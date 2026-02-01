@@ -1,0 +1,34 @@
+# Textamp Configuration Example
+# Copy this file to ~/.config/textamp/config.yaml and edit as needed
+
+# Plex server settings
+plex:
+  # Server URL (your local Plex server)
+  server_url: "http://localhost:32400"
+
+  # Credentials for authentication (username/password or token)
+  username: "your_plex_username"
+  password: "your_plex_password"
+  # Or use a pre-existing token instead of username/password:
+  # token: "your_plex_token"
+
+# General settings
+general:
+  log_level: "info"
+  # Default library to open (optional, uses first music library if not set)
+  default_library: ~
+  # Folder-only mode skips Plex "smart" features like Sonic Similarity
+  folder_only_mode: false
+
+# Playback settings
+playback:
+  default_volume: 0.8
+  gapless: true
+  buffer_size_kb: 1024
+
+# UI settings
+ui:
+  show_album_art: true
+  album_art_size: 40
+  # Theme: dark, solarized-dark, solarized-light, borland
+  theme: "dark"
