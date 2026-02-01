@@ -70,23 +70,29 @@ The library cache stores artist, album, playlist, and genre data for fast startu
 
 ## Configuration
 
-Example configuration:
+Configuration is optional. On first run, textamp will prompt you to sign in with your Plex account. Your auth token and selected server are stored in `auth.yaml` (not the config file).
+
+Example `config.yaml`:
 
 ```yaml
-plex:
-  server_url: "http://localhost:32400"
-  username: "your_username"
-  password: "your_password"
-
 general:
   log_level: "info"
 
 playback:
   default_volume: 0.8
+  gapless: true
+  buffer_size_kb: 1024
 
 ui:
   theme: "dark"  # Options: dark, solarized-dark, solarized-light, borland
+  show_album_art: true
+  album_art_size: 40
+
+libraries:
+  default_library: "1"  # Library key to open on startup
 ```
+
+Advanced users can also set `plex.server_url` and `plex.token` in config to override the stored auth, but this is not recommended for normal use.
 
 ### Themes
 
@@ -297,4 +303,4 @@ Album artwork is displayed in the queue view when playing music. Artwork display
 
 ## License
 
-GPL-3.0
+MIT

@@ -26,6 +26,11 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     frame.render_widget(block, area);
 
     let help_text = r#"
+FIRST-RUN LOGIN
+  Tab / Arrows    Navigate between fields
+  Enter           Edit field / Submit / Select server
+  Esc             Cancel editing
+
 NAVIGATION
   Arrow keys      Navigate lists
   Tab             Toggle focus between panels

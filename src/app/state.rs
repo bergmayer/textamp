@@ -8,6 +8,41 @@ use crate::services::{FolderNavigationState, WaveformData};
 use crate::ui::theme::ThemeName;
 use std::collections::HashMap;
 
+/// Authentication flow step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AuthStep {
+    /// Initial - checking for stored credentials
+    #[default]
+    Checking,
+    /// Username/password entry form
+    Login,
+    /// Signing in to Plex.tv
+    Authenticating,
+    /// Choose from available servers
+    ServerSelect,
+    /// Connecting to selected server
+    Connecting,
+}
+
+/// State for the authentication screen flow.
+#[derive(Debug, Clone, Default)]
+pub struct AuthState {
+    /// Current step in the auth flow
+    pub step: AuthStep,
+    /// Username input field
+    pub username_input: String,
+    /// Password input field
+    pub password_input: String,
+    /// Which field is focused: 0=username, 1=password, 2=sign in button
+    pub field_index: usize,
+    /// Whether currently editing a text field
+    pub editing: bool,
+    /// Selected server index (for ServerSelect step)
+    pub server_index: usize,
+    /// Error message to display
+    pub error_message: Option<String>,
+}
+
 /// Root application state.
 #[derive(Debug)]
 pub struct AppState {
@@ -16,6 +51,9 @@ pub struct AppState {
     pub libraries: Vec<Library>,
     pub active_library: Option<String>,
     pub available_servers: Vec<PlexServer>,
+
+    // Authentication flow state
+    pub auth_state: AuthState,
 
     // Navigation (musikcube-style)
     pub view: View,
@@ -458,6 +496,7 @@ impl AppState {
             libraries: Vec::new(),
             active_library: None,
             available_servers: Vec::new(),
+            auth_state: AuthState::default(),
             view: View::Auth,
             previous_view: None,
             help_scroll: 0,
@@ -1223,6 +1262,7 @@ pub enum SettingsSection {
     Playback,
     Interface,
     Data,
+    About,
 }
 
 impl SettingsSection {
@@ -1233,6 +1273,7 @@ impl SettingsSection {
             SettingsSection::Playback,
             SettingsSection::Interface,
             SettingsSection::Data,
+            SettingsSection::About,
         ]
     }
 
@@ -1243,6 +1284,7 @@ impl SettingsSection {
             SettingsSection::Playback => "Playback",
             SettingsSection::Interface => "Interface",
             SettingsSection::Data => "Data",
+            SettingsSection::About => "About",
         }
     }
 
@@ -1252,17 +1294,19 @@ impl SettingsSection {
             SettingsSection::Libraries => SettingsSection::Playback,
             SettingsSection::Playback => SettingsSection::Interface,
             SettingsSection::Interface => SettingsSection::Data,
-            SettingsSection::Data => SettingsSection::Server,
+            SettingsSection::Data => SettingsSection::About,
+            SettingsSection::About => SettingsSection::Server,
         }
     }
 
     pub fn prev(&self) -> Self {
         match self {
-            SettingsSection::Server => SettingsSection::Data,
+            SettingsSection::Server => SettingsSection::About,
             SettingsSection::Libraries => SettingsSection::Server,
             SettingsSection::Playback => SettingsSection::Libraries,
             SettingsSection::Interface => SettingsSection::Playback,
             SettingsSection::Data => SettingsSection::Interface,
+            SettingsSection::About => SettingsSection::Data,
         }
     }
 }

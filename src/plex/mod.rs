@@ -40,7 +40,7 @@ mod error;
 pub mod models;
 mod waveform;
 
-pub use auth::{PlexAuth, PlexClientInfo};
+pub use auth::{PlexAuth, PlexClientInfo, ServerInfo, StoredAuth};
 pub use cache::{CacheData, LibraryCache};
 pub use client::PlexClient;
 pub use error::ApiError;

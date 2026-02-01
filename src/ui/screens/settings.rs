@@ -83,6 +83,7 @@ fn render_content(frame: &mut Frame, state: &AppState, area: Rect) {
         SettingsSection::Playback => render_playback_content(frame, state, inner),
         SettingsSection::Interface => render_interface_content(frame, state, inner),
         SettingsSection::Data => render_data_content(frame, state, inner),
+        SettingsSection::About => render_about_content(frame, inner),
     }
 }
 
@@ -397,6 +398,54 @@ fn render_data_content(frame: &mut Frame, state: &AppState, area: Rect) {
     lines.push(Line::from(Span::styled(
         help_text,
         Style::default().fg(t.colors.fg_muted),
+    )));
+
+    let paragraph = Paragraph::new(lines);
+    frame.render_widget(paragraph, area);
+}
+
+fn render_about_content(frame: &mut Frame, area: Rect) {
+    let t = theme();
+
+    // ASCII art logo
+    let logo = vec![
+        "                                                ",
+        " ██                ██                           ",
+        "▀██▀▀ ▄█▀█▄ ██ ██ ▀██▀▀ ▀▀█▄ ███▄███▄ ████▄    ",
+        " ██   ██▄█▀  ███   ██  ▄█▀██ ██ ██ ██ ██ ██    ",
+        " ██   ▀█▄▄▄ ██ ██  ██  ▀█▄██ ██ ██ ██ ████▀    ",
+        "                                      ██       ",
+        "                                      ▀▀       ",
+    ];
+
+    let mut lines: Vec<Line> = logo
+        .iter()
+        .map(|line| Line::from(Span::styled(*line, Style::default().fg(t.colors.fg_accent))))
+        .collect();
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!("Version {}", env!("CARGO_PKG_VERSION")),
+        Style::default().fg(t.colors.fg_primary),
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "A keyboard-driven TUI client for Plex Music",
+        Style::default().fg(t.colors.fg_muted),
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Author: John Bergmayer",
+        Style::default().fg(t.colors.fg_primary),
+    )));
+    lines.push(Line::from(Span::styled(
+        "License: MIT",
+        Style::default().fg(t.colors.fg_primary),
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "https://github.com/bergmayer/textamp",
+        Style::default().fg(t.colors.fg_accent),
     )));
 
     let paragraph = Paragraph::new(lines);

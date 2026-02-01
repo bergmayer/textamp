@@ -137,24 +137,44 @@ impl EventLoop {
 
     /// Start authentication in background task.
     fn start_auth_task(&self, state: &mut AppState) {
+        use super::state::AuthStep;
         state.connection = ConnectionState::Authenticating;
+        state.auth_state.step = AuthStep::Checking;
 
         let event_tx = self.event_tx.clone();
-        let server_url = self.config.plex.server_url.clone();
+        let config_server_url = self.config.plex.server_url.clone();
 
         tokio::spawn(async move {
             // Try stored token (primary authentication method)
             if let Some(stored) = PlexAuth::load_token() {
-                let auth = PlexAuth::new();
+                let auth = PlexAuth::from_stored_auth(&stored);
                 match auth.verify_token(&stored.token).await {
                     Ok(user) => {
                         // Get servers for the authenticated user
                         let servers = auth.get_servers(&stored.token).await.unwrap_or_default();
 
-                        let final_server_url = if server_url.is_empty() {
-                            find_best_server_url(&servers)
+                        // Priority for server URL:
+                        // 1. Stored server_url (validated against server list) - from previous login
+                        // 2. Config file server_url (if explicitly set, not default)
+                        // 3. find_best_server_url() as fallback
+                        let config_is_default = config_server_url.is_empty()
+                            || config_server_url == "http://localhost:32400";
+
+                        let final_server_url = if let (Some(stored_url), Some(stored_id)) = (&stored.server_url, &stored.server_identifier) {
+                            // Validate stored server still exists in user's server list
+                            let server_valid = servers.iter().any(|s| &s.client_identifier == stored_id);
+                            if server_valid {
+                                tracing::info!("Using stored server: {}", stored_url);
+                                Some(stored_url.clone())
+                            } else {
+                                tracing::warn!("Stored server {} no longer available, finding best server", stored_id);
+                                find_best_server_url(&servers)
+                            }
+                        } else if !config_is_default {
+                            // Config has explicit non-default server URL
+                            Some(config_server_url.clone())
                         } else {
-                            Some(server_url.clone())
+                            find_best_server_url(&servers)
                         };
 
                         if let Some(url) = final_server_url {
@@ -171,10 +191,8 @@ impl EventLoop {
                 }
             }
 
-            // No valid stored token - need to authenticate via PIN
-            let _ = event_tx.send(Event::AuthFailed(
-                "No valid authentication token. Please sign in.".to_string()
-            )).await;
+            // No valid stored token - show login form
+            let _ = event_tx.send(Event::AuthShowLogin).await;
         });
     }
 
@@ -193,7 +211,23 @@ impl EventLoop {
             Event::AuthSuccess { token, username, server_url, servers } => {
                 tracing::info!("Authenticated as: {} ({} servers available)", username, servers.len());
                 client.set_auth_token(token);
-                client.set_server(server_url);
+                client.set_server(server_url.clone());
+
+                // Persist server info for future restarts
+                // Find the server that owns this URL to get its identifier and name
+                if let Some(server) = servers.iter().find(|s| {
+                    s.connections.iter().any(|c| c.uri == server_url)
+                }) {
+                    let server_info = crate::plex::ServerInfo {
+                        url: server_url.clone(),
+                        identifier: server.client_identifier.clone(),
+                        name: server.name.clone(),
+                    };
+                    if let Err(e) = PlexAuth::update_server_info(&server_info) {
+                        tracing::warn!("Failed to persist server info: {}", e);
+                    }
+                }
+
                 state.available_servers = servers;
                 state.connection = ConnectionState::Connected { username: username.clone() };
                 state.settings_state.discovering_servers = false;
@@ -215,11 +249,68 @@ impl EventLoop {
                 vec![]
             }
             Event::AuthFailed(msg) => {
+                use super::state::AuthStep;
                 tracing::error!("Auth failed: {}", msg);
                 state.connection = ConnectionState::Error(msg.clone());
                 state.settings_state.discovering_servers = false;
                 state.settings_state.password_input.clear(); // Clear password on failure
+                state.auth_state.step = AuthStep::Login;
+                state.auth_state.error_message = Some(msg.clone());
                 state.set_error(msg);
+                vec![]
+            }
+            Event::AuthShowLogin => {
+                use super::state::AuthStep;
+                tracing::info!("No stored credentials, showing login form");
+                state.connection = ConnectionState::Disconnected;
+                state.auth_state.step = AuthStep::Login;
+                state.auth_state.field_index = 0;
+                state.auth_state.editing = false;
+                state.auth_state.error_message = None;
+                vec![]
+            }
+            Event::AuthServersReady { token, username, servers } => {
+                use super::state::AuthStep;
+                tracing::info!("Login succeeded, {} servers available", servers.len());
+                state.available_servers = servers.clone();
+
+                // Auto-select if only one server, otherwise show selection
+                if servers.len() == 1 {
+                    // Find best connection URL
+                    if let Some(url) = find_best_server_url(&servers) {
+                        state.auth_state.step = AuthStep::Connecting;
+                        // Send AuthSuccess to complete the flow
+                        let event_tx = self.event_tx.clone();
+                        let token_clone = token.clone();
+                        let username_clone = username.clone();
+                        let servers_clone = servers.clone();
+                        tokio::spawn(async move {
+                            let _ = event_tx.send(Event::AuthSuccess {
+                                token: token_clone,
+                                username: username_clone,
+                                server_url: url,
+                                servers: servers_clone,
+                            }).await;
+                        });
+                    }
+                } else {
+                    // Multiple servers - let user choose
+                    state.auth_state.step = AuthStep::ServerSelect;
+                    state.auth_state.server_index = 0;
+                    // Store token temporarily for when server is selected
+                    state.settings_state.username_input = username;
+                    // Note: We need to pass the token through - store in a temp location
+                    // We'll use the client's token holder for this
+                    client.set_auth_token(token);
+                }
+                vec![]
+            }
+            Event::AuthLoginFailed(msg) => {
+                use super::state::AuthStep;
+                tracing::error!("Login failed: {}", msg);
+                state.auth_state.step = AuthStep::Login;
+                state.auth_state.error_message = Some(msg);
+                state.auth_state.password_input.clear();
                 vec![]
             }
             Event::LibrariesLoaded(libs) => {
@@ -656,6 +747,9 @@ impl EventLoop {
 
                 // Content area clicks depend on view
                 match state.view {
+                    View::Auth => {
+                        return self.handle_auth_click(click_row, click_col, state);
+                    }
                     View::Browse => {
                         // Left panel (categories)
                         if click_col < left_panel_width {
@@ -1349,6 +1443,76 @@ impl EventLoop {
         vec![]
     }
 
+    /// Handle click in Auth view (login form, server selection).
+    fn handle_auth_click(&self, click_row: u16, click_col: u16, state: &mut AppState) -> Vec<Action> {
+        use super::state::AuthStep;
+
+        match state.auth_state.step {
+            AuthStep::Login => {
+                // Login form is centered, 50 chars wide, 12 rows tall
+                let form_width = 50u16.min(state.terminal_width.saturating_sub(4));
+                let form_height = 12u16;
+                let form_x = (state.terminal_width.saturating_sub(form_width)) / 2;
+                let form_y = (state.terminal_height.saturating_sub(form_height)) / 2;
+
+                // Check if click is within form bounds
+                if click_col >= form_x && click_col < form_x + form_width
+                    && click_row >= form_y && click_row < form_y + form_height
+                {
+                    let rel_row = click_row - form_y;
+
+                    // Form layout:
+                    // 0-1: Title (2 rows)
+                    // 2-4: Username field (3 rows)
+                    // 5-7: Password field (3 rows)
+                    // 8-9: Button (2 rows)
+
+                    if rel_row >= 2 && rel_row < 5 {
+                        // Username field clicked
+                        state.auth_state.field_index = 0;
+                        state.auth_state.editing = true;
+                    } else if rel_row >= 5 && rel_row < 8 {
+                        // Password field clicked
+                        state.auth_state.field_index = 1;
+                        state.auth_state.editing = true;
+                    } else if rel_row >= 8 && rel_row < 10 {
+                        // Sign In button clicked
+                        state.auth_state.field_index = 2;
+                        state.auth_state.editing = false;
+                        // Trigger login action
+                        return vec![Action::AuthSignIn];
+                    }
+                }
+            }
+            AuthStep::ServerSelect => {
+                // Server list is centered, calculate bounds
+                let list_width = 50u16.min(state.terminal_width.saturating_sub(4));
+                let list_height = (state.available_servers.len() as u16).min(10) + 4;
+                let list_x = (state.terminal_width.saturating_sub(list_width)) / 2;
+                let list_y = (state.terminal_height.saturating_sub(list_height)) / 2;
+
+                if click_col >= list_x && click_col < list_x + list_width
+                    && click_row >= list_y && click_row < list_y + list_height
+                {
+                    let rel_row = click_row - list_y;
+
+                    // Layout: 2 rows instruction, then server list, 1 row hint
+                    if rel_row >= 2 && rel_row < list_height - 1 {
+                        let server_index = (rel_row - 2) as usize;
+                        if server_index < state.available_servers.len() {
+                            state.auth_state.server_index = server_index;
+                            // Double-click or single click to select
+                            return vec![Action::AuthSelectServer];
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        vec![]
+    }
+
     /// Handle click in Settings view.
     fn handle_settings_click(&self, click_row: u16, click_col: u16, state: &mut AppState) -> Vec<Action> {
         // Settings layout: left panel (sections) | right panel (items)
@@ -1702,10 +1866,125 @@ impl EventLoop {
         }
     }
 
-    fn handle_auth_keys(&self, key: event::KeyEvent, _state: &mut AppState) -> Vec<Action> {
-        match key.code {
-            KeyCode::Char('r') => vec![Action::StartAuth],
-            _ => vec![],
+    fn handle_auth_keys(&self, key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
+        use super::state::AuthStep;
+
+        match state.auth_state.step {
+            AuthStep::Checking | AuthStep::Authenticating | AuthStep::Connecting => {
+                // No input during these states
+                vec![]
+            }
+            AuthStep::Login => {
+                if state.auth_state.editing {
+                    // Text input mode
+                    match key.code {
+                        KeyCode::Char(c) => {
+                            if state.auth_state.field_index == 0 {
+                                state.auth_state.username_input.push(c);
+                            } else if state.auth_state.field_index == 1 {
+                                state.auth_state.password_input.push(c);
+                            }
+                            vec![]
+                        }
+                        KeyCode::Backspace => {
+                            if state.auth_state.field_index == 0 {
+                                state.auth_state.username_input.pop();
+                            } else if state.auth_state.field_index == 1 {
+                                state.auth_state.password_input.pop();
+                            }
+                            vec![]
+                        }
+                        KeyCode::Enter => {
+                            // Stop editing, move to next field or submit
+                            state.auth_state.editing = false;
+                            if state.auth_state.field_index < 2 {
+                                state.auth_state.field_index += 1;
+                            }
+                            // If we're now on the sign in button, submit
+                            if state.auth_state.field_index == 2 {
+                                return vec![Action::AuthSignIn];
+                            }
+                            vec![]
+                        }
+                        KeyCode::Esc => {
+                            state.auth_state.editing = false;
+                            vec![]
+                        }
+                        KeyCode::Tab => {
+                            // Move to next field while editing
+                            state.auth_state.editing = false;
+                            state.auth_state.field_index = (state.auth_state.field_index + 1) % 3;
+                            vec![]
+                        }
+                        _ => vec![],
+                    }
+                } else {
+                    // Navigation mode
+                    match key.code {
+                        KeyCode::Up => {
+                            if state.auth_state.field_index > 0 {
+                                state.auth_state.field_index -= 1;
+                            }
+                            vec![]
+                        }
+                        KeyCode::Down | KeyCode::Tab => {
+                            if state.auth_state.field_index < 2 {
+                                state.auth_state.field_index += 1;
+                            }
+                            vec![]
+                        }
+                        KeyCode::BackTab => {
+                            if state.auth_state.field_index > 0 {
+                                state.auth_state.field_index -= 1;
+                            }
+                            vec![]
+                        }
+                        KeyCode::Enter => {
+                            if state.auth_state.field_index == 2 {
+                                // Sign In button
+                                vec![Action::AuthSignIn]
+                            } else {
+                                // Start editing the field
+                                state.auth_state.editing = true;
+                                vec![]
+                            }
+                        }
+                        KeyCode::Char(c) => {
+                            // Start editing and add the character (for username/password fields)
+                            if state.auth_state.field_index < 2 {
+                                state.auth_state.editing = true;
+                                if state.auth_state.field_index == 0 {
+                                    state.auth_state.username_input.push(c);
+                                } else {
+                                    state.auth_state.password_input.push(c);
+                                }
+                            }
+                            vec![]
+                        }
+                        _ => vec![],
+                    }
+                }
+            }
+            AuthStep::ServerSelect => {
+                match key.code {
+                    KeyCode::Up => {
+                        if state.auth_state.server_index > 0 {
+                            state.auth_state.server_index -= 1;
+                        }
+                        vec![]
+                    }
+                    KeyCode::Down => {
+                        if state.auth_state.server_index + 1 < state.available_servers.len() {
+                            state.auth_state.server_index += 1;
+                        }
+                        vec![]
+                    }
+                    KeyCode::Enter => {
+                        vec![Action::AuthSelectServer]
+                    }
+                    _ => vec![],
+                }
+            }
         }
     }
 
@@ -3293,6 +3572,7 @@ impl EventLoop {
                             }
                             SettingsSection::Playback => 0,
                             SettingsSection::Data => 1, // Clear Cache, Sign Out
+                            SettingsSection::About => 0, // No selectable items
                         };
                         if state.settings_state.item_index < max_index {
                             state.settings_state.item_index += 1;
@@ -3524,6 +3804,102 @@ impl EventLoop {
                 state.playback.status = PlayStatus::Stopped;
 
                 state.set_status("Logged out. Restart to sign in again.".to_string());
+            }
+            Action::AuthSignIn => {
+                use super::state::AuthStep;
+                // Authenticate with username/password entered in auth screen login form
+                let username = state.auth_state.username_input.clone();
+                let password = state.auth_state.password_input.clone();
+
+                if username.is_empty() || password.is_empty() {
+                    state.auth_state.error_message = Some("Please enter username and password".to_string());
+                } else {
+                    state.auth_state.step = AuthStep::Authenticating;
+                    state.auth_state.error_message = None;
+                    let event_tx = self.event_tx.clone();
+
+                    tokio::spawn(async move {
+                        let auth = PlexAuth::new();
+
+                        match auth.authenticate_password(&username, &password).await {
+                            Ok(token) => {
+                                // Verify token and get user info
+                                match auth.verify_token(&token).await {
+                                    Ok(user) => {
+                                        // Save token (not password!)
+                                        if let Err(e) = auth.save_token(&token, Some(&user)) {
+                                            tracing::warn!("Failed to save token: {}", e);
+                                        }
+
+                                        // Get servers
+                                        let servers = auth.get_servers(&token).await.unwrap_or_default();
+
+                                        // Send servers ready event (will auto-select or show selection)
+                                        let _ = event_tx.send(Event::AuthServersReady {
+                                            token,
+                                            username: user.username,
+                                            servers,
+                                        }).await;
+                                    }
+                                    Err(e) => {
+                                        let _ = event_tx.send(Event::AuthLoginFailed(
+                                            format!("Token verification failed: {}", e)
+                                        )).await;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                let _ = event_tx.send(Event::AuthLoginFailed(
+                                    format!("Invalid username or password")
+                                )).await;
+                                tracing::error!("Auth error: {}", e);
+                            }
+                        }
+                    });
+
+                    // Clear password from memory immediately
+                    state.auth_state.password_input.clear();
+                }
+            }
+            Action::AuthSelectServer => {
+                use super::state::AuthStep;
+                // Select server from the server selection list
+                if let Some(server) = state.available_servers.get(state.auth_state.server_index) {
+                    state.auth_state.step = AuthStep::Connecting;
+
+                    // Find best connection URL (prefer local, non-relay)
+                    let url = server.connections.iter()
+                        .find(|c| c.local && !c.relay)
+                        .or_else(|| server.connections.iter().find(|c| !c.relay))
+                        .or_else(|| server.connections.first())
+                        .map(|c| c.uri.clone());
+
+                    if let Some(url) = url {
+                        // Get the token that was stored when servers were received
+                        let token = client.token().map(|s| s.to_string());
+                        let username = state.settings_state.username_input.clone();
+                        let servers = state.available_servers.clone();
+
+                        if let Some(token) = token {
+                            // Send AuthSuccess to complete the flow
+                            let event_tx = self.event_tx.clone();
+                            tokio::spawn(async move {
+                                let _ = event_tx.send(Event::AuthSuccess {
+                                    token,
+                                    username,
+                                    server_url: url,
+                                    servers,
+                                }).await;
+                            });
+                        } else {
+                            state.auth_state.error_message = Some("Authentication token not found".to_string());
+                            state.auth_state.step = AuthStep::Login;
+                        }
+                    } else {
+                        state.auth_state.error_message = Some("No connection available for selected server".to_string());
+                        state.auth_state.step = AuthStep::ServerSelect;
+                    }
+                }
             }
             Action::SetView(view) => {
                 state.view = view;
@@ -4624,6 +5000,9 @@ impl EventLoop {
                             }
                             _ => {}
                         }
+                    }
+                    SettingsSection::About => {
+                        // No selectable items in About section
                     }
                 }
             }

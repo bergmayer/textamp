@@ -138,6 +138,8 @@ pub enum Action {
     // Authentication
     StartAuth,
     SettingsSignIn, // Sign in with username/password from settings
+    AuthSignIn,     // Submit login form (from Auth screen)
+    AuthSelectServer, // Select server and connect (from Auth screen)
     Logout,
 
     // Artwork

@@ -3,8 +3,8 @@ name = "textamp"
 version = "0.2.0"
 edition = "2021"
 description = "A keyboard-driven TUI client for Plex Music"
-license = "GPL-3.0"
-authors = ["bergmayer"]
+license = "MIT"
+authors = ["John Bergmayer"]
 keywords = ["plex", "music", "tui", "plexamp"]
 categories = ["command-line-utilities", "multimedia::audio"]
 

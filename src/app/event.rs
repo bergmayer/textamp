@@ -20,6 +20,9 @@ pub enum Event {
     // Authentication events
     AuthSuccess { token: String, username: String, server_url: String, servers: Vec<PlexServer> },
     AuthFailed(String),
+    AuthShowLogin,  // No stored token - show login form
+    AuthServersReady { token: String, username: String, servers: Vec<PlexServer> },  // Login succeeded, select server
+    AuthLoginFailed(String),  // Login failed with message
     AuthPinReady { code: String, pin_id: u64 },
     ServersDiscovered(Vec<PlexServer>),
     ServerDiscoveryFailed(String),

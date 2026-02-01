@@ -57,6 +57,20 @@ pub struct StoredAuth {
     pub user_id: Option<u64>,
     pub username: Option<String>,
     pub client_identifier: String,
+    #[serde(default)]
+    pub server_url: Option<String>,
+    #[serde(default)]
+    pub server_identifier: Option<String>,
+    #[serde(default)]
+    pub server_name: Option<String>,
+}
+
+/// Server info for persistence.
+#[derive(Debug, Clone)]
+pub struct ServerInfo {
+    pub url: String,
+    pub identifier: String,
+    pub name: String,
 }
 
 impl PlexAuth {
@@ -263,11 +277,16 @@ impl PlexAuth {
         let paths = crate::config::XdgPaths::new("textamp");
         paths.ensure_dirs().map_err(|e| ApiError::AuthFailed(e.to_string()))?;
 
+        // Preserve existing server info if present
+        let existing = Self::load_token();
         let stored = StoredAuth {
             token: token.to_string(),
             user_id: user.map(|u| u.id),
             username: user.map(|u| u.username.clone()),
             client_identifier: self.client_info.client_identifier.clone(),
+            server_url: existing.as_ref().and_then(|e| e.server_url.clone()),
+            server_identifier: existing.as_ref().and_then(|e| e.server_identifier.clone()),
+            server_name: existing.as_ref().and_then(|e| e.server_name.clone()),
         };
 
         let yaml = serde_yaml::to_string(&stored)
@@ -276,6 +295,28 @@ impl PlexAuth {
         std::fs::write(paths.token_file(), yaml)
             .map_err(|e| ApiError::AuthFailed(e.to_string()))?;
 
+        Ok(())
+    }
+
+    /// Update server info in stored auth (preserves token and other fields).
+    pub fn update_server_info(server_info: &ServerInfo) -> Result<(), ApiError> {
+        let paths = crate::config::XdgPaths::new("textamp");
+
+        let Some(mut stored) = Self::load_token() else {
+            return Err(ApiError::AuthFailed("No stored auth to update".to_string()));
+        };
+
+        stored.server_url = Some(server_info.url.clone());
+        stored.server_identifier = Some(server_info.identifier.clone());
+        stored.server_name = Some(server_info.name.clone());
+
+        let yaml = serde_yaml::to_string(&stored)
+            .map_err(|e| ApiError::AuthFailed(e.to_string()))?;
+
+        std::fs::write(paths.token_file(), yaml)
+            .map_err(|e| ApiError::AuthFailed(e.to_string()))?;
+
+        tracing::info!("Persisted server info: {} ({})", server_info.name, server_info.url);
         Ok(())
     }
 

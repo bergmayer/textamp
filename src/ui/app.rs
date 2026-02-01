@@ -1062,12 +1062,25 @@ fn render_transport(frame: &mut Frame, state: &AppState, area: Rect) {
 
 /// Render the shortcut bar with consistent layout and current view highlighted.
 fn render_shortcuts(frame: &mut Frame, state: &AppState, area: Rect) {
+    use crate::app::state::AuthStep;
     let t = theme();
 
-    // Skip rendering for Auth view
+    // Show auth-specific shortcuts for Auth view
     if state.view == View::Auth {
-        let paragraph = Paragraph::new("")
-            .style(Style::default().bg(t.colors.bg_secondary));
+        let hint = match state.auth_state.step {
+            AuthStep::Login => {
+                if state.auth_state.editing {
+                    "Enter: done | Esc: cancel | Tab: next field"
+                } else {
+                    "Enter: edit/submit | Tab/Arrows: navigate"
+                }
+            }
+            AuthStep::ServerSelect => "Enter: connect | Arrows: select",
+            _ => "",
+        };
+        let paragraph = Paragraph::new(hint)
+            .style(Style::default().fg(t.colors.fg_muted).bg(t.colors.bg_secondary))
+            .alignment(Alignment::Center);
         frame.render_widget(paragraph, area);
         return;
     }
