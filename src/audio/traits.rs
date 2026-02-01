@@ -56,7 +56,7 @@ impl std::error::Error for AudioError {}
 ///
 /// 3. **Stateful**: The backend tracks its own playback state (playing,
 ///    paused, volume, position) rather than requiring the caller to manage it.
-pub trait AudioBackend: Send {
+pub trait AudioBackend {
     /// Play audio from raw bytes.
     ///
     /// The caller is responsible for fetching/downloading the audio data.
