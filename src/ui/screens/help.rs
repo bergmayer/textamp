@@ -166,6 +166,7 @@ MOUSE SUPPORT
   Scroll Wheel    Scroll lists (all views)
 
 GENERAL
+  F5              Refresh current view (updates cache)
   Ctrl+Q          Quit
   Ctrl+C          Quit
 "#;

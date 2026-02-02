@@ -68,6 +68,20 @@ textamp checks for XDG environment variables first, then falls back to platform 
 
 The library cache stores artist, album, playlist, and genre data for fast startup (refreshes in background). Waveform data is cached for the audio visualizer.
 
+### Caching Behavior
+
+textamp uses an aggressive caching strategy for fast startup:
+
+- **Instant display**: On startup, cached data is loaded immediately so you can browse your library without waiting
+- **Background refresh**: Fresh data is fetched from your Plex server in the background and merged automatically
+- **72-hour TTL**: Cache is considered "stale" after 72 hours and triggers a background refresh
+- **Manual refresh**: Press `F5` to force refresh the current view (Artists, Playlists, Genres, etc.)
+- **Change notifications**: A toast appears in the bottom-right when refreshed data differs from cache
+- **Very stale refresh**: Data older than 32 days is automatically refreshed when idle (2+ minutes)
+- **Track not found**: If playback fails with a 404 error, you'll be prompted to refresh the cache
+
+The cache is saved periodically while idle and on quit. To clear all cached data, use Settings (F2) > Data > Clear Cache.
+
 ## Configuration
 
 Configuration is optional. On first run, textamp will prompt you to sign in with your Plex account. Your auth token and selected server are stored in `auth.yaml` (not the config file).
@@ -288,6 +302,7 @@ Play history is automatically synced to your Plex server, so tracks you play in 
 ### General
 | Key | Action |
 |-----|--------|
+| `F5` | Refresh current view (updates cache) |
 | `Ctrl+Q` | Quit |
 | `Ctrl+C` | Quit |
 | `Esc` | Close view / Return to browse |

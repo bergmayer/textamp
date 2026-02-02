@@ -50,8 +50,11 @@ use models::{Album, Artist, Genre, Playlist, Station, Track};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// Default cache expiration for library data (24 hours).
-const LIBRARY_CACHE_TTL_SECS: u64 = 24 * 60 * 60;
+/// Default cache expiration for library data (72 hours).
+const LIBRARY_CACHE_TTL_SECS: u64 = 72 * 60 * 60;
+
+/// Very stale cache threshold (32 days) - triggers background refresh when idle.
+pub const VERY_STALE_CACHE_SECS: u64 = 32 * 24 * 60 * 60;
 
 /// Default cache expiration for waveforms (7 days).
 /// User indicated they don't replay songs often, so waveforms can expire faster.

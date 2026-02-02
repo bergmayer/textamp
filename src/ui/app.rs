@@ -15,7 +15,7 @@
 //! │ ^A artists │ ^P playlists │ ^N queue │ ^S similar │ ? │
 //! └──────────────────────────────────────────────────────────────┘
 
-use crate::app::state::{View, Focus, BrowseCategory, InputDialog};
+use crate::app::state::{View, Focus, BrowseCategory, InputDialog, ConfirmDialog};
 use crate::app::AppState;
 use crate::services::NavigationService;
 use super::layout::{AppLayout, FullScreenLayout, centered_rect};
@@ -50,6 +50,16 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     // Render input dialog if present
     if let Some(ref dialog) = state.input_dialog {
         render_input_dialog(frame, dialog);
+    }
+
+    // Render confirm dialog if present
+    if let Some(ref dialog) = state.confirm_dialog {
+        render_confirm_dialog(frame, dialog);
+    }
+
+    // Render toast notification if present (bottom-right, non-blocking)
+    if let Some(ref toast) = state.toast_message {
+        render_toast(frame, toast, frame.area());
     }
 }
 
@@ -1199,4 +1209,47 @@ fn render_input_dialog(frame: &mut Frame, dialog: &InputDialog) {
         .style(Style::default().fg(t.colors.fg_muted))
         .alignment(Alignment::Center);
     frame.render_widget(hint, chunks[2]);
+}
+
+fn render_confirm_dialog(frame: &mut Frame, dialog: &ConfirmDialog) {
+    let t = theme();
+    let area = centered_rect(50, 25, frame.area());
+
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(format!(" {} ", dialog.title))
+        .title_style(Style::default().fg(t.colors.fg_accent))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(t.colors.border_focused))
+        .style(Style::default().bg(t.colors.bg_primary));
+
+    let text = format!("{}\n\n[Y] Yes  [N] No", dialog.message);
+    let paragraph = Paragraph::new(text)
+        .style(Style::default().fg(t.colors.fg_primary))
+        .wrap(Wrap { trim: true })
+        .block(block);
+
+    frame.render_widget(paragraph, area);
+}
+
+fn render_toast(frame: &mut Frame, message: &str, area: Rect) {
+    let t = theme();
+    let width = (message.len() + 4).min(40) as u16;
+    let toast_area = Rect {
+        x: area.width.saturating_sub(width + 2),
+        y: area.height.saturating_sub(4),
+        width,
+        height: 3,
+    };
+
+    frame.render_widget(Clear, toast_area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(t.colors.fg_accent))
+        .style(Style::default().bg(t.colors.bg_secondary));
+    let text = Paragraph::new(message)
+        .style(Style::default().fg(t.colors.fg_primary))
+        .block(block);
+    frame.render_widget(text, toast_area);
 }

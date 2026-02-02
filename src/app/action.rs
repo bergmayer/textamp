@@ -155,6 +155,7 @@ pub enum Action {
     SetStatus(String),
     ClearStatus,
     Refresh,
+    RefreshCategory(crate::app::state::RefreshCategory),
 
     // Theme
     CycleTheme,

@@ -157,7 +157,9 @@ The app checks XDG environment variables first, then falls back to platform defa
 ### Cache Settings
 
 - **Library cache**: ~19MB per library
-  - TTL: 24 hours
+  - TTL: 72 hours (triggers background refresh when stale)
+  - Very stale threshold: 32 days (auto-refreshes when user is idle 2+ minutes)
+  - Manual refresh: F5 refreshes current view
   - Stores: artists, albums, playlists, genres, stations, folders
 
 - **Waveform cache**:

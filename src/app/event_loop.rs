@@ -461,7 +461,16 @@ impl EventLoop {
                 vec![]
             }
             Event::PlaybackError(msg) => {
-                state.set_error(format!("Playback error: {}", msg));
+                // Check for 404/not found errors - offer to refresh cache
+                if msg.contains("404") || msg.to_lowercase().contains("not found") {
+                    state.confirm_dialog = Some(super::state::ConfirmDialog {
+                        title: "Track Not Found".to_string(),
+                        message: "This track may have been removed. Refresh cache?".to_string(),
+                        on_confirm: super::state::ConfirmAction::RefreshCache,
+                    });
+                } else {
+                    state.set_error(format!("Playback error: {}", msg));
+                }
                 state.playback.status = PlayStatus::Stopped;
                 vec![]
             }
@@ -616,13 +625,35 @@ impl EventLoop {
                 vec![]
             }
             Event::Tick => {
+                // Clear expired toasts (5 second display)
+                if let Some(show_time) = state.toast_show_time {
+                    if show_time.elapsed() > Duration::from_secs(5) {
+                        state.toast_message = None;
+                        state.toast_show_time = None;
+                    }
+                }
+
                 // Periodic cache save: save if dirty, idle for 30+ seconds, and 2+ minutes since last save
                 self.maybe_save_cache_async(state);
+
+                // Very stale background refresh (32 days, 2min idle)
+                self.maybe_refresh_very_stale(state, client);
+
                 vec![]
             }
             Event::CacheSaved => {
                 state.cache_save_in_progress = false;
                 tracing::debug!("Periodic cache save completed");
+                vec![]
+            }
+            Event::CacheRefreshCompleted { category, changed } => {
+                state.background_refresh_in_progress.remove(&category);
+                state.cache_dirty = true;
+
+                if changed && self.is_viewing_category(&category, state) {
+                    state.toast_message = Some(format!("{} updated", category.display_name()));
+                    state.toast_show_time = Some(std::time::Instant::now());
+                }
                 vec![]
             }
             Event::Mouse(mouse_event) => {
@@ -1615,6 +1646,21 @@ impl EventLoop {
             return vec![];
         }
 
+        // Handle confirm dialog if active
+        if state.confirm_dialog.is_some() {
+            match key.code {
+                KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    state.confirm_dialog = None;
+                    return self.refresh_current_view(state);
+                }
+                KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                    state.confirm_dialog = None;
+                    return vec![];
+                }
+                _ => return vec![],
+            }
+        }
+
         // Handle input dialog if active
         if let Some(ref mut dialog) = state.input_dialog {
             match key.code {
@@ -1780,6 +1826,10 @@ impl EventLoop {
                 if state.view != View::Settings {
                     return vec![Action::OpenSettings];
                 }
+            }
+            (_, KeyCode::F(5)) => {
+                // F5 = Refresh current view
+                return self.refresh_current_view(state);
             }
 
             // Playback controls with Ctrl
@@ -4888,6 +4938,12 @@ impl EventLoop {
             Action::ClearStatus => {
                 state.status_message = None;
             }
+            Action::RefreshCategory(category) => {
+                if let Some(lib_key) = &state.active_library {
+                    let lib_key = lib_key.clone();
+                    self.spawn_category_refresh(category, &lib_key, state, client);
+                }
+            }
             Action::CycleTheme => {
                 state.theme = state.theme.next();
                 crate::ui::theme::set_theme(state.theme);
@@ -7928,6 +7984,380 @@ impl EventLoop {
 
             // Signal completion to reset in_progress flag
             let _ = event_tx.send(Event::CacheSaved).await;
+        });
+    }
+
+    /// Refresh the current view's category and return actions.
+    fn refresh_current_view(&self, state: &mut AppState) -> Vec<Action> {
+        use super::state::{RefreshCategory, ArtistViewMode, PlaylistsMode, GenreContentType};
+
+        let category = match state.view {
+            View::Browse => match state.browse_category {
+                BrowseCategory::Artists => match state.artist_view_mode {
+                    ArtistViewMode::Artist => Some(RefreshCategory::Artists),
+                    ArtistViewMode::AlbumArtist => Some(RefreshCategory::AlbumArtists),
+                    ArtistViewMode::Album => Some(RefreshCategory::Albums),
+                },
+                BrowseCategory::Playlists => match state.playlists_mode {
+                    PlaylistsMode::All => Some(RefreshCategory::Playlists),
+                    PlaylistsMode::RecentlyAdded => Some(RefreshCategory::RecentlyAdded),
+                    PlaylistsMode::RecentPlaylists => Some(RefreshCategory::RecentPlaylists),
+                },
+                BrowseCategory::Genres => match state.genre_content_type {
+                    GenreContentType::Genres => Some(RefreshCategory::Genres),
+                    GenreContentType::ArtistGenres => Some(RefreshCategory::ArtistGenres),
+                    GenreContentType::AlbumGenres => Some(RefreshCategory::AlbumGenres),
+                    GenreContentType::Moods => Some(RefreshCategory::Moods),
+                    GenreContentType::Styles => Some(RefreshCategory::Styles),
+                },
+                BrowseCategory::Stations => Some(RefreshCategory::Stations),
+                BrowseCategory::Folders => Some(RefreshCategory::Folders),
+            },
+            _ => None,
+        };
+
+        if let Some(cat) = category {
+            if !state.background_refresh_in_progress.contains(&cat) {
+                state.set_status(format!("Refreshing {}...", cat.display_name()));
+                return vec![Action::RefreshCategory(cat)];
+            }
+        }
+        vec![]
+    }
+
+    /// Check if the user is currently viewing a specific category.
+    fn is_viewing_category(&self, category: &super::state::RefreshCategory, state: &AppState) -> bool {
+        use super::state::{RefreshCategory, ArtistViewMode, PlaylistsMode, GenreContentType};
+
+        if state.view != View::Browse {
+            return false;
+        }
+
+        match (state.browse_category, category) {
+            (BrowseCategory::Artists, RefreshCategory::Artists) => {
+                matches!(state.artist_view_mode, ArtistViewMode::Artist)
+            }
+            (BrowseCategory::Artists, RefreshCategory::AlbumArtists) => {
+                matches!(state.artist_view_mode, ArtistViewMode::AlbumArtist)
+            }
+            (BrowseCategory::Artists, RefreshCategory::Albums) => {
+                matches!(state.artist_view_mode, ArtistViewMode::Album)
+            }
+            (BrowseCategory::Playlists, RefreshCategory::Playlists) => {
+                matches!(state.playlists_mode, PlaylistsMode::All)
+            }
+            (BrowseCategory::Playlists, RefreshCategory::RecentlyAdded) => {
+                matches!(state.playlists_mode, PlaylistsMode::RecentlyAdded)
+            }
+            (BrowseCategory::Playlists, RefreshCategory::RecentPlaylists) => {
+                matches!(state.playlists_mode, PlaylistsMode::RecentPlaylists)
+            }
+            (BrowseCategory::Genres, RefreshCategory::Genres) => {
+                matches!(state.genre_content_type, GenreContentType::Genres)
+            }
+            (BrowseCategory::Genres, RefreshCategory::ArtistGenres) => {
+                matches!(state.genre_content_type, GenreContentType::ArtistGenres)
+            }
+            (BrowseCategory::Genres, RefreshCategory::AlbumGenres) => {
+                matches!(state.genre_content_type, GenreContentType::AlbumGenres)
+            }
+            (BrowseCategory::Genres, RefreshCategory::Moods) => {
+                matches!(state.genre_content_type, GenreContentType::Moods)
+            }
+            (BrowseCategory::Genres, RefreshCategory::Styles) => {
+                matches!(state.genre_content_type, GenreContentType::Styles)
+            }
+            (BrowseCategory::Stations, RefreshCategory::Stations) => true,
+            (BrowseCategory::Folders, RefreshCategory::Folders) => true,
+            _ => false,
+        }
+    }
+
+    /// Check for very stale cache and refresh in background when user is idle.
+    fn maybe_refresh_very_stale(&self, state: &mut AppState, client: &PlexClient) {
+        use super::state::RefreshCategory;
+
+        // Only when idle for 2+ minutes
+        if state.last_input_time.elapsed() < Duration::from_secs(120) {
+            return;
+        }
+
+        // Only one refresh at a time
+        if !state.background_refresh_in_progress.is_empty() {
+            return;
+        }
+
+        // Need active library
+        let lib_key = match &state.active_library {
+            Some(k) => k.clone(),
+            None => return,
+        };
+
+        // Check each category for very stale (32+ days)
+        for category in RefreshCategory::all() {
+            // Skip categories we're currently viewing to avoid disruption
+            if self.is_viewing_category(category, state) {
+                continue;
+            }
+
+            if self.is_category_very_stale(*category, state) {
+                tracing::info!("Very stale background refresh: {:?}", category);
+                self.spawn_category_refresh(*category, &lib_key, state, client);
+                break; // One at a time
+            }
+        }
+    }
+
+    /// Check if a category's data is very stale (32+ days old).
+    fn is_category_very_stale(&self, category: super::state::RefreshCategory, state: &AppState) -> bool {
+        use super::state::RefreshCategory;
+
+        // Load cache to check timestamp
+        let lib_key = match &state.active_library {
+            Some(k) => k,
+            None => return false,
+        };
+
+        if let Some(cache) = LibraryCache::new() {
+            if let Some(data) = cache.load(lib_key) {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+
+                let age = now.saturating_sub(data.timestamp);
+                let very_stale_threshold = crate::plex::VERY_STALE_CACHE_SECS;
+
+                // Check if the specific category has data and is very stale
+                let has_data = match category {
+                    RefreshCategory::Artists | RefreshCategory::AlbumArtists => !data.artists.is_empty(),
+                    RefreshCategory::Albums => !data.albums.is_empty(),
+                    RefreshCategory::Playlists => !data.playlists.is_empty(),
+                    RefreshCategory::RecentlyAdded => !data.recently_added_albums.is_empty(),
+                    RefreshCategory::RecentPlaylists => !data.recent_playlists.is_empty(),
+                    RefreshCategory::Genres => !data.genres.is_empty(),
+                    RefreshCategory::ArtistGenres => !data.artist_genres.is_empty(),
+                    RefreshCategory::AlbumGenres => !data.album_genres.is_empty(),
+                    RefreshCategory::Moods => !data.moods.is_empty(),
+                    RefreshCategory::Styles => !data.styles.is_empty(),
+                    RefreshCategory::Stations => !data.stations.is_empty(),
+                    RefreshCategory::Folders => !data.root_folders.is_empty(),
+                };
+
+                return has_data && age > very_stale_threshold;
+            }
+        }
+        false
+    }
+
+    /// Spawn a background refresh task for a category.
+    fn spawn_category_refresh(
+        &self,
+        category: super::state::RefreshCategory,
+        lib_key: &str,
+        state: &mut AppState,
+        client: &PlexClient,
+    ) {
+        use super::state::RefreshCategory;
+
+        // Mark as in progress
+        state.background_refresh_in_progress.insert(category);
+
+        // Capture current data count for change detection
+        let old_count = match category {
+            RefreshCategory::Artists | RefreshCategory::AlbumArtists => state.artists.len(),
+            RefreshCategory::Albums => state.albums.len(),
+            RefreshCategory::Playlists => state.playlists.len(),
+            RefreshCategory::RecentlyAdded => state.recently_added_albums.len(),
+            RefreshCategory::RecentPlaylists => state.recent_playlists.len(),
+            RefreshCategory::Genres => state.genres.len(),
+            RefreshCategory::ArtistGenres => state.artist_genres.len(),
+            RefreshCategory::AlbumGenres => state.album_genres.len(),
+            RefreshCategory::Moods => state.moods.len(),
+            RefreshCategory::Styles => state.styles.len(),
+            RefreshCategory::Stations => state.stations.len(),
+            RefreshCategory::Folders => state.folder_state.as_ref().map(|f| f.columns.first().map(|c| c.items.len()).unwrap_or(0)).unwrap_or(0),
+        };
+
+        let event_tx = self.event_tx.clone();
+        let lib_key = lib_key.to_string();
+        let client = client.clone();
+
+        tokio::spawn(async move {
+            let changed = match category {
+                RefreshCategory::Artists | RefreshCategory::AlbumArtists => {
+                    match client.get_artists(&lib_key).await {
+                        Ok(artists) => {
+                            let new_count = artists.len();
+                            let _ = event_tx.send(Event::ArtistsPreloaded(artists)).await;
+                            new_count != old_count
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to refresh artists: {}", e);
+                            false
+                        }
+                    }
+                }
+                RefreshCategory::Albums => {
+                    match client.get_albums(&lib_key).await {
+                        Ok(albums) => {
+                            let new_count = albums.len();
+                            let _ = event_tx.send(Event::AlbumsPreloaded(albums)).await;
+                            new_count != old_count
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to refresh albums: {}", e);
+                            false
+                        }
+                    }
+                }
+                RefreshCategory::Playlists => {
+                    match client.get_playlists().await {
+                        Ok(playlists) => {
+                            let new_count = playlists.len();
+                            let _ = event_tx.send(Event::PlaylistsPreloaded(playlists)).await;
+                            new_count != old_count
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to refresh playlists: {}", e);
+                            false
+                        }
+                    }
+                }
+                RefreshCategory::RecentlyAdded => {
+                    match client.get_recently_added_albums(&lib_key, 50).await {
+                        Ok(albums) => {
+                            let new_count = albums.len();
+                            let _ = event_tx.send(Event::RecentlyAddedPreloaded(albums)).await;
+                            new_count != old_count
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to refresh recently added: {}", e);
+                            false
+                        }
+                    }
+                }
+                RefreshCategory::RecentPlaylists => {
+                    // Get all playlists and sort by updated_at to get recent ones
+                    match client.get_playlists().await {
+                        Ok(mut playlists) => {
+                            playlists.sort_by(|a, b| {
+                                b.updated_at.unwrap_or(0).cmp(&a.updated_at.unwrap_or(0))
+                            });
+                            let recent: Vec<_> = playlists.into_iter().take(20).collect();
+                            let new_count = recent.len();
+                            let _ = event_tx.send(Event::RecentPlaylistsPreloaded(recent)).await;
+                            new_count != old_count
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to refresh recent playlists: {}", e);
+                            false
+                        }
+                    }
+                }
+                RefreshCategory::Genres => {
+                    match client.get_genres(&lib_key).await {
+                        Ok(genres) => {
+                            let new_count = genres.len();
+                            let _ = event_tx.send(Event::GenresPreloaded(genres)).await;
+                            new_count != old_count
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to refresh genres: {}", e);
+                            false
+                        }
+                    }
+                }
+                RefreshCategory::ArtistGenres => {
+                    match client.get_artist_genres(&lib_key).await {
+                        Ok(genres) => {
+                            let new_count = genres.len();
+                            let _ = event_tx.send(Event::ArtistGenresPreloaded(genres)).await;
+                            new_count != old_count
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to refresh artist genres: {}", e);
+                            false
+                        }
+                    }
+                }
+                RefreshCategory::AlbumGenres => {
+                    match client.get_album_genres(&lib_key).await {
+                        Ok(genres) => {
+                            let new_count = genres.len();
+                            let _ = event_tx.send(Event::AlbumGenresPreloaded(genres)).await;
+                            new_count != old_count
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to refresh album genres: {}", e);
+                            false
+                        }
+                    }
+                }
+                RefreshCategory::Moods => {
+                    match client.get_moods(&lib_key).await {
+                        Ok(moods) => {
+                            let new_count = moods.len();
+                            let _ = event_tx.send(Event::MoodsPreloaded(moods)).await;
+                            new_count != old_count
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to refresh moods: {}", e);
+                            false
+                        }
+                    }
+                }
+                RefreshCategory::Styles => {
+                    match client.get_styles(&lib_key).await {
+                        Ok(styles) => {
+                            let new_count = styles.len();
+                            let _ = event_tx.send(Event::StylesPreloaded(styles)).await;
+                            new_count != old_count
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to refresh styles: {}", e);
+                            false
+                        }
+                    }
+                }
+                RefreshCategory::Stations => {
+                    match client.get_stations(&lib_key).await {
+                        Ok(stations) => {
+                            let new_count = stations.len();
+                            let _ = event_tx.send(Event::StationsPreloaded(stations)).await;
+                            new_count != old_count
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to refresh stations: {}", e);
+                            false
+                        }
+                    }
+                }
+                RefreshCategory::Folders => {
+                    use crate::services::{FolderColumn, FolderNavigationState, FolderService};
+                    match client.get_library_folders(&lib_key).await {
+                        Ok(response) => {
+                            let items = FolderService::from_response(&response);
+                            let new_count = items.len();
+                            let root_column = FolderColumn::new(None, "Music".to_string(), items);
+                            let folder_state = FolderNavigationState {
+                                columns: vec![root_column],
+                                focused_column: 0,
+                                loading: false,
+                            };
+                            let _ = event_tx.send(Event::FoldersPreloaded { folder_state }).await;
+                            new_count != old_count
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to refresh folders: {}", e);
+                            false
+                        }
+                    }
+                }
+            };
+
+            // Signal completion
+            let _ = event_tx.send(Event::CacheRefreshCompleted { category, changed }).await;
         });
     }
 }

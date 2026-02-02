@@ -215,9 +215,17 @@ pub struct AppState {
     pub last_input_time: std::time::Instant,
     pub last_cache_save: std::time::Instant,
     pub cache_save_in_progress: bool,
+    pub background_refresh_in_progress: std::collections::HashSet<RefreshCategory>,
 
     // Waveform seekbar state
     pub waveform: WaveformState,
+
+    // Toast notification
+    pub toast_message: Option<String>,
+    pub toast_show_time: Option<std::time::Instant>,
+
+    // Confirmation dialog
+    pub confirm_dialog: Option<ConfirmDialog>,
 }
 
 /// Playback mode - determines behavior (finite queue vs continuous radio).
@@ -593,7 +601,11 @@ impl AppState {
             last_input_time: std::time::Instant::now(),
             last_cache_save: std::time::Instant::now(),
             cache_save_in_progress: false,
+            background_refresh_in_progress: std::collections::HashSet::new(),
             waveform: WaveformState::default(),
+            toast_message: None,
+            toast_show_time: None,
+            confirm_dialog: None,
         }
     }
 
@@ -1380,4 +1392,76 @@ pub struct AdventureState {
     pub requested_length: usize,
     /// Currently generating the adventure
     pub generating: bool,
+}
+
+/// Category for cache refresh operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RefreshCategory {
+    Artists,
+    AlbumArtists,
+    Albums,
+    Playlists,
+    RecentlyAdded,
+    RecentPlaylists,
+    Genres,
+    ArtistGenres,
+    AlbumGenres,
+    Moods,
+    Styles,
+    Stations,
+    Folders,
+}
+
+impl RefreshCategory {
+    /// Get all categories in priority order.
+    pub fn all() -> &'static [RefreshCategory] {
+        &[
+            RefreshCategory::Artists,
+            RefreshCategory::AlbumArtists,
+            RefreshCategory::Albums,
+            RefreshCategory::Playlists,
+            RefreshCategory::RecentlyAdded,
+            RefreshCategory::RecentPlaylists,
+            RefreshCategory::Genres,
+            RefreshCategory::ArtistGenres,
+            RefreshCategory::AlbumGenres,
+            RefreshCategory::Moods,
+            RefreshCategory::Styles,
+            RefreshCategory::Stations,
+            RefreshCategory::Folders,
+        ]
+    }
+
+    /// Get display name for status messages and toasts.
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            RefreshCategory::Artists => "Artists",
+            RefreshCategory::AlbumArtists => "Album Artists",
+            RefreshCategory::Albums => "Albums",
+            RefreshCategory::Playlists => "Playlists",
+            RefreshCategory::RecentlyAdded => "Recently Added",
+            RefreshCategory::RecentPlaylists => "Recent Playlists",
+            RefreshCategory::Genres => "Genres",
+            RefreshCategory::ArtistGenres => "Artist Genres",
+            RefreshCategory::AlbumGenres => "Album Genres",
+            RefreshCategory::Moods => "Moods",
+            RefreshCategory::Styles => "Styles",
+            RefreshCategory::Stations => "Stations",
+            RefreshCategory::Folders => "Folders",
+        }
+    }
+}
+
+/// Confirmation dialog for user prompts.
+#[derive(Debug, Clone)]
+pub struct ConfirmDialog {
+    pub title: String,
+    pub message: String,
+    pub on_confirm: ConfirmAction,
+}
+
+/// Action to take when confirmation dialog is confirmed.
+#[derive(Debug, Clone)]
+pub enum ConfirmAction {
+    RefreshCache,
 }

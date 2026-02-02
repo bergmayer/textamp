@@ -84,6 +84,10 @@ pub enum Event {
 
     // Cache management
     CacheSaved,
+    CacheRefreshCompleted {
+        category: crate::app::state::RefreshCategory,
+        changed: bool,
+    },
 
     // Waveform generation
     WaveformGenerated { track_key: String, data: WaveformData },
