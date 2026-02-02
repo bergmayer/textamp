@@ -1235,21 +1235,20 @@ fn render_confirm_dialog(frame: &mut Frame, dialog: &ConfirmDialog) {
 
 fn render_toast(frame: &mut Frame, message: &str, area: Rect) {
     let t = theme();
-    let width = (message.len() + 4).min(40) as u16;
+    let padded_message = format!(" {} ", message);
+    let width = (padded_message.len().min(50)) as u16;
+
     let toast_area = Rect {
-        x: area.width.saturating_sub(width + 2),
-        y: area.height.saturating_sub(4),
+        x: area.width.saturating_sub(width + 1),
+        y: area.height.saturating_sub(4), // Above transport bar
         width,
-        height: 3,
+        height: 1,
     };
 
     frame.render_widget(Clear, toast_area);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(t.colors.fg_accent))
-        .style(Style::default().bg(t.colors.bg_secondary));
-    let text = Paragraph::new(message)
-        .style(Style::default().fg(t.colors.fg_primary))
-        .block(block);
+    let text = Paragraph::new(padded_message)
+        .style(Style::default()
+            .fg(t.colors.fg_primary)
+            .bg(t.colors.fg_accent));
     frame.render_widget(text, toast_area);
 }

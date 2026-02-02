@@ -96,6 +96,9 @@ impl FolderColumn {
 /// Navigation state for folder browsing (Miller columns style).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FolderNavigationState {
+    /// Which library this folder state belongs to (for cache validation)
+    #[serde(default)]
+    pub library_key: String,
     /// Columns from left to right (root is first)
     pub columns: Vec<FolderColumn>,
     /// Which column currently has focus (0-indexed)
@@ -108,6 +111,14 @@ impl FolderNavigationState {
     /// Create a new empty folder navigation state.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Create a new folder navigation state for a specific library.
+    pub fn for_library(library_key: String) -> Self {
+        Self {
+            library_key,
+            ..Default::default()
+        }
     }
 
     /// Get the focused column.

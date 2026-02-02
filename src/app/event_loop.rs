@@ -498,7 +498,12 @@ impl EventLoop {
                 state.artwork_loading = false;
                 vec![]
             }
-            Event::FoldersPreloaded { folder_state } => {
+            Event::FoldersPreloaded { library_key, folder_state } => {
+                // Ignore if this is for a different library (race condition from library switch)
+                if state.active_library.as_ref() != Some(&library_key) {
+                    tracing::debug!("Ignoring stale folders preload for library {}", library_key);
+                    return vec![];
+                }
                 // Only set if folders weren't already loaded (user might have navigated there)
                 if state.folder_state.is_none() {
                     state.folder_state = Some(folder_state);
@@ -543,7 +548,12 @@ impl EventLoop {
                 }
                 vec![]
             }
-            Event::GenresPreloaded(genres) => {
+            Event::GenresPreloaded { library_key, genres } => {
+                // Ignore if this is for a different library (race condition from library switch)
+                if state.active_library.as_ref() != Some(&library_key) {
+                    tracing::debug!("Ignoring stale genres preload for library {}", library_key);
+                    return vec![];
+                }
                 if state.genres.is_empty() && !state.genres_loading {
                     let count = genres.len();
                     state.genres = genres;
@@ -552,7 +562,12 @@ impl EventLoop {
                 }
                 vec![]
             }
-            Event::ArtistGenresPreloaded(genres) => {
+            Event::ArtistGenresPreloaded { library_key, genres } => {
+                // Ignore if this is for a different library (race condition from library switch)
+                if state.active_library.as_ref() != Some(&library_key) {
+                    tracing::debug!("Ignoring stale artist genres preload for library {}", library_key);
+                    return vec![];
+                }
                 if state.artist_genres.is_empty() && !state.artist_genres_loading {
                     let count = genres.len();
                     state.artist_genres = genres;
@@ -561,7 +576,12 @@ impl EventLoop {
                 }
                 vec![]
             }
-            Event::AlbumGenresPreloaded(genres) => {
+            Event::AlbumGenresPreloaded { library_key, genres } => {
+                // Ignore if this is for a different library (race condition from library switch)
+                if state.active_library.as_ref() != Some(&library_key) {
+                    tracing::debug!("Ignoring stale album genres preload for library {}", library_key);
+                    return vec![];
+                }
                 if state.album_genres.is_empty() && !state.album_genres_loading {
                     let count = genres.len();
                     state.album_genres = genres;
@@ -570,7 +590,12 @@ impl EventLoop {
                 }
                 vec![]
             }
-            Event::MoodsPreloaded(moods) => {
+            Event::MoodsPreloaded { library_key, moods } => {
+                // Ignore if this is for a different library (race condition from library switch)
+                if state.active_library.as_ref() != Some(&library_key) {
+                    tracing::debug!("Ignoring stale moods preload for library {}", library_key);
+                    return vec![];
+                }
                 if state.moods.is_empty() && !state.moods_loading {
                     let count = moods.len();
                     state.moods = moods;
@@ -579,7 +604,12 @@ impl EventLoop {
                 }
                 vec![]
             }
-            Event::StylesPreloaded(styles) => {
+            Event::StylesPreloaded { library_key, styles } => {
+                // Ignore if this is for a different library (race condition from library switch)
+                if state.active_library.as_ref() != Some(&library_key) {
+                    tracing::debug!("Ignoring stale styles preload for library {}", library_key);
+                    return vec![];
+                }
                 if state.styles.is_empty() && !state.styles_loading {
                     let count = styles.len();
                     state.styles = styles;
@@ -588,7 +618,12 @@ impl EventLoop {
                 }
                 vec![]
             }
-            Event::StationsPreloaded(stations) => {
+            Event::StationsPreloaded { library_key, stations } => {
+                // Ignore if this is for a different library (race condition from library switch)
+                if state.active_library.as_ref() != Some(&library_key) {
+                    tracing::debug!("Ignoring stale stations preload for library {}", library_key);
+                    return vec![];
+                }
                 if state.stations.is_empty() && !state.stations_loading {
                     let count = stations.len();
                     state.stations = stations;
@@ -597,7 +632,12 @@ impl EventLoop {
                 }
                 vec![]
             }
-            Event::RecentlyAddedPreloaded(albums) => {
+            Event::RecentlyAddedPreloaded { library_key, albums } => {
+                // Ignore if this is for a different library (race condition from library switch)
+                if state.active_library.as_ref() != Some(&library_key) {
+                    tracing::debug!("Ignoring stale recently added preload for library {}", library_key);
+                    return vec![];
+                }
                 if state.recently_added_albums.is_empty() && !state.recently_added_loading {
                     let count = albums.len();
                     state.recently_added_albums = albums;
@@ -606,7 +646,12 @@ impl EventLoop {
                 }
                 vec![]
             }
-            Event::RecentlyPlayedPreloaded(albums) => {
+            Event::RecentlyPlayedPreloaded { library_key, albums } => {
+                // Ignore if this is for a different library (race condition from library switch)
+                if state.active_library.as_ref() != Some(&library_key) {
+                    tracing::debug!("Ignoring stale recently played preload for library {}", library_key);
+                    return vec![];
+                }
                 if state.recently_played_albums.is_empty() && !state.recently_played_loading {
                     let count = albums.len();
                     state.recently_played_albums = albums;
@@ -633,6 +678,13 @@ impl EventLoop {
                     }
                 }
 
+                // Clear expired status messages (5 second display)
+                if let Some(show_time) = state.status_show_time {
+                    if show_time.elapsed() > Duration::from_secs(5) {
+                        state.clear_status();
+                    }
+                }
+
                 // Periodic cache save: save if dirty, idle for 30+ seconds, and 2+ minutes since last save
                 self.maybe_save_cache_async(state);
 
@@ -649,6 +701,12 @@ impl EventLoop {
             Event::CacheRefreshCompleted { category, changed } => {
                 state.background_refresh_in_progress.remove(&category);
                 state.cache_dirty = true;
+
+                // Clear the "Refreshing X..." status message if it matches this category
+                let refresh_msg = format!("Refreshing {}...", category.display_name());
+                if state.status_message.as_ref() == Some(&refresh_msg) {
+                    state.clear_status();
+                }
 
                 if changed && self.is_viewing_category(&category, state) {
                     state.toast_message = Some(format!("{} updated", category.display_name()));
@@ -3795,10 +3853,15 @@ impl EventLoop {
                     cache_data.albums = state.albums.clone();
                     cache_data.playlists = state.playlists.clone();
 
-                    // Folder data - extract root folder items
+                    // Folder data - extract root folder items only if they belong to this library
                     if let Some(ref folder_state) = state.folder_state {
-                        if let Some(root_col) = folder_state.columns.first() {
-                            cache_data.root_folders = root_col.items.clone();
+                        if folder_state.library_key == *lib_key {
+                            if let Some(root_col) = folder_state.columns.first() {
+                                cache_data.root_folders = root_col.items.clone();
+                            }
+                        } else {
+                            tracing::debug!("Not saving folder_state on quit - belongs to different library (expected {}, got {})",
+                                lib_key, folder_state.library_key);
                         }
                     }
 
@@ -4057,72 +4120,79 @@ impl EventLoop {
                             // Try to load ALL cached data for instant display
                             if let Some(cache) = LibraryCache::new() {
                                 if let Some(cached) = cache.load(&lib_key) {
-                                    tracing::info!("Loading from cache: {} artists, {} albums, {} folders, {} genres",
-                                        cached.artists.len(), cached.albums.len(), cached.root_folders.len(), cached.genres.len());
+                                    // Validate cache belongs to this library
+                                    if cached.library_key != lib_key {
+                                        tracing::warn!("Cache library_key mismatch: expected {}, got {} - ignoring cache",
+                                            lib_key, cached.library_key);
+                                    } else {
+                                        tracing::info!("Loading from cache: {} artists, {} albums, {} folders, {} genres",
+                                            cached.artists.len(), cached.albums.len(), cached.root_folders.len(), cached.genres.len());
 
-                                    // Core library data
-                                    if !cached.artists.is_empty() {
-                                        state.artists = cached.artists;
-                                        state.artists_total = state.artists.len() as u32;
-                                    }
-                                    if !cached.albums.is_empty() {
-                                        state.albums = cached.albums;
-                                        state.albums_total = state.albums.len() as u32;
-                                    }
-                                    if !cached.playlists.is_empty() {
-                                        state.playlists = cached.playlists;
-                                    }
+                                        // Core library data
+                                        if !cached.artists.is_empty() {
+                                            state.artists = cached.artists;
+                                            state.artists_total = state.artists.len() as u32;
+                                        }
+                                        if !cached.albums.is_empty() {
+                                            state.albums = cached.albums;
+                                            state.albums_total = state.albums.len() as u32;
+                                        }
+                                        if !cached.playlists.is_empty() {
+                                            state.playlists = cached.playlists;
+                                        }
 
-                                    // Folders
-                                    if !cached.root_folders.is_empty() {
-                                        use crate::services::{FolderColumn, FolderNavigationState};
-                                        let root_column = FolderColumn::new(None, lib_title.clone(), cached.root_folders);
-                                        state.folder_state = Some(FolderNavigationState {
-                                            columns: vec![root_column],
-                                            focused_column: 0,
-                                            loading: false,
-                                        });
-                                    }
+                                        // Folders
+                                        if !cached.root_folders.is_empty() {
+                                            use crate::services::{FolderColumn, FolderNavigationState};
+                                            let root_column = FolderColumn::new(None, lib_title.clone(), cached.root_folders);
+                                            state.folder_state = Some(FolderNavigationState {
+                                                library_key: lib_key.clone(),
+                                                columns: vec![root_column],
+                                                focused_column: 0,
+                                                loading: false,
+                                            });
+                                        }
 
-                                    // Genres, artist genres, album genres, moods, styles
-                                    if !cached.genres.is_empty() {
-                                        state.genres = cached.genres;
-                                    }
-                                    if !cached.artist_genres.is_empty() {
-                                        state.artist_genres = cached.artist_genres;
-                                    }
-                                    if !cached.album_genres.is_empty() {
-                                        state.album_genres = cached.album_genres;
-                                    }
-                                    if !cached.moods.is_empty() {
-                                        state.moods = cached.moods;
-                                    }
-                                    if !cached.styles.is_empty() {
-                                        state.styles = cached.styles;
-                                    }
+                                        // Genres, artist genres, album genres, moods, styles
+                                        if !cached.genres.is_empty() {
+                                            state.genres = cached.genres;
+                                        }
+                                        if !cached.artist_genres.is_empty() {
+                                            state.artist_genres = cached.artist_genres;
+                                        }
+                                        if !cached.album_genres.is_empty() {
+                                            state.album_genres = cached.album_genres;
+                                        }
+                                        if !cached.moods.is_empty() {
+                                            state.moods = cached.moods;
+                                        }
+                                        if !cached.styles.is_empty() {
+                                            state.styles = cached.styles;
+                                        }
 
-                                    // Stations - populate both legacy and Miller columns
-                                    if !cached.stations.is_empty() {
-                                        state.stations = cached.stations.clone();
-                                        // Initialize Miller columns with root column
-                                        state.station_nav.columns.clear();
-                                        state.station_nav.columns.push(super::state::StationColumn::new(
-                                            None,
-                                            "Stations".to_string(),
-                                            cached.stations,
-                                        ));
-                                        state.station_nav.focused_column = 0;
-                                    }
+                                        // Stations - populate both legacy and Miller columns
+                                        if !cached.stations.is_empty() {
+                                            state.stations = cached.stations.clone();
+                                            // Initialize Miller columns with root column
+                                            state.station_nav.columns.clear();
+                                            state.station_nav.columns.push(super::state::StationColumn::new(
+                                                None,
+                                                "Stations".to_string(),
+                                                cached.stations,
+                                            ));
+                                            state.station_nav.focused_column = 0;
+                                        }
 
-                                    // Recent content
-                                    if !cached.recently_added_albums.is_empty() {
-                                        state.recently_added_albums = cached.recently_added_albums;
-                                    }
-                                    if !cached.recently_played_albums.is_empty() {
-                                        state.recently_played_albums = cached.recently_played_albums;
-                                    }
-                                    if !cached.recent_playlists.is_empty() {
-                                        state.recent_playlists = cached.recent_playlists;
+                                        // Recent content
+                                        if !cached.recently_added_albums.is_empty() {
+                                            state.recently_added_albums = cached.recently_added_albums;
+                                        }
+                                        if !cached.recently_played_albums.is_empty() {
+                                            state.recently_played_albums = cached.recently_played_albums;
+                                        }
+                                        if !cached.recent_playlists.is_empty() {
+                                            state.recent_playlists = cached.recent_playlists;
+                                        }
                                     }
                                 }
                             }
@@ -4936,7 +5006,7 @@ impl EventLoop {
                 state.set_status(msg);
             }
             Action::ClearStatus => {
-                state.status_message = None;
+                state.clear_status();
             }
             Action::RefreshCategory(category) => {
                 if let Some(lib_key) = &state.active_library {
@@ -5198,72 +5268,79 @@ impl EventLoop {
                     // Load ALL cached data for instant display
                     if let Some(cache) = LibraryCache::new() {
                         if let Some(cached) = cache.load(&lib_key) {
-                            tracing::info!("Library switch: loading from cache: {} artists, {} albums, {} folders",
-                                cached.artists.len(), cached.albums.len(), cached.root_folders.len());
+                            // Validate cache belongs to this library
+                            if cached.library_key != lib_key {
+                                tracing::warn!("Cache library_key mismatch: expected {}, got {} - ignoring cache",
+                                    lib_key, cached.library_key);
+                            } else {
+                                tracing::info!("Library switch: loading from cache: {} artists, {} albums, {} folders",
+                                    cached.artists.len(), cached.albums.len(), cached.root_folders.len());
 
-                            // Core library data
-                            if !cached.artists.is_empty() {
-                                state.artists = cached.artists;
-                                state.artists_total = state.artists.len() as u32;
-                            }
-                            if !cached.albums.is_empty() {
-                                state.albums = cached.albums;
-                                state.albums_total = state.albums.len() as u32;
-                            }
-                            if !cached.playlists.is_empty() {
-                                state.playlists = cached.playlists;
-                            }
+                                // Core library data
+                                if !cached.artists.is_empty() {
+                                    state.artists = cached.artists;
+                                    state.artists_total = state.artists.len() as u32;
+                                }
+                                if !cached.albums.is_empty() {
+                                    state.albums = cached.albums;
+                                    state.albums_total = state.albums.len() as u32;
+                                }
+                                if !cached.playlists.is_empty() {
+                                    state.playlists = cached.playlists;
+                                }
 
-                            // Folders
-                            if !cached.root_folders.is_empty() {
-                                use crate::services::{FolderColumn, FolderNavigationState};
-                                let root_column = FolderColumn::new(None, lib_name.clone(), cached.root_folders);
-                                state.folder_state = Some(FolderNavigationState {
-                                    columns: vec![root_column],
-                                    focused_column: 0,
-                                    loading: false,
-                                });
-                            }
+                                // Folders
+                                if !cached.root_folders.is_empty() {
+                                    use crate::services::{FolderColumn, FolderNavigationState};
+                                    let root_column = FolderColumn::new(None, lib_name.clone(), cached.root_folders);
+                                    state.folder_state = Some(FolderNavigationState {
+                                        library_key: lib_key.clone(),
+                                        columns: vec![root_column],
+                                        focused_column: 0,
+                                        loading: false,
+                                    });
+                                }
 
-                            // Genres, artist genres, album genres, moods, styles
-                            if !cached.genres.is_empty() {
-                                state.genres = cached.genres;
-                            }
-                            if !cached.artist_genres.is_empty() {
-                                state.artist_genres = cached.artist_genres;
-                            }
-                            if !cached.album_genres.is_empty() {
-                                state.album_genres = cached.album_genres;
-                            }
-                            if !cached.moods.is_empty() {
-                                state.moods = cached.moods;
-                            }
-                            if !cached.styles.is_empty() {
-                                state.styles = cached.styles;
-                            }
+                                // Genres, artist genres, album genres, moods, styles
+                                if !cached.genres.is_empty() {
+                                    state.genres = cached.genres;
+                                }
+                                if !cached.artist_genres.is_empty() {
+                                    state.artist_genres = cached.artist_genres;
+                                }
+                                if !cached.album_genres.is_empty() {
+                                    state.album_genres = cached.album_genres;
+                                }
+                                if !cached.moods.is_empty() {
+                                    state.moods = cached.moods;
+                                }
+                                if !cached.styles.is_empty() {
+                                    state.styles = cached.styles;
+                                }
 
-                            // Stations - populate both legacy and Miller columns
-                            if !cached.stations.is_empty() {
-                                state.stations = cached.stations.clone();
-                                // Initialize Miller columns with root column
-                                state.station_nav.columns.clear();
-                                state.station_nav.columns.push(super::state::StationColumn::new(
-                                    None,
-                                    "Stations".to_string(),
-                                    cached.stations,
-                                ));
-                                state.station_nav.focused_column = 0;
-                            }
+                                // Stations - populate both legacy and Miller columns
+                                if !cached.stations.is_empty() {
+                                    state.stations = cached.stations.clone();
+                                    // Initialize Miller columns with root column
+                                    state.station_nav.columns.clear();
+                                    state.station_nav.columns.push(super::state::StationColumn::new(
+                                        None,
+                                        "Stations".to_string(),
+                                        cached.stations,
+                                    ));
+                                    state.station_nav.focused_column = 0;
+                                }
 
-                            // Recent content
-                            if !cached.recently_added_albums.is_empty() {
-                                state.recently_added_albums = cached.recently_added_albums;
-                            }
-                            if !cached.recently_played_albums.is_empty() {
-                                state.recently_played_albums = cached.recently_played_albums;
-                            }
-                            if !cached.recent_playlists.is_empty() {
-                                state.recent_playlists = cached.recent_playlists;
+                                // Recent content
+                                if !cached.recently_added_albums.is_empty() {
+                                    state.recently_added_albums = cached.recently_added_albums;
+                                }
+                                if !cached.recently_played_albums.is_empty() {
+                                    state.recently_played_albums = cached.recently_played_albums;
+                                }
+                                if !cached.recent_playlists.is_empty() {
+                                    state.recent_playlists = cached.recent_playlists;
+                                }
                             }
                         }
                     }
@@ -5466,6 +5543,7 @@ impl EventLoop {
 
                             let root_column = FolderColumn::new(None, lib_title, items);
                             state.folder_state = Some(FolderNavigationState {
+                                library_key: lib_key.clone(),
                                 columns: vec![root_column],
                                 focused_column: 0,
                                 loading: false,
@@ -6657,7 +6735,7 @@ impl EventLoop {
             Action::SetAdventureEnd(track) => {
                 state.adventure.end_track = Some(track);
                 // Clear status message so transport shows normal info
-                state.status_message = None;
+                state.clear_status();
                 // Show input dialog for length
                 state.input_dialog = Some(super::state::InputDialog {
                     title: "Adventure Length (5-100)".to_string(),
@@ -6717,7 +6795,7 @@ impl EventLoop {
             Action::CancelAdventure => {
                 state.adventure = crate::app::state::AdventureState::default();
                 state.input_dialog = None;
-                state.status_message = None;
+                state.clear_status();
             }
             Action::AdventureComplete(tracks) => {
                 // This is handled inline in SetAdventureLength for simplicity
@@ -7505,12 +7583,13 @@ impl EventLoop {
                         let items = FolderService::from_response(&response);
                         let root_column = FolderColumn::new(None, lib_title, items);
                         let folder_state = FolderNavigationState {
+                            library_key: lib_key.clone(),
                             columns: vec![root_column],
                             focused_column: 0,
                             loading: false,
                         };
                         tracing::debug!("Folders preloaded successfully");
-                        let _ = event_tx.send(Event::FoldersPreloaded { folder_state }).await;
+                        let _ = event_tx.send(Event::FoldersPreloaded { library_key: lib_key, folder_state }).await;
                     }
                     Err(e) => {
                         tracing::debug!("Failed to preload folders: {}", e);
@@ -7610,7 +7689,7 @@ impl EventLoop {
                 match client.get_genres(&lib_key).await {
                     Ok(genres) => {
                         tracing::debug!("Genres preloaded: {} items", genres.len());
-                        let _ = event_tx.send(Event::GenresPreloaded(genres)).await;
+                        let _ = event_tx.send(Event::GenresPreloaded { library_key: lib_key, genres }).await;
                     }
                     Err(e) => {
                         tracing::debug!("Failed to preload genres: {}", e);
@@ -7635,7 +7714,7 @@ impl EventLoop {
                 match client.get_moods(&lib_key).await {
                     Ok(moods) => {
                         tracing::debug!("Moods preloaded: {} items", moods.len());
-                        let _ = event_tx.send(Event::MoodsPreloaded(moods)).await;
+                        let _ = event_tx.send(Event::MoodsPreloaded { library_key: lib_key, moods }).await;
                     }
                     Err(e) => {
                         tracing::debug!("Failed to preload moods: {}", e);
@@ -7660,7 +7739,7 @@ impl EventLoop {
                 match client.get_artist_genres(&lib_key).await {
                     Ok(genres) => {
                         tracing::debug!("Artist genres preloaded: {} items", genres.len());
-                        let _ = event_tx.send(Event::ArtistGenresPreloaded(genres)).await;
+                        let _ = event_tx.send(Event::ArtistGenresPreloaded { library_key: lib_key, genres }).await;
                     }
                     Err(e) => {
                         tracing::debug!("Failed to preload artist genres: {}", e);
@@ -7685,7 +7764,7 @@ impl EventLoop {
                 match client.get_album_genres(&lib_key).await {
                     Ok(genres) => {
                         tracing::debug!("Album genres preloaded: {} items", genres.len());
-                        let _ = event_tx.send(Event::AlbumGenresPreloaded(genres)).await;
+                        let _ = event_tx.send(Event::AlbumGenresPreloaded { library_key: lib_key, genres }).await;
                     }
                     Err(e) => {
                         tracing::debug!("Failed to preload album genres: {}", e);
@@ -7710,7 +7789,7 @@ impl EventLoop {
                 match client.get_styles(&lib_key).await {
                     Ok(styles) => {
                         tracing::debug!("Styles preloaded: {} items", styles.len());
-                        let _ = event_tx.send(Event::StylesPreloaded(styles)).await;
+                        let _ = event_tx.send(Event::StylesPreloaded { library_key: lib_key, styles }).await;
                     }
                     Err(e) => {
                         tracing::debug!("Failed to preload styles: {}", e);
@@ -7735,7 +7814,7 @@ impl EventLoop {
                 match client.get_stations(&lib_key).await {
                     Ok(stations) => {
                         tracing::debug!("Stations preloaded: {} items", stations.len());
-                        let _ = event_tx.send(Event::StationsPreloaded(stations)).await;
+                        let _ = event_tx.send(Event::StationsPreloaded { library_key: lib_key, stations }).await;
                     }
                     Err(e) => {
                         tracing::debug!("Failed to preload stations: {}", e);
@@ -7760,7 +7839,7 @@ impl EventLoop {
                 match client.get_recently_added_albums(&lib_key, 50).await {
                     Ok(albums) => {
                         tracing::debug!("Recently added albums preloaded: {} items", albums.len());
-                        let _ = event_tx.send(Event::RecentlyAddedPreloaded(albums)).await;
+                        let _ = event_tx.send(Event::RecentlyAddedPreloaded { library_key: lib_key, albums }).await;
                     }
                     Err(e) => {
                         tracing::debug!("Failed to preload recently added albums: {}", e);
@@ -7786,7 +7865,7 @@ impl EventLoop {
                 match client.get_recently_played_albums(&lib_key, 50).await {
                     Ok(albums) => {
                         tracing::debug!("Recently played albums preloaded: {} items", albums.len());
-                        let _ = event_tx.send(Event::RecentlyPlayedPreloaded(albums)).await;
+                        let _ = event_tx.send(Event::RecentlyPlayedPreloaded { library_key: lib_key, albums }).await;
                     }
                     Err(e) => {
                         tracing::debug!("Failed to preload recently played albums: {}", e);
@@ -7936,9 +8015,15 @@ impl EventLoop {
         cache_data.artists = state.artists.clone();
         cache_data.albums = state.albums.clone();
         cache_data.playlists = state.playlists.clone();
+        // Only save folders if they belong to this library
         if let Some(ref folder_state) = state.folder_state {
-            if let Some(root_col) = folder_state.columns.first() {
-                cache_data.root_folders = root_col.items.clone();
+            if folder_state.library_key == lib_key {
+                if let Some(root_col) = folder_state.columns.first() {
+                    cache_data.root_folders = root_col.items.clone();
+                }
+            } else {
+                tracing::debug!("Not saving folder_state (periodic) - belongs to different library (expected {}, got {})",
+                    lib_key, folder_state.library_key);
             }
         }
         cache_data.genres = state.genres.clone();
@@ -8228,7 +8313,7 @@ impl EventLoop {
                     match client.get_recently_added_albums(&lib_key, 50).await {
                         Ok(albums) => {
                             let new_count = albums.len();
-                            let _ = event_tx.send(Event::RecentlyAddedPreloaded(albums)).await;
+                            let _ = event_tx.send(Event::RecentlyAddedPreloaded { library_key: lib_key.clone(), albums }).await;
                             new_count != old_count
                         }
                         Err(e) => {
@@ -8259,7 +8344,7 @@ impl EventLoop {
                     match client.get_genres(&lib_key).await {
                         Ok(genres) => {
                             let new_count = genres.len();
-                            let _ = event_tx.send(Event::GenresPreloaded(genres)).await;
+                            let _ = event_tx.send(Event::GenresPreloaded { library_key: lib_key.clone(), genres }).await;
                             new_count != old_count
                         }
                         Err(e) => {
@@ -8272,7 +8357,7 @@ impl EventLoop {
                     match client.get_artist_genres(&lib_key).await {
                         Ok(genres) => {
                             let new_count = genres.len();
-                            let _ = event_tx.send(Event::ArtistGenresPreloaded(genres)).await;
+                            let _ = event_tx.send(Event::ArtistGenresPreloaded { library_key: lib_key.clone(), genres }).await;
                             new_count != old_count
                         }
                         Err(e) => {
@@ -8285,7 +8370,7 @@ impl EventLoop {
                     match client.get_album_genres(&lib_key).await {
                         Ok(genres) => {
                             let new_count = genres.len();
-                            let _ = event_tx.send(Event::AlbumGenresPreloaded(genres)).await;
+                            let _ = event_tx.send(Event::AlbumGenresPreloaded { library_key: lib_key.clone(), genres }).await;
                             new_count != old_count
                         }
                         Err(e) => {
@@ -8298,7 +8383,7 @@ impl EventLoop {
                     match client.get_moods(&lib_key).await {
                         Ok(moods) => {
                             let new_count = moods.len();
-                            let _ = event_tx.send(Event::MoodsPreloaded(moods)).await;
+                            let _ = event_tx.send(Event::MoodsPreloaded { library_key: lib_key.clone(), moods }).await;
                             new_count != old_count
                         }
                         Err(e) => {
@@ -8311,7 +8396,7 @@ impl EventLoop {
                     match client.get_styles(&lib_key).await {
                         Ok(styles) => {
                             let new_count = styles.len();
-                            let _ = event_tx.send(Event::StylesPreloaded(styles)).await;
+                            let _ = event_tx.send(Event::StylesPreloaded { library_key: lib_key.clone(), styles }).await;
                             new_count != old_count
                         }
                         Err(e) => {
@@ -8324,7 +8409,7 @@ impl EventLoop {
                     match client.get_stations(&lib_key).await {
                         Ok(stations) => {
                             let new_count = stations.len();
-                            let _ = event_tx.send(Event::StationsPreloaded(stations)).await;
+                            let _ = event_tx.send(Event::StationsPreloaded { library_key: lib_key.clone(), stations }).await;
                             new_count != old_count
                         }
                         Err(e) => {
@@ -8341,11 +8426,12 @@ impl EventLoop {
                             let new_count = items.len();
                             let root_column = FolderColumn::new(None, "Music".to_string(), items);
                             let folder_state = FolderNavigationState {
+                                library_key: lib_key.clone(),
                                 columns: vec![root_column],
                                 focused_column: 0,
                                 loading: false,
                             };
-                            let _ = event_tx.send(Event::FoldersPreloaded { folder_state }).await;
+                            let _ = event_tx.send(Event::FoldersPreloaded { library_key: lib_key.clone(), folder_state }).await;
                             new_count != old_count
                         }
                         Err(e) => {

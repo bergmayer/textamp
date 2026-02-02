@@ -147,6 +147,7 @@ pub struct AppState {
     pub should_quit: bool,
     pub last_error: Option<String>,
     pub status_message: Option<String>,
+    pub status_show_time: Option<std::time::Instant>,
 
     // Input dialog state (for playlist naming, etc.)
     pub input_dialog: Option<InputDialog>,
@@ -569,6 +570,7 @@ impl AppState {
             should_quit: false,
             last_error: None,
             status_message: None,
+            status_show_time: None,
             input_dialog: None,
             alt_held: false,
             search_tab: SearchTab::default(),
@@ -619,9 +621,16 @@ impl AppState {
         self.last_error = None;
     }
 
-    /// Set a status message.
+    /// Set a status message (auto-clears after 5 seconds).
     pub fn set_status(&mut self, msg: String) {
         self.status_message = Some(msg);
+        self.status_show_time = Some(std::time::Instant::now());
+    }
+
+    /// Clear the status message.
+    pub fn clear_status(&mut self) {
+        self.status_message = None;
+        self.status_show_time = None;
     }
 
     /// Get the currently playing track (mode-aware).

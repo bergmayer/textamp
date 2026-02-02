@@ -66,20 +66,20 @@ pub enum Event {
     ArtworkFailed { thumb_path: String },
 
     // Folder preloading (background)
-    FoldersPreloaded { folder_state: crate::services::FolderNavigationState },
+    FoldersPreloaded { library_key: String, folder_state: crate::services::FolderNavigationState },
 
-    // Background data preloading
+    // Background data preloading (library-specific events include library_key for race condition safety)
     ArtistsPreloaded(Vec<Artist>),
     AlbumsPreloaded(Vec<Album>),
     PlaylistsPreloaded(Vec<Playlist>),
-    GenresPreloaded(Vec<Genre>),
-    ArtistGenresPreloaded(Vec<Genre>),
-    AlbumGenresPreloaded(Vec<Genre>),
-    MoodsPreloaded(Vec<Genre>),
-    StylesPreloaded(Vec<Genre>),
-    StationsPreloaded(Vec<Station>),
-    RecentlyAddedPreloaded(Vec<Album>),
-    RecentlyPlayedPreloaded(Vec<Album>),
+    GenresPreloaded { library_key: String, genres: Vec<Genre> },
+    ArtistGenresPreloaded { library_key: String, genres: Vec<Genre> },
+    AlbumGenresPreloaded { library_key: String, genres: Vec<Genre> },
+    MoodsPreloaded { library_key: String, moods: Vec<Genre> },
+    StylesPreloaded { library_key: String, styles: Vec<Genre> },
+    StationsPreloaded { library_key: String, stations: Vec<Station> },
+    RecentlyAddedPreloaded { library_key: String, albums: Vec<Album> },
+    RecentlyPlayedPreloaded { library_key: String, albums: Vec<Album> },
     RecentPlaylistsPreloaded(Vec<Playlist>),
 
     // Cache management
