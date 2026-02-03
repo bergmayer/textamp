@@ -26,6 +26,8 @@ pub enum Event {
     AuthPinReady { code: String, pin_id: u64 },
     ServersDiscovered(Vec<PlexServer>),
     ServerDiscoveryFailed(String),
+    ServerConnectionSucceeded { server_name: String, url: String },
+    ServerConnectionFailed { server_name: String },
 
     // API response events
     LibrariesLoaded(Vec<Library>),
@@ -80,7 +82,6 @@ pub enum Event {
     StationsPreloaded { library_key: String, stations: Vec<Station> },
     RecentlyAddedPreloaded { library_key: String, albums: Vec<Album> },
     RecentlyPlayedPreloaded { library_key: String, albums: Vec<Album> },
-    RecentPlaylistsPreloaded(Vec<Playlist>),
 
     // Cache management
     CacheSaved,
@@ -102,4 +103,10 @@ pub enum Event {
     // Album radio loading (background)
     AlbumRadioTracksLoaded { tracks: Vec<Track> },
     AlbumRadioLoadFailed { error: String },
+
+    // Inline list filter
+    ListFilterCompleted {
+        version: u64,
+        results: crate::app::state::ListFilterResults,
+    },
 }

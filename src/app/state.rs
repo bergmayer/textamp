@@ -4,9 +4,295 @@
 //! UI modeled after musikcube: Browse (left: categories, right: tracks), Queue, Search, etc.
 
 use crate::api::models::{Album, Artist, Genre, Library, Playlist, PlexServer, Station, Track, SearchResults};
+use crate::plex::CachedFolder;
 use crate::services::{FolderNavigationState, WaveformData};
 use crate::ui::theme::ThemeName;
 use std::collections::HashMap;
+
+/// Notification type - determines display behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationType {
+    /// Ongoing operation - stays visible while active
+    Ongoing,
+    /// Toast - appears briefly then auto-disappears
+    Toast,
+}
+
+/// A notification to display in the transport bar.
+#[derive(Debug, Clone)]
+pub struct Notification {
+    pub message: String,
+    pub notification_type: NotificationType,
+}
+
+impl Notification {
+    pub fn ongoing(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            notification_type: NotificationType::Ongoing,
+        }
+    }
+
+    pub fn toast(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            notification_type: NotificationType::Toast,
+        }
+    }
+}
+
+// ============================================================================
+// Miller Column Navigation for Browse Views
+// ============================================================================
+
+/// Item type in a browse column.
+#[derive(Debug, Clone)]
+pub enum BrowseItem {
+    Artist {
+        key: String,
+        title: String,
+    },
+    Album {
+        key: String,
+        title: String,
+        artist: String,
+        year: Option<u16>,
+    },
+    Track {
+        key: String,
+        title: String,
+        duration_ms: u64,
+        track_number: Option<u32>,
+    },
+    Genre {
+        key: String,
+        title: String,
+    },
+    Playlist {
+        key: String,
+        title: String,
+        track_count: Option<u32>,
+    },
+}
+
+impl BrowseItem {
+    pub fn key(&self) -> &str {
+        match self {
+            BrowseItem::Artist { key, .. } => key,
+            BrowseItem::Album { key, .. } => key,
+            BrowseItem::Track { key, .. } => key,
+            BrowseItem::Genre { key, .. } => key,
+            BrowseItem::Playlist { key, .. } => key,
+        }
+    }
+
+    pub fn title(&self) -> &str {
+        match self {
+            BrowseItem::Artist { title, .. } => title,
+            BrowseItem::Album { title, .. } => title,
+            BrowseItem::Track { title, .. } => title,
+            BrowseItem::Genre { title, .. } => title,
+            BrowseItem::Playlist { title, .. } => title,
+        }
+    }
+
+    pub fn is_drillable(&self) -> bool {
+        !matches!(self, BrowseItem::Track { .. })
+    }
+
+    /// Convert a list of Artists to BrowseItems.
+    pub fn from_artists(artists: &[Artist]) -> Vec<BrowseItem> {
+        artists.iter().map(|a| BrowseItem::Artist {
+            key: a.rating_key.clone(),
+            title: a.title.clone(),
+        }).collect()
+    }
+
+    /// Convert a list of Albums to BrowseItems.
+    pub fn from_albums(albums: &[Album]) -> Vec<BrowseItem> {
+        albums.iter().map(|a| BrowseItem::Album {
+            key: a.rating_key.clone(),
+            title: a.title.clone(),
+            artist: a.parent_title.clone().unwrap_or_default(),
+            year: a.year,
+        }).collect()
+    }
+
+    /// Convert a list of Tracks to BrowseItems.
+    pub fn from_tracks(tracks: &[Track]) -> Vec<BrowseItem> {
+        tracks.iter().map(|t| BrowseItem::Track {
+            key: t.rating_key.clone(),
+            title: t.title.clone(),
+            duration_ms: t.duration_ms(),
+            track_number: t.index,
+        }).collect()
+    }
+
+    /// Convert a list of Genres to BrowseItems.
+    pub fn from_genres(genres: &[Genre]) -> Vec<BrowseItem> {
+        genres.iter().map(|g| BrowseItem::Genre {
+            key: g.key.clone(),
+            title: g.title.clone(),
+        }).collect()
+    }
+
+    /// Convert a list of Playlists to BrowseItems.
+    pub fn from_playlists(playlists: &[Playlist]) -> Vec<BrowseItem> {
+        playlists.iter().map(|p| BrowseItem::Playlist {
+            key: p.rating_key.clone(),
+            title: p.title.clone(),
+            track_count: p.leaf_count,
+        }).collect()
+    }
+}
+
+/// A single column in the Miller columns browse view.
+#[derive(Debug, Clone)]
+pub struct BrowseColumn {
+    /// Column title (shown in header for root column only)
+    pub title: String,
+    /// Items in this column
+    pub items: Vec<BrowseItem>,
+    /// Currently selected index
+    pub selected_index: usize,
+}
+
+impl BrowseColumn {
+    pub fn new(title: impl Into<String>, items: Vec<BrowseItem>) -> Self {
+        Self {
+            title: title.into(),
+            items,
+            selected_index: 0,
+        }
+    }
+
+    pub fn selected_item(&self) -> Option<&BrowseItem> {
+        self.items.get(self.selected_index)
+    }
+}
+
+/// Navigation state for Miller column browsing.
+#[derive(Debug, Clone, Default)]
+pub struct BrowseNavigationState {
+    /// Columns from left to right
+    pub columns: Vec<BrowseColumn>,
+    /// Which column currently has focus (0-indexed)
+    pub focused_column: usize,
+    /// Loading indicator
+    pub loading: bool,
+}
+
+impl BrowseNavigationState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Initialize with a root column.
+    pub fn with_root(title: impl Into<String>, items: Vec<BrowseItem>) -> Self {
+        Self {
+            columns: vec![BrowseColumn::new(title, items)],
+            focused_column: 0,
+            loading: false,
+        }
+    }
+
+    /// Get the focused column.
+    pub fn focused(&self) -> Option<&BrowseColumn> {
+        self.columns.get(self.focused_column)
+    }
+
+    /// Get the focused column mutably.
+    pub fn focused_mut(&mut self) -> Option<&mut BrowseColumn> {
+        self.columns.get_mut(self.focused_column)
+    }
+
+    /// Get the selected item in the focused column.
+    pub fn selected_item(&self) -> Option<&BrowseItem> {
+        self.focused().and_then(|c| c.selected_item())
+    }
+
+    /// Check if we can go left (focus previous column).
+    pub fn can_go_left(&self) -> bool {
+        self.focused_column > 0
+    }
+
+    /// Move focus left.
+    pub fn focus_left(&mut self) {
+        if self.focused_column > 0 {
+            self.focused_column -= 1;
+        }
+    }
+
+    /// Move focus right (if there's a column to the right).
+    pub fn focus_right(&mut self) -> bool {
+        if self.focused_column + 1 < self.columns.len() {
+            self.focused_column += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Add a new column to the right, removing any columns after current focus.
+    pub fn push_column(&mut self, column: BrowseColumn) {
+        // Remove columns to the right of focus
+        self.columns.truncate(self.focused_column + 1);
+        // Add new column
+        self.columns.push(column);
+        // Move focus to new column
+        self.focused_column = self.columns.len() - 1;
+    }
+
+    /// Clear columns to the right of the focused column.
+    pub fn truncate_right(&mut self) {
+        self.columns.truncate(self.focused_column + 1);
+    }
+
+    /// Navigate up in current column.
+    pub fn move_up(&mut self) {
+        if let Some(col) = self.focused_mut() {
+            if col.selected_index > 0 {
+                col.selected_index -= 1;
+            }
+        }
+    }
+
+    /// Navigate down in current column.
+    pub fn move_down(&mut self) {
+        if let Some(col) = self.focused_mut() {
+            let max = col.items.len().saturating_sub(1);
+            if col.selected_index < max {
+                col.selected_index += 1;
+            }
+        }
+    }
+
+    /// Move to a specific index in the focused column.
+    pub fn move_to(&mut self, index: usize) {
+        if let Some(col) = self.focused_mut() {
+            if index < col.items.len() {
+                col.selected_index = index;
+            }
+        }
+    }
+
+    /// Get the number of columns.
+    pub fn column_count(&self) -> usize {
+        self.columns.len()
+    }
+
+    /// Reset to a single root column.
+    pub fn reset(&mut self, title: impl Into<String>, items: Vec<BrowseItem>) {
+        self.columns = vec![BrowseColumn::new(title, items)];
+        self.focused_column = 0;
+        self.loading = false;
+    }
+
+    /// Check if empty (no columns).
+    pub fn is_empty(&self) -> bool {
+        self.columns.is_empty()
+    }
+}
 
 /// Authentication flow step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -87,9 +373,6 @@ pub struct AppState {
     pub genre_content_type: GenreContentType,  // Genres / Artist / Album / Moods / Styles cycle
     pub genre_albums: Vec<Album>,  // Albums in selected genre/mood
     pub genre_albums_index: usize,
-    pub genre_tracks: Vec<Track>,  // Tracks for selected album in genre view
-    pub genre_tracks_index: usize,
-    pub genre_focus_column: usize,  // 0=genres, 1=albums, 2=tracks (Miller columns)
     pub genre_sort_mode: GenreSortMode,
 
     // Artist view mode (Artist vs Album Artist)
@@ -170,6 +453,16 @@ pub struct AppState {
 
     // Folder browsing state (for Folders category with Miller columns)
     pub folder_state: Option<FolderNavigationState>,
+    /// Cached subfolder contents: folder_key -> CachedFolder with timestamp.
+    /// Each entry has its own timestamp for individual staleness tracking.
+    /// Entries older than 32 days are deleted on cache load (not refreshed).
+    /// Subfolders are only cached when navigated to (lazy caching).
+    pub folder_contents_cache: HashMap<String, CachedFolder>,
+
+    // Miller column navigation for browse categories
+    pub artist_nav: BrowseNavigationState,
+    pub genre_nav: BrowseNavigationState,
+    pub playlist_nav: BrowseNavigationState,
 
     // Artwork state
     pub artwork_thumb: Option<String>,
@@ -204,12 +497,10 @@ pub struct AppState {
     pub recently_played_albums: Vec<Album>,
     pub recently_played_loading: bool,
 
-    // Playlists view mode (All vs Recently Added vs Recent)
+    // Playlists view mode (All vs Recently Added)
     pub playlists_mode: PlaylistsMode,
     pub recently_added_albums: Vec<Album>,
     pub recently_added_loading: bool,
-    pub recent_playlists: Vec<Playlist>,
-    pub recent_playlists_loading: bool,
 
     // Cache management
     pub cache_dirty: bool,
@@ -227,6 +518,19 @@ pub struct AppState {
 
     // Confirmation dialog
     pub confirm_dialog: Option<ConfirmDialog>,
+
+    // Inline list filter state
+    pub list_filter_active: bool,
+    pub list_filter_query: String,
+    pub list_filter_version: u64,
+    pub list_filter_loading: bool,
+    pub list_filter_results: Option<ListFilterResults>,
+    pub list_filter_selected: usize,  // Index into matched_indices (which filtered result is selected)
+    pub list_filter_category: BrowseCategory,  // Which category the filter applies to
+    pub list_filter_column: usize,  // Which column index the filter applies to
+
+    // Search popup state (Ctrl+F - floating dialog, not a full view)
+    pub search_popup_active: bool,
 }
 
 /// Playback mode - determines behavior (finite queue vs continuous radio).
@@ -420,11 +724,17 @@ impl StationNavigationState {
     /// Add a new column to the right, removing any columns after current focus.
     pub fn push_column(&mut self, column: StationColumn) {
         // Remove columns to the right of focus
-        self.columns.truncate(self.focused_column + 1);
+        self.truncate_right_columns();
         // Add new column
         self.columns.push(column);
         // Move focus to new column
         self.focused_column = self.columns.len() - 1;
+    }
+
+    /// Clear columns to the right of the focused column.
+    /// Call this when selection changes to prevent stale column data.
+    pub fn truncate_right_columns(&mut self) {
+        self.columns.truncate(self.focused_column + 1);
     }
 
     /// Get the current title (focused column's title).
@@ -457,8 +767,10 @@ impl StationNavigationState {
     }
 }
 
-// Legacy compatibility - keep RadioMode and RadioState for now
-/// Radio playback mode (legacy - use PlaybackMode instead).
+// Seed-based radio (Alt+R) - separate from station-based radio (via Ctrl+G Stations)
+// radio_state is used for track/album/artist radio seeded from user selection.
+// This is distinct from RadioPlaybackState which is for Plexamp stations.
+/// Radio mode for seed-based radio (track/album/artist radio via Alt+R).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RadioMode {
     #[default]
@@ -482,7 +794,8 @@ impl RadioMode {
     }
 }
 
-/// Radio state for auto-queueing similar content (legacy).
+/// Seed-based radio state for similarity-based playback (Alt+R).
+/// Distinct from RadioPlaybackState which handles Plexamp stations (via Ctrl+G).
 #[derive(Debug, Clone, Default)]
 pub struct RadioState {
     /// Current radio mode
@@ -533,9 +846,6 @@ impl AppState {
             genre_content_type: GenreContentType::default(),
             genre_albums: Vec::new(),
             genre_albums_index: 0,
-            genre_tracks: Vec::new(),
-            genre_tracks_index: 0,
-            genre_focus_column: 0,
             genre_sort_mode: GenreSortMode::default(),
             artist_view_mode: ArtistViewMode::default(),
             right_panel_mode: RightPanelMode::Empty,
@@ -579,6 +889,10 @@ impl AppState {
             image_loaded: HashMap::new(),
             settings_state: SettingsState::default(),
             folder_state: None,
+            folder_contents_cache: HashMap::new(),
+            artist_nav: BrowseNavigationState::new(),
+            genre_nav: BrowseNavigationState::new(),
+            playlist_nav: BrowseNavigationState::new(),
             artwork_thumb: None,
             artwork_data: None,
             artwork_loading: false,
@@ -597,8 +911,6 @@ impl AppState {
             playlists_mode: PlaylistsMode::default(),
             recently_added_albums: Vec::new(),
             recently_added_loading: false,
-            recent_playlists: Vec::new(),
-            recent_playlists_loading: false,
             cache_dirty: false,
             last_input_time: std::time::Instant::now(),
             last_cache_save: std::time::Instant::now(),
@@ -608,6 +920,15 @@ impl AppState {
             toast_message: None,
             toast_show_time: None,
             confirm_dialog: None,
+            list_filter_active: false,
+            list_filter_query: String::new(),
+            list_filter_version: 0,
+            list_filter_loading: false,
+            list_filter_results: None,
+            list_filter_selected: 0,
+            list_filter_category: BrowseCategory::Artists,
+            list_filter_column: 0,
+            search_popup_active: false,
         }
     }
 
@@ -631,6 +952,65 @@ impl AppState {
     pub fn clear_status(&mut self) {
         self.status_message = None;
         self.status_show_time = None;
+    }
+
+    /// Set a toast notification (auto-clears after 5 seconds).
+    pub fn set_toast(&mut self, msg: impl Into<String>) {
+        self.toast_message = Some(msg.into());
+        self.toast_show_time = Some(std::time::Instant::now());
+    }
+
+    /// Get the current notification to display (ongoing takes priority over toast).
+    /// Returns None if no notification should be shown.
+    pub fn current_notification(&self) -> Option<Notification> {
+        // Priority 1: Adventure mode notifications (ongoing)
+        if self.adventure.active {
+            if self.adventure.generating {
+                return Some(Notification::ongoing("🌟 Generating sonic bridge..."));
+            }
+            // Don't show adventure selection messages here - they're in the transport text
+        }
+
+        // Priority 2: Station loading (ongoing)
+        if self.station_nav.loading {
+            return Some(Notification::ongoing("Loading station..."));
+        }
+
+        // Priority 3: Background refresh (ongoing)
+        if !self.background_refresh_in_progress.is_empty() {
+            let categories: Vec<_> = self.background_refresh_in_progress
+                .iter()
+                .map(|c| c.display_name())
+                .collect();
+            let msg = if categories.len() == 1 {
+                format!("Refreshing {}...", categories[0])
+            } else {
+                format!("Refreshing {}...", categories.join(", "))
+            };
+            return Some(Notification::ongoing(msg));
+        }
+
+        // Priority 4: Waveform generation (ongoing)
+        if self.waveform.generating {
+            return Some(Notification::ongoing("Generating waveform..."));
+        }
+
+        // Priority 5: Cache saving (ongoing)
+        if self.cache_save_in_progress {
+            return Some(Notification::ongoing("Saving cache..."));
+        }
+
+        // Priority 6: Toast notifications (transient)
+        if let Some(ref msg) = self.toast_message {
+            return Some(Notification::toast(msg.clone()));
+        }
+
+        // Priority 7: Status messages (transient)
+        if let Some(ref msg) = self.status_message {
+            return Some(Notification::toast(msg.clone()));
+        }
+
+        None
     }
 
     /// Get the currently playing track (mode-aware).
@@ -663,16 +1043,22 @@ impl AppState {
                 match self.playlists_mode {
                     PlaylistsMode::All => self.playlists.len(),
                     PlaylistsMode::RecentlyAdded => self.recently_added_albums.len(),
-                    PlaylistsMode::RecentPlaylists => self.recent_playlists.len(),
                 }
             }
-            BrowseCategory::Stations => self.stations.len(),
-            BrowseCategory::Genres => self.current_genre_list().len(),
+            BrowseCategory::Genres => {
+                // Stations are in the genre cycle, but use station_nav for rendering
+                if self.genre_content_type == GenreContentType::Stations {
+                    0 // Handled separately via station_nav
+                } else {
+                    self.current_genre_list().len()
+                }
+            }
             BrowseCategory::Folders => 0, // Handled separately via folder_state
         }
     }
 
     /// Get the current genre list based on content type.
+    /// Note: Returns empty vec for Stations since stations use station_nav.
     pub fn current_genre_list(&self) -> &Vec<Genre> {
         match self.genre_content_type {
             GenreContentType::Genres => &self.genres,
@@ -680,6 +1066,7 @@ impl AppState {
             GenreContentType::AlbumGenres => &self.album_genres,
             GenreContentType::Moods => &self.moods,
             GenreContentType::Styles => &self.styles,
+            GenreContentType::Stations => &self.genres, // Stations use station_nav, not genre list
         }
     }
 
@@ -693,7 +1080,6 @@ impl AppState {
                 }
             }
             BrowseCategory::Playlists => self.list_state.playlists_index,
-            BrowseCategory::Stations => self.stations_index,
             BrowseCategory::Genres => self.genres_index,
             BrowseCategory::Folders => 0, // Handled separately via folder_state
         }
@@ -709,7 +1095,6 @@ impl AppState {
                 }
             }
             BrowseCategory::Playlists => self.list_state.playlists_index = idx,
-            BrowseCategory::Stations => self.stations_index = idx,
             BrowseCategory::Genres => self.genres_index = idx,
             BrowseCategory::Folders => {}, // Handled separately via folder_state
         }
@@ -741,14 +1126,8 @@ impl AppState {
                         self.recently_added_albums.get(self.list_state.playlists_index)
                             .map(|a| a.rating_key.clone())
                     }
-                    PlaylistsMode::RecentPlaylists => {
-                        self.recent_playlists.get(self.list_state.playlists_index)
-                            .map(|p| p.rating_key.clone())
-                    }
                 }
             }
-            BrowseCategory::Stations => self.stations.get(self.stations_index)
-                .map(|s| s.key.clone()),
             BrowseCategory::Genres => self.current_genre_list().get(self.genres_index)
                 .map(|g| g.effective_key().to_string()),
             BrowseCategory::Folders => None, // Handled separately via folder_state
@@ -781,14 +1160,8 @@ impl AppState {
                         self.recently_added_albums.get(self.list_state.playlists_index)
                             .map(|a| a.title.clone())
                     }
-                    PlaylistsMode::RecentPlaylists => {
-                        self.recent_playlists.get(self.list_state.playlists_index)
-                            .map(|p| p.title.clone())
-                    }
                 }
             }
-            BrowseCategory::Stations => self.stations.get(self.stations_index)
-                .map(|s| s.title.clone()),
             BrowseCategory::Genres => self.current_genre_list().get(self.genres_index)
                 .map(|g| g.title.clone()),
             BrowseCategory::Folders => None, // Handled separately via folder_state
@@ -866,6 +1239,14 @@ impl NowPlayingMode {
         }
     }
 
+    pub fn prev(&self) -> Self {
+        match self {
+            NowPlayingMode::Queue => NowPlayingMode::NowPlaying,
+            NowPlayingMode::RecentlyPlayed => NowPlayingMode::Queue,
+            NowPlayingMode::NowPlaying => NowPlayingMode::RecentlyPlayed,
+        }
+    }
+
     pub fn name(&self) -> &'static str {
         match self {
             NowPlayingMode::Queue => "queue",
@@ -883,24 +1264,25 @@ pub enum PlaylistsMode {
     All,
     /// Show recently added albums
     RecentlyAdded,
-    /// Show recently accessed playlists
-    RecentPlaylists,
 }
 
 impl PlaylistsMode {
     pub fn next(&self) -> Self {
         match self {
             PlaylistsMode::All => PlaylistsMode::RecentlyAdded,
-            PlaylistsMode::RecentlyAdded => PlaylistsMode::RecentPlaylists,
-            PlaylistsMode::RecentPlaylists => PlaylistsMode::All,
+            PlaylistsMode::RecentlyAdded => PlaylistsMode::All,
         }
+    }
+
+    /// For a two-state enum, prev() is equivalent to next()
+    pub fn prev(&self) -> Self {
+        self.next()
     }
 
     pub fn name(&self) -> &'static str {
         match self {
             PlaylistsMode::All => "playlists",
             PlaylistsMode::RecentlyAdded => "recently added",
-            PlaylistsMode::RecentPlaylists => "recent playlists",
         }
     }
 }
@@ -980,7 +1362,6 @@ impl SearchTab {
 pub enum BrowseCategory {
     Artists,
     Playlists,
-    Stations,
     Genres,
     Folders,
 }
@@ -990,7 +1371,6 @@ impl BrowseCategory {
         &[
             BrowseCategory::Artists,
             BrowseCategory::Playlists,
-            BrowseCategory::Stations,
             BrowseCategory::Genres,
             BrowseCategory::Folders,
         ]
@@ -1000,7 +1380,6 @@ impl BrowseCategory {
         match self {
             BrowseCategory::Artists => "artists",
             BrowseCategory::Playlists => "playlists",
-            BrowseCategory::Stations => "stations",
             BrowseCategory::Genres => "genres",
             BrowseCategory::Folders => "folders",
         }
@@ -1010,8 +1389,7 @@ impl BrowseCategory {
         match self {
             BrowseCategory::Artists => 'a',
             BrowseCategory::Playlists => 'p',
-            BrowseCategory::Stations => 't',
-            BrowseCategory::Genres => 'e',
+            BrowseCategory::Genres => 'g',
             BrowseCategory::Folders => 'o',
         }
     }
@@ -1036,6 +1414,15 @@ impl ArtistViewMode {
         }
     }
 
+    /// Cycle to the previous mode (Artist ← Album Artist ← Album ← Artist).
+    pub fn prev(&self) -> Self {
+        match self {
+            ArtistViewMode::Artist => ArtistViewMode::Album,
+            ArtistViewMode::AlbumArtist => ArtistViewMode::Artist,
+            ArtistViewMode::Album => ArtistViewMode::AlbumArtist,
+        }
+    }
+
     pub fn name(&self) -> &'static str {
         match self {
             ArtistViewMode::Artist => "artists",
@@ -1045,7 +1432,7 @@ impl ArtistViewMode {
     }
 }
 
-/// Genre content type - genres, normalized genres, or moods.
+/// Genre content type - genres, normalized genres, moods, styles, or stations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GenreContentType {
     #[default]
@@ -1054,17 +1441,31 @@ pub enum GenreContentType {
     AlbumGenres,
     Moods,
     Styles,
+    Stations,
 }
 
 impl GenreContentType {
-    /// Cycle to the next content type (Genres -> Artist -> Album -> Moods -> Styles -> Genres).
+    /// Cycle to the next content type (Genres -> Artist -> Album -> Moods -> Styles -> Stations -> Genres).
     pub fn next(&self) -> Self {
         match self {
             GenreContentType::Genres => GenreContentType::ArtistGenres,
             GenreContentType::ArtistGenres => GenreContentType::AlbumGenres,
             GenreContentType::AlbumGenres => GenreContentType::Moods,
             GenreContentType::Moods => GenreContentType::Styles,
-            GenreContentType::Styles => GenreContentType::Genres,
+            GenreContentType::Styles => GenreContentType::Stations,
+            GenreContentType::Stations => GenreContentType::Genres,
+        }
+    }
+
+    /// Cycle to the previous content type (Genres <- Artist <- Album <- Moods <- Styles <- Stations <- Genres).
+    pub fn prev(&self) -> Self {
+        match self {
+            GenreContentType::Genres => GenreContentType::Stations,
+            GenreContentType::ArtistGenres => GenreContentType::Genres,
+            GenreContentType::AlbumGenres => GenreContentType::ArtistGenres,
+            GenreContentType::Moods => GenreContentType::AlbumGenres,
+            GenreContentType::Styles => GenreContentType::Moods,
+            GenreContentType::Stations => GenreContentType::Styles,
         }
     }
 
@@ -1075,6 +1476,7 @@ impl GenreContentType {
             GenreContentType::AlbumGenres => "album genres",
             GenreContentType::Moods => "moods",
             GenreContentType::Styles => "styles",
+            GenreContentType::Stations => "stations",
         }
     }
 }
@@ -1411,7 +1813,6 @@ pub enum RefreshCategory {
     Albums,
     Playlists,
     RecentlyAdded,
-    RecentPlaylists,
     Genres,
     ArtistGenres,
     AlbumGenres,
@@ -1430,7 +1831,6 @@ impl RefreshCategory {
             RefreshCategory::Albums,
             RefreshCategory::Playlists,
             RefreshCategory::RecentlyAdded,
-            RefreshCategory::RecentPlaylists,
             RefreshCategory::Genres,
             RefreshCategory::ArtistGenres,
             RefreshCategory::AlbumGenres,
@@ -1449,7 +1849,6 @@ impl RefreshCategory {
             RefreshCategory::Albums => "Albums",
             RefreshCategory::Playlists => "Playlists",
             RefreshCategory::RecentlyAdded => "Recently Added",
-            RefreshCategory::RecentPlaylists => "Recent Playlists",
             RefreshCategory::Genres => "Genres",
             RefreshCategory::ArtistGenres => "Artist Genres",
             RefreshCategory::AlbumGenres => "Album Genres",
@@ -1473,4 +1872,15 @@ pub struct ConfirmDialog {
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
     RefreshCache,
+}
+
+/// Results from inline list filter.
+#[derive(Debug, Clone, Default)]
+pub struct ListFilterResults {
+    /// Indices of matched items in the original list (in priority order)
+    pub matched_indices: Vec<usize>,
+    /// Total number of matches found
+    pub total_matches: usize,
+    /// Whether there are more results beyond the limit
+    pub has_more: bool,
 }

@@ -517,9 +517,6 @@ fn apply_key_to_state(state: &mut AppState, key: crossterm::event::KeyEvent) {
                             BrowseCategory::Playlists => {
                                 state.list_state.playlists_index = state.list_state.playlists_index.saturating_sub(1);
                             }
-                            BrowseCategory::Stations => {
-                                state.stations_index = state.stations_index.saturating_sub(1);
-                            }
                             BrowseCategory::Genres => {
                                 state.genres_index = state.genres_index.saturating_sub(1);
                             }
@@ -541,10 +538,6 @@ fn apply_key_to_state(state: &mut AppState, key: crossterm::event::KeyEvent) {
                             BrowseCategory::Playlists => {
                                 let max = state.playlists.len().saturating_sub(1);
                                 state.list_state.playlists_index = (state.list_state.playlists_index + 1).min(max);
-                            }
-                            BrowseCategory::Stations => {
-                                let max = state.stations.len().saturating_sub(1);
-                                state.stations_index = (state.stations_index + 1).min(max);
                             }
                             BrowseCategory::Genres => {
                                 let max = state.genres.len().saturating_sub(1);
@@ -665,6 +658,9 @@ async fn run_tui_mode() -> Result<()> {
     // Always restore terminal, even on error
     let _ = restore_terminal(&mut terminal);
 
+    // Display exit logo (clear screen, show ANSI art)
+    display_exit_logo();
+
     // Now handle any errors
     if let Err(e) = result {
         eprintln!("Error: {}", e);
@@ -673,6 +669,50 @@ async fn run_tui_mode() -> Result<()> {
 
     tracing::info!("textamp shutdown complete");
     Ok(())
+}
+
+/// Display the ANSI art logo on exit (Cubic Player style).
+/// Clears the screen and prints the embedded ANSI logo with URLs and farewell message.
+fn display_exit_logo() {
+    use std::io::{self, Write};
+
+    // Embedded ANSI art logo
+    static LOGO_ANSI: &[u8] = include_bytes!("../textamp_logo.ansi");
+
+    // ANSI color codes (Cubic Player style)
+    // Bright cyan for top URL
+    const BRIGHT_CYAN: &str = "\x1b[38;2;0;187;187m";
+    // Dimmer cyan for secondary URL
+    const DIM_CYAN: &str = "\x1b[38;2;0;135;135m";
+    // Dark gray for placeholder text (lines 1 and 3)
+    const DARK_GRAY: &str = "\x1b[38;2;85;85;85m";
+    // Dim gray for separator lines
+    const DIM_GRAY: &str = "\x1b[38;2;68;68;68m";
+    const RESET: &str = "\x1b[0m";
+
+    // Clear screen and move cursor to top
+    print!("\x1b[2J\x1b[H");
+    let _ = io::stdout().flush();
+
+    // Print the ANSI logo directly
+    let _ = io::stdout().write_all(LOGO_ANSI);
+    let _ = io::stdout().flush();
+
+    // Cubic Player style footer
+    // Top separator line
+    println!("{DIM_GRAY}  . - . _ . - . _ . - . _ . - . _ . - . _ . - . _ . - . _ . - . _ . - . _ . - .{RESET}");
+
+    // Two-column layout: URLs on left (bright/dim cyan), placeholder text on right (dark/default/dark)
+    println!("  {BRIGHT_CYAN}https://github.com/bergmayer/textamp{RESET}                {DARK_GRAY}placeholder text{RESET}");
+    println!("       {DIM_CYAN}http://www.bergmayer.net{RESET}                         placeholder text");
+    println!("                                                        {DARK_GRAY}placeholder text{RESET}");
+
+    // Bottom separator line
+    println!("{DIM_GRAY}  . - . _ . - . _ . - . _ . - . _ . - . _ . - . _ . - . _ . - . _ . - . _ . - .{RESET}");
+
+    // Farewell message (no color - default terminal text)
+    println!("have a nice day...");
+    println!();
 }
 
 /// Inner app runner - separated so terminal restoration always happens

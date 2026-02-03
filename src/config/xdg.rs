@@ -4,7 +4,10 @@
 //! If not set, falls back to platform-specific defaults:
 //! - Linux: ~/.config, ~/.cache, ~/.local/share, ~/.local/state
 //! - macOS: ~/Library/Application Support, ~/Library/Caches, etc.
+//!
+//! Uses shared utility functions from crate::util::paths.
 
+use crate::util::paths;
 use std::path::PathBuf;
 
 /// XDG-compliant directory paths for the application.
@@ -21,10 +24,10 @@ impl XdgPaths {
     /// Checks XDG environment variables first, then falls back to platform defaults.
     pub fn new(app_name: &str) -> Self {
         Self {
-            config_dir: get_config_dir(app_name),
-            data_dir: get_data_dir(app_name),
-            cache_dir: get_cache_dir(app_name),
-            state_dir: get_state_dir(app_name),
+            config_dir: paths::get_config_dir(app_name).unwrap_or_else(|| PathBuf::from(".config").join(app_name)),
+            data_dir: paths::get_data_dir(app_name).unwrap_or_else(|| PathBuf::from(".local/share").join(app_name)),
+            cache_dir: paths::get_cache_dir(app_name).unwrap_or_else(|| PathBuf::from(".cache").join(app_name)),
+            state_dir: paths::get_state_dir(app_name).unwrap_or_else(|| PathBuf::from(".local/state").join(app_name)),
         }
     }
 
@@ -55,103 +58,5 @@ impl XdgPaths {
         std::fs::create_dir_all(&self.cache_dir)?;
         std::fs::create_dir_all(&self.state_dir)?;
         Ok(())
-    }
-}
-
-/// Get config directory: $XDG_CONFIG_HOME/app_name or platform default.
-fn get_config_dir(app_name: &str) -> PathBuf {
-    // Check XDG env var first (works on both macOS and Linux)
-    if let Ok(xdg_config) = std::env::var("XDG_CONFIG_HOME") {
-        return PathBuf::from(xdg_config).join(app_name);
-    }
-
-    // Fall back to platform default
-    #[cfg(target_os = "linux")]
-    {
-        dirs::home_dir()
-            .map(|h| h.join(".config"))
-            .unwrap_or_else(|| PathBuf::from(".config"))
-            .join(app_name)
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from(".config"))
-            .join(app_name)
-    }
-}
-
-/// Get data directory: $XDG_DATA_HOME/app_name or platform default.
-fn get_data_dir(app_name: &str) -> PathBuf {
-    // Check XDG env var first
-    if let Ok(xdg_data) = std::env::var("XDG_DATA_HOME") {
-        return PathBuf::from(xdg_data).join(app_name);
-    }
-
-    // Fall back to platform default
-    #[cfg(target_os = "linux")]
-    {
-        dirs::home_dir()
-            .map(|h| h.join(".local/share"))
-            .unwrap_or_else(|| PathBuf::from(".local/share"))
-            .join(app_name)
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from(".local/share"))
-            .join(app_name)
-    }
-}
-
-/// Get cache directory: $XDG_CACHE_HOME/app_name or platform default.
-fn get_cache_dir(app_name: &str) -> PathBuf {
-    // Check XDG env var first
-    if let Ok(xdg_cache) = std::env::var("XDG_CACHE_HOME") {
-        return PathBuf::from(xdg_cache).join(app_name);
-    }
-
-    // Fall back to platform default
-    #[cfg(target_os = "linux")]
-    {
-        dirs::home_dir()
-            .map(|h| h.join(".cache"))
-            .unwrap_or_else(|| PathBuf::from(".cache"))
-            .join(app_name)
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        dirs::cache_dir()
-            .unwrap_or_else(|| PathBuf::from(".cache"))
-            .join(app_name)
-    }
-}
-
-/// Get state directory: $XDG_STATE_HOME/app_name or platform default.
-fn get_state_dir(app_name: &str) -> PathBuf {
-    // Check XDG env var first
-    if let Ok(xdg_state) = std::env::var("XDG_STATE_HOME") {
-        return PathBuf::from(xdg_state).join(app_name);
-    }
-
-    // Fall back to platform default
-    // Note: state_dir is Linux-specific in XDG spec, macOS/Windows use data_dir
-    #[cfg(target_os = "linux")]
-    {
-        dirs::home_dir()
-            .map(|h| h.join(".local/state"))
-            .unwrap_or_else(|| PathBuf::from(".local/state"))
-            .join(app_name)
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        // On macOS/Windows, use data_dir for state (no native equivalent)
-        dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from(".local/state"))
-            .join(app_name)
     }
 }

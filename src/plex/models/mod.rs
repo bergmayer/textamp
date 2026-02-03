@@ -11,7 +11,10 @@ mod serde_helpers;
 mod sonic;
 
 pub use artist::{Album, AlbumsResponse, Artist, ArtistsResponse, Media, MediaPart, Track, TracksResponse};
-pub use folder::{FolderContainer, FolderDirectory, FolderMetadata, FolderResponse};
+pub use folder::{
+    FolderColumn, FolderContainer, FolderDirectory, FolderItem, FolderItemType,
+    FolderMetadata, FolderNavigationState, FolderResponse,
+};
 pub use genre::{Genre, GenresResponse};
 pub use hub::{Hub, HubItem, HubType, HubsResponse, PlayQueueResponse, Station, StationKind, StationsResponse};
 pub use library::{Library, LibrarySectionsResponse, LibraryType};

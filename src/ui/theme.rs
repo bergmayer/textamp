@@ -554,4 +554,41 @@ impl Theme {
     pub fn text() -> Style {
         theme()._text()
     }
+
+    /// Style for a list item based on selection state.
+    /// Use this instead of inline conditional style computation.
+    ///
+    /// # Arguments
+    /// * `is_selected` - Whether this item is currently selected
+    ///
+    /// # Returns
+    /// Selection bar style if selected, default foreground otherwise.
+    pub fn list_item_style(is_selected: bool) -> Style {
+        let t = theme();
+        if is_selected {
+            Style::default()
+                .fg(t.colors.selection_text)
+                .bg(t.colors.selection_bar_bg)
+        } else {
+            Style::default().fg(t.colors.fg_primary)
+        }
+    }
+
+    /// Style for a list item with focus awareness.
+    /// Selected items show the same style regardless of focus,
+    /// but unfocused panels may want to use this for visual distinction.
+    ///
+    /// # Arguments
+    /// * `is_selected` - Whether this item is currently selected
+    /// * `is_focused` - Whether the containing panel has focus
+    ///
+    /// # Returns
+    /// Selection bar style if selected (regardless of focus),
+    /// default foreground otherwise.
+    pub fn list_item_style_with_focus(is_selected: bool, _is_focused: bool) -> Style {
+        // Currently focus doesn't affect item styling, but this method
+        // exists for future extensibility. Using the same style for both
+        // ensures consistency and avoids redundant is_focused checks.
+        Self::list_item_style(is_selected)
+    }
 }

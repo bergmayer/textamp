@@ -5,11 +5,12 @@
 use super::{Action, AppState, Event};
 use super::state::{ConnectionState, View, BrowseCategory, Focus, PlayStatus, SearchSection, SearchTab, RightPanelMode, SettingsSection, PlaybackMode};
 use crate::api::{PlexAuth, PlexClient};
-use crate::api::models::{Playlist, Track};
+use crate::api::models::Track;
 use crate::audio::AudioPlayer;
 use crate::cache::LibraryCache;
 use crate::config::Config;
-use crate::services::{FolderService, FolderNavigationState};
+use crate::plex::CachedFolder;
+use crate::services::{CacheService, FolderService, FolderNavigationState};
 use crate::ui;
 use crate::util::truncate_str;
 
@@ -22,6 +23,28 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+/// Types of data that can be preloaded in the background.
+///
+/// This enum consolidates the 13 different preload operations into a single
+/// type-safe representation. Each variant corresponds to a specific API call
+/// and event result.
+#[derive(Clone, Debug)]
+pub enum PreloadType {
+    Artists,
+    Albums,
+    Playlists,
+    Genres,
+    Moods,
+    ArtistGenres,
+    AlbumGenres,
+    Styles,
+    Stations,
+    RecentlyAdded,
+    RecentlyPlayed,
+    /// Folders require additional lib_title for display.
+    Folders { lib_title: String },
+}
 
 /// Main event loop.
 pub struct EventLoop {
@@ -156,25 +179,31 @@ impl EventLoop {
                         // Priority for server URL:
                         // 1. Stored server_url (validated against server list) - from previous login
                         // 2. Config file server_url (if explicitly set, not default)
-                        // 3. find_best_server_url() as fallback
+                        // 3. find_working_connection_from_servers() as fallback (tests connectivity)
                         let config_is_default = config_server_url.is_empty()
                             || config_server_url == "http://localhost:32400";
 
                         let final_server_url = if let (Some(stored_url), Some(stored_id)) = (&stored.server_url, &stored.server_identifier) {
                             // Validate stored server still exists in user's server list
-                            let server_valid = servers.iter().any(|s| &s.client_identifier == stored_id);
-                            if server_valid {
-                                tracing::info!("Using stored server: {}", stored_url);
-                                Some(stored_url.clone())
+                            if let Some(server) = servers.iter().find(|s| &s.client_identifier == stored_id) {
+                                // Server exists - test if stored URL is still reachable
+                                if crate::plex::test_connection(stored_url, &stored.token).await.is_ok() {
+                                    tracing::info!("Using stored server: {}", stored_url);
+                                    Some(stored_url.clone())
+                                } else {
+                                    // Stored URL unreachable - find a working connection for this server
+                                    tracing::warn!("Stored URL {} unreachable, testing other connections", stored_url);
+                                    find_working_connection(server, &stored.token).await
+                                }
                             } else {
-                                tracing::warn!("Stored server {} no longer available, finding best server", stored_id);
-                                find_best_server_url(&servers)
+                                tracing::warn!("Stored server {} no longer available, finding working server", stored_id);
+                                find_working_connection_from_servers(&servers, &stored.token).await
                             }
                         } else if !config_is_default {
                             // Config has explicit non-default server URL
                             Some(config_server_url.clone())
                         } else {
-                            find_best_server_url(&servers)
+                            find_working_connection_from_servers(&servers, &stored.token).await
                         };
 
                         if let Some(url) = final_server_url {
@@ -248,6 +277,17 @@ impl EventLoop {
                 state.set_error(format!("Server discovery failed: {}", error));
                 vec![]
             }
+            Event::ServerConnectionSucceeded { server_name, url } => {
+                tracing::info!("Server connection succeeded: {} at {}", server_name, url);
+                client.set_server(url);
+                state.set_status(format!("Connected to {}", server_name));
+                vec![]
+            }
+            Event::ServerConnectionFailed { server_name } => {
+                tracing::warn!("All connection tests failed for server {}", server_name);
+                state.set_error(format!("Could not connect to {} - all connections failed", server_name));
+                vec![]
+            }
             Event::AuthFailed(msg) => {
                 use super::state::AuthStep;
                 tracing::error!("Auth failed: {}", msg);
@@ -276,23 +316,26 @@ impl EventLoop {
 
                 // Auto-select if only one server, otherwise show selection
                 if servers.len() == 1 {
-                    // Find best connection URL
-                    if let Some(url) = find_best_server_url(&servers) {
-                        state.auth_state.step = AuthStep::Connecting;
-                        // Send AuthSuccess to complete the flow
-                        let event_tx = self.event_tx.clone();
-                        let token_clone = token.clone();
-                        let username_clone = username.clone();
-                        let servers_clone = servers.clone();
-                        tokio::spawn(async move {
+                    state.auth_state.step = AuthStep::Connecting;
+                    // Find working connection URL (tests connectivity)
+                    let event_tx = self.event_tx.clone();
+                    let token_clone = token.clone();
+                    let username_clone = username.clone();
+                    let servers_clone = servers.clone();
+                    tokio::spawn(async move {
+                        if let Some(url) = find_working_connection_from_servers(&servers_clone, &token_clone).await {
                             let _ = event_tx.send(Event::AuthSuccess {
                                 token: token_clone,
                                 username: username_clone,
                                 server_url: url,
                                 servers: servers_clone,
                             }).await;
-                        });
-                    }
+                        } else {
+                            let _ = event_tx.send(Event::AuthFailed(
+                                "Could not connect to server - all connection attempts failed".to_string()
+                            )).await;
+                        }
+                    });
                 } else {
                     // Multiple servers - let user choose
                     state.auth_state.step = AuthStep::ServerSelect;
@@ -335,6 +378,13 @@ impl EventLoop {
                 artists.sort_by(|a, b| sort_key(&a.title).cmp(&sort_key(&b.title)));
                 state.artists = artists;
                 state.artists_loading = false;
+
+                // Initialize artist_nav if we're in Artists category
+                if state.browse_category == BrowseCategory::Artists && !state.artists.is_empty() {
+                    let title = state.artist_view_mode.name();
+                    let items = super::state::BrowseItem::from_artists(&state.artists);
+                    state.artist_nav.reset(title, items);
+                }
                 vec![]
             }
             Event::AlbumsLoaded(mut albums) => {
@@ -345,6 +395,9 @@ impl EventLoop {
                 vec![]
             }
             Event::PlaylistsLoaded(playlists) => {
+                // Initialize playlist_nav with the playlists list
+                let items = crate::app::state::BrowseItem::from_playlists(&playlists);
+                state.playlist_nav.reset("playlists", items);
                 state.playlists = playlists;
                 state.playlists_loading = false;
                 vec![]
@@ -660,15 +713,6 @@ impl EventLoop {
                 }
                 vec![]
             }
-            Event::RecentPlaylistsPreloaded(playlists) => {
-                if state.recent_playlists.is_empty() && !state.recent_playlists_loading {
-                    let count = playlists.len();
-                    state.recent_playlists = playlists;
-                    state.cache_dirty = true;
-                    tracing::debug!("Recent playlists preloaded: {} items", count);
-                }
-                vec![]
-            }
             Event::Tick => {
                 // Clear expired toasts (5 second display)
                 if let Some(show_time) = state.toast_show_time {
@@ -709,8 +753,7 @@ impl EventLoop {
                 }
 
                 if changed && self.is_viewing_category(&category, state) {
-                    state.toast_message = Some(format!("{} updated", category.display_name()));
-                    state.toast_show_time = Some(std::time::Instant::now());
+                    state.set_toast(format!("{} updated", category.display_name()));
                 }
                 vec![]
             }
@@ -803,6 +846,16 @@ impl EventLoop {
                 state.radio_state.fetching = false;
                 tracing::warn!("{}", error);
                 // Don't show error to user - seed album is already playing
+                vec![]
+            }
+
+            // Inline list filter completed
+            Event::ListFilterCompleted { version, results } => {
+                // Only apply if this is the most recent filter version
+                if version == state.list_filter_version {
+                    state.list_filter_loading = false;
+                    state.list_filter_results = Some(results);
+                }
                 vec![]
             }
             _ => vec![],
@@ -911,23 +964,23 @@ impl EventLoop {
     /// Handle click on the shortcut bar at the bottom.
     fn handle_shortcut_bar_click(&self, click_col: u16, state: &AppState) -> Vec<Action> {
         // Shortcut bar items (same order as render_shortcuts):
-        // ^A artists | ^P playlists | ^G genres | ^O folders | ^T stations | ^N queue | ^F search | F1 help | F2 settings
+        // ^A artists | ^P playlists | ^G genres | ^O folders | ^N queue | ^F search | F1 help | F2 settings
         //
         // These are centered, so we need to calculate positions based on terminal width.
         // Each item is roughly: " ^X label " with separators "|"
         //
         // Clicking an already-active item cycles its mode (like the keyboard shortcut does).
+        // Note: Genres cycle includes Stations (via Ctrl+G).
 
-        let shortcuts: [(&str, &str, usize); 9] = [
+        let shortcuts: [(&str, &str, usize); 8] = [
             ("^A", state.artist_view_mode.name(), 0),   // Artists
             ("^P", state.playlists_mode.name(), 1),     // Playlists
-            ("^G", state.genre_content_type.name(), 2), // Genres
+            ("^G", state.genre_content_type.name(), 2), // Genres (cycles through genres/moods/styles/stations)
             ("^O", "folders", 3),                       // Folders
-            ("^T", "stations", 4),                      // Stations
-            ("^N", state.now_playing_mode.name(), 5),   // Now Playing
-            ("^F", "search", 6),                        // Search
-            ("F1", "help", 7),                          // Help
-            ("F2", "settings", 8),                      // Settings
+            ("^N", state.now_playing_mode.name(), 4),   // Now Playing
+            ("^F", "search", 5),                        // Search
+            ("F1", "help", 6),                          // Help
+            ("F2", "settings", 7),                      // Settings
         ];
 
         // Calculate total width of shortcut bar
@@ -977,7 +1030,7 @@ impl EventLoop {
                 vec![Action::SetCategory(BrowseCategory::Playlists), Action::SetView(View::Browse)]
             }
             2 => {
-                // Genres: cycle content type if already there, else switch
+                // Genres: cycle content type if already there, else switch (includes Stations)
                 if state.view == View::Browse && state.browse_category == BrowseCategory::Genres {
                     return vec![Action::CycleGenreContentType];
                 }
@@ -988,25 +1041,21 @@ impl EventLoop {
                 vec![Action::SetCategory(BrowseCategory::Folders), Action::SetView(View::Browse)]
             }
             4 => {
-                // Stations: just switch (no cycling)
-                vec![Action::SetCategory(BrowseCategory::Stations), Action::SetView(View::Browse)]
-            }
-            5 => {
                 // Now Playing: cycle mode if already there, else switch
                 if state.view == View::NowPlaying {
                     return vec![Action::CycleNowPlayingMode];
                 }
                 vec![Action::SetView(View::NowPlaying)]
             }
-            6 => {
+            5 => {
                 // Search: just switch (could cycle tabs but Tab key does that)
                 vec![Action::SetView(View::Search)]
             }
-            7 => {
+            6 => {
                 // Help
                 vec![Action::SetView(View::Help)]
             }
-            8 => {
+            7 => {
                 // Settings
                 vec![Action::SetView(View::Settings)]
             }
@@ -1032,8 +1081,8 @@ impl EventLoop {
     /// Handle mouse down on the transport bar.
     fn handle_transport_down(&self, click_col: u16, state: &mut AppState) -> Vec<Action> {
         // Transport bar layout (controls on left):
-        // [⏸] [MM:SS] [━━━●───────] [MM:SS] [ │ ] [track info...] [ │ ] [vol]
-        // ^0  ^2      ^8           ^28      ^34
+        // [⏸] [MM:SS] [━━━●───────] [MM:SS] [ │ ] [track info...] [...] [🔍]
+        // ^0  ^2      ^8           ^28      ^34                          ^end
         //
         // Fixed positions at the start:
         // - Play/pause: cols 0-1 (icon + space)
@@ -1043,6 +1092,17 @@ impl EventLoop {
         // - Space: col 28
         // - Duration time: cols 29-33 (5 chars)
         // - Separator: cols 34-38 ("  │  ")
+        // - Search emoji at the far right
+
+        // Search emoji at far right (last 4 columns to account for emoji width)
+        // Only activate filter in Browse view
+        if state.view == View::Browse && click_col >= state.terminal_width.saturating_sub(4) {
+            if state.list_filter_active {
+                return vec![Action::DeactivateListFilter];
+            } else {
+                return vec![Action::ActivateListFilter];
+            }
+        }
 
         // Play/pause button at columns 0-1
         if click_col < 2 {
@@ -1133,36 +1193,38 @@ impl EventLoop {
                 }
             }
             BrowseCategory::Genres => {
-                let len = state.current_genre_list().len();
-                let selected = state.genres_index;
-                let scroll_offset = Self::calc_scroll_offset(selected, visible_height, len);
-                let actual_idx = visual_row + scroll_offset;
+                // Stations are now part of the genre content type cycle
+                if state.genre_content_type == super::state::GenreContentType::Stations {
+                    // Stations use station_nav - select item in focused column
+                    if let Some(column) = state.station_nav.columns.get(state.station_nav.focused_column) {
+                        let len = column.stations.len();
+                        let selected = column.selected_index;
+                        let scroll_offset = Self::calc_scroll_offset(selected, visible_height, len);
+                        let actual_idx = visual_row + scroll_offset;
 
-                if actual_idx < len {
-                    state.genres_index = actual_idx;
-                    state.genre_focus_column = 0;
-                    // Load albums for this genre
-                    return match state.genre_content_type {
-                        super::state::GenreContentType::Genres => vec![Action::LoadGenreAlbums],
-                        super::state::GenreContentType::ArtistGenres => vec![Action::LoadArtistGenreAlbums],
-                        super::state::GenreContentType::AlbumGenres => vec![Action::LoadAlbumGenreAlbums],
-                        super::state::GenreContentType::Moods => vec![Action::LoadMoodAlbums],
-                        super::state::GenreContentType::Styles => vec![Action::LoadStyleAlbums],
-                    };
-                }
-            }
-            BrowseCategory::Stations => {
-                // Stations use station_nav - select item in focused column
-                if let Some(column) = state.station_nav.columns.get(state.station_nav.focused_column) {
-                    let len = column.stations.len();
-                    let selected = column.selected_index;
+                        if actual_idx < len {
+                            if let Some(col) = state.station_nav.columns.get_mut(state.station_nav.focused_column) {
+                                col.selected_index = actual_idx;
+                            }
+                        }
+                    }
+                } else {
+                    let len = state.current_genre_list().len();
+                    let selected = state.genres_index;
                     let scroll_offset = Self::calc_scroll_offset(selected, visible_height, len);
                     let actual_idx = visual_row + scroll_offset;
 
                     if actual_idx < len {
-                        if let Some(col) = state.station_nav.columns.get_mut(state.station_nav.focused_column) {
-                            col.selected_index = actual_idx;
-                        }
+                        state.genres_index = actual_idx;
+                        // Load albums for this genre
+                        return match state.genre_content_type {
+                            super::state::GenreContentType::Genres => vec![Action::LoadGenreAlbums],
+                            super::state::GenreContentType::ArtistGenres => vec![Action::LoadArtistGenreAlbums],
+                            super::state::GenreContentType::AlbumGenres => vec![Action::LoadAlbumGenreAlbums],
+                            super::state::GenreContentType::Moods => vec![Action::LoadMoodAlbums],
+                            super::state::GenreContentType::Styles => vec![Action::LoadStyleAlbums],
+                            super::state::GenreContentType::Stations => vec![], // Handled above
+                        };
                     }
                 }
             }
@@ -1784,9 +1846,11 @@ impl EventLoop {
 
             // Global navigation shortcuts
             (KeyModifiers::CONTROL, KeyCode::Char('f')) => {
-                // Ctrl+F = Search/Filter (unified view)
-                if state.view != View::Search {
-                    return vec![Action::SetView(View::Search)];
+                // Ctrl+F = Search/Filter popup (floating dialog)
+                if state.search_popup_active {
+                    return vec![Action::CloseSearchPopup];
+                } else {
+                    return vec![Action::OpenSearchPopup];
                 }
             }
             (KeyModifiers::CONTROL, KeyCode::Char('g')) => {
@@ -1805,6 +1869,7 @@ impl EventLoop {
                     crate::app::state::GenreContentType::AlbumGenres => Action::LoadAlbumGenres,
                     crate::app::state::GenreContentType::Moods => Action::LoadMoods,
                     crate::app::state::GenreContentType::Styles => Action::LoadStyles,
+                    crate::app::state::GenreContentType::Stations => Action::LoadStations,
                 };
                 return vec![load_action, Action::SetView(View::Browse)];
             }
@@ -1815,6 +1880,15 @@ impl EventLoop {
                     return vec![Action::CycleNowPlayingMode];
                 }
                 return vec![Action::SetView(View::NowPlaying)];
+            }
+            (KeyModifiers::CONTROL, KeyCode::Char('s')) => {
+                // Ctrl+S = Save queue/radio as playlist (in Now Playing with tracks)
+                if state.view == View::NowPlaying {
+                    let has_tracks = !state.queue.is_empty() || !state.radio.tracks.is_empty();
+                    if has_tracks {
+                        return vec![Action::PromptSavePlaylist];
+                    }
+                }
             }
             (KeyModifiers::CONTROL, KeyCode::Char('a')) => {
                 // Ctrl+A = Artists category, or cycle view mode if already there
@@ -1854,15 +1928,6 @@ impl EventLoop {
                     return vec![Action::LoadPlaylists, Action::SetView(View::Browse)];
                 }
                 return vec![Action::SetView(View::Browse)];
-            }
-            (KeyModifiers::CONTROL, KeyCode::Char('t')) => {
-                // Ctrl+T = Stations category - always reset to top-level stations
-                state.browse_category = BrowseCategory::Stations;
-                Self::reset_right_panel(state);
-                // Reset station navigation to show top-level stations
-                state.station_nav.columns.clear();
-                state.station_nav.focused_column = 0;
-                return vec![Action::LoadStations, Action::SetView(View::Browse)];
             }
             (KeyModifiers::CONTROL, KeyCode::Char('o')) => {
                 // Ctrl+O = Folders category
@@ -1920,23 +1985,6 @@ impl EventLoop {
                 // Alt+V = Sonic Adventure
                 return self.handle_adventure_key(state);
             }
-            (KeyModifiers::ALT, KeyCode::Char(']')) => {
-                // Alt+] = Next track
-                return vec![Action::Next];
-            }
-            (KeyModifiers::ALT, KeyCode::Char('[')) => {
-                // Alt+[ = Previous track
-                return vec![Action::Previous];
-            }
-            (KeyModifiers::ALT, KeyCode::Char('p')) => {
-                // Alt+P = Save queue/radio as playlist (in Now Playing with tracks)
-                if state.view == View::NowPlaying {
-                    let has_tracks = !state.queue.is_empty() || !state.radio.tracks.is_empty();
-                    if has_tracks {
-                        return vec![Action::PromptSavePlaylist];
-                    }
-                }
-            }
             (KeyModifiers::ALT, KeyCode::Char('o')) => {
                 // Alt+O = Context-dependent cycling
                 if state.view == View::Browse && state.browse_category == BrowseCategory::Genres {
@@ -1960,6 +2008,11 @@ impl EventLoop {
             }
 
             _ => {}
+        }
+
+        // Search popup handling (takes priority over view-specific handling)
+        if state.search_popup_active {
+            return self.handle_search_keys(key, state);
         }
 
         // View-specific handling
@@ -2098,19 +2151,104 @@ impl EventLoop {
 
     /// Handle Browse view keys (CUA-style).
     fn handle_browse_keys(&self, key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
+        // Inline list filter mode - handle filter-specific keys
+        if state.list_filter_active {
+            // Check if current focus is on the filter's target column
+            use crate::app::state::GenreContentType;
+            let focused_on_filter_column = match state.list_filter_category {
+                BrowseCategory::Artists => state.artist_nav.focused_column == state.list_filter_column,
+                BrowseCategory::Playlists => state.playlist_nav.focused_column == state.list_filter_column,
+                BrowseCategory::Genres => {
+                    if state.genre_content_type == GenreContentType::Stations {
+                        state.station_nav.focused_column == state.list_filter_column
+                    } else {
+                        state.genre_nav.focused_column == state.list_filter_column
+                    }
+                }
+                BrowseCategory::Folders => {
+                    state.folder_state.as_ref()
+                        .map(|fs| fs.focused_column == state.list_filter_column)
+                        .unwrap_or(false)
+                }
+            };
+
+            match key.code {
+                // Esc always deactivates filter
+                KeyCode::Esc => {
+                    return vec![Action::DeactivateListFilter];
+                }
+                // Backspace deletes from filter query
+                KeyCode::Backspace => {
+                    return vec![Action::DeleteListFilterChar];
+                }
+                // Up/Down/Enter only intercept when focused on filter column
+                KeyCode::Up if focused_on_filter_column => {
+                    return vec![Action::FilteredListUp];
+                }
+                KeyCode::Down if focused_on_filter_column => {
+                    return vec![Action::FilteredListDown];
+                }
+                KeyCode::Enter if focused_on_filter_column => {
+                    return vec![Action::SelectFilteredItem];
+                }
+                // Typing appends to filter query (only unmodified chars)
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT) => {
+                    return vec![Action::AppendListFilterChar(c)];
+                }
+                // Other keys (arrows, etc.) fall through to normal handling
+                _ => {}
+            }
+        }
+
+        // Activate filter with / key (when not in filter mode)
+        if key.code == KeyCode::Char('/') && !key.modifiers.contains(KeyModifiers::CONTROL) {
+            return vec![Action::ActivateListFilter];
+        }
+
+        // Tab/Shift+Tab cycles through nav bar views (handle before category-specific handlers)
+        // Shift+Up/Down cycles through modes within current category
+        match key.code {
+            KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                return vec![Action::PrevMode];
+            }
+            KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                return vec![Action::NextMode];
+            }
+            KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                return vec![Action::PrevView];
+            }
+            KeyCode::BackTab => {
+                return vec![Action::PrevView];
+            }
+            KeyCode::Tab => {
+                return vec![Action::NextView];
+            }
+            _ => {}
+        }
+
         // Handle Folders category separately (Miller columns view)
         if state.browse_category == BrowseCategory::Folders {
             return self.handle_folder_browse_keys(key, state);
         }
 
-        // Handle Genres category with Miller columns (Genre | Albums | Tracks)
-        if state.browse_category == BrowseCategory::Genres {
-            return self.handle_genre_browse_keys(key, state);
+        // Handle Artists category with Miller columns when artist_nav is populated
+        if state.browse_category == BrowseCategory::Artists && !state.artist_nav.is_empty() {
+            return self.handle_artist_browse_keys(key, state);
         }
 
-        // Handle Stations category with Miller columns
-        if state.browse_category == BrowseCategory::Stations {
-            return self.handle_station_browse_keys(key, state);
+        // Handle Playlists category with Miller columns when playlist_nav is populated
+        if state.browse_category == BrowseCategory::Playlists && !state.playlist_nav.is_empty() {
+            return self.handle_playlist_browse_keys(key, state);
+        }
+
+        // Handle Genres category with Miller columns (Genre | Albums | Tracks)
+        // When GenreContentType::Stations is active, redirect to station handling
+        if state.browse_category == BrowseCategory::Genres {
+            if state.genre_content_type == super::state::GenreContentType::Stations {
+                return self.handle_station_browse_keys(key, state);
+            }
+            return self.handle_genre_browse_keys(key, state);
         }
 
         // Ctrl+R = Create station from current selection (Browse-specific)
@@ -2125,10 +2263,7 @@ impl EventLoop {
             // Settings
             KeyCode::F(2) => vec![Action::OpenSettings],
 
-            // Panel focus toggle
-            KeyCode::Tab => vec![Action::ToggleFocus],
-
-            // Navigation
+            // Navigation (Tab is handled above, before category-specific handlers)
             KeyCode::Up => vec![Action::ListUp],
             KeyCode::Down => vec![Action::ListDown],
             KeyCode::PageUp => vec![Action::ListPageUp],
@@ -2149,20 +2284,9 @@ impl EventLoop {
                             // Playlists -> load tracks directly
                             vec![Action::LoadCategoryTracks]
                         }
-                        BrowseCategory::Stations => {
-                            // Station -> play or drill into category
-                            if let Some(station) = state.stations.get(state.stations_index) {
-                                if station.is_category() {
-                                    vec![Action::DrillIntoStation(station.key.clone(), station.title.clone())]
-                                } else {
-                                    vec![Action::PlayStation(station.key.clone())]
-                                }
-                            } else {
-                                vec![]
-                            }
-                        }
                         BrowseCategory::Genres => {
-                            // Genre/Mood -> load albums in that genre/mood
+                            // Genre/Mood/Stations -> handled by genre browse keys
+                            // (Stations are now part of genre content type cycle)
                             vec![Action::LoadGenreAlbums]
                         }
                         BrowseCategory::Folders => {
@@ -2214,8 +2338,8 @@ impl EventLoop {
                     } else {
                         vec![Action::ToggleFocus]
                     }
-                } else if state.browse_category == BrowseCategory::Stations {
-                    // In stations category, go back in Miller columns
+                } else if state.browse_category == BrowseCategory::Genres && state.genre_content_type == super::state::GenreContentType::Stations {
+                    // In stations view (via Genres), go back in Miller columns
                     if state.station_nav.can_go_left() {
                         state.station_nav.focus_left();
                         // Update legacy state to match focused column
@@ -2258,7 +2382,7 @@ impl EventLoop {
                 if let Some(ref mut folder_state) = state.folder_state {
                     folder_state.move_up();
                     // Clear columns to the right since selection changed
-                    folder_state.columns.truncate(folder_state.focused_column + 1);
+                    folder_state.truncate_right_columns();
                 }
                 vec![]
             }
@@ -2266,7 +2390,7 @@ impl EventLoop {
                 if let Some(ref mut folder_state) = state.folder_state {
                     folder_state.move_down();
                     // Clear columns to the right since selection changed
-                    folder_state.columns.truncate(folder_state.focused_column + 1);
+                    folder_state.truncate_right_columns();
                 }
                 vec![]
             }
@@ -2276,7 +2400,7 @@ impl EventLoop {
                         col.selected_index = col.selected_index.saturating_sub(10);
                     }
                     // Clear columns to the right since selection changed
-                    folder_state.columns.truncate(folder_state.focused_column + 1);
+                    folder_state.truncate_right_columns();
                 }
                 vec![]
             }
@@ -2287,7 +2411,7 @@ impl EventLoop {
                         col.selected_index = (col.selected_index + 10).min(max);
                     }
                     // Clear columns to the right since selection changed
-                    folder_state.columns.truncate(folder_state.focused_column + 1);
+                    folder_state.truncate_right_columns();
                 }
                 vec![]
             }
@@ -2297,7 +2421,7 @@ impl EventLoop {
                         col.selected_index = 0;
                     }
                     // Clear columns to the right since selection changed
-                    folder_state.columns.truncate(folder_state.focused_column + 1);
+                    folder_state.truncate_right_columns();
                 }
                 vec![]
             }
@@ -2307,7 +2431,7 @@ impl EventLoop {
                         col.selected_index = col.items.len().saturating_sub(1);
                     }
                     // Clear columns to the right since selection changed
-                    folder_state.columns.truncate(folder_state.focused_column + 1);
+                    folder_state.truncate_right_columns();
                 }
                 vec![]
             }
@@ -2357,20 +2481,45 @@ impl EventLoop {
             }
 
             // Alphabet jumping in current column
+            // Plain letter: jump to first item starting with that letter
+            // Shift+letter: jump to first item where first char matches current item's first char
+            //               AND second char matches the pressed letter
             KeyCode::Char(c) if c.is_ascii_alphabetic() && !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 let letter_lower = c.to_ascii_lowercase();
+                let use_second_char = key.modifiers.contains(KeyModifiers::SHIFT);
                 if let Some(ref mut folder_state) = state.folder_state {
                     if let Some(col) = folder_state.focused_mut() {
-                        if let Some(idx) = col.items.iter().position(|item| {
-                            item.title.chars().next()
-                                .map(|ch| ch.to_ascii_lowercase() == letter_lower)
-                                .unwrap_or(false)
-                        }) {
-                            col.selected_index = idx;
+                        if use_second_char {
+                            // Get the first letter of the currently selected item
+                            let first_letter = col.items.get(col.selected_index)
+                                .map(|item| item.title.chars().next())
+                                .flatten()
+                                .map(|ch| ch.to_ascii_lowercase());
+
+                            if let Some(first_letter) = first_letter {
+                                // Find first item starting with that letter AND having pressed letter as second char
+                                if let Some(idx) = col.items.iter().position(|item| {
+                                    let mut chars = item.title.chars();
+                                    let first = chars.next().map(|ch| ch.to_ascii_lowercase());
+                                    let second = chars.next().map(|ch| ch.to_ascii_lowercase());
+                                    first == Some(first_letter) && second == Some(letter_lower)
+                                }) {
+                                    col.selected_index = idx;
+                                }
+                            }
+                        } else {
+                            // Normal first-letter jump
+                            if let Some(idx) = col.items.iter().position(|item| {
+                                item.title.chars().next()
+                                    .map(|ch| ch.to_ascii_lowercase() == letter_lower)
+                                    .unwrap_or(false)
+                            }) {
+                                col.selected_index = idx;
+                            }
                         }
                     }
                     // Clear columns to the right since selection changed
-                    folder_state.columns.truncate(folder_state.focused_column + 1);
+                    folder_state.truncate_right_columns();
                 }
                 vec![]
             }
@@ -2392,7 +2541,7 @@ impl EventLoop {
             KeyCode::Up => {
                 state.station_nav.move_up();
                 // Clear columns to the right since selection changed
-                state.station_nav.columns.truncate(state.station_nav.focused_column + 1);
+                state.station_nav.truncate_right_columns();
                 // Update legacy state
                 if let Some(col) = state.station_nav.focused() {
                     state.stations_index = col.selected_index;
@@ -2402,7 +2551,7 @@ impl EventLoop {
             KeyCode::Down => {
                 state.station_nav.move_down();
                 // Clear columns to the right since selection changed
-                state.station_nav.columns.truncate(state.station_nav.focused_column + 1);
+                state.station_nav.truncate_right_columns();
                 // Update legacy state
                 if let Some(col) = state.station_nav.focused() {
                     state.stations_index = col.selected_index;
@@ -2413,7 +2562,7 @@ impl EventLoop {
                 if let Some(col) = state.station_nav.focused_mut() {
                     col.selected_index = col.selected_index.saturating_sub(10);
                 }
-                state.station_nav.columns.truncate(state.station_nav.focused_column + 1);
+                state.station_nav.truncate_right_columns();
                 if let Some(col) = state.station_nav.focused() {
                     state.stations_index = col.selected_index;
                 }
@@ -2424,7 +2573,7 @@ impl EventLoop {
                     let max = col.stations.len().saturating_sub(1);
                     col.selected_index = (col.selected_index + 10).min(max);
                 }
-                state.station_nav.columns.truncate(state.station_nav.focused_column + 1);
+                state.station_nav.truncate_right_columns();
                 if let Some(col) = state.station_nav.focused() {
                     state.stations_index = col.selected_index;
                 }
@@ -2434,7 +2583,7 @@ impl EventLoop {
                 if let Some(col) = state.station_nav.focused_mut() {
                     col.selected_index = 0;
                 }
-                state.station_nav.columns.truncate(state.station_nav.focused_column + 1);
+                state.station_nav.truncate_right_columns();
                 if let Some(col) = state.station_nav.focused() {
                     state.stations_index = col.selected_index;
                 }
@@ -2444,7 +2593,7 @@ impl EventLoop {
                 if let Some(col) = state.station_nav.focused_mut() {
                     col.selected_index = col.stations.len().saturating_sub(1);
                 }
-                state.station_nav.columns.truncate(state.station_nav.focused_column + 1);
+                state.station_nav.truncate_right_columns();
                 if let Some(col) = state.station_nav.focused() {
                     state.stations_index = col.selected_index;
                 }
@@ -2500,18 +2649,42 @@ impl EventLoop {
             }
 
             // Alphabet jumping in current column
+            // Plain letter: jump to first item starting with that letter
+            // Shift+letter: jump to first item where first char matches current item's first char
+            //               AND second char matches the pressed letter
             KeyCode::Char(c) if c.is_ascii_alphabetic() && !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 let letter_lower = c.to_ascii_lowercase();
+                let use_second_char = key.modifiers.contains(KeyModifiers::SHIFT);
                 if let Some(col) = state.station_nav.focused_mut() {
-                    if let Some(idx) = col.stations.iter().position(|s| {
-                        s.title.chars().next()
-                            .map(|ch| ch.to_ascii_lowercase() == letter_lower)
-                            .unwrap_or(false)
-                    }) {
-                        col.selected_index = idx;
+                    if use_second_char {
+                        // Get the first letter of the currently selected item
+                        let first_letter = col.stations.get(col.selected_index)
+                            .and_then(|s| s.title.chars().next())
+                            .map(|ch| ch.to_ascii_lowercase());
+
+                        if let Some(first_letter) = first_letter {
+                            // Find first item starting with that letter AND having pressed letter as second char
+                            if let Some(idx) = col.stations.iter().position(|s| {
+                                let mut chars = s.title.chars();
+                                let first = chars.next().map(|ch| ch.to_ascii_lowercase());
+                                let second = chars.next().map(|ch| ch.to_ascii_lowercase());
+                                first == Some(first_letter) && second == Some(letter_lower)
+                            }) {
+                                col.selected_index = idx;
+                            }
+                        }
+                    } else {
+                        // Normal first-letter jump
+                        if let Some(idx) = col.stations.iter().position(|s| {
+                            s.title.chars().next()
+                                .map(|ch| ch.to_ascii_lowercase() == letter_lower)
+                                .unwrap_or(false)
+                        }) {
+                            col.selected_index = idx;
+                        }
                     }
                 }
-                state.station_nav.columns.truncate(state.station_nav.focused_column + 1);
+                state.station_nav.truncate_right_columns();
                 if let Some(col) = state.station_nav.focused() {
                     state.stations_index = col.selected_index;
                 }
@@ -2522,254 +2695,114 @@ impl EventLoop {
         }
     }
 
-    /// Handle Genre browsing with Miller columns (Genre | Albums | Tracks)
-    fn handle_genre_browse_keys(&self, key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
-        match key.code {
-            // Help
-            KeyCode::F(1) | KeyCode::Char('?') => vec![Action::SetView(View::Help)],
+    /// Handle Artist browsing with dynamic Miller columns.
+    fn handle_artist_browse_keys(&self, key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
+        use super::state::BrowseItem;
 
-            // Settings
-            KeyCode::F(2) => vec![Action::OpenSettings],
-
-            // Tab cycles between columns
-            KeyCode::Tab => {
-                // Move to next column (wrap around)
-                let max_col = if !state.genre_tracks.is_empty() {
-                    2
-                } else if !state.genre_albums.is_empty() {
-                    1
-                } else {
-                    0
-                };
-                state.genre_focus_column = (state.genre_focus_column + 1) % (max_col + 1);
-                vec![]
-            }
-
-            // Up/Down navigate within current column
-            KeyCode::Up => {
-                match state.genre_focus_column {
-                    0 => {
-                        // Genres column
-                        let len = state.current_genre_list().len();
-                        if len > 0 && state.genres_index > 0 {
-                            state.genres_index -= 1;
-                            // Clear albums and tracks when genre selection changes
-                            state.genre_albums.clear();
-                            state.genre_albums_index = 0;
-                            state.genre_tracks.clear();
-                            state.genre_tracks_index = 0;
-                        }
-                    }
-                    1 => {
-                        // Albums column
-                        if state.genre_albums_index > 0 {
-                            state.genre_albums_index -= 1;
-                            // Clear tracks when album selection changes
-                            state.genre_tracks.clear();
-                            state.genre_tracks_index = 0;
-                        }
-                    }
-                    2 => {
-                        // Tracks column
-                        if state.genre_tracks_index > 0 {
-                            state.genre_tracks_index -= 1;
-                        }
-                    }
-                    _ => {}
-                }
-                vec![]
-            }
-            KeyCode::Down => {
-                match state.genre_focus_column {
-                    0 => {
-                        let len = state.current_genre_list().len();
-                        if len > 0 && state.genres_index < len - 1 {
-                            state.genres_index += 1;
-                            // Clear albums and tracks when genre selection changes
-                            state.genre_albums.clear();
-                            state.genre_albums_index = 0;
-                            state.genre_tracks.clear();
-                            state.genre_tracks_index = 0;
-                        }
-                    }
-                    1 => {
-                        let len = state.genre_albums.len();
-                        if len > 0 && state.genre_albums_index < len - 1 {
-                            state.genre_albums_index += 1;
-                            // Clear tracks when album selection changes
-                            state.genre_tracks.clear();
-                            state.genre_tracks_index = 0;
-                        }
-                    }
-                    2 => {
-                        let len = state.genre_tracks.len();
-                        if len > 0 && state.genre_tracks_index < len - 1 {
-                            state.genre_tracks_index += 1;
-                        }
-                    }
-                    _ => {}
-                }
-                vec![]
-            }
-            KeyCode::PageUp => {
-                let page_size = 10;
-                match state.genre_focus_column {
-                    0 => {
-                        state.genres_index = state.genres_index.saturating_sub(page_size);
-                        state.genre_albums.clear();
-                        state.genre_tracks.clear();
-                    }
-                    1 => {
-                        state.genre_albums_index = state.genre_albums_index.saturating_sub(page_size);
-                        state.genre_tracks.clear();
-                    }
-                    2 => {
-                        state.genre_tracks_index = state.genre_tracks_index.saturating_sub(page_size);
-                    }
-                    _ => {}
-                }
-                vec![]
-            }
-            KeyCode::PageDown => {
-                let page_size = 10;
-                match state.genre_focus_column {
-                    0 => {
-                        let len = state.current_genre_list().len();
-                        state.genres_index = (state.genres_index + page_size).min(len.saturating_sub(1));
-                        state.genre_albums.clear();
-                        state.genre_tracks.clear();
-                    }
-                    1 => {
-                        let len = state.genre_albums.len();
-                        state.genre_albums_index = (state.genre_albums_index + page_size).min(len.saturating_sub(1));
-                        state.genre_tracks.clear();
-                    }
-                    2 => {
-                        let len = state.genre_tracks.len();
-                        state.genre_tracks_index = (state.genre_tracks_index + page_size).min(len.saturating_sub(1));
-                    }
-                    _ => {}
-                }
-                vec![]
-            }
-            KeyCode::Home => {
-                match state.genre_focus_column {
-                    0 => {
-                        state.genres_index = 0;
-                        state.genre_albums.clear();
-                        state.genre_tracks.clear();
-                    }
-                    1 => {
-                        state.genre_albums_index = 0;
-                        state.genre_tracks.clear();
-                    }
-                    2 => {
-                        state.genre_tracks_index = 0;
-                    }
-                    _ => {}
-                }
-                vec![]
-            }
-            KeyCode::End => {
-                match state.genre_focus_column {
-                    0 => {
-                        let len = state.current_genre_list().len();
-                        state.genres_index = len.saturating_sub(1);
-                        state.genre_albums.clear();
-                        state.genre_tracks.clear();
-                    }
-                    1 => {
-                        let len = state.genre_albums.len();
-                        state.genre_albums_index = len.saturating_sub(1);
-                        state.genre_tracks.clear();
-                    }
-                    2 => {
-                        let len = state.genre_tracks.len();
-                        state.genre_tracks_index = len.saturating_sub(1);
-                    }
-                    _ => {}
-                }
-                vec![]
-            }
-
-            // Right/Enter: drill into or play
-            KeyCode::Enter | KeyCode::Right => {
-                match state.genre_focus_column {
-                    0 => {
-                        // Genre selected -> load albums
-                        state.genre_focus_column = 1;
-                        vec![Action::LoadGenreAlbums]
-                    }
-                    1 => {
-                        // Album selected -> load tracks
-                        if let Some(album) = state.genre_albums.get(state.genre_albums_index).cloned() {
-                            state.genre_focus_column = 2;
-                            vec![Action::LoadGenreTracks { rating_key: album.rating_key }]
-                        } else {
-                            vec![]
-                        }
-                    }
-                    2 => {
-                        // Track selected -> play it
-                        if !state.genre_tracks.is_empty() {
-                            vec![Action::PlayGenreTrack(state.genre_tracks_index)]
-                        } else {
-                            vec![]
-                        }
-                    }
-                    _ => vec![]
-                }
-            }
-
-            // Left/Backspace: go back a column
-            KeyCode::Left | KeyCode::Backspace => {
-                if state.genre_focus_column > 0 {
-                    state.genre_focus_column -= 1;
-                }
-                vec![]
-            }
-
-            // Alphabet jumping in current column
-            KeyCode::Char(c) if c.is_ascii_alphabetic() && !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                let letter_lower = c.to_ascii_lowercase();
-                match state.genre_focus_column {
-                    0 => {
-                        if let Some(idx) = state.current_genre_list().iter().position(|g| {
-                            g.title.chars().next()
-                                .map(|ch| ch.to_ascii_lowercase() == letter_lower)
-                                .unwrap_or(false)
-                        }) {
-                            state.genres_index = idx;
-                            state.genre_albums.clear();
-                            state.genre_tracks.clear();
-                        }
-                    }
-                    1 => {
-                        if let Some(idx) = state.genre_albums.iter().position(|a| {
-                            a.title.chars().next()
-                                .map(|ch| ch.to_ascii_lowercase() == letter_lower)
-                                .unwrap_or(false)
-                        }) {
-                            state.genre_albums_index = idx;
-                            state.genre_tracks.clear();
-                        }
-                    }
-                    2 => {
-                        if let Some(idx) = state.genre_tracks.iter().position(|t| {
-                            t.title.chars().next()
-                                .map(|ch| ch.to_ascii_lowercase() == letter_lower)
-                                .unwrap_or(false)
-                        }) {
-                            state.genre_tracks_index = idx;
-                        }
-                    }
-                    _ => {}
-                }
-                vec![]
-            }
-
-            _ => vec![],
+        // Handle common navigation keys
+        if let Some(actions) = Self::handle_browse_nav_keys(key, &mut state.artist_nav) {
+            return actions;
         }
+
+        // Handle Enter/Right - drill down or play track
+        if matches!(key.code, KeyCode::Enter | KeyCode::Right) {
+            if let Some(item) = state.artist_nav.selected_item().cloned() {
+                return match item {
+                    BrowseItem::Artist { key, title } => {
+                        state.selected_artist_name = title;
+                        vec![Action::LoadArtistAlbumsForMiller { artist_key: key }]
+                    }
+                    BrowseItem::Album { key, title, .. } => {
+                        state.selected_album_title = title;
+                        vec![Action::LoadAlbumTracksForMiller { album_key: key }]
+                    }
+                    BrowseItem::Track { .. } => {
+                        if let Some(col) = state.artist_nav.focused() {
+                            let idx = col.selected_index;
+                            vec![Action::PlayTrackFromMiller { column_index: state.artist_nav.focused_column, track_index: idx }]
+                        } else {
+                            vec![]
+                        }
+                    }
+                    _ => vec![],
+                };
+            }
+        }
+
+        vec![]
+    }
+
+    /// Handle Genre browsing with dynamic Miller columns
+    fn handle_genre_browse_keys(&self, key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
+        use super::state::BrowseItem;
+
+        // Handle common navigation keys
+        if let Some(actions) = Self::handle_browse_nav_keys(key, &mut state.genre_nav) {
+            return actions;
+        }
+
+        // Handle Enter/Right - drill into selected item or play track
+        if matches!(key.code, KeyCode::Enter | KeyCode::Right) {
+            if let Some(item) = state.genre_nav.selected_item().cloned() {
+                return match item {
+                    BrowseItem::Genre { key, .. } => {
+                        vec![Action::LoadGenreAlbumsForMiller { genre_key: key }]
+                    }
+                    BrowseItem::Album { key, .. } => {
+                        vec![Action::LoadGenreTracksForMiller { album_key: key }]
+                    }
+                    BrowseItem::Track { .. } => {
+                        if let Some(col) = state.genre_nav.focused() {
+                            let idx = col.selected_index;
+                            vec![Action::PlayGenreTrackFromMiller { column_index: state.genre_nav.focused_column, track_index: idx }]
+                        } else {
+                            vec![]
+                        }
+                    }
+                    _ => vec![],
+                };
+            }
+        }
+
+        vec![]
+    }
+
+    /// Handle Playlist browsing with dynamic Miller columns
+    /// Handle Playlist browsing with dynamic Miller columns
+    fn handle_playlist_browse_keys(&self, key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
+        use super::state::BrowseItem;
+
+        // Handle common navigation keys
+        if let Some(actions) = Self::handle_browse_nav_keys(key, &mut state.playlist_nav) {
+            return actions;
+        }
+
+        // Handle Enter/Right - drill into playlist/album or play track
+        if matches!(key.code, KeyCode::Enter | KeyCode::Right) {
+            if let Some(item) = state.playlist_nav.selected_item().cloned() {
+                return match item {
+                    BrowseItem::Playlist { key, .. } => {
+                        vec![Action::LoadPlaylistTracksForMiller { playlist_key: key }]
+                    }
+                    BrowseItem::Album { key, title, .. } => {
+                        // For Recently Added mode - load album tracks
+                        state.selected_album_title = title;
+                        vec![Action::LoadAlbumTracksForPlaylistMiller { album_key: key }]
+                    }
+                    BrowseItem::Track { .. } => {
+                        if let Some(col) = state.playlist_nav.focused() {
+                            let idx = col.selected_index;
+                            vec![Action::PlayPlaylistTrackFromMiller { column_index: state.playlist_nav.focused_column, track_index: idx }]
+                        } else {
+                            vec![]
+                        }
+                    }
+                    _ => vec![],
+                };
+            }
+        }
+
+        vec![]
     }
 
     /// Get the similar albums/tracks action based on current context.
@@ -2849,9 +2882,6 @@ impl EventLoop {
         state.selected_album_tracks.clear();
         state.genre_albums.clear();
         state.genre_albums_index = 0;
-        state.genre_tracks.clear();
-        state.genre_tracks_index = 0;
-        state.genre_focus_column = 0;
         state.selected_artist_name.clear();
         state.selected_album_title.clear();
     }
@@ -3054,13 +3084,13 @@ impl EventLoop {
                         state.list_state.playlists_index = idx;
                     }
                 }
-                BrowseCategory::Stations => {
-                    if let Some(idx) = state.stations.iter().position(|s| starts_with(&s.title)) {
-                        state.stations_index = idx;
-                    }
-                }
                 BrowseCategory::Genres => {
-                    if let Some(idx) = state.genres.iter().position(|g| starts_with(&g.title)) {
+                    // Stations are now accessed via genre content type
+                    if state.genre_content_type == super::state::GenreContentType::Stations {
+                        if let Some(idx) = state.stations.iter().position(|s| starts_with(&s.title)) {
+                            state.stations_index = idx;
+                        }
+                    } else if let Some(idx) = state.genres.iter().position(|g| starts_with(&g.title)) {
                         state.genres_index = idx;
                     }
                 }
@@ -3111,6 +3141,10 @@ impl EventLoop {
         match key.code {
             KeyCode::Esc => vec![Action::SetView(View::Browse)],
             KeyCode::F(1) | KeyCode::Char('?') => vec![Action::SetView(View::Help)],
+
+            // Tab/Shift+Tab cycles through nav bar views
+            KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => vec![Action::PrevView],
+            KeyCode::Tab => vec![Action::NextView],
 
             KeyCode::Up => {
                 if state.list_state.queue_index > 0 {
@@ -3291,60 +3325,38 @@ impl EventLoop {
     fn handle_search_keys(&self, key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
         use super::state::SearchTab;
 
-        // Ctrl+Tab / Ctrl+Shift+Tab also switch tabs (same as Tab)
-        if key.modifiers.contains(KeyModifiers::CONTROL) {
-            match key.code {
-                KeyCode::Tab => {
-                    state.search_tab = state.search_tab.next();
-                    state.list_state.search_item_index = 0;
-                    state.list_state.search_section = SearchSection::Artists;
-                    if !state.search_query.is_empty() {
-                        if state.search_tab == SearchTab::Global {
-                            return vec![Action::ExecuteSearch];
-                        } else {
-                            return vec![Action::ExecuteFilterSearch];
-                        }
-                    }
-                    return vec![];
-                }
-                KeyCode::BackTab => {
-                    state.search_tab = state.search_tab.prev();
-                    state.list_state.search_item_index = 0;
-                    state.list_state.search_section = SearchSection::Artists;
-                    if !state.search_query.is_empty() {
-                        if state.search_tab == SearchTab::Global {
-                            return vec![Action::ExecuteSearch];
-                        } else {
-                            return vec![Action::ExecuteFilterSearch];
-                        }
-                    }
-                    return vec![];
-                }
-                _ => {}
-            }
-        }
-
         match key.code {
             KeyCode::Esc => {
                 state.search_query.clear();
                 state.search_results = None;
                 state.filter_results = None;
-                vec![Action::SetView(View::Browse)]
+                // Close popup if active, otherwise return to Browse view
+                if state.search_popup_active {
+                    vec![Action::CloseSearchPopup]
+                } else {
+                    vec![Action::SetView(View::Browse)]
+                }
             }
             KeyCode::Enter => {
                 match state.search_tab {
                     SearchTab::Global => {
                         if state.search_results.is_some() {
                             self.select_search_result(state)
-                        } else if !state.search_query.is_empty() {
+                        } else if !state.search_query.is_empty() && !state.search_loading {
+                            // Only trigger new search if not already loading
+                            // (avoids discarding pending search results)
                             vec![Action::ExecuteSearch]
                         } else {
-                            vec![]
+                            vec![]  // Wait for pending search to complete
                         }
                     }
                     _ => {
-                        // Filter tabs - select filter result
-                        vec![Action::SelectFilterResult]
+                        // Filter tabs - select filter result (only if not loading)
+                        if !state.filter_loading {
+                            vec![Action::SelectFilterResult]
+                        } else {
+                            vec![]  // Wait for pending filter to complete
+                        }
                     }
                 }
             }
@@ -3742,18 +3754,21 @@ impl EventLoop {
                         state.search_query.clear();
                         state.search_results = None;
                         state.view = View::Browse;
+                        state.search_popup_active = false; // Close popup
                         return vec![Action::LoadArtistAlbums];
                     }
                 }
                 SearchSection::Albums => {
                     if let Some(album) = results.albums.get(idx).cloned() {
-                        // Play album - stay in Search so user can continue searching
+                        // Play album - close popup after playing
+                        state.search_popup_active = false;
                         return vec![Action::PlayAlbum { rating_key: album.rating_key.clone() }];
                     }
                 }
                 SearchSection::Tracks => {
                     if let Some(track) = results.tracks.get(idx).cloned() {
-                        // Play track - stay in Search so user can continue searching
+                        // Play track - close popup after playing
+                        state.search_popup_active = false;
                         return vec![Action::PlayTrack(track)];
                     }
                 }
@@ -3864,6 +3879,8 @@ impl EventLoop {
                                 lib_key, folder_state.library_key);
                         }
                     }
+                    // Save cached subfolder contents
+                    cache_data.folder_contents = state.folder_contents_cache.clone();
 
                     // Genre/mood/style data
                     cache_data.genres = state.genres.clone();
@@ -3878,7 +3895,6 @@ impl EventLoop {
                     // Recent content
                     cache_data.recently_added_albums = state.recently_added_albums.clone();
                     cache_data.recently_played_albums = state.recently_played_albums.clone();
-                    cache_data.recent_playlists = state.recent_playlists.clone();
 
                     if let Some(cache) = LibraryCache::new() {
                         if cache.save(&cache_data) {
@@ -3909,6 +3925,7 @@ impl EventLoop {
                 state.albums.clear();
                 state.playlists.clear();
                 state.folder_state = None;
+                state.folder_contents_cache.clear();
                 state.queue.clear();
                 state.queue_index = None;
 
@@ -3978,44 +3995,145 @@ impl EventLoop {
                 use super::state::AuthStep;
                 // Select server from the server selection list
                 if let Some(server) = state.available_servers.get(state.auth_state.server_index) {
-                    state.auth_state.step = AuthStep::Connecting;
+                    // Get the token that was stored when servers were received
+                    let token = client.token().map(|s| s.to_string());
 
-                    // Find best connection URL (prefer local, non-relay)
-                    let url = server.connections.iter()
-                        .find(|c| c.local && !c.relay)
-                        .or_else(|| server.connections.iter().find(|c| !c.relay))
-                        .or_else(|| server.connections.first())
-                        .map(|c| c.uri.clone());
-
-                    if let Some(url) = url {
-                        // Get the token that was stored when servers were received
-                        let token = client.token().map(|s| s.to_string());
+                    if let Some(token) = token {
+                        state.auth_state.step = AuthStep::Connecting;
                         let username = state.settings_state.username_input.clone();
                         let servers = state.available_servers.clone();
+                        let server_clone = server.clone();
+                        let event_tx = self.event_tx.clone();
 
-                        if let Some(token) = token {
-                            // Send AuthSuccess to complete the flow
-                            let event_tx = self.event_tx.clone();
-                            tokio::spawn(async move {
+                        // Find working connection URL (tests connectivity)
+                        tokio::spawn(async move {
+                            if let Some(url) = find_working_connection(&server_clone, &token).await {
                                 let _ = event_tx.send(Event::AuthSuccess {
                                     token,
                                     username,
                                     server_url: url,
                                     servers,
                                 }).await;
-                            });
-                        } else {
-                            state.auth_state.error_message = Some("Authentication token not found".to_string());
-                            state.auth_state.step = AuthStep::Login;
-                        }
+                            } else {
+                                let _ = event_tx.send(Event::AuthFailed(
+                                    format!("Could not connect to {} - all connection attempts failed", server_clone.name)
+                                )).await;
+                            }
+                        });
                     } else {
-                        state.auth_state.error_message = Some("No connection available for selected server".to_string());
-                        state.auth_state.step = AuthStep::ServerSelect;
+                        state.auth_state.error_message = Some("Authentication token not found".to_string());
+                        state.auth_state.step = AuthStep::Login;
                     }
                 }
             }
             Action::SetView(view) => {
                 state.view = view;
+            }
+            Action::NextView => {
+                // Tab: cycle through nav bar views
+                // Order: Artists → Playlists → Genres → Folders → Now Playing → Artists
+                if state.view == View::NowPlaying {
+                    // From Now Playing, go to Artists
+                    state.view = View::Browse;
+                    Box::pin(self.dispatch(Action::SetCategory(BrowseCategory::Artists), state, client, audio)).await?;
+                } else if state.view == View::Browse {
+                    // Cycle through browse categories, then to Now Playing
+                    match state.browse_category {
+                        BrowseCategory::Artists => {
+                            Box::pin(self.dispatch(Action::SetCategory(BrowseCategory::Playlists), state, client, audio)).await?;
+                        }
+                        BrowseCategory::Playlists => {
+                            Box::pin(self.dispatch(Action::SetCategory(BrowseCategory::Genres), state, client, audio)).await?;
+                        }
+                        BrowseCategory::Genres => {
+                            Box::pin(self.dispatch(Action::SetCategory(BrowseCategory::Folders), state, client, audio)).await?;
+                        }
+                        BrowseCategory::Folders => {
+                            state.view = View::NowPlaying;
+                        }
+                    }
+                } else {
+                    // From other views (Help, Settings, Search, Similar), go to Browse
+                    state.view = View::Browse;
+                }
+            }
+            Action::PrevView => {
+                // Shift+Tab: cycle backwards through nav bar views
+                // Order: Artists ← Playlists ← Genres ← Folders ← Now Playing ← Artists
+                if state.view == View::NowPlaying {
+                    // From Now Playing, go to Folders
+                    state.view = View::Browse;
+                    Box::pin(self.dispatch(Action::SetCategory(BrowseCategory::Folders), state, client, audio)).await?;
+                } else if state.view == View::Browse {
+                    // Cycle backwards through browse categories, or to Now Playing
+                    match state.browse_category {
+                        BrowseCategory::Artists => {
+                            state.view = View::NowPlaying;
+                        }
+                        BrowseCategory::Playlists => {
+                            Box::pin(self.dispatch(Action::SetCategory(BrowseCategory::Artists), state, client, audio)).await?;
+                        }
+                        BrowseCategory::Genres => {
+                            Box::pin(self.dispatch(Action::SetCategory(BrowseCategory::Playlists), state, client, audio)).await?;
+                        }
+                        BrowseCategory::Folders => {
+                            Box::pin(self.dispatch(Action::SetCategory(BrowseCategory::Genres), state, client, audio)).await?;
+                        }
+                    }
+                } else {
+                    // From other views (Help, Settings, Search, Similar), go to Browse
+                    state.view = View::Browse;
+                }
+            }
+            Action::NextMode => {
+                // Shift+Down: cycle modes within current category
+                if state.view == View::NowPlaying {
+                    state.now_playing_mode = state.now_playing_mode.next();
+                    Box::pin(self.dispatch(Action::RefreshNowPlayingView, state, client, audio)).await?;
+                } else if state.view == View::Browse {
+                    match state.browse_category {
+                        BrowseCategory::Artists => {
+                            state.artist_view_mode = state.artist_view_mode.next();
+                            Box::pin(self.dispatch(Action::RefreshArtistView, state, client, audio)).await?;
+                        }
+                        BrowseCategory::Playlists => {
+                            state.playlists_mode = state.playlists_mode.next();
+                            Box::pin(self.dispatch(Action::RefreshPlaylistsView, state, client, audio)).await?;
+                        }
+                        BrowseCategory::Genres => {
+                            state.genre_content_type = state.genre_content_type.next();
+                            Box::pin(self.dispatch(Action::RefreshGenreView, state, client, audio)).await?;
+                        }
+                        BrowseCategory::Folders => {
+                            // Folders has no modes to cycle
+                        }
+                    }
+                }
+            }
+            Action::PrevMode => {
+                // Shift+Up: cycle modes backwards within current category
+                if state.view == View::NowPlaying {
+                    state.now_playing_mode = state.now_playing_mode.prev();
+                    Box::pin(self.dispatch(Action::RefreshNowPlayingView, state, client, audio)).await?;
+                } else if state.view == View::Browse {
+                    match state.browse_category {
+                        BrowseCategory::Artists => {
+                            state.artist_view_mode = state.artist_view_mode.prev();
+                            Box::pin(self.dispatch(Action::RefreshArtistView, state, client, audio)).await?;
+                        }
+                        BrowseCategory::Playlists => {
+                            state.playlists_mode = state.playlists_mode.prev();
+                            Box::pin(self.dispatch(Action::RefreshPlaylistsView, state, client, audio)).await?;
+                        }
+                        BrowseCategory::Genres => {
+                            state.genre_content_type = state.genre_content_type.prev();
+                            Box::pin(self.dispatch(Action::RefreshGenreView, state, client, audio)).await?;
+                        }
+                        BrowseCategory::Folders => {
+                            // Folders has no modes to cycle
+                        }
+                    }
+                }
             }
             Action::SetCategory(category) => {
                 if state.browse_category != category {
@@ -4031,16 +4149,16 @@ impl EventLoop {
                         BrowseCategory::Artists => {
                             if state.artists.is_empty() && !state.artists_loading {
                                 self.load_artists(state, client);
+                            } else if !state.artists.is_empty() {
+                                // Initialize artist_nav with existing artists
+                                let title = state.artist_view_mode.name();
+                                let items = super::state::BrowseItem::from_artists(&state.artists);
+                                state.artist_nav.reset(title, items);
                             }
                         }
                         BrowseCategory::Playlists => {
                             if state.playlists.is_empty() && !state.playlists_loading {
                                 self.load_playlists(state, client);
-                            }
-                        }
-                        BrowseCategory::Stations => {
-                            if state.station_nav.columns.is_empty() && !state.stations_loading {
-                                Box::pin(self.dispatch(Action::LoadStations, state, client, audio)).await?;
                             }
                         }
                         BrowseCategory::Genres => {
@@ -4069,6 +4187,11 @@ impl EventLoop {
                                 super::state::GenreContentType::Styles => {
                                     if state.styles.is_empty() && !state.styles_loading {
                                         Box::pin(self.dispatch(Action::LoadStyles, state, client, audio)).await?;
+                                    }
+                                }
+                                super::state::GenreContentType::Stations => {
+                                    if state.station_nav.columns.is_empty() && !state.stations_loading {
+                                        Box::pin(self.dispatch(Action::LoadStations, state, client, audio)).await?;
                                     }
                                 }
                             }
@@ -4132,13 +4255,19 @@ impl EventLoop {
                                         if !cached.artists.is_empty() {
                                             state.artists = cached.artists;
                                             state.artists_total = state.artists.len() as u32;
+                                            // Initialize artist_nav for Miller columns
+                                            let items = super::state::BrowseItem::from_artists(&state.artists);
+                                            state.artist_nav.reset(state.artist_view_mode.name(), items);
                                         }
                                         if !cached.albums.is_empty() {
                                             state.albums = cached.albums;
                                             state.albums_total = state.albums.len() as u32;
                                         }
                                         if !cached.playlists.is_empty() {
-                                            state.playlists = cached.playlists;
+                                            state.playlists = cached.playlists.clone();
+                                            // Initialize playlist_nav for Miller columns
+                                            let items = super::state::BrowseItem::from_playlists(&state.playlists);
+                                            state.playlist_nav.reset("playlists", items);
                                         }
 
                                         // Folders
@@ -4152,22 +4281,54 @@ impl EventLoop {
                                                 loading: false,
                                             });
                                         }
+                                        // Load cached subfolder contents with staleness filtering
+                                        // Very stale entries (>32 days) are deleted, not refreshed
+                                        if !cached.folder_contents.is_empty() {
+                                            state.folder_contents_cache = cached.folder_contents;
+                                            let removed = CacheService::filter_stale_subfolders_default(&mut state.folder_contents_cache);
+                                            if removed > 0 {
+                                                tracing::info!("Removed {} very stale subfolder caches on load", removed);
+                                                state.cache_dirty = true;  // Save the filtered cache
+                                            }
+                                            tracing::debug!("Loaded {} cached subfolders", state.folder_contents_cache.len());
+                                        }
 
                                         // Genres, artist genres, album genres, moods, styles
                                         if !cached.genres.is_empty() {
                                             state.genres = cached.genres;
+                                            // Initialize genre_nav if this is the default genre type
+                                            if state.genre_content_type == super::state::GenreContentType::Genres {
+                                                let items = super::state::BrowseItem::from_genres(&state.genres);
+                                                state.genre_nav.reset("genres", items);
+                                            }
                                         }
                                         if !cached.artist_genres.is_empty() {
                                             state.artist_genres = cached.artist_genres;
+                                            if state.genre_content_type == super::state::GenreContentType::ArtistGenres {
+                                                let items = super::state::BrowseItem::from_genres(&state.artist_genres);
+                                                state.genre_nav.reset("artist genres", items);
+                                            }
                                         }
                                         if !cached.album_genres.is_empty() {
                                             state.album_genres = cached.album_genres;
+                                            if state.genre_content_type == super::state::GenreContentType::AlbumGenres {
+                                                let items = super::state::BrowseItem::from_genres(&state.album_genres);
+                                                state.genre_nav.reset("album genres", items);
+                                            }
                                         }
                                         if !cached.moods.is_empty() {
                                             state.moods = cached.moods;
+                                            if state.genre_content_type == super::state::GenreContentType::Moods {
+                                                let items = super::state::BrowseItem::from_genres(&state.moods);
+                                                state.genre_nav.reset("moods", items);
+                                            }
                                         }
                                         if !cached.styles.is_empty() {
                                             state.styles = cached.styles;
+                                            if state.genre_content_type == super::state::GenreContentType::Styles {
+                                                let items = super::state::BrowseItem::from_genres(&state.styles);
+                                                state.genre_nav.reset("styles", items);
+                                            }
                                         }
 
                                         // Stations - populate both legacy and Miller columns
@@ -4190,38 +4351,12 @@ impl EventLoop {
                                         if !cached.recently_played_albums.is_empty() {
                                             state.recently_played_albums = cached.recently_played_albums;
                                         }
-                                        if !cached.recent_playlists.is_empty() {
-                                            state.recent_playlists = cached.recent_playlists;
-                                        }
                                     }
                                 }
                             }
 
-                            // Refresh from API in background (priority order)
-                            // 1. Artists (most important for main view)
-                            self.preload_artists_background(&lib_key, client);
-                            // 2. Folders (fast folder navigation)
-                            self.preload_folders_background(&lib_key, &lib_title, client);
-                            // 3. Albums (for album view and drill-down)
-                            self.preload_albums_background(&lib_key, client);
-                            // 4. Genres (for genre view)
-                            self.preload_genres_background(&lib_key, client);
-                            // 5. Artist Genres
-                            self.preload_artist_genres_background(&lib_key, client);
-                            // 6. Album Genres
-                            self.preload_album_genres_background(&lib_key, client);
-                            // 7. Moods
-                            self.preload_moods_background(&lib_key, client);
-                            // 8. Styles
-                            self.preload_styles_background(&lib_key, client);
-                            // 9. Stations
-                            self.preload_stations_background(&lib_key, client);
-                            // 8. Playlists (global)
-                            self.preload_playlists_background(client);
-                            // 9. Recently added/played (for playlist view cycling)
-                            self.preload_recently_added_background(&lib_key, client);
-                            self.preload_recently_played_background(&lib_key, client);
-                            self.preload_recent_playlists_background(&lib_key, client);
+                            // Refresh from API in background
+                            self.preload_all_library_data(&lib_key, &lib_title, client);
                         } else {
                             tracing::warn!("No music libraries found!");
                         }
@@ -4394,6 +4529,189 @@ impl EventLoop {
                 }
                 state.right_panel_loading = false;
             }
+
+            // ================================================================
+            // Miller Column Actions for Artists View
+            // ================================================================
+
+            Action::LoadArtistAlbumsForMiller { artist_key } => {
+                // Load albums for artist and add as new column in artist_nav
+                state.artist_nav.loading = true;
+
+                match client.get_artist_albums(&artist_key).await {
+                    Ok(albums) => {
+                        let items = super::state::BrowseItem::from_albums(&albums);
+                        let title = state.selected_artist_name.clone();
+                        let col = super::state::BrowseColumn::new(title, items);
+                        state.artist_nav.push_column(col);
+                    }
+                    Err(e) => {
+                        state.set_error(format!("Failed to load albums: {}", e));
+                    }
+                }
+                state.artist_nav.loading = false;
+            }
+
+            Action::LoadAlbumTracksForMiller { album_key } => {
+                // Load tracks for album and add as new column in artist_nav
+                state.artist_nav.loading = true;
+
+                match client.get_album_tracks(&album_key).await {
+                    Ok(tracks) => {
+                        let items = super::state::BrowseItem::from_tracks(&tracks);
+                        let title = state.selected_album_title.clone();
+                        let col = super::state::BrowseColumn::new(title, items);
+                        state.artist_nav.push_column(col);
+                    }
+                    Err(e) => {
+                        state.set_error(format!("Failed to load tracks: {}", e));
+                    }
+                }
+                state.artist_nav.loading = false;
+            }
+
+            Action::PlayTrackFromMiller { column_index, track_index } => {
+                // Get tracks from the specified column and play from track_index
+                if let Some(col) = state.artist_nav.columns.get(column_index) {
+                    let tracks = Self::collect_tracks_from_column(col);
+                    if !tracks.is_empty() {
+                        state.queue.clear();
+                        state.queue.extend(tracks);
+                        state.queue_index = Some(track_index);
+                        state.playback_mode = super::state::PlaybackMode::Queue;
+                        state.view = View::NowPlaying;
+                        self.play_current_track(state, client, audio).await;
+                    }
+                }
+            }
+
+            // Miller Column Actions for Genres View
+            // ================================================================
+
+            Action::LoadGenreAlbumsForMiller { genre_key } => {
+                // Load albums for genre and add as new column in genre_nav
+                state.genre_nav.loading = true;
+
+                if let Some(lib_key) = &state.active_library.clone() {
+                    // Determine which API to call based on genre content type
+                    let albums_result = match state.genre_content_type {
+                        super::state::GenreContentType::ArtistGenres => {
+                            client.get_artist_genre_albums(lib_key, &genre_key).await
+                        }
+                        super::state::GenreContentType::AlbumGenres => {
+                            client.get_album_genre_albums(lib_key, &genre_key).await
+                        }
+                        super::state::GenreContentType::Moods => {
+                            client.get_mood_albums(lib_key, &genre_key).await
+                        }
+                        super::state::GenreContentType::Styles => {
+                            client.get_style_albums(lib_key, &genre_key).await
+                        }
+                        _ => {
+                            // Default genres use file-based tags
+                            client.get_genre_albums(lib_key, &genre_key).await
+                        }
+                    };
+
+                    match albums_result {
+                        Ok(albums) => {
+                            let items = super::state::BrowseItem::from_albums(&albums);
+                            let col = super::state::BrowseColumn::new("albums", items);
+                            state.genre_nav.push_column(col);
+                        }
+                        Err(e) => {
+                            state.set_error(format!("Failed to load albums: {}", e));
+                        }
+                    }
+                }
+                state.genre_nav.loading = false;
+            }
+
+            Action::LoadGenreTracksForMiller { album_key } => {
+                // Load tracks for album and add as new column in genre_nav
+                state.genre_nav.loading = true;
+
+                match client.get_album_tracks(&album_key).await {
+                    Ok(tracks) => {
+                        let items = super::state::BrowseItem::from_tracks(&tracks);
+                        let col = super::state::BrowseColumn::new("tracks", items);
+                        state.genre_nav.push_column(col);
+                    }
+                    Err(e) => {
+                        state.set_error(format!("Failed to load tracks: {}", e));
+                    }
+                }
+                state.genre_nav.loading = false;
+            }
+
+            Action::PlayGenreTrackFromMiller { column_index, track_index } => {
+                // Get tracks from the specified column and play from track_index
+                if let Some(col) = state.genre_nav.columns.get(column_index) {
+                    let tracks = Self::collect_tracks_from_column(col);
+                    if !tracks.is_empty() {
+                        state.queue.clear();
+                        state.queue.extend(tracks);
+                        state.queue_index = Some(track_index);
+                        state.playback_mode = super::state::PlaybackMode::Queue;
+                        state.view = View::NowPlaying;
+                        self.play_current_track(state, client, audio).await;
+                    }
+                }
+            }
+
+            // Miller Column Actions for Playlists View
+            // ================================================================
+
+            Action::LoadPlaylistTracksForMiller { playlist_key } => {
+                // Load tracks for playlist and add as new column in playlist_nav
+                state.playlist_nav.loading = true;
+
+                match client.get_playlist_tracks(&playlist_key).await {
+                    Ok(tracks) => {
+                        let items = super::state::BrowseItem::from_tracks(&tracks);
+                        let col = super::state::BrowseColumn::new("tracks", items);
+                        state.playlist_nav.push_column(col);
+                    }
+                    Err(e) => {
+                        state.set_error(format!("Failed to load playlist tracks: {}", e));
+                    }
+                }
+                state.playlist_nav.loading = false;
+            }
+
+            Action::LoadAlbumTracksForPlaylistMiller { album_key } => {
+                // Load tracks for album (in Recently Added mode) and add as new column in playlist_nav
+                state.playlist_nav.loading = true;
+
+                match client.get_album_tracks(&album_key).await {
+                    Ok(tracks) => {
+                        let items = super::state::BrowseItem::from_tracks(&tracks);
+                        let title = state.selected_album_title.clone();
+                        let col = super::state::BrowseColumn::new(title, items);
+                        state.playlist_nav.push_column(col);
+                    }
+                    Err(e) => {
+                        state.set_error(format!("Failed to load album tracks: {}", e));
+                    }
+                }
+                state.playlist_nav.loading = false;
+            }
+
+            Action::PlayPlaylistTrackFromMiller { column_index, track_index } => {
+                // Get tracks from the specified column and play from track_index
+                if let Some(col) = state.playlist_nav.columns.get(column_index) {
+                    let tracks = Self::collect_tracks_from_column(col);
+                    if !tracks.is_empty() {
+                        state.queue.clear();
+                        state.queue.extend(tracks);
+                        state.queue_index = Some(track_index);
+                        state.playback_mode = super::state::PlaybackMode::Queue;
+                        state.view = View::NowPlaying;
+                        self.play_current_track(state, client, audio).await;
+                    }
+                }
+            }
+
             Action::LoadCategoryTracks => {
                 // Load tracks directly (for Playlists category)
                 // Check for pending filter key first
@@ -4425,11 +4743,11 @@ impl EventLoop {
                             }
                         }
                     }
-                    BrowseCategory::Stations => {
-                        // Stations don't have tracks to load directly
-                        return Ok(());
-                    }
                     BrowseCategory::Genres => {
+                        // Stations are handled separately via station_nav
+                        if state.genre_content_type == super::state::GenreContentType::Stations {
+                            return Ok(());
+                        }
                         if state.genres.is_empty() {
                             if let Some(lib_key) = &state.active_library {
                                 match client.get_genres(lib_key).await {
@@ -4511,7 +4829,6 @@ impl EventLoop {
                                 }
                             }
                         }
-                        BrowseCategory::Stations => return Ok(()), // Stations handled separately
                         BrowseCategory::Genres => {
                             if let Some(lib_key) = &state.active_library {
                                 client.get_genre_tracks(lib_key, &key).await
@@ -5162,9 +5479,9 @@ impl EventLoop {
                                         // Get servers
                                         let servers = auth.get_servers(&token).await.unwrap_or_default();
 
-                                        // Find best server URL
+                                        // Find working server URL (tests connectivity)
                                         let final_url = if server_url.is_empty() {
-                                            find_best_server_url(&servers)
+                                            find_working_connection_from_servers(&servers, &token).await
                                         } else {
                                             Some(server_url)
                                         };
@@ -5177,7 +5494,7 @@ impl EventLoop {
                                                 servers,
                                             }).await;
                                         } else {
-                                            // No server URL available
+                                            // No working server connection available
                                             let _ = event_tx.send(Event::ServersDiscovered(servers)).await;
                                         }
                                     }
@@ -5223,16 +5540,30 @@ impl EventLoop {
             Action::SelectServer(server_id) => {
                 // Find server and try to connect
                 if let Some(server) = state.available_servers.iter().find(|s| s.client_identifier == server_id) {
-                    // Find best connection URL (prefer local, non-relay)
-                    let url = server.connections.iter()
-                        .find(|c| c.local && !c.relay)
-                        .or_else(|| server.connections.iter().find(|c| !c.relay))
-                        .or_else(|| server.connections.first())
-                        .map(|c| c.uri.clone());
+                    // Get token for connection testing
+                    let token = client.token().map(|s| s.to_string());
 
-                    if let Some(url) = url {
-                        client.set_server(url);
-                        state.set_status(format!("Connected to {}", server.name));
+                    if let Some(token) = token {
+                        let server_clone = server.clone();
+                        let event_tx = self.event_tx.clone();
+
+                        // Find working connection URL (tests connectivity)
+                        tokio::spawn(async move {
+                            if let Some(url) = find_working_connection(&server_clone, &token).await {
+                                let _ = event_tx.send(Event::ServerConnectionSucceeded {
+                                    server_name: server_clone.name.clone(),
+                                    url,
+                                }).await;
+                            } else {
+                                let _ = event_tx.send(Event::ServerConnectionFailed {
+                                    server_name: server_clone.name.clone(),
+                                }).await;
+                            }
+                        });
+
+                        state.set_status(format!("Testing connections to {}...", server.name));
+                    } else {
+                        state.set_error("No authentication token available".to_string());
                     }
                 }
             }
@@ -5242,6 +5573,9 @@ impl EventLoop {
                     state.active_library = Some(lib_key.clone());
 
                     // Clear all current data and UI state
+                    // Note: folder_contents_cache is NOT cleared here - it will be replaced
+                    // with the new library's cached subfolders. Each library has its own
+                    // cache file, so there's no cross-contamination.
                     state.artists.clear();
                     state.albums.clear();
                     state.playlists.clear();
@@ -5253,7 +5587,6 @@ impl EventLoop {
                     state.stations.clear();
                     state.recently_added_albums.clear();
                     state.recently_played_albums.clear();
-                    state.recent_playlists.clear();
                     state.selected_artist_albums.clear();
                     state.selected_album_tracks.clear();
                     state.folder_state = None;
@@ -5300,6 +5633,20 @@ impl EventLoop {
                                         loading: false,
                                     });
                                 }
+                                // Load cached subfolder contents with staleness filtering
+                                // Very stale entries (>32 days) are deleted, not refreshed
+                                if !cached.folder_contents.is_empty() {
+                                    state.folder_contents_cache = cached.folder_contents;
+                                    let removed = CacheService::filter_stale_subfolders_default(&mut state.folder_contents_cache);
+                                    if removed > 0 {
+                                        tracing::info!("Library switch: removed {} very stale subfolder caches", removed);
+                                        state.cache_dirty = true;  // Save the filtered cache
+                                    }
+                                    tracing::debug!("Library switch: loaded {} cached subfolders", state.folder_contents_cache.len());
+                                } else {
+                                    // New library has no subfolder cache - clear any old data
+                                    state.folder_contents_cache.clear();
+                                }
 
                                 // Genres, artist genres, album genres, moods, styles
                                 if !cached.genres.is_empty() {
@@ -5338,27 +5685,12 @@ impl EventLoop {
                                 if !cached.recently_played_albums.is_empty() {
                                     state.recently_played_albums = cached.recently_played_albums;
                                 }
-                                if !cached.recent_playlists.is_empty() {
-                                    state.recent_playlists = cached.recent_playlists;
-                                }
                             }
                         }
                     }
 
-                    // Refresh from API in background (priority order)
-                    self.preload_artists_background(&lib_key, client);
-                    self.preload_folders_background(&lib_key, &lib_name, client);
-                    self.preload_albums_background(&lib_key, client);
-                    self.preload_genres_background(&lib_key, client);
-                    self.preload_artist_genres_background(&lib_key, client);
-                    self.preload_album_genres_background(&lib_key, client);
-                    self.preload_moods_background(&lib_key, client);
-                    self.preload_styles_background(&lib_key, client);
-                    self.preload_stations_background(&lib_key, client);
-                    self.preload_playlists_background(client);
-                    self.preload_recently_added_background(&lib_key, client);
-                    self.preload_recently_played_background(&lib_key, client);
-                    self.preload_recent_playlists_background(&lib_key, client);
+                    // Refresh from API in background
+                    self.preload_all_library_data(&lib_key, &lib_name, client);
 
                     state.set_status(format!("Switched to {}", lib_name));
 
@@ -5390,6 +5722,7 @@ impl EventLoop {
                             state.albums.clear();
                             state.playlists.clear();
                             state.folder_state = None;
+                            state.folder_contents_cache.clear();
 
                             // Reload from API
                             if let Some(lib_key) = &state.active_library {
@@ -5399,10 +5732,19 @@ impl EventLoop {
                                     .map(|l| l.title.clone())
                                     .unwrap_or_else(|| lib_key.clone());
 
-                                self.preload_artists_background(&lib_key, client);
-                                self.preload_albums_background(&lib_key, client);
-                                self.preload_playlists_background(client);
-                                self.preload_folders_background(&lib_key, &lib_name, client);
+                                // Preload all library data (same as preload_all_library_data)
+                                self.preload_data(PreloadType::Artists, &lib_key, client);
+                                self.preload_data(PreloadType::Albums, &lib_key, client);
+                                self.preload_data(PreloadType::Playlists, &lib_key, client);
+                                self.preload_data(PreloadType::Folders { lib_title: lib_name }, &lib_key, client);
+                                self.preload_data(PreloadType::Genres, &lib_key, client);
+                                self.preload_data(PreloadType::ArtistGenres, &lib_key, client);
+                                self.preload_data(PreloadType::AlbumGenres, &lib_key, client);
+                                self.preload_data(PreloadType::Moods, &lib_key, client);
+                                self.preload_data(PreloadType::Styles, &lib_key, client);
+                                self.preload_data(PreloadType::Stations, &lib_key, client);
+                                self.preload_data(PreloadType::RecentlyAdded, &lib_key, client);
+                                self.preload_data(PreloadType::RecentlyPlayed, &lib_key, client);
                             }
 
                             state.set_status(format!("Cleared {} cache files, reloading...", count));
@@ -5558,18 +5900,35 @@ impl EventLoop {
             Action::NavigateIntoFolder(folder_key) => {
                 use crate::services::FolderColumn;
 
-                match client.get_folder_contents(&folder_key).await {
-                    Ok(response) => {
-                        let items = FolderService::from_response(&response);
-                        let folder_title = response.media_container.title2.clone().unwrap_or_default();
-
-                        if let Some(ref mut folder_state) = state.folder_state {
-                            let new_column = FolderColumn::new(Some(folder_key), folder_title, items);
-                            folder_state.push_column(new_column);
-                        }
+                // Check cache first for instant navigation
+                if let Some(cached_folder) = state.folder_contents_cache.get(&folder_key) {
+                    tracing::debug!("Folder cache hit: {} ({} items)", folder_key, cached_folder.items.len());
+                    // Extract folder title from the key if possible, or use a generic title
+                    let folder_title = folder_key.split('/').last().unwrap_or("Folder").to_string();
+                    if let Some(ref mut folder_state) = state.folder_state {
+                        let new_column = FolderColumn::new(Some(folder_key), folder_title, cached_folder.items.clone());
+                        folder_state.push_column(new_column);
                     }
-                    Err(e) => {
-                        state.set_error(format!("Failed to load folder: {}", e));
+                } else {
+                    // Not in cache - fetch from API
+                    match client.get_folder_contents(&folder_key).await {
+                        Ok(response) => {
+                            let items = FolderService::from_response(&response);
+                            let folder_title = response.media_container.title2.clone().unwrap_or_default();
+
+                            // Store in cache with timestamp for future use
+                            state.folder_contents_cache.insert(folder_key.clone(), CachedFolder::new(items.clone()));
+                            state.cache_dirty = true;
+                            tracing::debug!("Cached folder: {} ({} items)", folder_key, items.len());
+
+                            if let Some(ref mut folder_state) = state.folder_state {
+                                let new_column = FolderColumn::new(Some(folder_key), folder_title, items);
+                                folder_state.push_column(new_column);
+                            }
+                        }
+                        Err(e) => {
+                            state.set_error(format!("Failed to load folder: {}", e));
+                        }
                     }
                 }
             }
@@ -5577,6 +5936,42 @@ impl EventLoop {
                 // In column view, going up just moves focus left
                 if let Some(ref mut folder_state) = state.folder_state {
                     folder_state.focus_left();
+                }
+            }
+            Action::RefreshSubfolder(folder_key) => {
+                // Manual refresh of a specific subfolder (F5 when focused on subfolder)
+                // This is the ONLY way subfolder caches get manually refreshed.
+
+                match client.get_folder_contents(&folder_key).await {
+                    Ok(response) => {
+                        let items = FolderService::from_response(&response);
+                        let folder_title = response.media_container.title2.clone().unwrap_or_default();
+
+                        // Update the cache with fresh data and new timestamp
+                        state.folder_contents_cache.insert(folder_key.clone(), CachedFolder::new(items.clone()));
+                        state.cache_dirty = true;
+                        tracing::info!("Refreshed subfolder cache: {} ({} items)", folder_key, items.len());
+
+                        // Update the currently displayed column if it matches
+                        if let Some(ref mut folder_state) = state.folder_state {
+                            // Find the column that corresponds to this folder key and update it
+                            for col in folder_state.columns.iter_mut() {
+                                if col.key.as_ref() == Some(&folder_key) {
+                                    let old_selected = col.selected_index;
+                                    col.items = items.clone();
+                                    // Preserve selection position if possible
+                                    col.selected_index = old_selected.min(col.items.len().saturating_sub(1));
+                                    col.title = folder_title.clone();
+                                    break;
+                                }
+                            }
+                        }
+
+                        state.set_status("Folder refreshed".to_string());
+                    }
+                    Err(e) => {
+                        state.set_error(format!("Failed to refresh folder: {}", e));
+                    }
                 }
             }
             Action::PlayFolderTracks => {
@@ -5905,8 +6300,12 @@ impl EventLoop {
             Action::LoadGenres => {
                 if let Some(lib_key) = &state.active_library.clone() {
                     state.genres_loading = true;
+                    state.genre_nav.loading = true;
                     match client.get_genres(lib_key).await {
                         Ok(genres) => {
+                            // Initialize genre_nav with the genres list
+                            let items = crate::app::state::BrowseItem::from_genres(&genres);
+                            state.genre_nav.reset("genres", items);
                             state.genres = genres;
                             state.genres_loading = false;
                             state.genres_index = 0;
@@ -5914,6 +6313,7 @@ impl EventLoop {
                         Err(e) => {
                             state.set_error(format!("Failed to load genres: {}", e));
                             state.genres_loading = false;
+                            state.genre_nav.loading = false;
                         }
                     }
                 }
@@ -5921,8 +6321,11 @@ impl EventLoop {
             Action::LoadArtistGenres => {
                 if let Some(lib_key) = &state.active_library.clone() {
                     state.artist_genres_loading = true;
+                    state.genre_nav.loading = true;
                     match client.get_artist_genres(lib_key).await {
                         Ok(genres) => {
+                            let items = crate::app::state::BrowseItem::from_genres(&genres);
+                            state.genre_nav.reset("artist genres", items);
                             state.artist_genres = genres;
                             state.artist_genres_loading = false;
                             state.genres_index = 0;
@@ -5930,6 +6333,7 @@ impl EventLoop {
                         Err(e) => {
                             state.set_error(format!("Failed to load artist genres: {}", e));
                             state.artist_genres_loading = false;
+                            state.genre_nav.loading = false;
                         }
                     }
                 }
@@ -5937,8 +6341,11 @@ impl EventLoop {
             Action::LoadAlbumGenres => {
                 if let Some(lib_key) = &state.active_library.clone() {
                     state.album_genres_loading = true;
+                    state.genre_nav.loading = true;
                     match client.get_album_genres(lib_key).await {
                         Ok(genres) => {
+                            let items = crate::app::state::BrowseItem::from_genres(&genres);
+                            state.genre_nav.reset("album genres", items);
                             state.album_genres = genres;
                             state.album_genres_loading = false;
                             state.genres_index = 0;
@@ -5946,51 +6353,26 @@ impl EventLoop {
                         Err(e) => {
                             state.set_error(format!("Failed to load album genres: {}", e));
                             state.album_genres_loading = false;
+                            state.genre_nav.loading = false;
                         }
-                    }
-                }
-            }
-            Action::LoadGenreArtists => {
-                // Load tracks that belong to the selected genre
-                if let Some(genre) = state.genres.get(state.genres_index) {
-                    let genre_key = genre.effective_key().to_string();
-                    let lib_key = state.active_library.clone();
-                    state.right_panel_loading = true;
-                    state.right_panel_mode = RightPanelMode::CategoryTracks;
-                    state.selected_album_tracks.clear();
-                    state.list_state.tracks_index = 0;
-                    state.focus = Focus::Right;
-
-                    if genre_key.is_empty() {
-                        state.set_error("Genre has no valid key".to_string());
-                        state.right_panel_loading = false;
-                    } else if let Some(lib_key) = lib_key {
-                        match client.get_genre_tracks(&lib_key, &genre_key).await {
-                            Ok(tracks) => {
-                                state.selected_album_tracks = tracks;
-                            }
-                            Err(e) => {
-                                state.set_error(format!("Failed to load genre tracks: {}", e));
-                            }
-                        }
-                        state.right_panel_loading = false;
-                    } else {
-                        state.set_error("No library selected".to_string());
-                        state.right_panel_loading = false;
                     }
                 }
             }
             Action::LoadMoods => {
                 if let Some(lib_key) = &state.active_library.clone() {
                     state.moods_loading = true;
+                    state.genre_nav.loading = true;
                     match client.get_moods(lib_key).await {
                         Ok(moods) => {
+                            let items = crate::app::state::BrowseItem::from_genres(&moods);
+                            state.genre_nav.reset("moods", items);
                             state.moods = moods;
                             state.moods_loading = false;
                         }
                         Err(e) => {
                             state.set_error(format!("Failed to load moods: {}", e));
                             state.moods_loading = false;
+                            state.genre_nav.loading = false;
                         }
                     }
                 }
@@ -5998,14 +6380,18 @@ impl EventLoop {
             Action::LoadStyles => {
                 if let Some(lib_key) = &state.active_library.clone() {
                     state.styles_loading = true;
+                    state.genre_nav.loading = true;
                     match client.get_styles(lib_key).await {
                         Ok(styles) => {
+                            let items = crate::app::state::BrowseItem::from_genres(&styles);
+                            state.genre_nav.reset("styles", items);
                             state.styles = styles;
                             state.styles_loading = false;
                         }
                         Err(e) => {
                             state.set_error(format!("Failed to load styles: {}", e));
                             state.styles_loading = false;
+                            state.genre_nav.loading = false;
                         }
                     }
                 }
@@ -6020,8 +6406,6 @@ impl EventLoop {
                     state.right_panel_loading = true;
                     state.genre_albums.clear();
                     state.genre_albums_index = 0;
-                    state.genre_tracks.clear();
-                    state.genre_tracks_index = 0;
 
                     if genre_key.is_empty() {
                         state.set_error("Genre/mood/style has no valid key".to_string());
@@ -6042,6 +6426,10 @@ impl EventLoop {
                             }
                             super::state::GenreContentType::Styles => {
                                 client.get_style_albums(&lib_key, &genre_key).await
+                            }
+                            super::state::GenreContentType::Stations => {
+                                // Stations don't have albums - this shouldn't be called
+                                Ok(Vec::new())
                             }
                         };
 
@@ -6096,85 +6484,66 @@ impl EventLoop {
                 // Handled by LoadGenreAlbums - just dispatch to it
                 Box::pin(self.dispatch(Action::LoadGenreAlbums, state, client, audio)).await?;
             }
-            Action::LoadGenreTracks { rating_key } => {
-                // Load tracks for selected album in genre Miller columns view
-                state.genre_tracks.clear();
-                state.genre_tracks_index = 0;
-                state.right_panel_loading = true;
-
-                match client.get_album_tracks(&rating_key).await {
-                    Ok(tracks) => {
-                        state.genre_tracks = tracks;
-                    }
-                    Err(e) => {
-                        state.set_error(format!("Failed to load tracks: {}", e));
-                    }
-                }
-                state.right_panel_loading = false;
-            }
-            Action::PlayGenreTrack(index) => {
-                // Play track from genre tracks list
-                if let Some(_track) = state.genre_tracks.get(index).cloned() {
-                    // Report stop for currently playing track before switching
-                    // continuing=true because we're switching to another track
-                    if let Some(current) = state.current_track().cloned() {
-                        Self::report_playback_stop_to_plex(&current, state.playback.position_ms, true, state.plex_session_id.clone(), client);
-                    }
-
-                    // Generate new session ID for this playback context
-                    state.plex_session_id = Some(Self::generate_plex_session_id());
-
-                    // Clear radio state if switching from radio mode
-                    if state.playback_mode == PlaybackMode::Radio {
-                        state.radio.clear();
-                    }
-                    // Build queue from genre tracks starting at this track
-                    state.queue = state.genre_tracks.clone();
-                    state.queue_index = Some(index);
-                    state.queue_original.clear();
-                    state.queue_sort_mode = super::state::QueueSortMode::QueueOrder;
-                    state.playback_mode = PlaybackMode::Queue;
-                    state.view = View::NowPlaying;
-
-                    // Start playback
-                    self.play_current_track(state, client, audio).await;
-                }
-            }
             Action::CycleGenreContentType => {
                 state.genre_content_type = state.genre_content_type.next();
+                Box::pin(self.dispatch(Action::RefreshGenreView, state, client, audio)).await?;
+            }
+            Action::RefreshGenreView => {
                 state.genres_index = 0;
                 state.genre_albums.clear();
                 state.genre_albums_index = 0;
-                state.genre_tracks.clear();
-                state.genre_tracks_index = 0;
-                state.genre_focus_column = 0;
 
-                // Load the appropriate content based on new type
+                // Reset genre_nav when cycling
+                state.genre_nav = super::state::BrowseNavigationState::new();
+
+                // Load the appropriate content based on current type
                 match state.genre_content_type {
                     super::state::GenreContentType::Genres => {
                         if state.genres.is_empty() {
                             Box::pin(self.dispatch(Action::LoadGenres, state, client, audio)).await?;
+                        } else {
+                            // Initialize genre_nav from cached data
+                            let items = super::state::BrowseItem::from_genres(&state.genres);
+                            state.genre_nav.reset("genres", items);
                         }
                     }
                     super::state::GenreContentType::ArtistGenres => {
                         if state.artist_genres.is_empty() {
                             Box::pin(self.dispatch(Action::LoadArtistGenres, state, client, audio)).await?;
+                        } else {
+                            let items = super::state::BrowseItem::from_genres(&state.artist_genres);
+                            state.genre_nav.reset("artist genres", items);
                         }
                     }
                     super::state::GenreContentType::AlbumGenres => {
                         if state.album_genres.is_empty() {
                             Box::pin(self.dispatch(Action::LoadAlbumGenres, state, client, audio)).await?;
+                        } else {
+                            let items = super::state::BrowseItem::from_genres(&state.album_genres);
+                            state.genre_nav.reset("album genres", items);
                         }
                     }
                     super::state::GenreContentType::Moods => {
                         if state.moods.is_empty() {
                             Box::pin(self.dispatch(Action::LoadMoods, state, client, audio)).await?;
+                        } else {
+                            let items = super::state::BrowseItem::from_genres(&state.moods);
+                            state.genre_nav.reset("moods", items);
                         }
                     }
                     super::state::GenreContentType::Styles => {
                         if state.styles.is_empty() {
                             Box::pin(self.dispatch(Action::LoadStyles, state, client, audio)).await?;
+                        } else {
+                            let items = super::state::BrowseItem::from_genres(&state.styles);
+                            state.genre_nav.reset("styles", items);
                         }
+                    }
+                    super::state::GenreContentType::Stations => {
+                        // Reset station navigation and load stations
+                        state.station_nav.columns.clear();
+                        state.station_nav.focused_column = 0;
+                        Box::pin(self.dispatch(Action::LoadStations, state, client, audio)).await?;
                     }
                 }
             }
@@ -6183,13 +6552,8 @@ impl EventLoop {
                 // Re-sort the current albums
                 if !state.genre_albums.is_empty() {
                     match state.genre_sort_mode {
-                        super::state::GenreSortMode::Artist => {
-                            state.genre_albums.sort_by(|a, b| {
-                                let a_artist = a.parent_title.as_deref().unwrap_or("").to_lowercase();
-                                let b_artist = b.parent_title.as_deref().unwrap_or("").to_lowercase();
-                                a_artist.cmp(&b_artist)
-                            });
-                        }
+                        // Artist and AlbumArtist both sort by parent_title (the album's artist)
+                        super::state::GenreSortMode::Artist |
                         super::state::GenreSortMode::AlbumArtist => {
                             state.genre_albums.sort_by(|a, b| {
                                 let a_artist = a.parent_title.as_deref().unwrap_or("").to_lowercase();
@@ -6205,6 +6569,9 @@ impl EventLoop {
             }
             Action::CycleArtistViewMode => {
                 state.artist_view_mode = state.artist_view_mode.next();
+                Box::pin(self.dispatch(Action::RefreshArtistView, state, client, audio)).await?;
+            }
+            Action::RefreshArtistView => {
                 // Clear right panel state (drill-down state) but keep preloaded data
                 state.selected_artist_albums.clear();
                 state.selected_album_tracks.clear();
@@ -6220,30 +6587,40 @@ impl EventLoop {
                         if state.artists.is_empty() {
                             Box::pin(self.dispatch(Action::LoadArtists, state, client, audio)).await?;
                         }
+                        // Reset artist_nav with new data
+                        let title = state.artist_view_mode.name();
+                        let items = super::state::BrowseItem::from_artists(&state.artists);
+                        state.artist_nav.reset(title, items);
                     }
                     crate::app::state::ArtistViewMode::Album => {
                         if state.albums.is_empty() {
                             Box::pin(self.dispatch(Action::LoadAlbums, state, client, audio)).await?;
                         }
+                        // Reset artist_nav with albums
+                        let title = state.artist_view_mode.name();
+                        let items = super::state::BrowseItem::from_albums(&state.albums);
+                        state.artist_nav.reset(title, items);
                     }
                 }
             }
             Action::CycleNowPlayingMode => {
                 state.now_playing_mode = state.now_playing_mode.next();
-                // Load data for the new mode if needed
+                Box::pin(self.dispatch(Action::RefreshNowPlayingView, state, client, audio)).await?;
+            }
+            Action::RefreshNowPlayingView => {
+                // Load data for the current mode if needed
                 match state.now_playing_mode {
                     crate::app::state::NowPlayingMode::Queue => {
                         // Queue mode - nothing to load, already have queue
                     }
                     crate::app::state::NowPlayingMode::RecentlyPlayed => {
                         // Recently Played mode - load from Plex hubs
-                        if state.recently_played_albums.is_empty() {
+                        if state.recently_played_albums.is_empty() && !state.recently_played_loading {
                             Box::pin(self.dispatch(Action::LoadRecentlyPlayedAlbums, state, client, audio)).await?;
                         }
                     }
                     crate::app::state::NowPlayingMode::NowPlaying => {
                         // Visualizer mode - load waveform for all visualizer styles
-                        // This allows all visualizers to use real audio data
                         Box::pin(self.dispatch(Action::LoadWaveform, state, client, audio)).await?;
                     }
                 }
@@ -6267,12 +6644,19 @@ impl EventLoop {
             }
             Action::CyclePlaylistsMode => {
                 state.playlists_mode = state.playlists_mode.next();
-                // Load data for the new mode if needed
+                Box::pin(self.dispatch(Action::RefreshPlaylistsView, state, client, audio)).await?;
+            }
+            Action::RefreshPlaylistsView => {
+                // Load data for the current mode if needed and reset playlist_nav
                 match state.playlists_mode {
                     crate::app::state::PlaylistsMode::All => {
                         // All playlists - reload if empty
                         if state.playlists.is_empty() {
                             Box::pin(self.dispatch(Action::LoadPlaylists, state, client, audio)).await?;
+                        } else {
+                            // Reset playlist_nav with playlists
+                            let items = super::state::BrowseItem::from_playlists(&state.playlists);
+                            state.playlist_nav.reset("playlists", items);
                         }
                     }
                     crate::app::state::PlaylistsMode::RecentlyAdded => {
@@ -6280,12 +6664,9 @@ impl EventLoop {
                         if state.recently_added_albums.is_empty() {
                             Box::pin(self.dispatch(Action::LoadRecentlyAddedAlbums, state, client, audio)).await?;
                         }
-                    }
-                    crate::app::state::PlaylistsMode::RecentPlaylists => {
-                        // Recent playlists from hubs
-                        if state.recent_playlists.is_empty() {
-                            Box::pin(self.dispatch(Action::LoadRecentPlaylists, state, client, audio)).await?;
-                        }
+                        // Reset playlist_nav with recently added albums
+                        let items = super::state::BrowseItem::from_albums(&state.recently_added_albums);
+                        state.playlist_nav.reset("recently added", items);
                     }
                 }
             }
@@ -6296,84 +6677,13 @@ impl EventLoop {
                         Ok(albums) => {
                             state.recently_added_albums = albums;
                             state.recently_added_loading = false;
+                            // Reset playlist_nav with recently added albums
+                            let items = super::state::BrowseItem::from_albums(&state.recently_added_albums);
+                            state.playlist_nav.reset("recently added", items);
                         }
                         Err(e) => {
                             tracing::warn!("Failed to load recently added albums: {}", e);
                             state.recently_added_loading = false;
-                        }
-                    }
-                }
-            }
-            Action::LoadRecentPlaylists => {
-                if let Some(library_key) = &state.active_library {
-                    state.recent_playlists_loading = true;
-                    match client.get_music_hubs(library_key).await {
-                        Ok(hubs) => {
-                            // Log all hubs for debugging
-                            for hub in &hubs {
-                                tracing::debug!(
-                                    "Hub: identifier='{}', type='{}', title='{}', metadata_count={}",
-                                    hub.hub_identifier, hub.hub_type, hub.title, hub.metadata.len()
-                                );
-                            }
-
-                            // Find the "Playlists" hub - check multiple possible identifiers
-                            for hub in hubs {
-                                let hub_identifier = &hub.hub_identifier;
-                                let title_lower = hub.title.to_lowercase();
-
-                                // Check for playlist hub by identifier or title
-                                let is_playlist_hub = hub_identifier.contains("playlist")
-                                    || hub_identifier == "music.playlists"
-                                    || title_lower.contains("playlist");
-
-                                if is_playlist_hub && !hub.metadata.is_empty() {
-                                    tracing::info!(
-                                        "Found playlist hub: '{}' with {} items",
-                                        hub.title, hub.metadata.len()
-                                    );
-                                    // Convert HubMetadata to Playlist
-                                    state.recent_playlists = hub.metadata.iter()
-                                        .map(|m| Playlist {
-                                            rating_key: m.rating_key.clone(),
-                                            key: m.key.clone(),
-                                            title: m.title.clone(),
-                                            playlist_type: "audio".to_string(),
-                                            composite: m.thumb.clone(),
-                                            smart: false,
-                                            duration: None,
-                                            leaf_count: None,
-                                            added_at: None,
-                                            updated_at: None,
-                                        })
-                                        .collect();
-                                    break;
-                                }
-                            }
-
-                            // If no playlist hub found, fall back to regular playlists sorted by updated_at
-                            if state.recent_playlists.is_empty() {
-                                tracing::info!("No playlist hub found, falling back to playlists sorted by updated_at");
-                                // Get regular playlists and sort by updated_at (most recent first)
-                                match client.get_playlists().await {
-                                    Ok(mut playlists) => {
-                                        // Sort by updated_at descending (most recent first)
-                                        playlists.sort_by(|a, b| {
-                                            b.updated_at.unwrap_or(0).cmp(&a.updated_at.unwrap_or(0))
-                                        });
-                                        // Take top 20 recent playlists
-                                        state.recent_playlists = playlists.into_iter().take(20).collect();
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!("Failed to load playlists for fallback: {}", e);
-                                    }
-                                }
-                            }
-                            state.recent_playlists_loading = false;
-                        }
-                        Err(e) => {
-                            tracing::warn!("Failed to load recent playlists: {}", e);
-                            state.recent_playlists_loading = false;
                         }
                     }
                 }
@@ -6815,6 +7125,112 @@ impl EventLoop {
             Action::AdventureError(msg) => {
                 state.adventure.generating = false;
                 state.set_error(format!("Adventure failed: {}", msg));
+            }
+
+            // Inline list filter actions
+            Action::ActivateListFilter => {
+                use crate::app::state::GenreContentType;
+                state.list_filter_active = true;
+                state.list_filter_query.clear();
+                state.list_filter_results = None;
+                state.list_filter_loading = false;
+                state.list_filter_selected = 0;
+                // Capture which category and column the filter was activated on
+                state.list_filter_category = state.browse_category;
+                state.list_filter_column = match state.browse_category {
+                    BrowseCategory::Artists => state.artist_nav.focused_column,
+                    BrowseCategory::Playlists => state.playlist_nav.focused_column,
+                    BrowseCategory::Genres => {
+                        if state.genre_content_type == GenreContentType::Stations {
+                            state.station_nav.focused_column
+                        } else {
+                            state.genre_nav.focused_column
+                        }
+                    }
+                    BrowseCategory::Folders => {
+                        state.folder_state.as_ref().map(|fs| fs.focused_column).unwrap_or(0)
+                    }
+                };
+            }
+            Action::DeactivateListFilter => {
+                state.list_filter_active = false;
+                state.list_filter_query.clear();
+                state.list_filter_results = None;
+                state.list_filter_loading = false;
+                state.list_filter_selected = 0;
+            }
+            Action::FilteredListUp => {
+                // Navigate up within filtered results and update the target column's selection
+                if state.list_filter_selected > 0 {
+                    state.list_filter_selected -= 1;
+                    // Update the column's selected_index to match
+                    if let Some(ref results) = state.list_filter_results {
+                        if let Some(&item_idx) = results.matched_indices.get(state.list_filter_selected) {
+                            self.update_filter_column_selection(state, item_idx);
+                        }
+                    }
+                }
+            }
+            Action::FilteredListDown => {
+                // Navigate down within filtered results and update the target column's selection
+                if let Some(ref results) = state.list_filter_results {
+                    if state.list_filter_selected + 1 < results.matched_indices.len() {
+                        state.list_filter_selected += 1;
+                        if let Some(&item_idx) = results.matched_indices.get(state.list_filter_selected) {
+                            self.update_filter_column_selection(state, item_idx);
+                        }
+                    }
+                }
+            }
+            Action::SelectFilteredItem => {
+                // Select the currently highlighted filtered item and drill down
+                // Filter stays active and continues to apply to the original column
+                if let Some(ref results) = state.list_filter_results.clone() {
+                    if let Some(&item_idx) = results.matched_indices.get(state.list_filter_selected) {
+                        // Update the column's selected_index to point to this item
+                        self.update_filter_column_selection(state, item_idx);
+
+                        // Get and dispatch drill-down actions (filter stays active)
+                        let drilldown_actions = self.get_filter_drilldown_actions(state);
+                        for action in drilldown_actions {
+                            Box::pin(self.dispatch(action, state, client, audio)).await?;
+                        }
+                    }
+                }
+            }
+            Action::AppendListFilterChar(c) => {
+                state.list_filter_query.push(c);
+                // Trigger filter execution with debounce
+                return self.execute_list_filter(state).await;
+            }
+            Action::DeleteListFilterChar => {
+                state.list_filter_query.pop();
+                if state.list_filter_query.is_empty() {
+                    state.list_filter_results = None;
+                    state.list_filter_loading = false;
+                } else {
+                    return self.execute_list_filter(state).await;
+                }
+            }
+            Action::ClearListFilter => {
+                state.list_filter_query.clear();
+                state.list_filter_results = None;
+                state.list_filter_loading = false;
+            }
+            Action::ExecuteListFilter => {
+                return self.execute_list_filter(state).await;
+            }
+
+            // Search popup actions
+            Action::OpenSearchPopup => {
+                state.search_popup_active = true;
+                // Clear previous search when opening
+                state.search_query.clear();
+                state.search_results = None;
+                state.filter_results = None;
+            }
+            Action::CloseSearchPopup => {
+                state.search_popup_active = false;
             }
             _ => {}
         }
@@ -7286,6 +7702,338 @@ impl EventLoop {
         }
     }
 
+    /// Helper to collect tracks from a Miller column for playback
+    fn collect_tracks_from_column(col: &super::state::BrowseColumn) -> Vec<Track> {
+        col.items.iter()
+            .filter_map(|item| {
+                if let super::state::BrowseItem::Track { key, title, duration_ms, track_number } = item {
+                    Some(Track {
+                        rating_key: key.clone(),
+                        title: title.clone(),
+                        duration: Some(*duration_ms),
+                        index: *track_number,
+                        parent_title: None,
+                        grandparent_title: None,
+                        parent_rating_key: None,
+                        grandparent_rating_key: None,
+                        media: vec![],
+                        thumb: None,
+                        key: String::new(),
+                        parent_thumb: None,
+                        grandparent_thumb: None,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Handle common navigation keys for BrowseNavigationState-based views.
+    /// Returns Some(actions) if the key was handled, None if not.
+    fn handle_browse_nav_keys(
+        key: event::KeyEvent,
+        nav: &mut super::state::BrowseNavigationState,
+    ) -> Option<Vec<Action>> {
+        match key.code {
+            // Help
+            KeyCode::F(1) | KeyCode::Char('?') => Some(vec![Action::SetView(View::Help)]),
+
+            // Settings
+            KeyCode::F(2) => Some(vec![Action::OpenSettings]),
+
+            // Up - move selection up, truncate columns to the right
+            KeyCode::Up => {
+                nav.move_up();
+                nav.truncate_right();
+                Some(vec![])
+            }
+
+            // Down - move selection down, truncate columns to the right
+            KeyCode::Down => {
+                nav.move_down();
+                nav.truncate_right();
+                Some(vec![])
+            }
+
+            // Page Up
+            KeyCode::PageUp => {
+                if let Some(col) = nav.focused_mut() {
+                    col.selected_index = col.selected_index.saturating_sub(10);
+                }
+                nav.truncate_right();
+                Some(vec![])
+            }
+
+            // Page Down
+            KeyCode::PageDown => {
+                if let Some(col) = nav.focused_mut() {
+                    let max_idx = col.items.len().saturating_sub(1);
+                    col.selected_index = (col.selected_index + 10).min(max_idx);
+                }
+                nav.truncate_right();
+                Some(vec![])
+            }
+
+            // Home - go to first item
+            KeyCode::Home => {
+                if let Some(col) = nav.focused_mut() {
+                    col.selected_index = 0;
+                }
+                nav.truncate_right();
+                Some(vec![])
+            }
+
+            // End - go to last item
+            KeyCode::End => {
+                if let Some(col) = nav.focused_mut() {
+                    col.selected_index = col.items.len().saturating_sub(1);
+                }
+                nav.truncate_right();
+                Some(vec![])
+            }
+
+            // Left/Backspace/Esc - focus previous column
+            KeyCode::Left | KeyCode::Backspace | KeyCode::Esc => {
+                if nav.can_go_left() {
+                    nav.focus_left();
+                }
+                Some(vec![])
+            }
+
+            // Tab is NOT handled here - it's handled globally to cycle between views
+            // (Artists → Playlists → Genres → Folders → Now Playing)
+
+            // Alphabet jumping in current column
+            // Plain letter: jump to first item starting with that letter
+            // Shift+letter: jump to first item where first char matches current item's first char
+            //               AND second char matches the pressed letter
+            KeyCode::Char(c) if c.is_ascii_alphabetic() && !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(col) = nav.focused_mut() {
+                    let letter_lower = c.to_ascii_lowercase();
+                    let use_second_char = key.modifiers.contains(KeyModifiers::SHIFT);
+
+                    if use_second_char {
+                        // Get the first letter of the currently selected item
+                        let first_letter = col.items.get(col.selected_index)
+                            .and_then(|item| item.title().chars().next())
+                            .map(|ch| ch.to_ascii_lowercase());
+
+                        if let Some(first_letter) = first_letter {
+                            // Find first item starting with that letter AND having pressed letter as second char
+                            if let Some(idx) = col.items.iter().position(|item| {
+                                let mut chars = item.title().chars();
+                                let first = chars.next().map(|ch| ch.to_ascii_lowercase());
+                                let second = chars.next().map(|ch| ch.to_ascii_lowercase());
+                                first == Some(first_letter) && second == Some(letter_lower)
+                            }) {
+                                col.selected_index = idx;
+                            }
+                        }
+                    } else {
+                        // Normal first-letter jump
+                        if let Some(idx) = col.items.iter().position(|item| {
+                            item.title().chars().next()
+                                .map(|ch| ch.to_ascii_lowercase() == letter_lower)
+                                .unwrap_or(false)
+                        }) {
+                            col.selected_index = idx;
+                        }
+                    }
+                }
+                nav.truncate_right();
+                Some(vec![])
+            }
+
+            // Not handled by common navigation
+            _ => None,
+        }
+    }
+
+    /// Update the column's selected_index for the filter's target category/column.
+    fn update_filter_column_selection(&self, state: &mut AppState, item_idx: usize) {
+        use crate::app::state::GenreContentType;
+        let category = state.list_filter_category;
+        let column = state.list_filter_column;
+
+        match category {
+            BrowseCategory::Artists => {
+                if let Some(col) = state.artist_nav.columns.get_mut(column) {
+                    col.selected_index = item_idx;
+                }
+            }
+            BrowseCategory::Playlists => {
+                if let Some(col) = state.playlist_nav.columns.get_mut(column) {
+                    col.selected_index = item_idx;
+                }
+            }
+            BrowseCategory::Genres => {
+                if state.genre_content_type == GenreContentType::Stations {
+                    if let Some(col) = state.station_nav.columns.get_mut(column) {
+                        col.selected_index = item_idx;
+                    }
+                } else {
+                    if let Some(col) = state.genre_nav.columns.get_mut(column) {
+                        col.selected_index = item_idx;
+                    }
+                }
+            }
+            BrowseCategory::Folders => {
+                if let Some(ref mut folder_state) = state.folder_state {
+                    if let Some(col) = folder_state.columns.get_mut(column) {
+                        col.selected_index = item_idx;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Get the drill-down actions for the selected filtered item.
+    /// This simulates pressing Enter on the selected item to drill into it.
+    fn get_filter_drilldown_actions(&self, state: &mut AppState) -> Vec<Action> {
+        use crate::app::state::GenreContentType;
+        let category = state.list_filter_category;
+
+        // Get the appropriate drill-down action based on category
+        match category {
+            BrowseCategory::Artists => {
+                // Use the artist_nav enter key logic
+                self.handle_artist_browse_keys(
+                    crossterm::event::KeyEvent::new(
+                        crossterm::event::KeyCode::Enter,
+                        crossterm::event::KeyModifiers::NONE,
+                    ),
+                    state,
+                )
+            }
+            BrowseCategory::Playlists => {
+                self.handle_playlist_browse_keys(
+                    crossterm::event::KeyEvent::new(
+                        crossterm::event::KeyCode::Enter,
+                        crossterm::event::KeyModifiers::NONE,
+                    ),
+                    state,
+                )
+            }
+            BrowseCategory::Genres => {
+                if state.genre_content_type == GenreContentType::Stations {
+                    self.handle_station_browse_keys(
+                        crossterm::event::KeyEvent::new(
+                            crossterm::event::KeyCode::Enter,
+                            crossterm::event::KeyModifiers::NONE,
+                        ),
+                        state,
+                    )
+                } else {
+                    self.handle_genre_browse_keys(
+                        crossterm::event::KeyEvent::new(
+                            crossterm::event::KeyCode::Enter,
+                            crossterm::event::KeyModifiers::NONE,
+                        ),
+                        state,
+                    )
+                }
+            }
+            BrowseCategory::Folders => {
+                self.handle_folder_browse_keys(
+                    crossterm::event::KeyEvent::new(
+                        crossterm::event::KeyCode::Enter,
+                        crossterm::event::KeyModifiers::NONE,
+                    ),
+                    state,
+                )
+            }
+        }
+    }
+
+    /// Execute inline list filter with debounce.
+    /// Collects filterable items from the filter's target column (captured when filter was activated).
+    async fn execute_list_filter(&self, state: &mut AppState) -> Result<()> {
+        use crate::app::state::GenreContentType;
+        use crate::services::{filter_browse_items, filter_folder_items, filter_stations, DEFAULT_MAX_RESULTS};
+
+        // Increment version for debouncing
+        state.list_filter_version = state.list_filter_version.wrapping_add(1);
+        let version = state.list_filter_version;
+        let query = state.list_filter_query.clone();
+
+        if query.is_empty() {
+            state.list_filter_results = None;
+            state.list_filter_loading = false;
+            return Ok(());
+        }
+
+        state.list_filter_loading = true;
+
+        // Use the filter's captured category and column (not the currently focused one)
+        let event_tx = self.event_tx.clone();
+        let category = state.list_filter_category;
+        let column = state.list_filter_column;
+
+        match category {
+            BrowseCategory::Artists => {
+                // Filter items in the captured column of artist_nav
+                if let Some(col) = state.artist_nav.columns.get(column) {
+                    let items: Vec<_> = col.items.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                        let results = filter_browse_items(&items, &query, DEFAULT_MAX_RESULTS);
+                        let _ = event_tx.send(Event::ListFilterCompleted { version, results }).await;
+                    });
+                }
+            }
+            BrowseCategory::Playlists => {
+                // Filter items in the captured column of playlist_nav
+                if let Some(col) = state.playlist_nav.columns.get(column) {
+                    let items: Vec<_> = col.items.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                        let results = filter_browse_items(&items, &query, DEFAULT_MAX_RESULTS);
+                        let _ = event_tx.send(Event::ListFilterCompleted { version, results }).await;
+                    });
+                }
+            }
+            BrowseCategory::Genres => {
+                if state.genre_content_type == GenreContentType::Stations {
+                    // Filter stations in the captured column
+                    if let Some(col) = state.station_nav.columns.get(column) {
+                        let items: Vec<_> = col.stations.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                            let results = filter_stations(&items, &query, DEFAULT_MAX_RESULTS);
+                            let _ = event_tx.send(Event::ListFilterCompleted { version, results }).await;
+                        });
+                    }
+                } else {
+                    // Filter items in the captured column of genre_nav
+                    if let Some(col) = state.genre_nav.columns.get(column) {
+                        let items: Vec<_> = col.items.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                            let results = filter_browse_items(&items, &query, DEFAULT_MAX_RESULTS);
+                            let _ = event_tx.send(Event::ListFilterCompleted { version, results }).await;
+                        });
+                    }
+                }
+            }
+            BrowseCategory::Folders => {
+                // Filter folder items in the captured column
+                if let Some(ref folder_state) = state.folder_state {
+                    if let Some(col) = folder_state.columns.get(column) {
+                        let items: Vec<_> = col.items.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                            let results = filter_folder_items(&items, &query, DEFAULT_MAX_RESULTS);
+                            let _ = event_tx.send(Event::ListFilterCompleted { version, results }).await;
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     async fn play_current_track(
         &self,
         state: &mut AppState,
@@ -7563,23 +8311,110 @@ impl EventLoop {
         }
     }
 
-    /// Preload folder structure in background for faster Ctrl+O access.
-    fn preload_folders_background(&self, lib_key: &str, lib_title: &str, client: &PlexClient) {
+    /// Preload data in background for faster access.
+    ///
+    /// This is a unified preload function that handles all data types. Each preload type
+    /// spawns an async task that fetches data from the Plex API and sends the result
+    /// back via the event channel.
+    ///
+    /// # Arguments
+    /// * `preload_type` - The type of data to preload
+    /// * `lib_key` - The library key (may be unused for some preload types like Playlists)
+    /// * `client` - The Plex client to clone connection info from
+    fn preload_data(&self, preload_type: PreloadType, lib_key: &str, client: &PlexClient) {
         use crate::services::{FolderColumn, FolderNavigationState, FolderService};
 
-        if let Some(server_url) = client.server_url() {
-            let lib_key = lib_key.to_string();
-            let lib_title = lib_title.to_string();
-            let server_url = server_url.to_string();
-            let token = client.token().map(|s| s.to_string());
-            let event_tx = self.event_tx.clone();
+        let Some(server_url) = client.server_url() else { return };
+        let server_url = server_url.to_string();
+        let token = client.token().map(|s| s.to_string());
+        let lib_key = lib_key.to_string();
+        let event_tx = self.event_tx.clone();
 
-            tokio::spawn(async move {
-                tracing::debug!("Preloading folders for library: {}", lib_key);
-                let client = crate::api::PlexClient::new_with_url(&server_url, token.as_deref());
+        tokio::spawn(async move {
+            let client = crate::api::PlexClient::new_with_url(&server_url, token.as_deref());
+            let lib_key_ref = lib_key.as_str();
 
-                match client.get_library_folders(&lib_key).await {
-                    Ok(response) => {
+            match preload_type {
+                PreloadType::Artists => {
+                    tracing::debug!("Preloading artists for library: {}", lib_key);
+                    if let Ok(data) = client.get_artists(lib_key_ref).await {
+                        tracing::debug!("Artists preloaded: {} items", data.len());
+                        let _ = event_tx.send(Event::ArtistsPreloaded(data)).await;
+                    }
+                }
+                PreloadType::Albums => {
+                    tracing::debug!("Preloading albums for library: {}", lib_key);
+                    if let Ok(data) = client.get_albums(lib_key_ref).await {
+                        tracing::debug!("Albums preloaded: {} items", data.len());
+                        let _ = event_tx.send(Event::AlbumsPreloaded(data)).await;
+                    }
+                }
+                PreloadType::Playlists => {
+                    tracing::debug!("Preloading playlists");
+                    if let Ok(data) = client.get_playlists().await {
+                        tracing::debug!("Playlists preloaded: {} items", data.len());
+                        let _ = event_tx.send(Event::PlaylistsPreloaded(data)).await;
+                    }
+                }
+                PreloadType::Genres => {
+                    tracing::debug!("Preloading genres for library: {}", lib_key);
+                    if let Ok(data) = client.get_genres(lib_key_ref).await {
+                        tracing::debug!("Genres preloaded: {} items", data.len());
+                        let _ = event_tx.send(Event::GenresPreloaded { library_key: lib_key, genres: data }).await;
+                    }
+                }
+                PreloadType::Moods => {
+                    tracing::debug!("Preloading moods for library: {}", lib_key);
+                    if let Ok(data) = client.get_moods(lib_key_ref).await {
+                        tracing::debug!("Moods preloaded: {} items", data.len());
+                        let _ = event_tx.send(Event::MoodsPreloaded { library_key: lib_key, moods: data }).await;
+                    }
+                }
+                PreloadType::ArtistGenres => {
+                    tracing::debug!("Preloading artist genres for library: {}", lib_key);
+                    if let Ok(data) = client.get_artist_genres(lib_key_ref).await {
+                        tracing::debug!("Artist genres preloaded: {} items", data.len());
+                        let _ = event_tx.send(Event::ArtistGenresPreloaded { library_key: lib_key, genres: data }).await;
+                    }
+                }
+                PreloadType::AlbumGenres => {
+                    tracing::debug!("Preloading album genres for library: {}", lib_key);
+                    if let Ok(data) = client.get_album_genres(lib_key_ref).await {
+                        tracing::debug!("Album genres preloaded: {} items", data.len());
+                        let _ = event_tx.send(Event::AlbumGenresPreloaded { library_key: lib_key, genres: data }).await;
+                    }
+                }
+                PreloadType::Styles => {
+                    tracing::debug!("Preloading styles for library: {}", lib_key);
+                    if let Ok(data) = client.get_styles(lib_key_ref).await {
+                        tracing::debug!("Styles preloaded: {} items", data.len());
+                        let _ = event_tx.send(Event::StylesPreloaded { library_key: lib_key, styles: data }).await;
+                    }
+                }
+                PreloadType::Stations => {
+                    tracing::debug!("Preloading stations for library: {}", lib_key);
+                    if let Ok(data) = client.get_stations(lib_key_ref).await {
+                        tracing::debug!("Stations preloaded: {} items", data.len());
+                        let _ = event_tx.send(Event::StationsPreloaded { library_key: lib_key, stations: data }).await;
+                    }
+                }
+                PreloadType::RecentlyAdded => {
+                    tracing::debug!("Preloading recently added albums for library: {}", lib_key);
+                    if let Ok(data) = client.get_recently_added_albums(lib_key_ref, 50).await {
+                        tracing::debug!("Recently added albums preloaded: {} items", data.len());
+                        let _ = event_tx.send(Event::RecentlyAddedPreloaded { library_key: lib_key, albums: data }).await;
+                    }
+                }
+                PreloadType::RecentlyPlayed => {
+                    tracing::debug!("Preloading recently played albums for library: {}", lib_key);
+                    if let Ok(data) = client.get_recently_played_albums(lib_key_ref, 50).await {
+                        tracing::debug!("Recently played albums preloaded: {} items", data.len());
+                        let _ = event_tx.send(Event::RecentlyPlayedPreloaded { library_key: lib_key, albums: data }).await;
+                    }
+                }
+                PreloadType::Folders { lib_title } => {
+                    tracing::debug!("Preloading folders for library: {}", lib_key);
+                    if let Ok(response) = client.get_library_folders(lib_key_ref).await {
                         let items = FolderService::from_response(&response);
                         let root_column = FolderColumn::new(None, lib_title, items);
                         let folder_state = FolderNavigationState {
@@ -7591,313 +8426,34 @@ impl EventLoop {
                         tracing::debug!("Folders preloaded successfully");
                         let _ = event_tx.send(Event::FoldersPreloaded { library_key: lib_key, folder_state }).await;
                     }
-                    Err(e) => {
-                        tracing::debug!("Failed to preload folders: {}", e);
-                        // Silently fail - folders will load on demand when user presses Ctrl+O
-                    }
                 }
-            });
-        }
+            }
+        });
     }
 
-    /// Preload artists in background and save to cache.
-    fn preload_artists_background(&self, lib_key: &str, client: &PlexClient) {
-        if let Some(server_url) = client.server_url() {
-            let lib_key = lib_key.to_string();
-            let server_url = server_url.to_string();
-            let token = client.token().map(|s| s.to_string());
-            let event_tx = self.event_tx.clone();
-
-            tokio::spawn(async move {
-                tracing::debug!("Preloading artists for library: {}", lib_key);
-                let client = crate::api::PlexClient::new_with_url(&server_url, token.as_deref());
-
-                match client.get_artists(&lib_key).await {
-                    Ok(artists) => {
-                        tracing::debug!("Artists preloaded: {} items", artists.len());
-                        let _ = event_tx.send(Event::ArtistsPreloaded(artists)).await;
-                    }
-                    Err(e) => {
-                        tracing::debug!("Failed to preload artists: {}", e);
-                    }
-                }
-            });
-        }
-    }
-
-    /// Preload albums in background and save to cache.
-    fn preload_albums_background(&self, lib_key: &str, client: &PlexClient) {
-        if let Some(server_url) = client.server_url() {
-            let lib_key = lib_key.to_string();
-            let server_url = server_url.to_string();
-            let token = client.token().map(|s| s.to_string());
-            let event_tx = self.event_tx.clone();
-
-            tokio::spawn(async move {
-                tracing::debug!("Preloading albums for library: {}", lib_key);
-                let client = crate::api::PlexClient::new_with_url(&server_url, token.as_deref());
-
-                match client.get_albums(&lib_key).await {
-                    Ok(albums) => {
-                        tracing::debug!("Albums preloaded: {} items", albums.len());
-                        let _ = event_tx.send(Event::AlbumsPreloaded(albums)).await;
-                    }
-                    Err(e) => {
-                        tracing::debug!("Failed to preload albums: {}", e);
-                    }
-                }
-            });
-        }
-    }
-
-    /// Preload playlists in background and save to cache.
-    fn preload_playlists_background(&self, client: &PlexClient) {
-        if let Some(server_url) = client.server_url() {
-            let server_url = server_url.to_string();
-            let token = client.token().map(|s| s.to_string());
-            let event_tx = self.event_tx.clone();
-
-            tokio::spawn(async move {
-                tracing::debug!("Preloading playlists");
-                let client = crate::api::PlexClient::new_with_url(&server_url, token.as_deref());
-
-                match client.get_playlists().await {
-                    Ok(playlists) => {
-                        tracing::debug!("Playlists preloaded: {} items", playlists.len());
-                        let _ = event_tx.send(Event::PlaylistsPreloaded(playlists)).await;
-                    }
-                    Err(e) => {
-                        tracing::debug!("Failed to preload playlists: {}", e);
-                    }
-                }
-            });
-        }
-    }
-
-    /// Preload genres in background and save to cache.
-    fn preload_genres_background(&self, lib_key: &str, client: &PlexClient) {
-        if let Some(server_url) = client.server_url() {
-            let lib_key = lib_key.to_string();
-            let server_url = server_url.to_string();
-            let token = client.token().map(|s| s.to_string());
-            let event_tx = self.event_tx.clone();
-
-            tokio::spawn(async move {
-                tracing::debug!("Preloading genres for library: {}", lib_key);
-                let client = crate::api::PlexClient::new_with_url(&server_url, token.as_deref());
-
-                match client.get_genres(&lib_key).await {
-                    Ok(genres) => {
-                        tracing::debug!("Genres preloaded: {} items", genres.len());
-                        let _ = event_tx.send(Event::GenresPreloaded { library_key: lib_key, genres }).await;
-                    }
-                    Err(e) => {
-                        tracing::debug!("Failed to preload genres: {}", e);
-                    }
-                }
-            });
-        }
-    }
-
-    /// Preload moods in background and save to cache.
-    fn preload_moods_background(&self, lib_key: &str, client: &PlexClient) {
-        if let Some(server_url) = client.server_url() {
-            let lib_key = lib_key.to_string();
-            let server_url = server_url.to_string();
-            let token = client.token().map(|s| s.to_string());
-            let event_tx = self.event_tx.clone();
-
-            tokio::spawn(async move {
-                tracing::debug!("Preloading moods for library: {}", lib_key);
-                let client = crate::api::PlexClient::new_with_url(&server_url, token.as_deref());
-
-                match client.get_moods(&lib_key).await {
-                    Ok(moods) => {
-                        tracing::debug!("Moods preloaded: {} items", moods.len());
-                        let _ = event_tx.send(Event::MoodsPreloaded { library_key: lib_key, moods }).await;
-                    }
-                    Err(e) => {
-                        tracing::debug!("Failed to preload moods: {}", e);
-                    }
-                }
-            });
-        }
-    }
-
-    /// Preload artist genres (Plex genres at artist level) in background and save to cache.
-    fn preload_artist_genres_background(&self, lib_key: &str, client: &PlexClient) {
-        if let Some(server_url) = client.server_url() {
-            let lib_key = lib_key.to_string();
-            let server_url = server_url.to_string();
-            let token = client.token().map(|s| s.to_string());
-            let event_tx = self.event_tx.clone();
-
-            tokio::spawn(async move {
-                tracing::debug!("Preloading artist genres for library: {}", lib_key);
-                let client = crate::api::PlexClient::new_with_url(&server_url, token.as_deref());
-
-                match client.get_artist_genres(&lib_key).await {
-                    Ok(genres) => {
-                        tracing::debug!("Artist genres preloaded: {} items", genres.len());
-                        let _ = event_tx.send(Event::ArtistGenresPreloaded { library_key: lib_key, genres }).await;
-                    }
-                    Err(e) => {
-                        tracing::debug!("Failed to preload artist genres: {}", e);
-                    }
-                }
-            });
-        }
-    }
-
-    /// Preload album genres (Plex genres at album level) in background and save to cache.
-    fn preload_album_genres_background(&self, lib_key: &str, client: &PlexClient) {
-        if let Some(server_url) = client.server_url() {
-            let lib_key = lib_key.to_string();
-            let server_url = server_url.to_string();
-            let token = client.token().map(|s| s.to_string());
-            let event_tx = self.event_tx.clone();
-
-            tokio::spawn(async move {
-                tracing::debug!("Preloading album genres for library: {}", lib_key);
-                let client = crate::api::PlexClient::new_with_url(&server_url, token.as_deref());
-
-                match client.get_album_genres(&lib_key).await {
-                    Ok(genres) => {
-                        tracing::debug!("Album genres preloaded: {} items", genres.len());
-                        let _ = event_tx.send(Event::AlbumGenresPreloaded { library_key: lib_key, genres }).await;
-                    }
-                    Err(e) => {
-                        tracing::debug!("Failed to preload album genres: {}", e);
-                    }
-                }
-            });
-        }
-    }
-
-    /// Preload styles in background and save to cache.
-    fn preload_styles_background(&self, lib_key: &str, client: &PlexClient) {
-        if let Some(server_url) = client.server_url() {
-            let lib_key = lib_key.to_string();
-            let server_url = server_url.to_string();
-            let token = client.token().map(|s| s.to_string());
-            let event_tx = self.event_tx.clone();
-
-            tokio::spawn(async move {
-                tracing::debug!("Preloading styles for library: {}", lib_key);
-                let client = crate::api::PlexClient::new_with_url(&server_url, token.as_deref());
-
-                match client.get_styles(&lib_key).await {
-                    Ok(styles) => {
-                        tracing::debug!("Styles preloaded: {} items", styles.len());
-                        let _ = event_tx.send(Event::StylesPreloaded { library_key: lib_key, styles }).await;
-                    }
-                    Err(e) => {
-                        tracing::debug!("Failed to preload styles: {}", e);
-                    }
-                }
-            });
-        }
-    }
-
-    /// Preload stations in background and save to cache.
-    fn preload_stations_background(&self, lib_key: &str, client: &PlexClient) {
-        if let Some(server_url) = client.server_url() {
-            let lib_key = lib_key.to_string();
-            let server_url = server_url.to_string();
-            let token = client.token().map(|s| s.to_string());
-            let event_tx = self.event_tx.clone();
-
-            tokio::spawn(async move {
-                tracing::debug!("Preloading stations for library: {}", lib_key);
-                let client = crate::api::PlexClient::new_with_url(&server_url, token.as_deref());
-
-                match client.get_stations(&lib_key).await {
-                    Ok(stations) => {
-                        tracing::debug!("Stations preloaded: {} items", stations.len());
-                        let _ = event_tx.send(Event::StationsPreloaded { library_key: lib_key, stations }).await;
-                    }
-                    Err(e) => {
-                        tracing::debug!("Failed to preload stations: {}", e);
-                    }
-                }
-            });
-        }
-    }
-
-    /// Preload recently added albums in background and save to cache.
-    fn preload_recently_added_background(&self, lib_key: &str, client: &PlexClient) {
-        if let Some(server_url) = client.server_url() {
-            let lib_key = lib_key.to_string();
-            let server_url = server_url.to_string();
-            let token = client.token().map(|s| s.to_string());
-            let event_tx = self.event_tx.clone();
-
-            tokio::spawn(async move {
-                tracing::debug!("Preloading recently added albums for library: {}", lib_key);
-                let client = crate::api::PlexClient::new_with_url(&server_url, token.as_deref());
-
-                match client.get_recently_added_albums(&lib_key, 50).await {
-                    Ok(albums) => {
-                        tracing::debug!("Recently added albums preloaded: {} items", albums.len());
-                        let _ = event_tx.send(Event::RecentlyAddedPreloaded { library_key: lib_key, albums }).await;
-                    }
-                    Err(e) => {
-                        tracing::debug!("Failed to preload recently added albums: {}", e);
-                    }
-                }
-            });
-        }
-    }
-
-    /// Preload recently played albums in background and save to cache.
-    fn preload_recently_played_background(&self, lib_key: &str, client: &PlexClient) {
-        if let Some(server_url) = client.server_url() {
-            let lib_key = lib_key.to_string();
-            let server_url = server_url.to_string();
-            let token = client.token().map(|s| s.to_string());
-            let event_tx = self.event_tx.clone();
-
-            tokio::spawn(async move {
-                tracing::debug!("Preloading recently played albums for library: {}", lib_key);
-                let client = crate::api::PlexClient::new_with_url(&server_url, token.as_deref());
-
-                // Use the lastViewedAt sort approach - more reliable than hubs
-                match client.get_recently_played_albums(&lib_key, 50).await {
-                    Ok(albums) => {
-                        tracing::debug!("Recently played albums preloaded: {} items", albums.len());
-                        let _ = event_tx.send(Event::RecentlyPlayedPreloaded { library_key: lib_key, albums }).await;
-                    }
-                    Err(e) => {
-                        tracing::debug!("Failed to preload recently played albums: {}", e);
-                    }
-                }
-            });
-        }
-    }
-
-    /// Preload recent playlists in background.
-    fn preload_recent_playlists_background(&self, _lib_key: &str, client: &PlexClient) {
-        if let Some(server_url) = client.server_url() {
-            let server_url = server_url.to_string();
-            let token = client.token().map(|s| s.to_string());
-            let event_tx = self.event_tx.clone();
-
-            tokio::spawn(async move {
-                tracing::debug!("Preloading recent playlists");
-                let client = crate::api::PlexClient::new_with_url(&server_url, token.as_deref());
-
-                // Fallback: get all playlists sorted by updated_at
-                // (Hub-based recent playlists are unreliable, so just use sorted playlists)
-                if let Ok(mut all_playlists) = client.get_playlists().await {
-                    all_playlists.sort_by(|a, b| {
-                        b.updated_at.unwrap_or(0).cmp(&a.updated_at.unwrap_or(0))
-                    });
-                    let recent: Vec<_> = all_playlists.into_iter().take(20).collect();
-                    tracing::debug!("Recent playlists preloaded: {} items", recent.len());
-                    let _ = event_tx.send(Event::RecentPlaylistsPreloaded(recent)).await;
-                }
-            });
-        }
+    /// Preload all library data in background for a fresh library.
+    ///
+    /// This initiates background fetches for all data types: artists, albums, playlists,
+    /// genres, moods, styles, stations, folders, and recent content. Each fetch runs
+    /// concurrently and sends its result via the event channel when complete.
+    ///
+    /// # Arguments
+    /// * `lib_key` - The library key to preload data for
+    /// * `lib_title` - The library title for display in folder columns
+    /// * `client` - The Plex client to clone connection info from
+    fn preload_all_library_data(&self, lib_key: &str, lib_title: &str, client: &PlexClient) {
+        self.preload_data(PreloadType::Artists, lib_key, client);
+        self.preload_data(PreloadType::Folders { lib_title: lib_title.to_string() }, lib_key, client);
+        self.preload_data(PreloadType::Albums, lib_key, client);
+        self.preload_data(PreloadType::Genres, lib_key, client);
+        self.preload_data(PreloadType::ArtistGenres, lib_key, client);
+        self.preload_data(PreloadType::AlbumGenres, lib_key, client);
+        self.preload_data(PreloadType::Moods, lib_key, client);
+        self.preload_data(PreloadType::Styles, lib_key, client);
+        self.preload_data(PreloadType::Stations, lib_key, client);
+        self.preload_data(PreloadType::Playlists, lib_key, client);
+        self.preload_data(PreloadType::RecentlyAdded, lib_key, client);
+        self.preload_data(PreloadType::RecentlyPlayed, lib_key, client);
     }
 
     /// Fetch more tracks for the current radio station.
@@ -8026,6 +8582,8 @@ impl EventLoop {
                     lib_key, folder_state.library_key);
             }
         }
+        // Save cached subfolder contents
+        cache_data.folder_contents = state.folder_contents_cache.clone();
         cache_data.genres = state.genres.clone();
         cache_data.artist_genres = state.artist_genres.clone();
         cache_data.album_genres = state.album_genres.clone();
@@ -8034,7 +8592,6 @@ impl EventLoop {
         cache_data.stations = state.stations.clone();
         cache_data.recently_added_albums = state.recently_added_albums.clone();
         cache_data.recently_played_albums = state.recently_played_albums.clone();
-        cache_data.recent_playlists = state.recent_playlists.clone();
 
         // Spawn async task to save cache (non-blocking)
         let event_tx = self.event_tx.clone();
@@ -8076,6 +8633,26 @@ impl EventLoop {
     fn refresh_current_view(&self, state: &mut AppState) -> Vec<Action> {
         use super::state::{RefreshCategory, ArtistViewMode, PlaylistsMode, GenreContentType};
 
+        // Special handling for Folders: refresh the focused column (subfolder or root)
+        if state.view == View::Browse && state.browse_category == BrowseCategory::Folders {
+            // Extract subfolder key first to avoid borrow conflict
+            let subfolder_key = state.folder_state.as_ref().and_then(|folder_state| {
+                if folder_state.focused_column > 0 {
+                    folder_state.columns.get(folder_state.focused_column)
+                        .and_then(|col| col.key.clone())
+                } else {
+                    None
+                }
+            });
+
+            if let Some(folder_key) = subfolder_key {
+                // User is focused on a subfolder - refresh that specific subfolder
+                state.set_status("Refreshing folder...".to_string());
+                return vec![Action::RefreshSubfolder(folder_key)];
+            }
+            // Fall through to refresh root folders if focused_column == 0 or no subfolder key
+        }
+
         let category = match state.view {
             View::Browse => match state.browse_category {
                 BrowseCategory::Artists => match state.artist_view_mode {
@@ -8086,7 +8663,6 @@ impl EventLoop {
                 BrowseCategory::Playlists => match state.playlists_mode {
                     PlaylistsMode::All => Some(RefreshCategory::Playlists),
                     PlaylistsMode::RecentlyAdded => Some(RefreshCategory::RecentlyAdded),
-                    PlaylistsMode::RecentPlaylists => Some(RefreshCategory::RecentPlaylists),
                 },
                 BrowseCategory::Genres => match state.genre_content_type {
                     GenreContentType::Genres => Some(RefreshCategory::Genres),
@@ -8094,8 +8670,8 @@ impl EventLoop {
                     GenreContentType::AlbumGenres => Some(RefreshCategory::AlbumGenres),
                     GenreContentType::Moods => Some(RefreshCategory::Moods),
                     GenreContentType::Styles => Some(RefreshCategory::Styles),
+                    GenreContentType::Stations => Some(RefreshCategory::Stations),
                 },
-                BrowseCategory::Stations => Some(RefreshCategory::Stations),
                 BrowseCategory::Folders => Some(RefreshCategory::Folders),
             },
             _ => None,
@@ -8134,9 +8710,6 @@ impl EventLoop {
             (BrowseCategory::Playlists, RefreshCategory::RecentlyAdded) => {
                 matches!(state.playlists_mode, PlaylistsMode::RecentlyAdded)
             }
-            (BrowseCategory::Playlists, RefreshCategory::RecentPlaylists) => {
-                matches!(state.playlists_mode, PlaylistsMode::RecentPlaylists)
-            }
             (BrowseCategory::Genres, RefreshCategory::Genres) => {
                 matches!(state.genre_content_type, GenreContentType::Genres)
             }
@@ -8152,7 +8725,9 @@ impl EventLoop {
             (BrowseCategory::Genres, RefreshCategory::Styles) => {
                 matches!(state.genre_content_type, GenreContentType::Styles)
             }
-            (BrowseCategory::Stations, RefreshCategory::Stations) => true,
+            (BrowseCategory::Genres, RefreshCategory::Stations) => {
+                matches!(state.genre_content_type, GenreContentType::Stations)
+            }
             (BrowseCategory::Folders, RefreshCategory::Folders) => true,
             _ => false,
         }
@@ -8219,7 +8794,6 @@ impl EventLoop {
                     RefreshCategory::Albums => !data.albums.is_empty(),
                     RefreshCategory::Playlists => !data.playlists.is_empty(),
                     RefreshCategory::RecentlyAdded => !data.recently_added_albums.is_empty(),
-                    RefreshCategory::RecentPlaylists => !data.recent_playlists.is_empty(),
                     RefreshCategory::Genres => !data.genres.is_empty(),
                     RefreshCategory::ArtistGenres => !data.artist_genres.is_empty(),
                     RefreshCategory::AlbumGenres => !data.album_genres.is_empty(),
@@ -8254,7 +8828,6 @@ impl EventLoop {
             RefreshCategory::Albums => state.albums.len(),
             RefreshCategory::Playlists => state.playlists.len(),
             RefreshCategory::RecentlyAdded => state.recently_added_albums.len(),
-            RefreshCategory::RecentPlaylists => state.recent_playlists.len(),
             RefreshCategory::Genres => state.genres.len(),
             RefreshCategory::ArtistGenres => state.artist_genres.len(),
             RefreshCategory::AlbumGenres => state.album_genres.len(),
@@ -8318,24 +8891,6 @@ impl EventLoop {
                         }
                         Err(e) => {
                             tracing::warn!("Failed to refresh recently added: {}", e);
-                            false
-                        }
-                    }
-                }
-                RefreshCategory::RecentPlaylists => {
-                    // Get all playlists and sort by updated_at to get recent ones
-                    match client.get_playlists().await {
-                        Ok(mut playlists) => {
-                            playlists.sort_by(|a, b| {
-                                b.updated_at.unwrap_or(0).cmp(&a.updated_at.unwrap_or(0))
-                            });
-                            let recent: Vec<_> = playlists.into_iter().take(20).collect();
-                            let new_count = recent.len();
-                            let _ = event_tx.send(Event::RecentPlaylistsPreloaded(recent)).await;
-                            new_count != old_count
-                        }
-                        Err(e) => {
-                            tracing::warn!("Failed to refresh recent playlists: {}", e);
                             false
                         }
                     }
@@ -8448,22 +9003,54 @@ impl EventLoop {
     }
 }
 
-fn find_best_server_url(servers: &[crate::api::models::PlexServer]) -> Option<String> {
+/// Find the first working server connection by testing each in priority order.
+/// Priority: local non-relay > non-relay > relay
+///
+/// This tests connections with a short timeout before committing, which is
+/// essential for remote access when local IPs (encoded in plex.direct URLs)
+/// are unreachable from outside the LAN.
+async fn find_working_connection(
+    server: &crate::api::models::PlexServer,
+    token: &str,
+) -> Option<String> {
+    use crate::api::models::ServerConnection;
+
+    // Build prioritized list of connections
+    let mut connections: Vec<&ServerConnection> = Vec::new();
+
+    // Priority 1: local, non-relay (fastest when on same LAN)
+    connections.extend(server.connections.iter().filter(|c| c.local && !c.relay));
+    // Priority 2: non-relay remote (direct connection over internet)
+    connections.extend(server.connections.iter().filter(|c| !c.local && !c.relay));
+    // Priority 3: relay (fallback through Plex's servers)
+    connections.extend(server.connections.iter().filter(|c| c.relay));
+
+    // Test each connection until one works
+    for conn in connections {
+        match crate::plex::test_connection(&conn.uri, token).await {
+            Ok(()) => {
+                tracing::info!("Connection test succeeded: {}", conn.uri);
+                return Some(conn.uri.clone());
+            }
+            Err(e) => {
+                tracing::debug!("Connection test failed for {}: {}", conn.uri, e);
+            }
+        }
+    }
+
+    tracing::warn!("All connection tests failed for server {}", server.name);
+    None
+}
+
+/// Find the first working connection across multiple servers.
+/// Tests each server's connections in priority order.
+async fn find_working_connection_from_servers(
+    servers: &[crate::api::models::PlexServer],
+    token: &str,
+) -> Option<String> {
     for server in servers {
-        for conn in &server.connections {
-            if conn.local && !conn.relay {
-                return Some(conn.uri.clone());
-            }
-        }
-        for conn in &server.connections {
-            if !conn.relay {
-                return Some(conn.uri.clone());
-            }
-        }
-        for conn in &server.connections {
-            if conn.relay {
-                return Some(conn.uri.clone());
-            }
+        if let Some(url) = find_working_connection(server, token).await {
+            return Some(url);
         }
     }
     None

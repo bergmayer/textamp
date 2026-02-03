@@ -1647,3 +1647,35 @@ impl PlexClient {
         }
     }
 }
+
+// ============================================================================
+// Standalone Connection Testing
+// ============================================================================
+
+/// Test if a server URL is reachable with a short timeout.
+/// Returns Ok(()) if reachable, Err with reason if not.
+///
+/// This is used to test multiple connection options before committing to one,
+/// which is essential for remote access when local IPs are unreachable.
+pub async fn test_connection(url: &str, token: &str) -> Result<(), ApiError> {
+    let http = Client::builder()
+        .timeout(Duration::from_secs(CONNECTION_TEST_TIMEOUT_SECS))
+        .build()
+        .map_err(ApiError::Http)?;
+
+    let response = http
+        .get(format!("{}/", url.trim_end_matches('/')))
+        .header(HEADER_PLEX_TOKEN, token)
+        .header("Accept", "application/json")
+        .send()
+        .await?;
+
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(ApiError::ServerError {
+            status: response.status().as_u16(),
+            message: "Server returned error".to_string(),
+        })
+    }
+}

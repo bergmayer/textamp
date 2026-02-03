@@ -118,3 +118,19 @@ pub const DEFAULT_SEARCH_LIMIT: u32 = 50;
 
 /// Default similar items limit.
 pub const DEFAULT_SIMILAR_LIMIT: u32 = 10;
+
+/// Timeout for connection testing (in seconds).
+pub const CONNECTION_TEST_TIMEOUT_SECS: u64 = 5;
+
+// ============================================================================
+// Cache Staleness Thresholds
+// ============================================================================
+
+/// Cache staleness threshold (72 hours).
+/// Cache older than this triggers background refresh when idle.
+pub const CACHE_STALE_THRESHOLD_SECS: u64 = 72 * 60 * 60;
+
+/// Very stale cache threshold (32 days).
+/// For most caches: triggers background refresh when idle 2+ minutes.
+/// For subfolders: entries older than this are DELETED (not refreshed).
+pub const CACHE_VERY_STALE_THRESHOLD_SECS: u64 = 32 * 24 * 60 * 60;

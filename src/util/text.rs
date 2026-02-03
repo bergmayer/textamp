@@ -58,6 +58,41 @@ pub fn truncate_str(s: &str, max_len: usize) -> String {
     }
 }
 
+/// Middle-truncate a string, preserving both the beginning and end.
+///
+/// Replaces the center characters with a single ellipsis (…) so that both
+/// the start and end of the string remain visible.
+///
+/// # Examples
+/// ```
+/// use textamp::util::truncate_middle;
+/// assert_eq!(truncate_middle("ExtremelyLongFileName_2024.png", 20), "ExtremelyL…_2024.png");
+/// assert_eq!(truncate_middle("short", 20), "short");
+/// ```
+pub fn truncate_middle(s: &str, max_len: usize) -> String {
+    let char_count = s.chars().count();
+
+    if char_count <= max_len {
+        return s.to_string();
+    }
+
+    // Need at least 3 characters for "x…x"
+    if max_len < 3 {
+        return s.chars().take(max_len).collect();
+    }
+
+    // We need 1 char for the ellipsis, leaving (max_len - 1) chars for content
+    // Split roughly evenly, with start getting the extra char if odd
+    let content_len = max_len - 1;
+    let start_len = (content_len + 1) / 2;
+    let end_len = content_len / 2;
+
+    let start: String = s.chars().take(start_len).collect();
+    let end: String = s.chars().skip(char_count - end_len).collect();
+
+    format!("{}…{}", start, end)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,5 +147,48 @@ mod tests {
         assert_eq!(format_bytes(1536), "1.5 KB");
         assert_eq!(format_bytes(1048576), "1.0 MB");
         assert_eq!(format_bytes(1073741824), "1.0 GB");
+    }
+
+    #[test]
+    fn test_truncate_middle_short_string() {
+        assert_eq!(truncate_middle("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_truncate_middle_exact_length() {
+        assert_eq!(truncate_middle("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_middle_long_string() {
+        // "ExtremelyLongFileName_2024.png" = 30 chars
+        // At 20: start=10, end=9 → "ExtremelyL…_2024.png"
+        assert_eq!(
+            truncate_middle("ExtremelyLongFileName_2024.png", 20),
+            "ExtremelyL…_2024.png"
+        );
+    }
+
+    #[test]
+    fn test_truncate_middle_preserves_ends() {
+        // "abcdefghij" = 10 chars, truncate to 5
+        // content_len = 4, start_len = 2, end_len = 2
+        // "ab…ij"
+        assert_eq!(truncate_middle("abcdefghij", 5), "ab…ij");
+    }
+
+    #[test]
+    fn test_truncate_middle_unicode() {
+        // Japanese: "こんにちは世界" = 7 chars
+        // At 5: content_len = 4, start=2, end=2
+        // "こん…世界"
+        assert_eq!(truncate_middle("こんにちは世界", 5), "こん…世界");
+    }
+
+    #[test]
+    fn test_truncate_middle_minimum() {
+        assert_eq!(truncate_middle("abcdef", 3), "a…f");
+        assert_eq!(truncate_middle("abcdef", 2), "ab");
+        assert_eq!(truncate_middle("abcdef", 1), "a");
     }
 }

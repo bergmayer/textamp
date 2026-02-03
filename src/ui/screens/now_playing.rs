@@ -190,7 +190,7 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
                 " radio ".to_string()
             }
         }
-        PlaybackMode::Queue | PlaybackMode::None => " now playing ".to_string(),
+        PlaybackMode::Queue | PlaybackMode::None => " queue ".to_string(),
     };
 
     let block = Block::default()

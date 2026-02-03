@@ -11,6 +11,10 @@ pub enum Action {
     // Navigation (musikcube-style)
     SetView(View),
     SetCategory(BrowseCategory),
+    NextView,   // Tab: cycle Artists→Playlists→Genres→Folders→NowPlaying
+    PrevView,   // Shift+Tab: cycle backwards
+    NextMode,   // Shift+Down: cycle modes within current category
+    PrevMode,   // Shift+Up: cycle modes backwards
     ToggleFocus,
 
     // Data loading
@@ -70,24 +74,24 @@ pub enum Action {
     LoadAlbumGenreAlbums,      // Load albums in selected album genre
     LoadMoodAlbums,            // Load albums in selected mood
     LoadStyleAlbums,           // Load albums in selected style
-    LoadGenreTracks { rating_key: String }, // Load tracks for album in genre Miller columns
-    PlayGenreTrack(usize),     // Play track from genre tracks list
     CycleGenreContentType,     // Ctrl+G when in genres: cycle Genres -> Artist -> Album -> Moods -> Styles
+    RefreshGenreView,          // Refresh genre view after mode change (shared logic)
     CycleGenreSort,            // Cycle through sort modes
-    LoadGenreArtists,          // Legacy - now prefer LoadGenreAlbums
 
     // Artist view mode cycling
     CycleArtistViewMode, // Ctrl+A when in Artists: cycle Artist → Album Artist → Album
+    RefreshArtistView,   // Refresh artist view after mode change (shared logic)
 
     // Now Playing view mode cycling
     CycleNowPlayingMode, // Ctrl+N when already in Now Playing: cycle Queue → Recently Played
+    RefreshNowPlayingView, // Refresh now playing view after mode change (shared logic)
     LoadRecentlyPlayedAlbums,
     PlayRecentlyPlayedAlbum(usize),  // Play album at index in recently played list
 
     // Playlists view mode cycling
-    CyclePlaylistsMode, // Ctrl+P when already in Playlists: cycle All → Recently Added → Recent
+    CyclePlaylistsMode, // Ctrl+P when already in Playlists: cycle All → Recently Added
+    RefreshPlaylistsView, // Refresh playlists view after mode change (shared logic)
     LoadRecentlyAddedAlbums,
-    LoadRecentPlaylists,
 
     // Search/Filter
     AppendSearchChar(char),
@@ -120,6 +124,24 @@ pub enum Action {
     NavigateIntoFolder(String),
     NavigateUpFolder,
     PlayFolderTracks,
+    /// Refresh a specific subfolder (F5 when focused on a subfolder column).
+    /// This is the only way subfolder caches get manually refreshed.
+    RefreshSubfolder(String),
+
+    // Miller column navigation for Artists view
+    LoadArtistAlbumsForMiller { artist_key: String },
+    LoadAlbumTracksForMiller { album_key: String },
+    PlayTrackFromMiller { column_index: usize, track_index: usize },
+
+    // Miller column navigation for Genres view
+    LoadGenreAlbumsForMiller { genre_key: String },
+    LoadGenreTracksForMiller { album_key: String },
+    PlayGenreTrackFromMiller { column_index: usize, track_index: usize },
+
+    // Miller column navigation for Playlists view
+    LoadPlaylistTracksForMiller { playlist_key: String },
+    LoadAlbumTracksForPlaylistMiller { album_key: String },  // For Recently Added mode
+    PlayPlaylistTrackFromMiller { column_index: usize, track_index: usize },
 
     // Radio mode
     StartTrackRadio { track_key: String, title: String },
@@ -168,4 +190,19 @@ pub enum Action {
     CancelAdventure,                     // Cancel adventure mode
     AdventureComplete(Vec<Track>),       // Adventure ready
     AdventureError(String),              // Generation failed
+
+    // Inline list filter
+    ActivateListFilter,
+    DeactivateListFilter,
+    SelectFilteredItem,       // Select the currently highlighted filtered item (drill down/play)
+    FilteredListUp,           // Navigate up within filtered results
+    FilteredListDown,         // Navigate down within filtered results
+    AppendListFilterChar(char),
+    DeleteListFilterChar,
+    ClearListFilter,
+    ExecuteListFilter,
+
+    // Search popup (Ctrl+F)
+    OpenSearchPopup,
+    CloseSearchPopup,
 }

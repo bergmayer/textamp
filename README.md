@@ -79,8 +79,33 @@ textamp uses an aggressive caching strategy for fast startup:
 - **Change notifications**: A toast appears in the bottom-right when refreshed data differs from cache
 - **Very stale refresh**: Data older than 32 days is automatically refreshed when idle (2+ minutes)
 - **Track not found**: If playback fails with a 404 error, you'll be prompted to refresh the cache
+- **Per-library caches**: Each library has its own cache file, preserved when switching libraries
 
 The cache is saved periodically while idle and on quit. To clear all cached data, use Settings (F2) > Data > Clear Cache.
+
+### Subfolder Caching (Folders View)
+
+Subfolders in the Folders view (`Ctrl+O`) have special caching behavior that differs from other library data:
+
+| Behavior | Standard Caches | Subfolder Caches |
+|----------|-----------------|------------------|
+| **Loading** | Preloaded on library load | Lazy (only when navigated to) |
+| **72h staleness** | Background refresh | No automatic refresh |
+| **32d very stale** | Background refresh when idle | **Deleted** (not refreshed) |
+| **Manual refresh** | F5 refreshes category | F5 refreshes focused folder |
+
+This design has several benefits:
+
+1. **Fast navigation**: Frequently-used folders load instantly from cache
+2. **No stale folder bloat**: Very old folder data is automatically pruned
+3. **Accurate data**: Folder structures change more than metadata, so stale data is deleted rather than kept
+4. **User control**: Press F5 to refresh any folder that seems outdated
+
+When you navigate into a subfolder:
+1. If cached and less than 32 days old: displays instantly from cache
+2. If not cached or very stale: fetches from server and caches the result
+
+Subfolder caches include both sub-subfolders and tracks, so the entire folder tree you've browsed is preserved.
 
 ## Configuration
 
@@ -127,7 +152,10 @@ Change themes in Settings (F2) > Interface, or set in config file.
 | Key | Action |
 |-----|--------|
 | `↑` / `↓` | Navigate lists |
-| `Tab` | Toggle focus between panels |
+| `Tab` | Next category (Artists→Playlists→Genres→Folders→Now Playing) |
+| `Shift+Tab` | Previous category |
+| `Shift+↓` | Cycle modes within category (e.g., Artists → Album Artists → Albums) |
+| `Shift+↑` | Cycle modes backwards |
 | `Enter` / `→` | Select / Drill down / Play |
 | `←` / `Backspace` | Go back / Focus left |
 | `Page Up/Down` | Scroll by page |
@@ -138,30 +166,27 @@ Change themes in Settings (F2) > Interface, or set in config file.
 | Key | Action |
 |-----|--------|
 | `Ctrl+A` | Artists (cycles: Artists → Album Artists → Albums) |
-| `Ctrl+P` | Playlists (cycles: All → Recently Added → Recent Playlists) |
-| `Ctrl+G` | Genres (cycles: Genres → Plex Genres → Moods) |
+| `Ctrl+P` | Playlists (cycles: All → Recently Added) |
+| `Ctrl+G` | Genres (cycles: Genres → Artist Genres → Album Genres → Moods → Styles → Stations) |
 | `Ctrl+O` | Folders |
-| `Ctrl+T` | Stations |
 
-### Views (Ctrl+key)
+### Views
 | Key | Action |
 |-----|--------|
-| `Ctrl+F` | Search / Filter (tabbed view) |
 | `Ctrl+N` | Now Playing (cycles: Queue → Recently Played → Visualizer) |
 | `F1` / `?` | Help screen |
 | `F2` | Settings |
 
-### Commands (Alt+key)
+### Commands
 
 | Key | Action |
 |-----|--------|
+| `Ctrl+F` | Search popup (floating dialog) |
+| `Ctrl+S` | Save queue as playlist (in Now Playing) |
 | `Alt+R` | Create radio from selection |
 | `Alt+E` | Add selection to queue (track or album) |
 | `Alt+S` | Similar albums/tracks |
 | `Alt+V` | Sonic Adventure (see below) |
-| `Alt+P` | Save as playlist (in Now Playing) |
-| `Alt+]` | Next track |
-| `Alt+[` | Previous track |
 | `Alt+O` | Cycle sort order (in Genres) or tabs (in Search) |
 
 ### Search / Filter (Ctrl+F)

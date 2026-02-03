@@ -5,13 +5,53 @@
 //!
 //! IMPORTANT: Cache writes should happen once (on quit or periodically),
 //! not from background tasks, to avoid file contention.
+//!
+//! # Subfolder Caching
+//!
+//! Subfolders have different caching behavior than other library data:
+//! - **Lazy caching**: Only cached when navigated to (not preloaded)
+//! - **No auto-refresh**: Stale subfolders are NOT automatically refreshed
+//! - **Manual refresh**: F5 refreshes the currently focused subfolder
+//! - **32-day deletion**: Very stale entries are deleted (not refreshed)
+//!
+//! This design prevents accumulation of stale folder data while still
+//! providing fast navigation for frequently-accessed folders.
 
-use super::models::{Album, Artist, Genre, Playlist, Station};
-use crate::services::FolderItem;
+use super::models::{Album, Artist, FolderItem, Genre, Playlist, Station};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Cached subfolder with timestamp for staleness tracking.
+///
+/// Each subfolder is cached individually with its own timestamp,
+/// allowing fine-grained staleness control. Subfolders older than
+/// 32 days are deleted on load (not refreshed like other caches).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachedFolder {
+    /// The folder's contents (subfolders and tracks).
+    pub items: Vec<FolderItem>,
+    /// Unix timestamp when this folder was cached.
+    pub timestamp: u64,
+}
+
+impl CachedFolder {
+    /// Create a new cached folder with current timestamp.
+    pub fn new(items: Vec<FolderItem>) -> Self {
+        Self {
+            items,
+            timestamp: current_timestamp(),
+        }
+    }
+
+    /// Check if this folder cache is older than the given threshold (in seconds).
+    pub fn is_older_than(&self, threshold_secs: u64) -> bool {
+        let now = current_timestamp();
+        now.saturating_sub(self.timestamp) > threshold_secs
+    }
+}
 
 /// Cache data structure with timestamp.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -32,6 +72,11 @@ pub struct CacheData {
     // Folder data
     #[serde(default)]
     pub root_folders: Vec<FolderItem>,
+    /// Cached subfolder contents: folder_key -> CachedFolder with timestamp.
+    /// Each entry has its own timestamp for individual staleness tracking.
+    /// Entries older than 32 days are deleted on load (not refreshed).
+    #[serde(default)]
+    pub folder_contents: HashMap<String, CachedFolder>,
 
     // Genre/mood/style data
     #[serde(default)]
@@ -54,8 +99,6 @@ pub struct CacheData {
     pub recently_added_albums: Vec<Album>,
     #[serde(default)]
     pub recently_played_albums: Vec<Album>,
-    #[serde(default)]
-    pub recent_playlists: Vec<Playlist>,
 }
 
 impl CacheData {
@@ -114,10 +157,11 @@ impl LibraryCache {
                 match serde_json::from_str::<CacheData>(&contents) {
                     Ok(data) => {
                         tracing::info!(
-                            "Loaded cache: {} artists, {} albums, {} folders",
+                            "Loaded cache: {} artists, {} albums, {} root folders, {} cached subfolders",
                             data.artists.len(),
                             data.albums.len(),
-                            data.root_folders.len()
+                            data.root_folders.len(),
+                            data.folder_contents.len()
                         );
                         Some(data)
                     }
@@ -211,35 +255,9 @@ impl Default for LibraryCache {
     }
 }
 
-/// Get the cache directory path.
-///
-/// Checks $XDG_CACHE_HOME first (on macOS and Linux), then falls back to platform defaults.
+/// Get the cache directory path using shared utility.
 fn get_cache_dir() -> Option<PathBuf> {
-    // Check XDG env var first (works on both macOS and Linux)
-    if let Ok(xdg_cache) = std::env::var("XDG_CACHE_HOME") {
-        return Some(PathBuf::from(xdg_cache).join("textamp"));
-    }
-
-    // Fall back to platform default
-    #[cfg(target_os = "linux")]
-    {
-        dirs::home_dir().map(|h| h.join(".cache/textamp"))
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        dirs::cache_dir().map(|p| p.join("textamp"))
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        dirs::cache_dir().map(|p| p.join("textamp"))
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    {
-        dirs::cache_dir().map(|p| p.join("textamp"))
-    }
+    crate::util::paths::get_cache_dir("textamp")
 }
 
 /// Get the current Unix timestamp.

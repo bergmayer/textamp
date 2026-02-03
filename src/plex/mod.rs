@@ -41,8 +41,8 @@ pub mod models;
 mod waveform;
 
 pub use auth::{PlexAuth, PlexClientInfo, ServerInfo, StoredAuth};
-pub use cache::{CacheData, LibraryCache};
-pub use client::PlexClient;
+pub use cache::{CacheData, CachedFolder, LibraryCache};
+pub use client::{PlexClient, test_connection};
 pub use error::ApiError;
 pub use waveform::{WaveformCache, WaveformData, WaveformError, generate_waveform};
 

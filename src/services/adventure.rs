@@ -5,14 +5,22 @@
 
 use crate::api::models::Track;
 use crate::api::{ApiError, PlexClient};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
+
+/// Number of recent artists to avoid (not just immediate previous).
+const MAX_RECENT_ARTISTS: usize = 4;
+
+/// Maximum tracks per artist in the entire adventure.
+const MAX_ARTIST_TRACKS: usize = 3;
 
 /// Generate a Sonic Adventure playlist from start to end track.
 ///
 /// The algorithm:
 /// 1. Get similar tracks for both start and end points
 /// 2. Find "bridge" tracks that are similar to both
-/// 3. Build a path with artist diversity: avoid consecutive tracks from same artist
+/// 3. Build a path with artist diversity:
+///    - Avoid recent artists (last 4, not just immediate previous)
+///    - Cap per-artist tracks (max 3 per artist in the adventure)
 /// 4. Structure: start -> start-similar -> bridges -> end-similar -> end
 pub async fn generate_adventure(
     client: &PlexClient,
@@ -55,21 +63,23 @@ pub async fn generate_adventure(
     let mut playlist = Vec::with_capacity(length);
     let mut used_keys = HashSet::new();
     let mut artist_counts: HashMap<String, usize> = HashMap::new();
+    let mut recent_artists: VecDeque<String> = VecDeque::with_capacity(MAX_RECENT_ARTISTS);
 
     // Helper to get artist key for diversity tracking
     fn artist_key(track: &Track) -> String {
         track.artist_name().to_lowercase()
     }
 
-    // Helper to select next track with artist diversity
-    // Prefers tracks from artists we haven't used, or used least
+    // Helper to select next track with improved artist diversity
+    // - Avoids artists used in the last MAX_RECENT_ARTISTS tracks
+    // - Enforces max tracks per artist (MAX_ARTIST_TRACKS)
     fn select_diverse<'a>(
         candidates: &'a [Track],
         used_keys: &HashSet<String>,
         artist_counts: &HashMap<String, usize>,
-        last_artist: Option<&str>,
+        recent_artists: &VecDeque<String>,
     ) -> Option<&'a Track> {
-        // First pass: find tracks from unused artists (not the last artist)
+        // Phase 1: Find track from artist NOT in recent history AND under max limit
         let mut best: Option<&Track> = None;
         let mut best_count = usize::MAX;
 
@@ -78,49 +88,75 @@ pub async fn generate_adventure(
                 continue;
             }
             let artist = artist_key(track);
+            let count = artist_counts.get(&artist).copied().unwrap_or(0);
 
-            // Skip if same as last artist (avoid consecutive)
-            if let Some(last) = last_artist {
-                if artist == last {
-                    continue;
-                }
+            // Skip if artist was used recently OR has hit max tracks
+            if recent_artists.contains(&artist) || count >= MAX_ARTIST_TRACKS {
+                continue;
             }
 
-            let count = artist_counts.get(&artist).copied().unwrap_or(0);
+            // Prefer artists with fewer tracks in the adventure
             if count < best_count {
                 best_count = count;
                 best = Some(track);
             }
         }
 
-        // If no diverse option, allow same artist as fallback
-        if best.is_none() {
-            for track in candidates {
-                if used_keys.contains(&track.rating_key) {
-                    continue;
-                }
-                let artist = artist_key(track);
-                let count = artist_counts.get(&artist).copied().unwrap_or(0);
-                if count < best_count {
-                    best_count = count;
-                    best = Some(track);
-                }
+        if best.is_some() {
+            return best;
+        }
+
+        // Phase 2: Relax recent constraint but keep max limit
+        for track in candidates {
+            if used_keys.contains(&track.rating_key) {
+                continue;
+            }
+            let artist = artist_key(track);
+            let count = artist_counts.get(&artist).copied().unwrap_or(0);
+
+            // Still enforce max tracks per artist
+            if count >= MAX_ARTIST_TRACKS {
+                continue;
+            }
+
+            if count < best_count {
+                best_count = count;
+                best = Some(track);
             }
         }
 
-        best
+        if best.is_some() {
+            return best;
+        }
+
+        // Phase 3: Last resort - any unused track (ignoring all diversity constraints)
+        candidates
+            .iter()
+            .find(|t| !used_keys.contains(&t.rating_key))
     }
 
     // Add a track to playlist with bookkeeping
-    let add_track = |track: Track,
-                         playlist: &mut Vec<Track>,
-                         used_keys: &mut HashSet<String>,
-                         artist_counts: &mut HashMap<String, usize>| {
+    fn add_track(
+        track: Track,
+        playlist: &mut Vec<Track>,
+        used_keys: &mut HashSet<String>,
+        artist_counts: &mut HashMap<String, usize>,
+        recent_artists: &mut VecDeque<String>,
+    ) {
         let artist = artist_key(&track);
-        *artist_counts.entry(artist).or_insert(0) += 1;
+
+        // Update artist count
+        *artist_counts.entry(artist.clone()).or_insert(0) += 1;
+
+        // Update recent artists deque
+        recent_artists.push_back(artist);
+        if recent_artists.len() > MAX_RECENT_ARTISTS {
+            recent_artists.pop_front();
+        }
+
         used_keys.insert(track.rating_key.clone());
         playlist.push(track);
-    };
+    }
 
     // Always start with start track
     add_track(
@@ -128,6 +164,7 @@ pub async fn generate_adventure(
         &mut playlist,
         &mut used_keys,
         &mut artist_counts,
+        &mut recent_artists,
     );
     used_keys.insert(end.rating_key.clone()); // Reserve end slot
 
@@ -143,45 +180,40 @@ pub async fn generate_adventure(
 
     // Phase 1: Start-similar tracks
     for _ in 0..phase1_target {
-        let last_artist = playlist.last().map(|t| artist_key(t));
-        if let Some(track) =
-            select_diverse(&start_only, &used_keys, &artist_counts, last_artist.as_deref())
+        if let Some(track) = select_diverse(&start_only, &used_keys, &artist_counts, &recent_artists)
         {
             add_track(
                 track.clone(),
                 &mut playlist,
                 &mut used_keys,
                 &mut artist_counts,
+                &mut recent_artists,
             );
         }
     }
 
     // Phase 2: Bridge tracks (similar to both)
     for _ in 0..phase2_target {
-        let last_artist = playlist.last().map(|t| artist_key(t));
-        if let Some(track) =
-            select_diverse(&bridges, &used_keys, &artist_counts, last_artist.as_deref())
-        {
+        if let Some(track) = select_diverse(&bridges, &used_keys, &artist_counts, &recent_artists) {
             add_track(
                 track.clone(),
                 &mut playlist,
                 &mut used_keys,
                 &mut artist_counts,
+                &mut recent_artists,
             );
         }
     }
 
     // Phase 3: End-similar tracks (fill remaining)
     while playlist.len() < length - 1 {
-        let last_artist = playlist.last().map(|t| artist_key(t));
-        if let Some(track) =
-            select_diverse(&end_only, &used_keys, &artist_counts, last_artist.as_deref())
-        {
+        if let Some(track) = select_diverse(&end_only, &used_keys, &artist_counts, &recent_artists) {
             add_track(
                 track.clone(),
                 &mut playlist,
                 &mut used_keys,
                 &mut artist_counts,
+                &mut recent_artists,
             );
         } else {
             break;
@@ -196,18 +228,15 @@ pub async fn generate_adventure(
         .collect();
 
     while playlist.len() < length - 1 {
-        let last_artist = playlist.last().map(|t| artist_key(t));
-        if let Some(track) = select_diverse(
-            &all_candidates,
-            &used_keys,
-            &artist_counts,
-            last_artist.as_deref(),
-        ) {
+        if let Some(track) =
+            select_diverse(&all_candidates, &used_keys, &artist_counts, &recent_artists)
+        {
             add_track(
                 track.clone(),
                 &mut playlist,
                 &mut used_keys,
                 &mut artist_counts,
+                &mut recent_artists,
             );
         } else {
             break;

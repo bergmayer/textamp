@@ -26,35 +26,35 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     frame.render_widget(block, area);
 
     let help_text = r#"
-FIRST-RUN LOGIN
-  Tab / Arrows    Navigate between fields
-  Enter           Edit field / Submit / Select server
-  Esc             Cancel editing
-
 NAVIGATION
   Arrow keys      Navigate lists
-  Tab             Toggle focus between panels
+  Tab             Next category (Artists→Playlists→Genres→Folders→Now Playing)
+  Shift+Tab       Previous category
+  Shift+Down      Cycle modes within category (e.g., Artists→Album Artists→Albums)
+  Shift+Up        Cycle modes backwards
   Enter / Right   Select / Drill down / Play
   Left / Bksp     Go back / Move focus left
-  Esc             Close view / Cancel adventure
+  Esc             Close view / Cancel adventure / Close filter
   Page Up/Down    Scroll by page
   Home/End        Jump to top/bottom
   A-Z             Jump to first item starting with letter
+  Shift+A-Z       Refine: same first letter, 2nd char matches
+  /               Activate inline filter (type to filter list)
 
 CATEGORIES (Ctrl+key - works from any view)
   Ctrl+A          Artists (cycles: artists/album artists/albums)
-  Ctrl+P          Playlists (cycles: all/recently added/recent)
-  Ctrl+G          Genres (cycles: genres/artist/album/moods/styles)
-  Ctrl+O          Folders (Miller columns)
-  Ctrl+T          Stations (radio)
+  Ctrl+P          Playlists (cycles: all/recently added)
+  Ctrl+G          Genres (cycles: genres/artist/album/moods/styles/stations)
+  Ctrl+O          Folders
 
-VIEWS (Ctrl+key)
+VIEWS
   Ctrl+N          Now Playing (cycles: queue/recently played/visualizer)
-  Ctrl+F          Search / Filter (tabbed)
   F1 / ?          This help screen
   F2              Settings
 
-COMMANDS (Alt+key) - Act on Selection
+COMMANDS
+  Ctrl+F          Search popup (floating dialog)
+  Ctrl+S          Save queue as playlist (Now Playing)
   Alt+R           Create radio from selection
                   Track: similar individual tracks
                   Album: similar albums played in order
@@ -62,14 +62,11 @@ COMMANDS (Alt+key) - Act on Selection
                   Track: adds single track
                   Album: adds all tracks from album
   Alt+S           Show similar albums/tracks
-  Alt+P           Save queue as playlist (Now Playing)
   Alt+V           Start Sonic Adventure (see below)
-  Alt+]           Next track
-  Alt+[           Previous track
   Alt+O           Cycle filter tabs (in Search view)
                   Cycle sort order (in Genres view)
 
-SEARCH / FILTER (Ctrl+F)
+SEARCH POPUP (Ctrl+F)
   Tabs: All | Artists | Album Artists | Albums |
         Playlists | Tracks | Genres
   Tab / Shift+Tab Switch between tabs
@@ -77,9 +74,18 @@ SEARCH / FILTER (Ctrl+F)
   Up / Down       Navigate results
   Type text       Enter search query
   Enter           Search (if query changed) or select
-  Esc             Cancel / close
+  Esc             Close popup
   All tab:        3-column view (Artists | Albums | Tracks)
                   Left/Right to switch column focus
+
+INLINE FILTER (/ key)
+  /               Activate filter box in transport bar
+  Click 🔍        Click search icon to activate filter
+  Type text       Filter current column in real-time
+  Up/Down         Navigate within filtered results
+  Enter           Select item and drill down (filter persists)
+  Esc             Close filter and restore full list
+  Note: Filter stays on original column when navigating
 
 PLAYBACK
   Space           Play / Pause
@@ -95,7 +101,7 @@ NOW PLAYING (Ctrl+N)
   Queue mode      Current queue or radio tracks
                   Scroll up to see play history (~20 tracks)
                   Del to remove from queue
-                  Alt+P to save as playlist
+                  Ctrl+S to save as playlist
   Recently Played Albums played on this server
   Now Playing     Album art, track info, waveform seekbar
                   Left/Right seeks ±1s, click to seek
@@ -103,7 +109,7 @@ NOW PLAYING (Ctrl+N)
 RADIO (Alt+R on selection)
   Track Radio     Similar individual tracks (sonic)
   Album Radio     Tracks from similar albums in order
-  Station Radio   Plex curated stations (via Ctrl+T)
+  Station Radio   Plex curated stations (via Ctrl+G)
 
 SONIC ADVENTURE (Alt+V)
   Creates a sonic bridge between two tracks.
@@ -114,28 +120,25 @@ SONIC ADVENTURE (Alt+V)
   Tracks can be selected from Browse or Search (Tracks tab)
   Esc             Cancel adventure mode
 
-PLAYLISTS (Ctrl+P in Browse)
-  Ctrl+P cycles:  All -> Recently Added -> Recent Playlists
+PLAYLISTS (Ctrl+P)
+  Ctrl+P cycles:  All -> Recently Added
   All             All playlists
   Recently Added  Albums recently added to library
-  Recent          Recently accessed playlists
 
-GENRES (Ctrl+G in Browse)
-  3-column Miller columns (Genre | Albums | Tracks)
-  Ctrl+G cycles:  Genres -> Artist Genres -> Album Genres -> Moods -> Styles
+GENRES (Ctrl+G)
+  3-column view (Genre | Albums | Tracks)
+  Ctrl+G cycles:  Genres -> Artist Genres -> Album Genres -> Moods -> Styles -> Stations
   Alt+O           Cycle sort: artist/album artist/album
   Left / Right    Move focus between columns
   Up / Down       Navigate within current column
   Enter           Play selected track, or focus next column
 
-STATIONS (Ctrl+T in Browse)
-  Miller columns style navigation
+STATIONS (via Ctrl+G cycle)
   Enter / Right   Drill into category or play station
   Left / Bksp     Move focus to previous column
   › suffix indicates drillable category
 
-FOLDERS (Ctrl+O in Browse)
-  Miller columns style navigation
+FOLDERS (Ctrl+O)
   Enter / Right   Open folder or play track
   Left / Bksp     Go back to parent folder
   ♪ icon shows currently playing track
