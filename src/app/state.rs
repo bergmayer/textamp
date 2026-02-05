@@ -163,6 +163,8 @@ pub struct BrowseColumn {
     pub items: Vec<BrowseItem>,
     /// Currently selected index
     pub selected_index: usize,
+    /// Full Track objects for track columns (used for playback with media info)
+    pub tracks: Vec<crate::plex::models::Track>,
 }
 
 impl BrowseColumn {
@@ -171,6 +173,17 @@ impl BrowseColumn {
             title: title.into(),
             items,
             selected_index: 0,
+            tracks: vec![],
+        }
+    }
+
+    /// Create a column with full track objects stored for playback.
+    pub fn new_with_tracks(title: impl Into<String>, items: Vec<BrowseItem>, tracks: Vec<crate::plex::models::Track>) -> Self {
+        Self {
+            title: title.into(),
+            items,
+            selected_index: 0,
+            tracks,
         }
     }
 

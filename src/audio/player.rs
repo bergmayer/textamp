@@ -13,6 +13,7 @@ use super::streaming::{BlockingReader, StreamingBuffer};
 use super::traits::AudioBackend;
 use anyhow::{anyhow, Result};
 use futures::StreamExt;
+use reqwest::header::HeaderMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -61,14 +62,28 @@ impl AudioPlayer {
     /// This significantly reduces time-to-first-audio compared to
     /// downloading the entire file first.
     pub async fn play_url(&mut self, url: &str) -> Result<()> {
+        self.play_url_with_headers(url, HeaderMap::new()).await
+    }
+
+    /// Play audio from a URL with custom headers.
+    ///
+    /// Same as `play_url` but allows passing custom HTTP headers.
+    /// Use this for Plex transcode URLs which require headers like
+    /// `X-Plex-Client-Identifier`.
+    pub async fn play_url_with_headers(&mut self, url: &str, headers: HeaderMap) -> Result<()> {
         // Stop any existing playback
         self.stop();
 
+        tracing::debug!("Fetching audio from: {}", url);
         let client = reqwest::Client::new();
-        let response = client.get(url).send().await?;
+        let response = client.get(url).headers(headers).send().await?;
 
         if !response.status().is_success() {
-            return Err(anyhow!("Failed to fetch audio: HTTP {}", response.status()));
+            // Log error details for debugging
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            tracing::error!("Audio fetch failed: HTTP {} - Body: {}", status, body);
+            return Err(anyhow!("Failed to fetch audio: HTTP {}", status));
         }
 
         // Get content length for progress tracking

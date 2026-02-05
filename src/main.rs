@@ -724,13 +724,16 @@ async fn run_app(
     // IMPORTANT: The client_identifier must match what the auth token was issued for,
     // otherwise Plex will reject requests with 400 errors
     let client_info = if let Some(stored) = PlexAuth::load_token() {
+        tracing::info!("Loaded stored client_identifier: {}", stored.client_identifier);
         let mut info = PlexClientInfo::default();
         info.client_identifier = stored.client_identifier;
         info
     } else {
+        tracing::info!("No stored auth, using new client_identifier");
         PlexClientInfo::default()
     };
     let mut client = PlexClient::new(client_info);
+    tracing::info!("PlexClient created with client_identifier: {}", client.client_identifier());
 
     // Create audio player
     let mut audio = AudioPlayer::new()?;

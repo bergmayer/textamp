@@ -364,6 +364,11 @@ impl PlexClient {
     pub async fn get_album_tracks(&self, album_key: &str) -> Result<Vec<Track>, ApiError> {
         let path = format!("{}/{}/children", EP_LIBRARY_METADATA, album_key);
         let response: TracksResponse = self.get(&path).await?;
+        // Log media parts info for debugging
+        if let Some(track) = response.media_container.metadata.first() {
+            tracing::debug!("Album track '{}' media info: {} media items, has stream_part: {}",
+                track.title, track.media.len(), track.stream_part().is_some());
+        }
         Ok(response.media_container.metadata)
     }
 
@@ -703,6 +708,63 @@ impl PlexClient {
     /// Get all tracks in a folder, suitable for playback.
     pub async fn get_folder_tracks(&self, folder_key: &str) -> Result<Vec<Track>, ApiError> {
         let response = self.get_folder_contents(folder_key).await?;
+
+        let mut tracks: Vec<Track> = response
+            .media_container
+            .metadata
+            .into_iter()
+            .filter_map(|meta| {
+                let rating_key = meta.rating_key?;
+                Some(Track {
+                    rating_key,
+                    key: meta.key,
+                    title: meta.title,
+                    duration: meta.duration,
+                    parent_title: meta.parent_title,
+                    grandparent_title: meta.grandparent_title,
+                    index: meta.index,
+                    parent_rating_key: None,
+                    grandparent_rating_key: None,
+                    thumb: None,
+                    parent_thumb: None,
+                    grandparent_thumb: None,
+                    media: meta
+                        .media
+                        .into_iter()
+                        .map(|m| Media {
+                            id: m.id,
+                            duration: m.duration,
+                            bitrate: m.bitrate,
+                            audio_channels: m.audio_channels.map(|c| c as u8),
+                            audio_codec: m.audio_codec,
+                            container: m.container,
+                            part: m
+                                .parts
+                                .into_iter()
+                                .map(|p| MediaPart {
+                                    id: p.id,
+                                    key: p.key.unwrap_or_default(),
+                                    duration: p.duration,
+                                    file: p.file,
+                                    size: p.size,
+                                    container: p.container,
+                                })
+                                .collect(),
+                        })
+                        .collect(),
+                })
+            })
+            .collect();
+
+        tracks.sort_by(|a, b| a.title.cmp(&b.title));
+        Ok(tracks)
+    }
+
+    /// Get all tracks at the library root level, suitable for playback.
+    ///
+    /// Similar to `get_folder_tracks` but for the library root folder.
+    pub async fn get_library_root_tracks(&self, library_key: &str) -> Result<Vec<Track>, ApiError> {
+        let response = self.get_library_folders(library_key).await?;
 
         let mut tracks: Vec<Track> = response
             .media_container
@@ -1495,6 +1557,8 @@ impl PlexClient {
         let token = self.require_token()?;
         let server = self.require_server()?;
         let session_id = uuid::Uuid::new_v4().to_string();
+
+        tracing::debug!("Generating transcode URL with client_identifier: {}", self.client_info.client_identifier);
 
         Ok(format!(
             "{}{}?path={}&mediaIndex=0&partIndex=0&protocol=http&directPlay=0&directStream=0\

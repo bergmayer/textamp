@@ -169,6 +169,8 @@ impl EventLoop {
         tokio::spawn(async move {
             // Try stored token (primary authentication method)
             if let Some(stored) = PlexAuth::load_token() {
+                tracing::info!("Loaded stored auth: client_identifier={}, server_url={:?}",
+                    stored.client_identifier, stored.server_url);
                 let auth = PlexAuth::from_stored_auth(&stored);
                 match auth.verify_token(&stored.token).await {
                     Ok(user) => {
@@ -229,9 +231,15 @@ impl EventLoop {
             }
             Event::AuthSuccess { token, username, server_url, servers, client_identifier } => {
                 tracing::info!("Authenticated as: {} ({} servers available)", username, servers.len());
+                tracing::info!("AuthSuccess server_url: {}", server_url);
+                tracing::info!("AuthSuccess client_identifier: {}", client_identifier);
+                tracing::info!("PlexClient BEFORE update - client_id: {}, server: {:?}",
+                    client.client_identifier(), client.server_url());
                 client.set_auth_token(token);
                 client.set_server(server_url.clone());
                 client.set_client_identifier(client_identifier);
+                tracing::info!("PlexClient AFTER update - client_id: {}, server: {:?}",
+                    client.client_identifier(), client.server_url());
 
                 // Persist server info for future restarts
                 // Find the server that owns this URL to get its identifier and name
@@ -4577,7 +4585,8 @@ impl EventLoop {
                     Ok(tracks) => {
                         let items = super::state::BrowseItem::from_tracks(&tracks);
                         let title = state.selected_album_title.clone();
-                        let col = super::state::BrowseColumn::new(title, items);
+                        // Store full tracks for playback (includes media info)
+                        let col = super::state::BrowseColumn::new_with_tracks(title, items, tracks);
                         state.artist_nav.push_column(col);
                     }
                     Err(e) => {
@@ -4596,7 +4605,8 @@ impl EventLoop {
                     Ok(tracks) => {
                         let items = super::state::BrowseItem::from_tracks(&tracks);
                         let title = state.selected_album_title.clone();
-                        let col = super::state::BrowseColumn::new(title, items);
+                        // Store full tracks for playback (includes media info)
+                        let col = super::state::BrowseColumn::new_with_tracks(title, items, tracks);
                         state.artist_nav.push_column(col);
                     }
                     Err(e) => {
@@ -4670,7 +4680,8 @@ impl EventLoop {
                 match client.get_album_tracks(&album_key).await {
                     Ok(tracks) => {
                         let items = super::state::BrowseItem::from_tracks(&tracks);
-                        let col = super::state::BrowseColumn::new("tracks", items);
+                        // Store full tracks for playback (includes media info)
+                        let col = super::state::BrowseColumn::new_with_tracks("tracks", items, tracks);
                         state.genre_nav.push_column(col);
                     }
                     Err(e) => {
@@ -4705,7 +4716,8 @@ impl EventLoop {
                 match client.get_playlist_tracks(&playlist_key).await {
                     Ok(tracks) => {
                         let items = super::state::BrowseItem::from_tracks(&tracks);
-                        let col = super::state::BrowseColumn::new("tracks", items);
+                        // Store full tracks for playback (includes media info)
+                        let col = super::state::BrowseColumn::new_with_tracks("tracks", items, tracks);
                         state.playlist_nav.push_column(col);
                     }
                     Err(e) => {
@@ -4723,7 +4735,8 @@ impl EventLoop {
                     Ok(tracks) => {
                         let items = super::state::BrowseItem::from_tracks(&tracks);
                         let title = state.selected_album_title.clone();
-                        let col = super::state::BrowseColumn::new(title, items);
+                        // Store full tracks for playback (includes media info)
+                        let col = super::state::BrowseColumn::new_with_tracks(title, items, tracks);
                         state.playlist_nav.push_column(col);
                     }
                     Err(e) => {
@@ -6052,33 +6065,12 @@ impl EventLoop {
                         } else {
                             // Root folder - get all tracks from library root
                             if let Some(lib_key) = &state.active_library {
-                                match client.get_library_folders(lib_key).await {
-                                    Ok(response) => {
-                                        // Get tracks from root
-                                        let tracks: Vec<_> = response.media_container.metadata
-                                            .into_iter()
-                                            .filter_map(|meta| {
-                                                let rating_key = meta.rating_key?;
-                                                Some(crate::api::models::Track {
-                                                    rating_key,
-                                                    key: meta.key,
-                                                    title: meta.title,
-                                                    duration: meta.duration,
-                                                    parent_title: meta.parent_title,
-                                                    grandparent_title: meta.grandparent_title,
-                                                    index: meta.index,
-                                                    parent_rating_key: None,
-                                                    grandparent_rating_key: None,
-                                                    thumb: None,
-                                                    parent_thumb: None,
-                                                    grandparent_thumb: None,
-                                                    media: vec![],
-                                                })
-                                            })
-                                            .collect();
+                                match client.get_library_root_tracks(lib_key).await {
+                                    Ok(tracks) => {
                                         if !tracks.is_empty() {
                                             state.queue = tracks;
                                             state.queue_index = Some(0);
+                                            state.playback_mode = PlaybackMode::Queue;
                                             if let Some(track) = state.queue.first().cloned() {
                                                 self.play_track(track, state, client, audio).await;
                                             }
@@ -7745,8 +7737,25 @@ impl EventLoop {
         }
     }
 
-    /// Helper to collect tracks from a Miller column for playback
+    /// Helper to collect tracks from a Miller column for playback.
+    /// Uses stored full Track objects if available (for media info), otherwise creates stubs.
     fn collect_tracks_from_column(col: &super::state::BrowseColumn) -> Vec<Track> {
+        // If we have full tracks stored, use them (they have media info for direct playback)
+        if !col.tracks.is_empty() {
+            return col.tracks.clone();
+        }
+
+        // Fallback: create Track stubs from BrowseItems (won't have media info)
+        // This path should be avoided - direct playback will fail and transcode may 400 on relay servers
+        let track_count = col.items.iter().filter(|item| matches!(item, super::state::BrowseItem::Track { .. })).count();
+        if track_count > 0 {
+            tracing::warn!(
+                "collect_tracks_from_column fallback: creating {} track stubs without media info for column '{}'. Direct playback may fail.",
+                track_count,
+                col.title
+            );
+        }
+
         col.items.iter()
             .filter_map(|item| {
                 if let super::state::BrowseItem::Track { key, title, duration_ms, track_number } = item {
@@ -8085,6 +8094,10 @@ impl EventLoop {
     ) {
         if let Some(track) = state.current_track().cloned() {
             tracing::info!("Playing: {} - {}", track.artist_name(), track.title);
+            tracing::info!("PlayCurrentTrack: client_identifier={}", client.client_identifier());
+            tracing::info!("PlayCurrentTrack: server_url={:?}", client.server_url());
+            tracing::info!("PlayCurrentTrack: has_token={}", client.token().is_some());
+            tracing::info!("PlayCurrentTrack: track.media.len()={}", track.media.len());
 
             state.playback.status = PlayStatus::Buffering;
             state.playback.duration_ms = track.duration_ms();
@@ -8230,25 +8243,34 @@ impl EventLoop {
             }
 
             // Try direct playback first
-            if let Ok(url) = client.get_stream_url(&track) {
-                match audio.play_url(&url).await {
-                    Ok(()) => {
-                        state.playback.status = PlayStatus::Playing;
-                        // Report playback to Plex (scrobble + timeline) in background
-                        self.report_playback_to_plex(&track, state.plex_session_id.clone(), client);
-                        // Update local recently played list immediately
-                        Self::update_local_recently_played(state, &track);
-                        return;
+            match client.get_stream_url(&track) {
+                Ok(url) => {
+                    tracing::debug!("Direct stream URL: {}", url);
+                    match audio.play_url(&url).await {
+                        Ok(()) => {
+                            state.playback.status = PlayStatus::Playing;
+                            // Report playback to Plex (scrobble + timeline) in background
+                            self.report_playback_to_plex(&track, state.plex_session_id.clone(), client);
+                            // Update local recently played list immediately
+                            Self::update_local_recently_played(state, &track);
+                            return;
+                        }
+                        Err(e) => {
+                            tracing::warn!("Direct playback failed, trying transcode: {}", e);
+                        }
                     }
-                    Err(e) => {
-                        tracing::warn!("Direct playback failed, trying transcode: {}", e);
-                    }
+                }
+                Err(e) => {
+                    tracing::debug!("Cannot get direct stream URL (track has {} media items): {}",
+                        track.media.len(), e);
                 }
             }
 
             // Fall back to transcoded stream (Plex converts to MP3)
             if let Ok(url) = client.get_transcoded_stream_url(&track) {
-                tracing::info!("Using transcoded stream for: {}", track.title);
+                // Log URL (redact token for security)
+                let redacted = url.split("X-Plex-Token=").next().unwrap_or(&url);
+                tracing::info!("Using transcoded stream for: {} - URL: {}...", track.title, redacted);
                 match audio.play_url(&url).await {
                     Ok(()) => {
                         state.playback.status = PlayStatus::Playing;
