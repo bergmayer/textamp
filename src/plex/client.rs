@@ -1664,15 +1664,28 @@ impl PlexClient {
 ///
 /// This is used to test multiple connection options before committing to one,
 /// which is essential for remote access when local IPs are unreachable.
+///
+/// Note: Sends full Plex client headers as some servers may require them to respond.
 pub async fn test_connection(url: &str, token: &str) -> Result<(), ApiError> {
+    use super::auth::PlexClientInfo;
+
     let http = Client::builder()
         .timeout(Duration::from_secs(CONNECTION_TEST_TIMEOUT_SECS))
         .build()
         .map_err(ApiError::Http)?;
 
+    // Use default client info for headers - the specific identifier doesn't matter
+    // for connection testing, we just need to look like a valid Plex client.
+    let client_info = PlexClientInfo::default();
+
     let response = http
         .get(format!("{}/", url.trim_end_matches('/')))
         .header(HEADER_PLEX_TOKEN, token)
+        .header(HEADER_PLEX_PRODUCT, &client_info.product)
+        .header(HEADER_PLEX_VERSION, &client_info.version)
+        .header(HEADER_PLEX_CLIENT_ID, &client_info.client_identifier)
+        .header(HEADER_PLEX_DEVICE_NAME, &client_info.device_name)
+        .header(HEADER_PLEX_PLATFORM, &client_info.platform)
         .header("Accept", "application/json")
         .send()
         .await?;
