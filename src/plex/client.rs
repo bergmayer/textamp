@@ -77,6 +77,12 @@ impl PlexClient {
         self.server_url.as_deref()
     }
 
+    /// Set the client identifier.
+    /// IMPORTANT: Must match the identifier the auth token was issued for.
+    pub fn set_client_identifier(&mut self, identifier: String) {
+        self.client_info.client_identifier = identifier;
+    }
+
     /// Check if authenticated.
     pub fn is_authenticated(&self) -> bool {
         self.auth_token.is_some()

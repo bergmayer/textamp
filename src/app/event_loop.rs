@@ -201,6 +201,7 @@ impl EventLoop {
                                 username: user.username,
                                 server_url: url,
                                 servers,
+                                client_identifier: stored.client_identifier,
                             }).await;
                             return;
                         }
@@ -226,10 +227,11 @@ impl EventLoop {
                 state.terminal_height = h;
                 vec![]
             }
-            Event::AuthSuccess { token, username, server_url, servers } => {
+            Event::AuthSuccess { token, username, server_url, servers, client_identifier } => {
                 tracing::info!("Authenticated as: {} ({} servers available)", username, servers.len());
                 client.set_auth_token(token);
                 client.set_server(server_url.clone());
+                client.set_client_identifier(client_identifier);
 
                 // Persist server info for future restarts
                 // Find the server that owns this URL to get its identifier and name
@@ -298,7 +300,7 @@ impl EventLoop {
                 state.auth_state.error_message = None;
                 vec![]
             }
-            Event::AuthServersReady { token, username, servers } => {
+            Event::AuthServersReady { token, username, servers, client_identifier } => {
                 use super::state::AuthStep;
                 tracing::info!("Login succeeded, {} servers available", servers.len());
                 state.available_servers = servers.clone();
@@ -311,6 +313,7 @@ impl EventLoop {
                     let token_clone = token.clone();
                     let username_clone = username.clone();
                     let servers_clone = servers.clone();
+                    let client_id_clone = client_identifier.clone();
                     tokio::spawn(async move {
                         if let Some(url) = find_working_connection_from_servers(&servers_clone, &token_clone).await {
                             let _ = event_tx.send(Event::AuthSuccess {
@@ -318,6 +321,7 @@ impl EventLoop {
                                 username: username_clone,
                                 server_url: url,
                                 servers: servers_clone,
+                                client_identifier: client_id_clone,
                             }).await;
                         } else {
                             let _ = event_tx.send(Event::AuthFailed(
@@ -334,6 +338,7 @@ impl EventLoop {
                     // Note: We need to pass the token through - store in a temp location
                     // We'll use the client's token holder for this
                     client.set_auth_token(token);
+                    client.set_client_identifier(client_identifier);
                 }
                 vec![]
             }
@@ -3949,6 +3954,9 @@ impl EventLoop {
                                 // Verify token and get user info
                                 match auth.verify_token(&token).await {
                                     Ok(user) => {
+                                        // Get client_identifier BEFORE saving (save_token consumes it)
+                                        let client_id = auth.client_identifier().to_string();
+
                                         // Save token (not password!)
                                         if let Err(e) = auth.save_token(&token, Some(&user)) {
                                             tracing::warn!("Failed to save token: {}", e);
@@ -3962,6 +3970,7 @@ impl EventLoop {
                                             token,
                                             username: user.username,
                                             servers,
+                                            client_identifier: client_id,
                                         }).await;
                                     }
                                     Err(e) => {
@@ -3988,8 +3997,9 @@ impl EventLoop {
                 use super::state::AuthStep;
                 // Select server from the server selection list
                 if let Some(server) = state.available_servers.get(state.auth_state.server_index) {
-                    // Get the token that was stored when servers were received
+                    // Get the token and client_identifier that were stored when servers were received
                     let token = client.token().map(|s| s.to_string());
+                    let client_id = client.client_identifier().to_string();
 
                     if let Some(token) = token {
                         state.auth_state.step = AuthStep::Connecting;
@@ -4006,6 +4016,7 @@ impl EventLoop {
                                     username,
                                     server_url: url,
                                     servers,
+                                    client_identifier: client_id,
                                 }).await;
                             } else {
                                 let _ = event_tx.send(Event::AuthFailed(
@@ -5496,6 +5507,9 @@ impl EventLoop {
                                 // Verify token and get user info
                                 match auth.verify_token(&token).await {
                                     Ok(user) => {
+                                        // Get client_identifier BEFORE saving
+                                        let client_id = auth.client_identifier().to_string();
+
                                         // Save token (not password!)
                                         if let Err(e) = auth.save_token(&token, Some(&user)) {
                                             tracing::warn!("Failed to save token: {}", e);
@@ -5517,6 +5531,7 @@ impl EventLoop {
                                                 username: user.username,
                                                 server_url: url,
                                                 servers,
+                                                client_identifier: client_id,
                                             }).await;
                                         } else {
                                             // No working server connection available
