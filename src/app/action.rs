@@ -131,6 +131,7 @@ pub enum Action {
     // Miller column navigation for Artists view
     LoadArtistAlbumsForMiller { artist_key: String },
     LoadAlbumTracksForMiller { album_key: String },
+    LoadArtistAllTracksForMiller { artist_key: String },  // Load all tracks by artist (from "All Tracks" entry)
     PlayTrackFromMiller { column_index: usize, track_index: usize },
 
     // Miller column navigation for Genres view

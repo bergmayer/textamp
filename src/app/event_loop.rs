@@ -2710,6 +2710,10 @@ impl EventLoop {
                         state.selected_album_title = title;
                         vec![Action::LoadAlbumTracksForMiller { album_key: key }]
                     }
+                    BrowseItem::AllTracks { artist_key, artist_name } => {
+                        state.selected_album_title = format!("All tracks by {}", artist_name);
+                        vec![Action::LoadArtistAllTracksForMiller { artist_key }]
+                    }
                     BrowseItem::Track { .. } => {
                         if let Some(col) = state.artist_nav.focused() {
                             let idx = col.selected_index;
@@ -4534,11 +4538,20 @@ impl EventLoop {
 
             Action::LoadArtistAlbumsForMiller { artist_key } => {
                 // Load albums for artist and add as new column in artist_nav
+                // Prepend "All Tracks" entry before albums (same as old render path)
                 state.artist_nav.loading = true;
 
                 match client.get_artist_albums(&artist_key).await {
                     Ok(albums) => {
-                        let items = super::state::BrowseItem::from_albums(&albums);
+                        // Create "All Tracks" entry first
+                        let all_tracks = super::state::BrowseItem::AllTracks {
+                            artist_key: artist_key.clone(),
+                            artist_name: state.selected_artist_name.clone(),
+                        };
+                        // Then add albums
+                        let mut items = vec![all_tracks];
+                        items.extend(super::state::BrowseItem::from_albums(&albums));
+
                         let title = state.selected_artist_name.clone();
                         let col = super::state::BrowseColumn::new(title, items);
                         state.artist_nav.push_column(col);
@@ -4555,6 +4568,25 @@ impl EventLoop {
                 state.artist_nav.loading = true;
 
                 match client.get_album_tracks(&album_key).await {
+                    Ok(tracks) => {
+                        let items = super::state::BrowseItem::from_tracks(&tracks);
+                        let title = state.selected_album_title.clone();
+                        let col = super::state::BrowseColumn::new(title, items);
+                        state.artist_nav.push_column(col);
+                    }
+                    Err(e) => {
+                        state.set_error(format!("Failed to load tracks: {}", e));
+                    }
+                }
+                state.artist_nav.loading = false;
+            }
+
+            Action::LoadArtistAllTracksForMiller { artist_key } => {
+                // Load all tracks by an artist and add as new column in artist_nav
+                // This is triggered by selecting "All Tracks" entry in the albums column
+                state.artist_nav.loading = true;
+
+                match client.get_artist_all_tracks(&artist_key).await {
                     Ok(tracks) => {
                         let items = super::state::BrowseItem::from_tracks(&tracks);
                         let title = state.selected_album_title.clone();
@@ -8142,10 +8174,11 @@ impl EventLoop {
                         let event_tx = self.event_tx.clone();
                         let server_url = server_url.to_string();
                         let token = client.token().map(|s| s.to_string());
+                        let client_id = client.client_identifier().to_string();
 
                         // Spawn artwork loading in background task
                         tokio::spawn(async move {
-                            let client = crate::api::PlexClient::new_with_url(&server_url, token.as_deref());
+                            let client = crate::api::PlexClient::new_with_url(&server_url, token.as_deref(), &client_id);
                             match tokio::time::timeout(
                                 std::time::Duration::from_secs(5),
                                 client.fetch_artwork(&thumb_path_owned, 300)
@@ -8235,9 +8268,10 @@ impl EventLoop {
             let track_clone = track.clone();
             let server_url = server_url.to_string();
             let token = client.token().map(|s| s.to_string());
+            let client_id = client.client_identifier().to_string();
 
             tokio::spawn(async move {
-                let client = crate::api::PlexClient::new_with_url(&server_url, token.as_deref());
+                let client = crate::api::PlexClient::new_with_url(&server_url, token.as_deref(), &client_id);
 
                 // Report playback start (for "Continue Listening" etc.)
                 if let Err(e) = client.report_playback_start(&track_clone, 0, session_id.as_deref()).await {
@@ -8269,9 +8303,10 @@ impl EventLoop {
             let track_clone = track.clone();
             let server_url = server_url.to_string();
             let token = client.token().map(|s| s.to_string());
+            let client_id = client.client_identifier().to_string();
 
             tokio::spawn(async move {
-                let client = crate::api::PlexClient::new_with_url(&server_url, token.as_deref());
+                let client = crate::api::PlexClient::new_with_url(&server_url, token.as_deref(), &client_id);
 
                 if let Err(e) = client.report_playback_stop(&track_clone, position_ms, continuing, session_id.as_deref()).await {
                     tracing::debug!("Failed to report playback stop: {}", e);
@@ -8328,11 +8363,12 @@ impl EventLoop {
         let Some(server_url) = client.server_url() else { return };
         let server_url = server_url.to_string();
         let token = client.token().map(|s| s.to_string());
+        let client_id = client.client_identifier().to_string();
         let lib_key = lib_key.to_string();
         let event_tx = self.event_tx.clone();
 
         tokio::spawn(async move {
-            let client = crate::api::PlexClient::new_with_url(&server_url, token.as_deref());
+            let client = crate::api::PlexClient::new_with_url(&server_url, token.as_deref(), &client_id);
             let lib_key_ref = lib_key.as_str();
 
             match preload_type {

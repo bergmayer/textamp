@@ -17,12 +17,17 @@
 use crate::plex::PlexClient;
 
 /// Connection parameters needed to create a PlexClient in a background task.
+///
+/// IMPORTANT: The client_identifier MUST match the one the token was issued for,
+/// otherwise Plex will reject requests with 400 errors.
 #[derive(Debug, Clone)]
 pub struct ConnectionParams {
     /// Server URL.
     pub server_url: String,
     /// Auth token (optional).
     pub token: Option<String>,
+    /// Client identifier - must match token's issuance identifier.
+    pub client_identifier: String,
 }
 
 impl ConnectionParams {
@@ -33,12 +38,13 @@ impl ConnectionParams {
         client.server_url().map(|url| Self {
             server_url: url.to_string(),
             token: client.token().map(|s| s.to_string()),
+            client_identifier: client.client_identifier().to_string(),
         })
     }
 
     /// Create a new PlexClient with these connection parameters.
     pub fn create_client(&self) -> PlexClient {
-        PlexClient::new_with_url(&self.server_url, self.token.as_deref())
+        PlexClient::new_with_url(&self.server_url, self.token.as_deref(), &self.client_identifier)
     }
 }
 
@@ -68,11 +74,13 @@ mod tests {
         let params = ConnectionParams {
             server_url: "http://localhost:32400".to_string(),
             token: Some("test-token".to_string()),
+            client_identifier: "test-client-id".to_string(),
         };
 
         let client = params.create_client();
         assert_eq!(client.server_url(), Some("http://localhost:32400"));
         assert_eq!(client.token(), Some("test-token"));
+        assert_eq!(client.client_identifier(), "test-client-id");
     }
 
     #[test]
@@ -80,10 +88,12 @@ mod tests {
         let params = ConnectionParams {
             server_url: "http://localhost:32400".to_string(),
             token: None,
+            client_identifier: "test-client-id".to_string(),
         };
 
         let client = params.create_client();
         assert_eq!(client.server_url(), Some("http://localhost:32400"));
         assert_eq!(client.token(), None);
+        assert_eq!(client.client_identifier(), "test-client-id");
     }
 }

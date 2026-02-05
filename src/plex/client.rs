@@ -34,17 +34,24 @@ impl PlexClient {
         }
     }
 
-    /// Create a new PlexClient with server URL and optional token.
+    /// Create a new PlexClient with server URL, optional token, and client_identifier.
     /// Used for background tasks that need their own client instance.
-    pub fn new_with_url(server_url: &str, token: Option<&str>) -> Self {
+    ///
+    /// IMPORTANT: The client_identifier MUST match the one the token was issued for,
+    /// otherwise Plex will reject requests with 400 errors. Always pass the
+    /// client_identifier from auth.yaml, not a new random one.
+    pub fn new_with_url(server_url: &str, token: Option<&str>, client_identifier: &str) -> Self {
         let http = Client::builder()
             .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
             .build()
             .expect("Failed to create HTTP client");
 
+        let mut client_info = PlexClientInfo::default();
+        client_info.client_identifier = client_identifier.to_string();
+
         Self {
             http,
-            client_info: PlexClientInfo::default(),
+            client_info,
             auth_token: token.map(|s| s.to_string()),
             server_url: Some(server_url.trim_end_matches('/').to_string()),
         }

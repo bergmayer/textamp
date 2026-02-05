@@ -73,6 +73,11 @@ pub enum BrowseItem {
         title: String,
         track_count: Option<u32>,
     },
+    /// "All Tracks" entry - shows all tracks by an artist.
+    AllTracks {
+        artist_key: String,
+        artist_name: String,
+    },
 }
 
 impl BrowseItem {
@@ -83,6 +88,7 @@ impl BrowseItem {
             BrowseItem::Track { key, .. } => key,
             BrowseItem::Genre { key, .. } => key,
             BrowseItem::Playlist { key, .. } => key,
+            BrowseItem::AllTracks { artist_key, .. } => artist_key,
         }
     }
 
@@ -93,10 +99,12 @@ impl BrowseItem {
             BrowseItem::Track { title, .. } => title,
             BrowseItem::Genre { title, .. } => title,
             BrowseItem::Playlist { title, .. } => title,
+            BrowseItem::AllTracks { .. } => "► All Tracks",
         }
     }
 
     pub fn is_drillable(&self) -> bool {
+        // AllTracks is drillable (loads tracks column), Track is not
         !matches!(self, BrowseItem::Track { .. })
     }
 
