@@ -165,7 +165,6 @@ impl EventLoop {
         state.auth_state.step = AuthStep::Checking;
 
         let event_tx = self.event_tx.clone();
-        let config_server_url = self.config.plex.server_url.clone();
 
         tokio::spawn(async move {
             // Try stored token (primary authentication method)
@@ -178,11 +177,8 @@ impl EventLoop {
 
                         // Priority for server URL:
                         // 1. Stored server_url (validated against server list) - from previous login
-                        // 2. Config file server_url (if explicitly set, not default)
-                        // 3. find_working_connection_from_servers() as fallback (tests connectivity)
-                        let config_is_default = config_server_url.is_empty()
-                            || config_server_url == "http://localhost:32400";
-
+                        // 2. find_working_connection_from_servers() as fallback (tests connectivity)
+                        // Note: config.plex.server_url is NOT used - it's legacy and unreliable
                         let final_server_url = if let (Some(stored_url), Some(stored_id)) = (&stored.server_url, &stored.server_identifier) {
                             // Validate stored server still exists in user's server list
                             if let Some(server) = servers.iter().find(|s| &s.client_identifier == stored_id) {
@@ -199,10 +195,8 @@ impl EventLoop {
                                 tracing::warn!("Stored server {} no longer available, finding working server", stored_id);
                                 find_working_connection_from_servers(&servers, &stored.token).await
                             }
-                        } else if !config_is_default {
-                            // Config has explicit non-default server URL
-                            Some(config_server_url.clone())
                         } else {
+                            // No stored server - find a working connection from available servers
                             find_working_connection_from_servers(&servers, &stored.token).await
                         };
 
