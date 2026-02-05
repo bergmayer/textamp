@@ -36,7 +36,7 @@ async fn main() {
     println!("Library: {}", library_key);
     println!();
 
-    let client = PlexClient::new_with_url(server_url, Some(&token));
+    let client = PlexClient::new_with_url(server_url, Some(&token), "textamp-test-example");
 
     // Test each station type
     let station_types = [
