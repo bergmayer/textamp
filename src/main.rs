@@ -720,8 +720,16 @@ async fn run_app(
     terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
     config: Config,
 ) -> Result<()> {
-    // Create Plex client
-    let client_info = PlexClientInfo::default();
+    // Create Plex client with stored client_identifier if available
+    // IMPORTANT: The client_identifier must match what the auth token was issued for,
+    // otherwise Plex will reject requests with 400 errors
+    let client_info = if let Some(stored) = PlexAuth::load_token() {
+        let mut info = PlexClientInfo::default();
+        info.client_identifier = stored.client_identifier;
+        info
+    } else {
+        PlexClientInfo::default()
+    };
     let mut client = PlexClient::new(client_info);
 
     // Create audio player

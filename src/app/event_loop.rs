@@ -4246,8 +4246,11 @@ impl EventLoop {
                                             cached.artists.len(), cached.albums.len(), cached.root_folders.len(), cached.genres.len());
 
                                         // Core library data
+                                        // IMPORTANT: Always re-sort after loading from cache
+                                        // Cache may have been saved with API order, not alphabetical
                                         if !cached.artists.is_empty() {
                                             state.artists = cached.artists;
+                                            state.artists.sort_by(|a, b| sort_key(&a.title).cmp(&sort_key(&b.title)));
                                             state.artists_total = state.artists.len() as u32;
                                             // Initialize artist_nav for Miller columns
                                             let items = super::state::BrowseItem::from_artists(&state.artists);
@@ -4255,6 +4258,7 @@ impl EventLoop {
                                         }
                                         if !cached.albums.is_empty() {
                                             state.albums = cached.albums;
+                                            state.albums.sort_by(|a, b| sort_key(&a.title).cmp(&sort_key(&b.title)));
                                             state.albums_total = state.albums.len() as u32;
                                         }
                                         if !cached.playlists.is_empty() {
@@ -5604,12 +5608,15 @@ impl EventLoop {
                                     cached.artists.len(), cached.albums.len(), cached.root_folders.len());
 
                                 // Core library data
+                                // IMPORTANT: Always re-sort after loading from cache
                                 if !cached.artists.is_empty() {
                                     state.artists = cached.artists;
+                                    state.artists.sort_by(|a, b| sort_key(&a.title).cmp(&sort_key(&b.title)));
                                     state.artists_total = state.artists.len() as u32;
                                 }
                                 if !cached.albums.is_empty() {
                                     state.albums = cached.albums;
+                                    state.albums.sort_by(|a, b| sort_key(&a.title).cmp(&sort_key(&b.title)));
                                     state.albums_total = state.albums.len() as u32;
                                 }
                                 if !cached.playlists.is_empty() {
