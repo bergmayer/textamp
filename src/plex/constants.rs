@@ -120,6 +120,8 @@ pub const DEFAULT_SEARCH_LIMIT: u32 = 50;
 pub const DEFAULT_SIMILAR_LIMIT: u32 = 10;
 
 /// Timeout for connection testing (in seconds).
+/// Keep short - local connections respond in <100ms, remote in <2s.
+/// Only relay connections might need longer, but 5s is sufficient.
 pub const CONNECTION_TEST_TIMEOUT_SECS: u64 = 5;
 
 // ============================================================================

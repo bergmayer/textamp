@@ -175,24 +175,19 @@ impl EventLoop {
                         // Get servers for the authenticated user
                         let servers = auth.get_servers(&stored.token).await.unwrap_or_default();
 
-                        // Priority for server URL:
-                        // 1. Stored server_url (validated against server list) - from previous login
-                        // 2. find_working_connection_from_servers() as fallback (tests connectivity)
-                        // Note: config.plex.server_url is NOT used - it's legacy and unreliable
-                        let final_server_url = if let (Some(stored_url), Some(stored_id)) = (&stored.server_url, &stored.server_identifier) {
-                            // Validate stored server still exists in user's server list
+                        // Find best working connection using parallel testing.
+                        // This tests ALL connections simultaneously and picks the best one
+                        // (local preferred over remote over relay). Much faster than sequential.
+                        //
+                        // If we have a stored server identifier, prefer that server's connections.
+                        // Otherwise test all servers.
+                        let final_server_url = if let Some(stored_id) = &stored.server_identifier {
+                            // Find the stored server in the list
                             if let Some(server) = servers.iter().find(|s| &s.client_identifier == stored_id) {
-                                // Server exists - test if stored URL is still reachable
-                                if crate::plex::test_connection(stored_url, &stored.token).await.is_ok() {
-                                    tracing::info!("Using stored server: {}", stored_url);
-                                    Some(stored_url.clone())
-                                } else {
-                                    // Stored URL unreachable - find a working connection for this server
-                                    tracing::warn!("Stored URL {} unreachable, testing other connections", stored_url);
-                                    find_working_connection(server, &stored.token).await
-                                }
+                                tracing::info!("Testing connections for stored server: {}", server.name);
+                                find_working_connection(server, &stored.token).await
                             } else {
-                                tracing::warn!("Stored server {} no longer available, finding working server", stored_id);
+                                tracing::warn!("Stored server no longer available, testing all servers");
                                 find_working_connection_from_servers(&servers, &stored.token).await
                             }
                         } else {
@@ -9040,39 +9035,74 @@ impl EventLoop {
     }
 }
 
-/// Find the first working server connection by testing each in priority order.
+/// Find the first working server connection by testing ALL connections in PARALLEL.
 /// Priority: local non-relay > non-relay > relay
 ///
-/// This tests connections with a short timeout before committing, which is
-/// essential for remote access when local IPs (encoded in plex.direct URLs)
-/// are unreachable from outside the LAN.
+/// Tests all connections simultaneously and returns the best working one
+/// (preferring local over remote over relay). This is much faster than
+/// sequential testing when some connections are unreachable.
 async fn find_working_connection(
     server: &crate::api::models::PlexServer,
     token: &str,
 ) -> Option<String> {
-    use crate::api::models::ServerConnection;
+    use futures::future::join_all;
 
-    // Build prioritized list of connections
-    let mut connections: Vec<&ServerConnection> = Vec::new();
+    // Build prioritized list of connections with their priority level
+    // Priority 0 = local non-relay, 1 = remote non-relay, 2 = relay
+    let mut prioritized: Vec<(usize, &str)> = Vec::new();
 
-    // Priority 1: local, non-relay (fastest when on same LAN)
-    connections.extend(server.connections.iter().filter(|c| c.local && !c.relay));
-    // Priority 2: non-relay remote (direct connection over internet)
-    connections.extend(server.connections.iter().filter(|c| !c.local && !c.relay));
-    // Priority 3: relay (fallback through Plex's servers)
-    connections.extend(server.connections.iter().filter(|c| c.relay));
+    for conn in &server.connections {
+        let priority = if conn.local && !conn.relay {
+            0 // Local, non-relay - highest priority
+        } else if !conn.relay {
+            1 // Remote, non-relay
+        } else {
+            2 // Relay - lowest priority
+        };
+        prioritized.push((priority, conn.uri.as_str()));
+    }
 
-    // Test each connection until one works
-    for conn in connections {
-        match crate::plex::test_connection(&conn.uri, token).await {
-            Ok(()) => {
-                tracing::info!("Connection test succeeded: {}", conn.uri);
-                return Some(conn.uri.clone());
-            }
-            Err(e) => {
-                tracing::debug!("Connection test failed for {}: {}", conn.uri, e);
+    if prioritized.is_empty() {
+        tracing::warn!("No connections available for server {}", server.name);
+        return None;
+    }
+
+    // Test ALL connections in parallel
+    let token_str = token.to_string();
+    let futures = prioritized.iter().map(|(priority, uri)| {
+        let uri = uri.to_string();
+        let token = token_str.clone();
+        let prio = *priority;
+        async move {
+            match crate::plex::test_connection(&uri, &token).await {
+                Ok(()) => {
+                    tracing::info!("Connection test succeeded: {} (priority {})", uri, prio);
+                    Some((prio, uri))
+                }
+                Err(e) => {
+                    tracing::debug!("Connection test failed for {}: {}", uri, e);
+                    None
+                }
             }
         }
+    });
+
+    // Wait for ALL tests to complete
+    let results: Vec<Option<(usize, String)>> = join_all(futures).await;
+
+    // Filter successful results and sort by priority (lowest = best)
+    let mut successes: Vec<(usize, String)> = results.into_iter().flatten().collect();
+    successes.sort_by_key(|(prio, _)| *prio);
+
+    // Return the best (lowest priority number = highest preference)
+    if let Some((prio, url)) = successes.into_iter().next() {
+        let prio_name = match prio {
+            0 => "local",
+            1 => "remote",
+            _ => "relay",
+        };
+        tracing::info!("Selected {} connection: {}", prio_name, url);
+        return Some(url);
     }
 
     tracing::warn!("All connection tests failed for server {}", server.name);

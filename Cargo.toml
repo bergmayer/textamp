@@ -12,8 +12,8 @@ categories = ["command-line-utilities", "multimedia::audio"]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 
-# HTTP client
-reqwest = { version = "0.12", features = ["json", "stream", "gzip", "deflate", "charset"] }
+# HTTP client - use native-tls (OpenSSL) for better compatibility with Plex servers
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "gzip", "deflate", "charset", "native-tls"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

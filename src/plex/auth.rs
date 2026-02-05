@@ -81,8 +81,12 @@ impl PlexAuth {
 
     /// Create a new PlexAuth with custom client info.
     pub fn with_client_info(client_info: PlexClientInfo) -> Self {
+        use std::time::Duration;
         Self {
-            http: Client::new(),
+            http: Client::builder()
+                .timeout(Duration::from_secs(10)) // 10s timeout for plex.tv calls
+                .build()
+                .expect("Failed to create auth HTTP client"),
             client_info,
         }
     }
