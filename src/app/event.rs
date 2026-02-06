@@ -116,6 +116,9 @@ pub enum Event {
     PlaylistTracksForMillerLoaded { playlist_key: String, tracks: Vec<Track> },
     PlaylistTracksForMillerFailed { playlist_key: String, error: String },
 
+    // Playlist tracks preloading (background, cache-only, no Miller column push)
+    PlaylistTracksPreloaded { playlist_key: String, tracks: Vec<Track> },
+
     // Inline list filter
     ListFilterCompleted {
         version: u64,

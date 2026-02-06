@@ -48,6 +48,7 @@ pub enum Action {
     ToggleMute,
     CycleRepeat,
     StartPendingPlayback,
+    RetryCurrentTrack,    // Replay current track without resetting error counter
 
     // Queue management
     PlayTrack(Track),

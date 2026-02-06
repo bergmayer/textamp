@@ -13,10 +13,24 @@ use crate::util::{format_duration, truncate_str};
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
+use ratatui_image::picker::Picker;
 use std::cell::RefCell;
 
 thread_local! {
     static ARTWORK_RENDERER: RefCell<ArtworkRenderer> = RefCell::new(ArtworkRenderer::new());
+}
+
+/// Initialize the artwork renderer with a pre-detected picker.
+/// Must be called before the event reader task starts consuming stdin.
+pub fn init_artwork_renderer(picker: Picker) {
+    ARTWORK_RENDERER.with(|r| {
+        *r.borrow_mut() = ArtworkRenderer::new_with_picker(picker);
+    });
+}
+
+/// Get the name of the detected graphics protocol (for settings display).
+pub fn artwork_protocol_name() -> &'static str {
+    ARTWORK_RENDERER.with(|r| r.borrow().protocol_name())
 }
 
 /// Render the unified now playing screen.

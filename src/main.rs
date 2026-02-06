@@ -653,6 +653,11 @@ async fn run_tui_mode() -> Result<()> {
     // Setup terminal
     let mut terminal = setup_terminal()?;
 
+    // Detect terminal graphics capabilities (must happen before event reader starts)
+    if let Ok(picker) = ratatui_image::picker::Picker::from_query_stdio() {
+        textamp::ui::screens::now_playing::init_artwork_renderer(picker);
+    }
+
     // Run the app and ensure terminal is always restored
     let result = run_app(&mut terminal, config).await;
 

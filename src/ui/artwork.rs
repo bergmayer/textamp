@@ -23,13 +23,20 @@ impl Default for ArtworkRenderer {
 }
 
 impl ArtworkRenderer {
+    /// Create without a picker (no graphics, placeholder fallback).
     pub fn new() -> Self {
-        // Try to create a picker for the current terminal
-        // This queries the terminal for its capabilities
-        let picker = Picker::from_query_stdio().ok();
-
         Self {
-            picker,
+            picker: None,
+            protocol: None,
+            current_thumb: None,
+        }
+    }
+
+    /// Create with a pre-initialized picker for graphics support.
+    pub fn new_with_picker(picker: Picker) -> Self {
+        tracing::info!("Artwork protocol: {:?}", picker.protocol_type());
+        Self {
+            picker: Some(picker),
             protocol: None,
             current_thumb: None,
         }
@@ -38,6 +45,19 @@ impl ArtworkRenderer {
     /// Check if graphics are supported.
     pub fn is_supported(&self) -> bool {
         self.picker.is_some()
+    }
+
+    /// Get the detected protocol type name (for display in settings).
+    pub fn protocol_name(&self) -> &'static str {
+        match &self.picker {
+            Some(picker) => match picker.protocol_type() {
+                ratatui_image::picker::ProtocolType::Halfblocks => "Halfblocks",
+                ratatui_image::picker::ProtocolType::Sixel => "Sixel",
+                ratatui_image::picker::ProtocolType::Kitty => "Kitty",
+                ratatui_image::picker::ProtocolType::Iterm2 => "iTerm2",
+            },
+            None => "None",
+        }
     }
 
     /// Load and prepare an image for rendering.
@@ -72,7 +92,7 @@ impl ArtworkRenderer {
     /// Render the artwork to a frame area.
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
         if let Some(ref mut protocol) = self.protocol {
-            let image = StatefulImage::new(None);
+            let image = StatefulImage::new();
             frame.render_stateful_widget(image, area, protocol);
         }
     }

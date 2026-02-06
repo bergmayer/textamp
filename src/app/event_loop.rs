@@ -323,7 +323,7 @@ impl EventLoop {
             // Playback control
             TogglePlayPause | Pause | Play | Stop | Next | Previous
             | VolumeUp | VolumeDown | ToggleMute | Seek(_) | SeekRelative(_)
-            | CycleRepeat | StartPendingPlayback => {
+            | CycleRepeat | StartPendingPlayback | RetryCurrentTrack => {
                 handlers::dispatch_playback::dispatch(&self.event_tx, action, state, client, audio).await?
             }
 

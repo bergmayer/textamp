@@ -190,6 +190,25 @@ pub fn handle_app_event(
             vec![]
         }
         Event::PlaylistsLoaded(playlists) => {
+            // Preload tracks for playlists not already cached (single task, sequential)
+            let uncached_keys: Vec<String> = playlists.iter()
+                .filter(|p| !state.playlist_tracks_cache.contains_key(&p.rating_key))
+                .map(|p| p.rating_key.clone())
+                .collect();
+            if !uncached_keys.is_empty() {
+                let tx = event_tx.clone();
+                let client_clone = client.clone();
+                tokio::spawn(async move {
+                    for pk in uncached_keys {
+                        if let Ok(tracks) = client_clone.get_playlist_tracks(&pk).await {
+                            let _ = tx.send(Event::PlaylistTracksPreloaded {
+                                playlist_key: pk, tracks,
+                            }).await;
+                        }
+                    }
+                });
+            }
+
             // Initialize playlist_nav with the playlists list
             let items = crate::app::state::BrowseItem::from_playlists(&playlists);
             state.playlist_nav.reset("playlists", items);
@@ -359,14 +378,19 @@ pub fn handle_app_event(
             state.playback.status = PlayStatus::Stopped;
             state.consecutive_playback_errors += 1;
 
-            // Auto-skip on error (up to 3 consecutive failures)
-            // Suppress error display during auto-skip — just silently retry
-            if state.consecutive_playback_errors <= 3 {
-                tracing::warn!("Playback error (attempt {}/3, auto-skipping): {}", state.consecutive_playback_errors, msg);
+            // First error: retry the SAME track (handles transient startup issues)
+            if state.consecutive_playback_errors == 1 {
+                tracing::warn!("Playback error (retrying same track): {}", msg);
+                return vec![Action::RetryCurrentTrack];
+            }
+
+            // Subsequent errors: auto-skip to next track
+            if state.consecutive_playback_errors <= 4 {
+                tracing::warn!("Playback error (attempt {}/4, auto-skipping): {}", state.consecutive_playback_errors, msg);
                 return vec![Action::Next];
             }
 
-            // After 3 consecutive failures, show error to user
+            // After 4 consecutive failures, show error to user
             state.consecutive_playback_errors = 0;
             if msg.contains("404") || msg.to_lowercase().contains("not found") {
                 state.confirm_dialog = Some(crate::app::state::ConfirmDialog {
@@ -375,7 +399,7 @@ pub fn handle_app_event(
                     on_confirm: crate::app::state::ConfirmAction::RefreshCache,
                 });
             } else {
-                state.set_error("Playback stopped after 3 consecutive errors".to_string());
+                state.set_error("Playback stopped after multiple consecutive errors".to_string());
             }
             vec![]
         }
@@ -462,6 +486,26 @@ pub fn handle_app_event(
             }
             if state.playlists.is_empty() || !state.playlists_loading {
                 let count = playlists.len();
+
+                // Preload tracks for playlists not already cached (single task, sequential)
+                let uncached_keys: Vec<String> = playlists.iter()
+                    .filter(|p| !state.playlist_tracks_cache.contains_key(&p.rating_key))
+                    .map(|p| p.rating_key.clone())
+                    .collect();
+                if !uncached_keys.is_empty() {
+                    let tx = event_tx.clone();
+                    let client_clone = client.clone();
+                    tokio::spawn(async move {
+                        for pk in uncached_keys {
+                            if let Ok(tracks) = client_clone.get_playlist_tracks(&pk).await {
+                                let _ = tx.send(Event::PlaylistTracksPreloaded {
+                                    playlist_key: pk, tracks,
+                                }).await;
+                            }
+                        }
+                    });
+                }
+
                 state.playlists = playlists;
                 state.cache_dirty = true;
                 tracing::debug!("Playlists preloaded: {} items", count);
@@ -822,6 +866,15 @@ pub fn handle_app_event(
         Event::PlaylistTracksForMillerFailed { playlist_key: _, error } => {
             state.playlist_nav.loading = false;
             state.set_error(format!("Failed to load playlist: {}", error));
+            vec![]
+        }
+
+        // Playlist tracks preloaded in background (cache only, no UI change)
+        Event::PlaylistTracksPreloaded { playlist_key, tracks } => {
+            if !tracks.is_empty() {
+                state.playlist_tracks_cache.insert(playlist_key, tracks);
+                state.cache_dirty = true;
+            }
             vec![]
         }
 

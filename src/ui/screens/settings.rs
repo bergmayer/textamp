@@ -436,6 +436,12 @@ fn render_about_content(frame: &mut Frame, area: Rect) {
         Style::default().fg(t.colors.fg_primary),
     )));
     lines.push(Line::from(""));
+    let protocol = crate::ui::screens::now_playing::artwork_protocol_name();
+    lines.push(Line::from(Span::styled(
+        format!("Graphics: {}", protocol),
+        Style::default().fg(t.colors.fg_primary),
+    )));
+    lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "https://github.com/bergmayer/textamp",
         Style::default().fg(t.colors.fg_accent),

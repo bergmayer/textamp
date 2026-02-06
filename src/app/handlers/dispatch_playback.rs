@@ -188,6 +188,11 @@ pub async fn dispatch(
                 }
             }
         }
+        Action::RetryCurrentTrack => {
+            // Replay the current track without resetting the error counter.
+            // Used by PlaybackError handler to retry before skipping.
+            helpers::play_current_track(event_tx, state, client, audio).await;
+        }
         _ => unreachable!("dispatch_playback called with non-playback action: {:?}", action),
     }
     Ok(vec![])
