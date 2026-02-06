@@ -4,7 +4,7 @@
 
 mod app;
 pub mod artwork;
-mod layout;
+pub mod layout;
 pub mod screens;
 pub mod theme;
 pub mod widgets;

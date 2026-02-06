@@ -1736,7 +1736,7 @@ impl PlexClient {
 /// which is essential for remote access when local IPs are unreachable.
 ///
 /// Note: Sends full Plex client headers as some servers may require them to respond.
-pub async fn test_connection(url: &str, token: &str) -> Result<(), ApiError> {
+pub async fn test_connection(url: &str, token: &str, client_identifier: &str) -> Result<(), ApiError> {
     use super::auth::PlexClientInfo;
 
     let http = Client::builder()
@@ -1744,9 +1744,10 @@ pub async fn test_connection(url: &str, token: &str) -> Result<(), ApiError> {
         .build()
         .map_err(ApiError::Http)?;
 
-    // Use default client info for headers - the specific identifier doesn't matter
-    // for connection testing, we just need to look like a valid Plex client.
-    let client_info = PlexClientInfo::default();
+    // Use the stored client_identifier — Plex tokens are tied to the identifier
+    // they were issued for, so a mismatch can cause 400/401 errors.
+    let mut client_info = PlexClientInfo::default();
+    client_info.client_identifier = client_identifier.to_string();
 
     let response = http
         .get(format!("{}/", url.trim_end_matches('/')))

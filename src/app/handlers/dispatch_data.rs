@@ -1,0 +1,553 @@
+//! Data loading dispatch handlers: LoadInitialData, LoadLibraries, LoadArtists, LoadAlbums,
+//! LoadPlaylists, LoadArtistAlbums, LoadArtistAllTracks, LoadSelectedAlbumTracks,
+//! LoadAlbumTracks, LoadCategoryTracks, GoBackInRightPanel, LoadSimilarAlbums,
+//! LoadSimilarTracks, ListUp/Down/PageUp/PageDown/Top/Bottom.
+
+use crate::app::{Action, AppState, Event};
+use crate::app::state::{BrowseCategory, BrowseItem, Focus, RightPanelMode, View};
+use crate::api::PlexClient;
+use crate::api::models::{Album, Track};
+use crate::cache::LibraryCache;
+use crate::config::Config;
+use crate::services::{CacheService, FolderColumn, FolderNavigationState};
+
+use anyhow::Result;
+use tokio::sync::mpsc;
+
+use super::helpers;
+
+/// Helper enum for LoadCategoryTracks spawn result disambiguation.
+enum Either {
+    Tracks(Vec<Track>),
+    Albums(Vec<Album>, String),
+}
+
+/// Dispatch data-loading actions. Returns follow-up actions.
+pub async fn dispatch(
+    event_tx: &mpsc::Sender<Event>,
+    config: &Config,
+    action: Action,
+    state: &mut AppState,
+    client: &mut PlexClient,
+) -> Result<Vec<Action>> {
+    match action {
+        Action::LoadInitialData => {
+            tracing::info!("Action::LoadInitialData - loading libraries and artists");
+
+            // Load theme from config
+            state.theme = crate::ui::theme::ThemeName::from_config(&config.ui.theme);
+            crate::ui::theme::set_theme(state.theme);
+            tracing::info!("Loaded theme: {}", state.theme.display_name());
+
+            // Load libraries
+            match client.get_libraries().await {
+                Ok(libs) => {
+                    tracing::info!("Loaded {} total libraries", libs.len());
+                    state.libraries = libs.into_iter().filter(|l| l.is_music()).collect();
+                    tracing::info!("After filtering: {} music libraries", state.libraries.len());
+
+                    // Select library: saved default > "Music" by name > alphabetical
+                    let lib = if let Some(ref default_key) = config.libraries.default_library {
+                        state.libraries.iter()
+                            .find(|l| &l.key == default_key)
+                            .or_else(|| pick_default_library(&state.libraries))
+                    } else {
+                        pick_default_library(&state.libraries)
+                    };
+
+                    if let Some(lib) = lib {
+                        tracing::info!("Selected music library: {} (key={})", lib.title, lib.key);
+                        let lib_key = lib.key.clone();
+                        let lib_title = lib.title.clone();
+                        state.active_library = Some(lib_key.clone());
+
+                        // Try to load ALL cached data for instant display
+                        if let Some(cache) = LibraryCache::new() {
+                            if let Some(cached) = cache.load(&lib_key) {
+                                // Validate cache belongs to this library
+                                if cached.library_key != lib_key {
+                                    tracing::warn!("Cache library_key mismatch: expected {}, got {} - ignoring cache",
+                                        lib_key, cached.library_key);
+                                } else {
+                                    tracing::info!("Loading from cache: {} artists, {} albums, {} folders, {} genres",
+                                        cached.artists.len(), cached.albums.len(), cached.root_folders.len(), cached.genres.len());
+
+                                    // Core library data
+                                    // IMPORTANT: Always re-sort after loading from cache
+                                    // Cache may have been saved with API order, not alphabetical
+                                    if !cached.artists.is_empty() {
+                                        state.artists = cached.artists;
+                                        state.artists.sort_by(|a, b| helpers::sort_key(&a.title).cmp(&helpers::sort_key(&b.title)));
+                                        state.artists_total = state.artists.len() as u32;
+                                        // Initialize artist_nav for Miller columns
+                                        let items = BrowseItem::from_artists(&state.artists);
+                                        state.artist_nav.reset(state.artist_view_mode.name(), items);
+                                    }
+                                    if !cached.albums.is_empty() {
+                                        state.albums = cached.albums;
+                                        state.albums.sort_by(|a, b| helpers::sort_key(&a.title).cmp(&helpers::sort_key(&b.title)));
+                                        state.albums_total = state.albums.len() as u32;
+                                    }
+                                    if !cached.playlists.is_empty() {
+                                        state.playlists = cached.playlists.clone();
+                                        // Initialize playlist_nav for Miller columns
+                                        let items = BrowseItem::from_playlists(&state.playlists);
+                                        state.playlist_nav.reset("playlists", items);
+                                    }
+
+                                    // Folders
+                                    if !cached.root_folders.is_empty() {
+                                        let root_column = FolderColumn::new(None, lib_title.clone(), cached.root_folders);
+                                        state.folder_state = Some(FolderNavigationState {
+                                            library_key: lib_key.clone(),
+                                            columns: vec![root_column],
+                                            focused_column: 0,
+                                            loading: false,
+                                        });
+                                    }
+                                    // Load cached subfolder contents with staleness filtering
+                                    // Very stale entries (>32 days) are deleted, not refreshed
+                                    if !cached.folder_contents.is_empty() {
+                                        state.folder_contents_cache = cached.folder_contents;
+                                        let removed = CacheService::filter_stale_subfolders_default(&mut state.folder_contents_cache);
+                                        if removed > 0 {
+                                            tracing::info!("Removed {} very stale subfolder caches on load", removed);
+                                            state.cache_dirty = true;  // Save the filtered cache
+                                        }
+                                        tracing::debug!("Loaded {} cached subfolders", state.folder_contents_cache.len());
+                                    }
+
+                                    // Genres, artist genres, album genres, moods, styles
+                                    if !cached.genres.is_empty() {
+                                        state.genres = cached.genres;
+                                        // Initialize genre_nav if this is the default genre type
+                                        if state.genre_content_type == crate::app::state::GenreContentType::Genres {
+                                            let items = BrowseItem::from_genres(&state.genres);
+                                            state.genre_nav.reset("genres", items);
+                                        }
+                                    }
+                                    if !cached.artist_genres.is_empty() {
+                                        state.artist_genres = cached.artist_genres;
+                                        if state.genre_content_type == crate::app::state::GenreContentType::ArtistGenres {
+                                            let items = BrowseItem::from_genres(&state.artist_genres);
+                                            state.genre_nav.reset("artist genres", items);
+                                        }
+                                    }
+                                    if !cached.album_genres.is_empty() {
+                                        state.album_genres = cached.album_genres;
+                                        if state.genre_content_type == crate::app::state::GenreContentType::AlbumGenres {
+                                            let items = BrowseItem::from_genres(&state.album_genres);
+                                            state.genre_nav.reset("album genres", items);
+                                        }
+                                    }
+                                    if !cached.moods.is_empty() {
+                                        state.moods = cached.moods;
+                                        if state.genre_content_type == crate::app::state::GenreContentType::Moods {
+                                            let items = BrowseItem::from_genres(&state.moods);
+                                            state.genre_nav.reset("moods", items);
+                                        }
+                                    }
+                                    if !cached.styles.is_empty() {
+                                        state.styles = cached.styles;
+                                        if state.genre_content_type == crate::app::state::GenreContentType::Styles {
+                                            let items = BrowseItem::from_genres(&state.styles);
+                                            state.genre_nav.reset("styles", items);
+                                        }
+                                    }
+
+                                    // Stations - populate both legacy and Miller columns
+                                    if !cached.stations.is_empty() {
+                                        state.stations = cached.stations.clone();
+                                        // Initialize Miller columns with root column
+                                        state.station_nav.columns.clear();
+                                        state.station_nav.columns.push(crate::app::state::StationColumn::new(
+                                            None,
+                                            "Stations".to_string(),
+                                            cached.stations,
+                                        ));
+                                        state.station_nav.focused_column = 0;
+                                    }
+
+                                    // Recent content
+                                    if !cached.recently_added_albums.is_empty() {
+                                        state.recently_added_albums = cached.recently_added_albums;
+                                    }
+                                    if !cached.recently_played_albums.is_empty() {
+                                        state.recently_played_albums = cached.recently_played_albums;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Refresh from API in background
+                        helpers::preload_all_library_data(event_tx, &lib_key, &lib_title, client);
+                    } else {
+                        tracing::warn!("No music libraries found!");
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Failed to load libraries: {}", e);
+                    state.set_error(format!("Failed to load libraries: {}", e));
+                }
+            }
+        }
+        Action::LoadLibraries => {
+            tracing::info!("Action::LoadLibraries - fetching libraries");
+            match client.get_libraries().await {
+                Ok(libs) => {
+                    tracing::info!("Fetched {} libraries", libs.len());
+                    state.libraries = libs.into_iter().filter(|l| l.is_music()).collect();
+                    if let Some(lib) = state.libraries.first() {
+                        state.active_library = Some(lib.key.clone());
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Failed to load libraries: {}", e);
+                }
+            }
+        }
+        Action::LoadArtists => {
+            tracing::info!("Action::LoadArtists - active_library={:?}", state.active_library);
+            helpers::load_artists(event_tx, state, client);
+            tracing::info!("LoadArtists complete - loaded {} artists", state.artists.len());
+        }
+        Action::LoadAlbums => {
+            helpers::load_albums(event_tx, state, client);
+        }
+        Action::LoadPlaylists => {
+            helpers::load_playlists(event_tx, state, client);
+        }
+        Action::LoadArtistAlbums => {
+            // Load albums for selected artist (right panel shows albums)
+            // First check for pending filter key (from API search selection)
+            let artist_key = if let Some(key) = state.pending_filter_key.take() {
+                // Coming from search - ensure artists are loaded first
+                if state.artists.is_empty() && !state.artists_loading {
+                    state.artists_loading = true;
+                    if let Some(lib_key) = &state.active_library {
+                        match client.get_artists(lib_key).await {
+                            Ok(mut artists) => {
+                                artists.sort_by(|a, b| helpers::sort_key(&a.title).cmp(&helpers::sort_key(&b.title)));
+                                state.artists = artists;
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to load artists: {}", e);
+                            }
+                        }
+                    }
+                    state.artists_loading = false;
+                }
+                // Find artist in loaded list and set correct index
+                if let Some(pos) = state.artists.iter().position(|a| a.rating_key == key) {
+                    state.list_state.artists_index = pos;
+                }
+                key
+            } else if let Some(artist) = state.artists.get(state.list_state.artists_index) {
+                state.selected_artist_name = artist.title.clone();
+                artist.rating_key.clone()
+            } else {
+                return Ok(vec![]);
+            };
+
+            state.right_panel_loading = true;
+            state.right_panel_mode = RightPanelMode::ArtistAlbums;
+            state.selected_artist_albums.clear();
+            state.list_state.right_albums_index = 0;
+
+            let event_tx = event_tx.clone();
+            let client = client.clone();
+            tokio::spawn(async move {
+                match client.get_artist_albums(&artist_key).await {
+                    Ok(albums) => { let _ = event_tx.send(Event::ArtistAlbumsLoaded(albums)).await; }
+                    Err(e) => { let _ = event_tx.send(Event::DataLoadError(format!("Failed to load albums: {}", e))).await; }
+                }
+            });
+        }
+        Action::LoadArtistAllTracks => {
+            // Load all tracks by the selected artist
+            if let Some(artist) = state.artists.get(state.list_state.artists_index) {
+                let artist_key = artist.rating_key.clone();
+                state.selected_album_title = format!("All tracks by {}", artist.title);
+                state.right_panel_loading = true;
+                state.right_panel_mode = RightPanelMode::AlbumTracks;
+                state.selected_album_tracks.clear();
+                state.list_state.tracks_index = 0;
+
+                let event_tx = event_tx.clone();
+                let client = client.clone();
+                tokio::spawn(async move {
+                    match client.get_artist_all_tracks(&artist_key).await {
+                        Ok(tracks) => { let _ = event_tx.send(Event::ArtistAllTracksLoaded(tracks)).await; }
+                        Err(e) => { let _ = event_tx.send(Event::DataLoadError(format!("Failed to load tracks: {}", e))).await; }
+                    }
+                });
+            }
+        }
+        Action::LoadSelectedAlbumTracks => {
+            // Load tracks for selected album (drill down from artist albums)
+            // Index 0 is "All Tracks", so actual albums start at index 1
+            let album_idx = state.list_state.right_albums_index.saturating_sub(1);
+            if let Some(album) = state.selected_artist_albums.get(album_idx) {
+                let album_key = album.rating_key.clone();
+                state.selected_album_title = album.title.clone();
+                state.right_panel_loading = true;
+                state.right_panel_mode = RightPanelMode::AlbumTracks;
+                state.selected_album_tracks.clear();
+                state.list_state.tracks_index = 0;
+
+                let event_tx = event_tx.clone();
+                let client = client.clone();
+                tokio::spawn(async move {
+                    match client.get_album_tracks(&album_key).await {
+                        Ok(tracks) => { let _ = event_tx.send(Event::AlbumTracksLoaded(tracks)).await; }
+                        Err(e) => { let _ = event_tx.send(Event::DataLoadError(format!("Failed to load tracks: {}", e))).await; }
+                    }
+                });
+            }
+        }
+        Action::LoadAlbumTracks { rating_key } => {
+            // Load tracks for a specific album (used by genre albums)
+            state.right_panel_loading = true;
+            state.right_panel_mode = RightPanelMode::AlbumTracks;
+            state.selected_album_tracks.clear();
+            state.list_state.tracks_index = 0;
+
+            let event_tx = event_tx.clone();
+            let client = client.clone();
+            tokio::spawn(async move {
+                match client.get_album_tracks(&rating_key).await {
+                    Ok(tracks) => { let _ = event_tx.send(Event::AlbumTracksLoaded(tracks)).await; }
+                    Err(e) => { let _ = event_tx.send(Event::DataLoadError(format!("Failed to load album tracks: {}", e))).await; }
+                }
+            });
+        }
+        Action::LoadCategoryTracks => {
+            // Load tracks directly (for Playlists category)
+            // Check for pending filter key first
+            let pending_key = state.pending_filter_key.take();
+
+            // Ensure category data is loaded first (synchronously - rare fallback)
+            match state.browse_category {
+                BrowseCategory::Artists => {
+                    if state.artists.is_empty() && !state.artists_loading {
+                        state.artists_loading = true;
+                        if let Some(lib_key) = &state.active_library {
+                            match client.get_artists(lib_key).await {
+                                Ok(mut artists) => {
+                                    artists.sort_by(|a, b| helpers::sort_key(&a.title).cmp(&helpers::sort_key(&b.title)));
+                                    state.artists = artists;
+                                }
+                                Err(e) => {
+                                    tracing::error!("Failed to load artists: {}", e);
+                                }
+                            }
+                        }
+                        state.artists_loading = false;
+                    }
+                }
+                BrowseCategory::Playlists => {
+                    if state.playlists.is_empty() {
+                        if let Ok(playlists) = client.get_playlists().await {
+                            state.playlists = playlists;
+                        }
+                    }
+                }
+                BrowseCategory::Genres => {
+                    // Stations are handled separately via station_nav
+                    if state.genre_content_type == crate::app::state::GenreContentType::Stations {
+                        return Ok(vec![]);
+                    }
+                    if state.genres.is_empty() {
+                        if let Some(lib_key) = &state.active_library {
+                            match client.get_genres(lib_key).await {
+                                Ok(genres) => state.genres = genres,
+                                Err(e) => tracing::error!("Failed to load genres: {}", e),
+                            }
+                        }
+                    }
+                }
+                BrowseCategory::Folders => {
+                    // Folders don't use this load mechanism
+                    return Ok(vec![]);
+                }
+            }
+
+            // Get rating key AFTER category data is loaded
+            let rating_key = pending_key.or_else(|| state.selected_category_key());
+
+            state.right_panel_mode = RightPanelMode::CategoryTracks;
+            state.focus = Focus::Right;
+            state.list_state.tracks_index = 0;
+
+            if let Some(key) = rating_key {
+                state.right_panel_loading = true;
+                state.selected_album_tracks.clear();
+
+                // Capture branching data synchronously before spawning
+                let browse_category = state.browse_category;
+                let playlists_mode = state.playlists_mode;
+                let playlist_title = state.selected_category_title()
+                    .map(|s| s.to_lowercase());
+                let lib_key = state.active_library.clone();
+
+                let event_tx = event_tx.clone();
+                let client = client.clone();
+                tokio::spawn(async move {
+                    let result = match browse_category {
+                        BrowseCategory::Artists => {
+                            match client.get_artist_all_tracks(&key).await {
+                                Ok(tracks) => Ok(Either::Tracks(tracks)),
+                                Err(e) => Err(e),
+                            }
+                        }
+                        BrowseCategory::Playlists => {
+                            match playlists_mode {
+                                crate::app::state::PlaylistsMode::RecentlyAdded => {
+                                    match client.get_album_tracks(&key).await {
+                                        Ok(tracks) => Ok(Either::Tracks(tracks)),
+                                        Err(e) => Err(e),
+                                    }
+                                }
+                                _ => {
+                                    let title = playlist_title.unwrap_or_default();
+                                    if title.contains("recently played") {
+                                        if let Some(lib_key) = &lib_key {
+                                            match client.get_recently_played_albums(lib_key, 50).await {
+                                                Ok(albums) => Ok(Either::Albums(albums, "Showing recently played albums".to_string())),
+                                                Err(e) => Err(e),
+                                            }
+                                        } else {
+                                            Err(crate::api::ApiError::NoServerSelected)
+                                        }
+                                    } else if title.contains("recently added") {
+                                        if let Some(lib_key) = &lib_key {
+                                            match client.get_recently_added_albums(lib_key, 50).await {
+                                                Ok(albums) => Ok(Either::Albums(albums, "Showing recently added albums".to_string())),
+                                                Err(e) => Err(e),
+                                            }
+                                        } else {
+                                            Err(crate::api::ApiError::NoServerSelected)
+                                        }
+                                    } else {
+                                        match client.get_playlist_tracks(&key).await {
+                                            Ok(tracks) => Ok(Either::Tracks(tracks)),
+                                            Err(e) => Err(e),
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        BrowseCategory::Genres => {
+                            if let Some(lib_key) = &lib_key {
+                                match client.get_genre_tracks(lib_key, &key).await {
+                                    Ok(tracks) => Ok(Either::Tracks(tracks)),
+                                    Err(e) => Err(e),
+                                }
+                            } else {
+                                Err(crate::api::ApiError::NoServerSelected)
+                            }
+                        }
+                        BrowseCategory::Folders => unreachable!(),
+                    };
+
+                    match result {
+                        Ok(Either::Tracks(tracks)) => {
+                            let _ = event_tx.send(Event::CategoryTracksLoaded(tracks)).await;
+                        }
+                        Ok(Either::Albums(albums, msg)) => {
+                            let _ = event_tx.send(Event::CategoryAlbumsLoaded { albums, status_message: msg }).await;
+                        }
+                        Err(e) => {
+                            let error_str = e.to_string();
+                            let clean_error = if error_str.contains("<html>") || error_str.contains("500") {
+                                "This playlist cannot be loaded (server error)".to_string()
+                            } else {
+                                format!("Failed to load tracks: {}", e)
+                            };
+                            let _ = event_tx.send(Event::DataLoadError(clean_error)).await;
+                        }
+                    }
+                });
+            } else {
+                // No key available
+                state.right_panel_loading = false;
+                state.selected_album_tracks.clear();
+            }
+        }
+        Action::GoBackInRightPanel => {
+            // Go from tracks back to albums view (for artist drill-down)
+            if state.right_panel_mode == RightPanelMode::AlbumTracks {
+                state.right_panel_mode = RightPanelMode::ArtistAlbums;
+                state.selected_album_tracks.clear();
+            }
+        }
+        Action::LoadSimilarAlbums { rating_key, title } => {
+            state.similar_source_title = title;
+            state.similar_loading = true;
+            state.similar_albums.clear();
+            state.list_state.similar_index = 0;
+            state.view = View::Similar;
+
+            let event_tx = event_tx.clone();
+            let client = client.clone();
+            tokio::spawn(async move {
+                match client.get_similar_albums(&rating_key, 50).await {
+                    Ok(albums) => { let _ = event_tx.send(Event::SimilarAlbumsLoaded(albums)).await; }
+                    Err(e) => { let _ = event_tx.send(Event::DataLoadError(format!("Failed to load similar albums: {}", e))).await; }
+                }
+            });
+        }
+        Action::LoadSimilarTracks { rating_key, title } => {
+            state.similar_source_title = title;
+            state.similar_loading = true;
+            state.similar_tracks.clear();
+            state.list_state.similar_index = 0;
+            state.view = View::Similar;
+
+            let event_tx = event_tx.clone();
+            let client = client.clone();
+            tokio::spawn(async move {
+                match client.get_similar_tracks(&rating_key, 50).await {
+                    Ok(tracks) => { let _ = event_tx.send(Event::SimilarTracksLoaded(tracks)).await; }
+                    Err(e) => { let _ = event_tx.send(Event::DataLoadError(format!("Failed to load similar tracks: {}", e))).await; }
+                }
+            });
+        }
+        Action::ListUp => {
+            helpers::adjust_list_index(state, -1);
+        }
+        Action::ListDown => {
+            helpers::adjust_list_index(state, 1);
+            // Lazy load more if needed
+            helpers::maybe_load_more(state, client).await;
+        }
+        Action::ListPageUp => {
+            helpers::adjust_list_index(state, -10);
+        }
+        Action::ListPageDown => {
+            helpers::adjust_list_index(state, 10);
+            helpers::maybe_load_more(state, client).await;
+        }
+        Action::ListTop => {
+            helpers::set_list_index(state, 0);
+        }
+        Action::ListBottom => {
+            helpers::set_list_index(state, isize::MAX);
+        }
+        _ => unreachable!("dispatch_data called with non-data action: {:?}", action),
+    }
+    Ok(vec![])
+}
+
+/// Pick the default library when no saved default exists.
+/// Prefers a library named "Music" (case-insensitive), then alphabetical.
+fn pick_default_library(libraries: &[crate::api::models::Library]) -> Option<&crate::api::models::Library> {
+    // Prefer "Music" by name
+    if let Some(lib) = libraries.iter().find(|l| l.title.eq_ignore_ascii_case("music")) {
+        return Some(lib);
+    }
+    // Fallback: first alphabetically by title
+    libraries.iter().min_by(|a, b| {
+        helpers::sort_key(&a.title).cmp(&helpers::sort_key(&b.title))
+    })
+}

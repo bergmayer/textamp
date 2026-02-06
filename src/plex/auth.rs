@@ -63,6 +63,8 @@ pub struct StoredAuth {
     pub server_identifier: Option<String>,
     #[serde(default)]
     pub server_name: Option<String>,
+    #[serde(default)]
+    pub has_plex_pass: bool,
 }
 
 /// Server info for persistence.
@@ -291,6 +293,7 @@ impl PlexAuth {
             server_url: existing.as_ref().and_then(|e| e.server_url.clone()),
             server_identifier: existing.as_ref().and_then(|e| e.server_identifier.clone()),
             server_name: existing.as_ref().and_then(|e| e.server_name.clone()),
+            has_plex_pass: user.map(|u| u.has_plex_pass()).unwrap_or(false),
         };
 
         let yaml = serde_yaml::to_string(&stored)

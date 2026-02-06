@@ -1,0 +1,790 @@
+//! Event result handlers.
+//!
+//! Processes async event results (auth, data loading, playback, cache, etc.)
+
+use crate::app::{Action, AppState, Event};
+use crate::app::state::{
+    BrowseCategory, ConnectionState, PlayStatus, PlaybackMode,
+    SearchSection, View,
+};
+use crate::api::{PlexAuth, PlexClient};
+use super::helpers;
+use std::time::Duration;
+use tokio::sync::mpsc;
+
+/// Handle non-input events (async results, timers, etc.) and return actions to dispatch.
+pub fn handle_app_event(
+    event: Event,
+    state: &mut AppState,
+    client: &mut PlexClient,
+    event_tx: &mpsc::Sender<Event>,
+) -> Vec<Action> {
+    match event {
+        Event::AuthSuccess { token, username, server_url, servers, client_identifier, has_plex_pass } => {
+            tracing::info!("Authenticated as: {} ({} servers available)", username, servers.len());
+            tracing::info!("AuthSuccess server_url: {}", server_url);
+            tracing::info!("AuthSuccess client_identifier: {}", client_identifier);
+            tracing::info!("PlexClient BEFORE update - client_id: {}, server: {:?}",
+                client.client_identifier(), client.server_url());
+            client.set_auth_token(token);
+            client.set_server(server_url.clone());
+            client.set_client_identifier(client_identifier);
+            tracing::info!("PlexClient AFTER update - client_id: {}, server: {:?}",
+                client.client_identifier(), client.server_url());
+
+            // Persist server info for future restarts
+            // Find the server that owns this URL to get its identifier and name
+            if let Some(server) = servers.iter().find(|s| {
+                s.connections.iter().any(|c| c.uri == server_url)
+            }) {
+                let server_info = crate::plex::ServerInfo {
+                    url: server_url.clone(),
+                    identifier: server.client_identifier.clone(),
+                    name: server.name.clone(),
+                };
+                if let Err(e) = PlexAuth::update_server_info(&server_info) {
+                    tracing::warn!("Failed to persist server info: {}", e);
+                }
+            }
+
+            state.available_servers = servers;
+            state.connection = ConnectionState::Connected { username: username.clone(), has_plex_pass };
+            state.settings_state.discovering_servers = false;
+            state.settings_state.username_input = username;
+            state.settings_state.password_input.clear(); // Never keep password in memory
+            state.view = View::Browse;
+            vec![Action::LoadInitialData]
+        }
+        Event::ServersDiscovered(servers) => {
+            tracing::info!("Discovered {} servers", servers.len());
+            state.available_servers = servers;
+            state.settings_state.discovering_servers = false;
+            vec![]
+        }
+        Event::ServerDiscoveryFailed(error) => {
+            tracing::warn!("Server discovery failed: {}", error);
+            state.settings_state.discovering_servers = false;
+            state.set_error(format!("Server discovery failed: {}", error));
+            vec![]
+        }
+        Event::ServerConnectionSucceeded { server_name, url } => {
+            tracing::info!("Server connection succeeded: {} at {}", server_name, url);
+            client.set_server(url);
+            state.set_status(format!("Connected to {}", server_name));
+            vec![]
+        }
+        Event::ServerConnectionFailed { server_name } => {
+            tracing::warn!("All connection tests failed for server {}", server_name);
+            state.set_error(format!("Could not connect to {} - all connections failed", server_name));
+            vec![]
+        }
+        Event::AuthFailed(msg) => {
+            use crate::app::state::AuthStep;
+            tracing::error!("Auth failed: {}", msg);
+            state.connection = ConnectionState::Error(msg.clone());
+            state.settings_state.discovering_servers = false;
+            state.settings_state.password_input.clear(); // Clear password on failure
+            state.auth_state.step = AuthStep::Login;
+            state.auth_state.error_message = Some(msg.clone());
+            state.set_error(msg);
+            vec![]
+        }
+        Event::AuthShowLogin => {
+            use crate::app::state::AuthStep;
+            tracing::info!("No stored credentials, showing login form");
+            state.connection = ConnectionState::Disconnected;
+            state.auth_state.step = AuthStep::Login;
+            state.auth_state.field_index = 0;
+            state.auth_state.editing = false;
+            state.auth_state.error_message = None;
+            vec![]
+        }
+        Event::AuthServersReady { token, username, servers, client_identifier, has_plex_pass } => {
+            use crate::app::state::AuthStep;
+            tracing::info!("Login succeeded, {} servers available", servers.len());
+            state.available_servers = servers.clone();
+
+            // Auto-select if only one server, otherwise show selection
+            if servers.len() == 1 {
+                state.auth_state.step = AuthStep::Connecting;
+                // Find working connection URL (tests connectivity)
+                let event_tx = event_tx.clone();
+                let token_clone = token.clone();
+                let username_clone = username.clone();
+                let servers_clone = servers.clone();
+                let client_id_clone = client_identifier.clone();
+                tokio::spawn(async move {
+                    if let Some(url) = helpers::find_working_connection_from_servers(&servers_clone, &token_clone, &client_id_clone).await {
+                        let _ = event_tx.send(Event::AuthSuccess {
+                            token: token_clone,
+                            username: username_clone,
+                            server_url: url,
+                            servers: servers_clone,
+                            client_identifier: client_id_clone,
+                            has_plex_pass,
+                        }).await;
+                    } else {
+                        let _ = event_tx.send(Event::AuthFailed(
+                            "Could not connect to server - all connection attempts failed".to_string()
+                        )).await;
+                    }
+                });
+            } else {
+                // Multiple servers - let user choose
+                state.auth_state.step = AuthStep::ServerSelect;
+                state.auth_state.server_index = 0;
+                // Store token temporarily for when server is selected
+                state.settings_state.username_input = username;
+                // Note: We need to pass the token through - store in a temp location
+                // We'll use the client's token holder for this
+                client.set_auth_token(token);
+                client.set_client_identifier(client_identifier);
+                state.auth_state.has_plex_pass = has_plex_pass;
+            }
+            vec![]
+        }
+        Event::AuthLoginFailed(msg) => {
+            use crate::app::state::AuthStep;
+            tracing::error!("Login failed: {}", msg);
+            state.auth_state.step = AuthStep::Login;
+            state.auth_state.error_message = Some(msg);
+            state.auth_state.password_input.clear();
+            vec![]
+        }
+        Event::LibrariesLoaded(libs) => {
+            tracing::info!("LibrariesLoaded: received {} libraries", libs.len());
+            for lib in &libs {
+                tracing::debug!("  Library: {} (key={}, type={})", lib.title, lib.key, lib.library_type);
+            }
+            state.libraries = libs.into_iter().filter(|l| l.is_music()).collect();
+            tracing::info!("After filtering: {} music libraries", state.libraries.len());
+            if let Some(lib) = state.libraries.first() {
+                tracing::info!("Selected music library: {} (key={})", lib.title, lib.key);
+                state.active_library = Some(lib.key.clone());
+                // Now that we have an active library, load artists
+                return vec![Action::LoadArtists];
+            } else {
+                tracing::warn!("No music libraries found after filtering!");
+            }
+            vec![]
+        }
+        Event::ArtistsLoaded(mut artists) => {
+            // Sort by display title, ignoring "The " prefix
+            artists.sort_by(|a, b| helpers::sort_key(&a.title).cmp(&helpers::sort_key(&b.title)));
+            state.artists = artists;
+            state.artists_loading = false;
+
+            // Initialize artist_nav if we're in Artists category
+            if state.browse_category == BrowseCategory::Artists && !state.artists.is_empty() {
+                let title = state.artist_view_mode.name();
+                let items = crate::app::state::BrowseItem::from_artists(&state.artists);
+                state.artist_nav.reset(title, items);
+            }
+            vec![]
+        }
+        Event::AlbumsLoaded(mut albums) => {
+            // Sort by display title, ignoring "The " prefix
+            albums.sort_by(|a, b| helpers::sort_key(&a.title).cmp(&helpers::sort_key(&b.title)));
+            state.albums = albums;
+            state.albums_loading = false;
+            vec![]
+        }
+        Event::PlaylistsLoaded(playlists) => {
+            // Initialize playlist_nav with the playlists list
+            let items = crate::app::state::BrowseItem::from_playlists(&playlists);
+            state.playlist_nav.reset("playlists", items);
+            state.playlists = playlists;
+            state.playlists_loading = false;
+            vec![]
+        }
+        Event::TracksLoaded(tracks) => {
+            state.selected_album_tracks = tracks;
+            state.right_panel_loading = false;
+            vec![]
+        }
+        Event::AlbumTracksLoaded(tracks) => {
+            state.selected_album_tracks = tracks;
+            state.right_panel_loading = false;
+            vec![]
+        }
+        Event::ArtistAlbumsLoaded(albums) => {
+            state.selected_artist_albums = albums;
+            state.right_panel_loading = false;
+            state.focus = crate::app::state::Focus::Right;
+
+            // Check if we need to auto-select a specific album (e.g., from Similar view)
+            if let Some(album_key) = state.pending_album_key.take() {
+                // Find the album in the list (+1 offset for "All Tracks" at index 0)
+                if let Some(album_idx) = state.selected_artist_albums.iter()
+                    .position(|a| a.rating_key == album_key)
+                {
+                    state.list_state.right_albums_index = album_idx + 1; // +1 for "All Tracks"
+                    state.selected_album_title = state.selected_artist_albums[album_idx].title.clone();
+                    return vec![Action::LoadAlbumTracks { rating_key: album_key }];
+                }
+            }
+            vec![]
+        }
+        Event::ArtistAllTracksLoaded(tracks) => {
+            state.selected_album_tracks = tracks;
+            state.right_panel_loading = false;
+            vec![]
+        }
+        Event::CategoryTracksLoaded(tracks) => {
+            if state.selected_album_title.is_empty() {
+                if let Some(first) = tracks.first() {
+                    state.selected_album_title = first.album_name().to_string();
+                }
+            }
+            state.selected_album_tracks = tracks;
+            state.right_panel_loading = false;
+            vec![]
+        }
+        Event::CategoryAlbumsLoaded { albums, status_message } => {
+            state.right_panel_mode = crate::app::state::RightPanelMode::CategoryAlbums;
+            state.genre_albums = albums;
+            state.genre_albums_index = 0;
+            state.set_status(status_message);
+            state.right_panel_loading = false;
+            vec![]
+        }
+        Event::DataLoadError(msg) => {
+            state.set_error(msg);
+            state.right_panel_loading = false;
+            state.similar_loading = false;
+            vec![]
+        }
+        Event::SimilarAlbumsLoaded(albums) => {
+            state.similar_albums = albums;
+            state.similar_mode = crate::app::state::SimilarMode::Albums;
+            state.similar_loading = false;
+            state.list_state.similar_index = 0;
+            vec![]
+        }
+        Event::SimilarTracksLoaded(tracks) => {
+            state.similar_tracks = tracks;
+            state.similar_mode = crate::app::state::SimilarMode::Tracks;
+            state.similar_loading = false;
+            state.list_state.similar_index = 0;
+            vec![]
+        }
+        Event::SearchCompleted(results) => {
+            // Legacy handler for non-debounced search (e.g., Enter key)
+            tracing::info!(
+                "Search completed: {} artists, {} albums, {} tracks, {} playlists",
+                results.artists.len(),
+                results.albums.len(),
+                results.tracks.len(),
+                results.playlists.len()
+            );
+            state.list_state.search_item_index = 0;
+            if !results.artists.is_empty() {
+                state.list_state.search_section = SearchSection::Artists;
+            } else if !results.albums.is_empty() {
+                state.list_state.search_section = SearchSection::Albums;
+            } else if !results.tracks.is_empty() {
+                state.list_state.search_section = SearchSection::Tracks;
+            }
+            state.search_results = Some(results);
+            state.search_loading = false;
+            vec![]
+        }
+        Event::GlobalSearchCompleted { version, results } => {
+            // Only apply results if version matches (not stale)
+            if version == state.global_search_version {
+                tracing::info!(
+                    "Global search completed: {} artists, {} albums, {} tracks, {} playlists",
+                    results.artists.len(),
+                    results.albums.len(),
+                    results.tracks.len(),
+                    results.playlists.len()
+                );
+                state.list_state.search_item_index = 0;
+                if !results.artists.is_empty() {
+                    state.list_state.search_section = SearchSection::Artists;
+                } else if !results.albums.is_empty() {
+                    state.list_state.search_section = SearchSection::Albums;
+                } else if !results.tracks.is_empty() {
+                    state.list_state.search_section = SearchSection::Tracks;
+                }
+                state.search_results = Some(results);
+                state.search_loading = false;
+            }
+            // Stale results are silently ignored
+            vec![]
+        }
+        Event::FilterSearchCompleted { version, results } => {
+            // Only apply results if version matches (not stale)
+            if version == state.filter_search_version {
+                state.filter_results = Some(results);
+                state.filter_loading = false;
+                state.list_state.search_item_index = 0;
+            }
+            // Stale results are silently ignored
+            vec![]
+        }
+        Event::ApiError(msg) => {
+            state.set_error(msg);
+            vec![]
+        }
+        Event::TrackStarted => {
+            state.playback.status = PlayStatus::Playing;
+            state.playback.position_ms = 0;
+            vec![]
+        }
+        Event::TrackEnded => {
+            // Report stop to Plex when track ends naturally
+            // continuing=true because we're about to play the next track
+            if let Some(track) = state.current_track().cloned() {
+                // Use track duration as position (track finished)
+                let position = track.duration_ms();
+                helpers::report_playback_stop_to_plex(&track, position, true, state.plex_session_id.clone(), client);
+            }
+            vec![Action::Next]
+        }
+        Event::PlaybackPaused => {
+            state.playback.status = PlayStatus::Paused;
+            vec![]
+        }
+        Event::PlaybackResumed => {
+            state.playback.status = PlayStatus::Playing;
+            vec![]
+        }
+        Event::PlaybackStopped => {
+            state.playback.status = PlayStatus::Stopped;
+            state.playback.position_ms = 0;
+            vec![]
+        }
+        Event::PlaybackError(msg) => {
+            // Check for 404/not found errors - offer to refresh cache
+            if msg.contains("404") || msg.to_lowercase().contains("not found") {
+                state.confirm_dialog = Some(crate::app::state::ConfirmDialog {
+                    title: "Track Not Found".to_string(),
+                    message: "This track may have been removed. Refresh cache?".to_string(),
+                    on_confirm: crate::app::state::ConfirmAction::RefreshCache,
+                });
+            } else {
+                state.set_error(format!("Playback error: {}", msg));
+            }
+            state.playback.status = PlayStatus::Stopped;
+            vec![]
+        }
+        Event::BufferingStart => {
+            state.playback.status = PlayStatus::Buffering;
+            vec![]
+        }
+        Event::BufferingEnd => {
+            vec![Action::StartPendingPlayback]
+        }
+        Event::PositionUpdate(pos) => {
+            state.playback.position_ms = pos;
+            vec![]
+        }
+        Event::ArtworkLoaded { thumb_path, data } => {
+            state.artwork_thumb = Some(thumb_path);
+            state.artwork_data = Some(data);
+            state.artwork_loading = false;
+            vec![]
+        }
+        Event::ArtworkFailed { thumb_path: _ } => {
+            state.artwork_thumb = None;
+            state.artwork_data = None;
+            state.artwork_loading = false;
+            vec![]
+        }
+        Event::FoldersPreloaded { library_key, folder_state } => {
+            // Ignore if this is for a different library (race condition from library switch)
+            if state.active_library.as_ref() != Some(&library_key) {
+                tracing::debug!("Ignoring stale folders preload for library {}", library_key);
+                return vec![];
+            }
+            // Only set if folders weren't already loaded (user might have navigated there)
+            if state.folder_state.is_none() {
+                state.folder_state = Some(folder_state);
+                state.cache_dirty = true;
+                tracing::debug!("Folders preloaded and ready");
+            }
+            vec![]
+        }
+        Event::ArtistsPreloaded { library_key, mut artists } => {
+            // Ignore if this is for a different library (race condition from library switch)
+            if state.active_library.as_ref() != Some(&library_key) {
+                tracing::debug!("Ignoring stale artists preload for library {}", library_key);
+                return vec![];
+            }
+            if state.artists.is_empty() || !state.artists_loading {
+                artists.sort_by(|a, b| helpers::sort_key(&a.title).cmp(&helpers::sort_key(&b.title)));
+                let count = artists.len();
+                state.artists = artists;
+                state.artists_total = count as u32;
+                state.cache_dirty = true;
+                tracing::debug!("Artists preloaded: {} items", count);
+                // Rebuild Miller columns
+                if !state.artists.is_empty() {
+                    let items = crate::app::state::BrowseItem::from_artists(&state.artists);
+                    state.artist_nav.reset(state.artist_view_mode.name(), items);
+                }
+            }
+            vec![]
+        }
+        Event::AlbumsPreloaded { library_key, mut albums } => {
+            // Ignore if this is for a different library (race condition from library switch)
+            if state.active_library.as_ref() != Some(&library_key) {
+                tracing::debug!("Ignoring stale albums preload for library {}", library_key);
+                return vec![];
+            }
+            if state.albums.is_empty() || !state.albums_loading {
+                albums.sort_by(|a, b| helpers::sort_key(&a.title).cmp(&helpers::sort_key(&b.title)));
+                let count = albums.len();
+                state.albums = albums;
+                state.albums_total = count as u32;
+                state.cache_dirty = true;
+                tracing::debug!("Albums preloaded: {} items", count);
+            }
+            vec![]
+        }
+        Event::PlaylistsPreloaded { library_key, playlists } => {
+            // Ignore if this is for a different library (race condition from library switch)
+            if state.active_library.as_ref() != Some(&library_key) {
+                tracing::debug!("Ignoring stale playlists preload for library {}", library_key);
+                return vec![];
+            }
+            if state.playlists.is_empty() || !state.playlists_loading {
+                let count = playlists.len();
+                state.playlists = playlists;
+                state.cache_dirty = true;
+                tracing::debug!("Playlists preloaded: {} items", count);
+                // Rebuild Miller columns
+                if !state.playlists.is_empty() {
+                    let items = crate::app::state::BrowseItem::from_playlists(&state.playlists);
+                    state.playlist_nav.reset(state.playlists_mode.name(), items);
+                }
+            }
+            vec![]
+        }
+        Event::GenresPreloaded { library_key, genres } => {
+            // Ignore if this is for a different library (race condition from library switch)
+            if state.active_library.as_ref() != Some(&library_key) {
+                tracing::debug!("Ignoring stale genres preload for library {}", library_key);
+                return vec![];
+            }
+            if state.genres.is_empty() && !state.genres_loading {
+                let count = genres.len();
+                state.genres = genres;
+                state.cache_dirty = true;
+                tracing::debug!("Genres preloaded: {} items", count);
+                if state.genre_content_type == crate::app::state::GenreContentType::Genres {
+                    let items = crate::app::state::BrowseItem::from_genres(&state.genres);
+                    state.genre_nav.reset("genres", items);
+                }
+            }
+            vec![]
+        }
+        Event::ArtistGenresPreloaded { library_key, genres } => {
+            // Ignore if this is for a different library (race condition from library switch)
+            if state.active_library.as_ref() != Some(&library_key) {
+                tracing::debug!("Ignoring stale artist genres preload for library {}", library_key);
+                return vec![];
+            }
+            if state.artist_genres.is_empty() && !state.artist_genres_loading {
+                let count = genres.len();
+                state.artist_genres = genres;
+                state.cache_dirty = true;
+                tracing::debug!("Artist genres preloaded: {} items", count);
+                if state.genre_content_type == crate::app::state::GenreContentType::ArtistGenres {
+                    let items = crate::app::state::BrowseItem::from_genres(&state.artist_genres);
+                    state.genre_nav.reset("artist genres", items);
+                }
+            }
+            vec![]
+        }
+        Event::AlbumGenresPreloaded { library_key, genres } => {
+            // Ignore if this is for a different library (race condition from library switch)
+            if state.active_library.as_ref() != Some(&library_key) {
+                tracing::debug!("Ignoring stale album genres preload for library {}", library_key);
+                return vec![];
+            }
+            if state.album_genres.is_empty() && !state.album_genres_loading {
+                let count = genres.len();
+                state.album_genres = genres;
+                state.cache_dirty = true;
+                tracing::debug!("Album genres preloaded: {} items", count);
+                if state.genre_content_type == crate::app::state::GenreContentType::AlbumGenres {
+                    let items = crate::app::state::BrowseItem::from_genres(&state.album_genres);
+                    state.genre_nav.reset("album genres", items);
+                }
+            }
+            vec![]
+        }
+        Event::MoodsPreloaded { library_key, moods } => {
+            // Ignore if this is for a different library (race condition from library switch)
+            if state.active_library.as_ref() != Some(&library_key) {
+                tracing::debug!("Ignoring stale moods preload for library {}", library_key);
+                return vec![];
+            }
+            if state.moods.is_empty() && !state.moods_loading {
+                let count = moods.len();
+                state.moods = moods;
+                state.cache_dirty = true;
+                tracing::debug!("Moods preloaded: {} items", count);
+                if state.genre_content_type == crate::app::state::GenreContentType::Moods {
+                    let items = crate::app::state::BrowseItem::from_genres(&state.moods);
+                    state.genre_nav.reset("moods", items);
+                }
+            }
+            vec![]
+        }
+        Event::StylesPreloaded { library_key, styles } => {
+            // Ignore if this is for a different library (race condition from library switch)
+            if state.active_library.as_ref() != Some(&library_key) {
+                tracing::debug!("Ignoring stale styles preload for library {}", library_key);
+                return vec![];
+            }
+            if state.styles.is_empty() && !state.styles_loading {
+                let count = styles.len();
+                state.styles = styles;
+                state.cache_dirty = true;
+                tracing::debug!("Styles preloaded: {} items", count);
+                if state.genre_content_type == crate::app::state::GenreContentType::Styles {
+                    let items = crate::app::state::BrowseItem::from_genres(&state.styles);
+                    state.genre_nav.reset("styles", items);
+                }
+            }
+            vec![]
+        }
+        Event::StationsPreloaded { library_key, stations } => {
+            // Ignore if this is for a different library (race condition from library switch)
+            if state.active_library.as_ref() != Some(&library_key) {
+                tracing::debug!("Ignoring stale stations preload for library {}", library_key);
+                return vec![];
+            }
+            if state.stations.is_empty() && !state.stations_loading {
+                let count = stations.len();
+                state.stations = stations.clone();
+                state.cache_dirty = true;
+                tracing::debug!("Stations preloaded: {} items", count);
+                // Rebuild station Miller columns
+                state.station_nav.columns.clear();
+                state.station_nav.columns.push(crate::app::state::StationColumn::new(
+                    None,
+                    "Stations".to_string(),
+                    stations,
+                ));
+                state.station_nav.focused_column = 0;
+            }
+            vec![]
+        }
+        Event::RecentlyAddedPreloaded { library_key, albums } => {
+            // Ignore if this is for a different library (race condition from library switch)
+            if state.active_library.as_ref() != Some(&library_key) {
+                tracing::debug!("Ignoring stale recently added preload for library {}", library_key);
+                return vec![];
+            }
+            if state.recently_added_albums.is_empty() && !state.recently_added_loading {
+                let count = albums.len();
+                state.recently_added_albums = albums;
+                state.cache_dirty = true;
+                tracing::debug!("Recently added albums preloaded: {} items", count);
+            }
+            vec![]
+        }
+        Event::RecentlyPlayedPreloaded { library_key, albums } => {
+            // Ignore if this is for a different library (race condition from library switch)
+            if state.active_library.as_ref() != Some(&library_key) {
+                tracing::debug!("Ignoring stale recently played preload for library {}", library_key);
+                return vec![];
+            }
+            if state.recently_played_albums.is_empty() && !state.recently_played_loading {
+                let count = albums.len();
+                state.recently_played_albums = albums;
+                state.cache_dirty = true;
+                tracing::debug!("Recently played albums preloaded: {} items", count);
+            }
+            vec![]
+        }
+        Event::Tick => {
+            // Clear expired toasts (5 second display)
+            if let Some(show_time) = state.toast_show_time {
+                if show_time.elapsed() > Duration::from_secs(5) {
+                    state.toast_message = None;
+                    state.toast_show_time = None;
+                }
+            }
+
+            // Clear expired status messages (5 second display)
+            if let Some(show_time) = state.status_show_time {
+                if show_time.elapsed() > Duration::from_secs(5) {
+                    state.clear_status();
+                }
+            }
+
+            // Periodic cache save: save if dirty, idle for 30+ seconds, and 2+ minutes since last save
+            helpers::maybe_save_cache_async(&event_tx,state);
+
+            // Very stale background refresh (32 days, 2min idle)
+            helpers::maybe_refresh_very_stale(&event_tx,state, client);
+
+            vec![]
+        }
+        Event::CacheSaved => {
+            state.cache_save_in_progress = false;
+            tracing::debug!("Periodic cache save completed");
+            vec![]
+        }
+        Event::CacheRefreshCompleted { category, changed } => {
+            state.background_refresh_in_progress.remove(&category);
+            state.cache_dirty = true;
+
+            // Clear the "Refreshing X..." status message if it matches this category
+            let refresh_msg = format!("Refreshing {}...", category.display_name());
+            if state.status_message.as_ref() == Some(&refresh_msg) {
+                state.clear_status();
+            }
+
+            if changed && helpers::is_viewing_category(&category, state) {
+                state.set_toast(format!("{} updated", category.display_name()));
+            }
+            vec![]
+        }
+        Event::Mouse(mouse_event) => {
+            super::mouse_input::handle_mouse(mouse_event, state)
+        }
+        Event::WaveformGenerated { track_key, data } => {
+            if state.waveform.track_key.as_ref() == Some(&track_key) {
+                state.waveform.data = Some(data);
+                state.waveform.generating = false;
+                state.waveform.error = None;
+                tracing::debug!("Waveform generated for track: {}", track_key);
+            }
+            vec![]
+        }
+        Event::WaveformFailed { track_key, error } => {
+            if state.waveform.track_key.as_ref() == Some(&track_key) {
+                state.waveform.error = Some(error.clone());
+                state.waveform.generating = false;
+                tracing::warn!("Waveform generation failed for {}: {}", track_key, error);
+            }
+            vec![]
+        }
+        Event::WaveformCacheHit { track_key, data } => {
+            if state.waveform.track_key.as_ref() == Some(&track_key) {
+                state.waveform.data = Some(data);
+                state.waveform.generating = false;
+                state.waveform.error = None;
+                tracing::debug!("Waveform loaded from cache for track: {}", track_key);
+            }
+            vec![]
+        }
+        Event::StationTracksLoaded { station_key, station_title, tracks } => {
+            state.stations_loading = false;
+            state.station_nav.loading = false;
+
+            if tracks.is_empty() {
+                state.set_error("Station returned no tracks (is Sonic Analysis enabled in Plex settings?)".to_string());
+            } else {
+                // Start playing the station
+                state.playback_mode = PlaybackMode::Radio;
+                state.radio.clear();
+                state.radio.active_station = Some(crate::app::state::ActiveStation {
+                    key: station_key,
+                    title: station_title.clone(),
+                });
+                state.radio.tracks = tracks.clone();
+                state.radio.track_index = Some(0);
+                state.view = View::NowPlaying;
+                state.set_status(format!("Playing {} ({} tracks)", station_title, tracks.len()));
+
+                // Return action to play the first track
+                if let Some(track) = tracks.first().cloned() {
+                    return vec![Action::PlayTrack(track)];
+                }
+            }
+            vec![]
+        }
+        Event::StationLoadFailed { station_key: _, error } => {
+            state.stations_loading = false;
+            state.station_nav.loading = false;
+            state.set_error(error);
+            vec![]
+        }
+        Event::StationChildrenLoaded { station_key, station_title, children } => {
+            state.stations_loading = false;
+            state.station_nav.loading = false;
+
+            // Push new column with children (Miller columns style)
+            state.station_nav.push_column(crate::app::state::StationColumn::new(
+                Some(station_key),
+                station_title,
+                children.clone(),
+            ));
+            // Also update the legacy state for compatibility
+            state.stations = children;
+            state.stations_index = 0;
+            state.clear_error();
+            vec![]
+        }
+        Event::AlbumRadioTracksLoaded { tracks } => {
+            state.radio_state.fetching = false;
+            if !tracks.is_empty() {
+                state.queue.extend(tracks);
+                state.set_status(format!("Album radio: {} tracks queued", state.queue.len()));
+            }
+            vec![]
+        }
+        Event::AlbumRadioLoadFailed { error } => {
+            state.radio_state.fetching = false;
+            tracing::warn!("{}", error);
+            // Don't show error to user - seed album is already playing
+            vec![]
+        }
+
+        // Radio track fetching completed (background)
+        Event::RadioTracksLoaded { tracks, time_travel_index } => {
+            let old_len = state.radio.tracks.len();
+
+            // Deduplicate against existing tracks
+            let existing_keys: std::collections::HashSet<_> = state.radio.tracks
+                .iter()
+                .map(|t| t.rating_key.clone())
+                .collect();
+
+            let unique_tracks: Vec<_> = tracks
+                .into_iter()
+                .filter(|t| !existing_keys.contains(&t.rating_key))
+                .collect();
+
+            let added = unique_tracks.len();
+            if added > 0 {
+                tracing::info!("Radio: adding {} new unique tracks", added);
+                state.radio.tracks.extend(unique_tracks);
+            }
+
+            if let Some(idx) = time_travel_index {
+                state.radio.time_travel_index = idx;
+            }
+
+            state.radio.fetching = false;
+
+            // Auto-advance if we were stuck at end of radio list waiting for more tracks
+            if added > 0
+                && state.playback_mode == PlaybackMode::Radio
+                && state.radio.track_index.map_or(false, |idx| idx + 1 >= old_len)
+            {
+                return vec![Action::Next];
+            }
+
+            vec![]
+        }
+
+        // Inline list filter completed
+        Event::ListFilterCompleted { version, results } => {
+            // Only apply if this is the most recent filter version
+            if version == state.list_filter_version {
+                state.list_filter_loading = false;
+                state.list_filter_results = Some(results);
+            }
+            vec![]
+        }
+        _ => vec![],
+    }
+}

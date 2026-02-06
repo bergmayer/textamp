@@ -53,6 +53,24 @@ pub struct PlexUser {
     pub email: Option<String>,
     #[serde(default)]
     pub thumb: Option<String>,
+    #[serde(default)]
+    pub subscription: Option<PlexSubscription>,
+}
+
+impl PlexUser {
+    /// Check if user has an active Plex Pass subscription.
+    pub fn has_plex_pass(&self) -> bool {
+        self.subscription.as_ref().map(|s| s.active).unwrap_or(false)
+    }
+}
+
+/// Plex subscription information.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlexSubscription {
+    #[serde(default)]
+    pub active: bool,
+    #[serde(default)]
+    pub plan: Option<String>,
 }
 
 /// Plex server information.

@@ -18,10 +18,10 @@ pub enum Event {
     Tick,
 
     // Authentication events
-    AuthSuccess { token: String, username: String, server_url: String, servers: Vec<PlexServer>, client_identifier: String },
+    AuthSuccess { token: String, username: String, server_url: String, servers: Vec<PlexServer>, client_identifier: String, has_plex_pass: bool },
     AuthFailed(String),
     AuthShowLogin,  // No stored token - show login form
-    AuthServersReady { token: String, username: String, servers: Vec<PlexServer>, client_identifier: String },  // Login succeeded, select server
+    AuthServersReady { token: String, username: String, servers: Vec<PlexServer>, client_identifier: String, has_plex_pass: bool },  // Login succeeded, select server
     AuthLoginFailed(String),  // Login failed with message
     AuthPinReady { code: String, pin_id: u64 },
     ServersDiscovered(Vec<PlexServer>),
@@ -39,6 +39,11 @@ pub enum Event {
     ArtistLoaded(Artist),
     AlbumLoaded(Album),
     AlbumTracksLoaded(Vec<Track>),
+    ArtistAlbumsLoaded(Vec<Album>),
+    ArtistAllTracksLoaded(Vec<Track>),
+    CategoryTracksLoaded(Vec<Track>),
+    CategoryAlbumsLoaded { albums: Vec<Album>, status_message: String },
+    DataLoadError(String),
     SimilarAlbumsLoaded(Vec<Album>),
     SimilarTracksLoaded(Vec<Track>),
     SearchCompleted(SearchResults),
@@ -70,10 +75,10 @@ pub enum Event {
     // Folder preloading (background)
     FoldersPreloaded { library_key: String, folder_state: crate::services::FolderNavigationState },
 
-    // Background data preloading (library-specific events include library_key for race condition safety)
-    ArtistsPreloaded(Vec<Artist>),
-    AlbumsPreloaded(Vec<Album>),
-    PlaylistsPreloaded(Vec<Playlist>),
+    // Background data preloading (all events include library_key for race condition safety)
+    ArtistsPreloaded { library_key: String, artists: Vec<Artist> },
+    AlbumsPreloaded { library_key: String, albums: Vec<Album> },
+    PlaylistsPreloaded { library_key: String, playlists: Vec<Playlist> },
     GenresPreloaded { library_key: String, genres: Vec<Genre> },
     ArtistGenresPreloaded { library_key: String, genres: Vec<Genre> },
     AlbumGenresPreloaded { library_key: String, genres: Vec<Genre> },
@@ -103,6 +108,9 @@ pub enum Event {
     // Album radio loading (background)
     AlbumRadioTracksLoaded { tracks: Vec<Track> },
     AlbumRadioLoadFailed { error: String },
+
+    // Radio track fetching (background)
+    RadioTracksLoaded { tracks: Vec<Track>, time_travel_index: Option<usize> },
 
     // Inline list filter
     ListFilterCompleted {

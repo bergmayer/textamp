@@ -2,7 +2,7 @@
 //!
 //! Shows the current playback (queue, playlist, or station tracks)
 //! with album artwork and play history support.
-//! Cycles between Queue, Recently Played, and Visualizer modes.
+//! Cycles between Queue and Now Playing modes.
 
 use crate::app::state::{PlaybackMode, NowPlayingMode, PlayStatus};
 use crate::app::AppState;
@@ -32,7 +32,6 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     // Render based on now playing mode
     match state.now_playing_mode {
         NowPlayingMode::Queue => render_queue_mode(frame, state, area),
-        NowPlayingMode::RecentlyPlayed => render_recently_played_mode(frame, state, area),
         NowPlayingMode::NowPlaying => render_visualizer_mode(frame, state, area),
     }
 }
@@ -57,75 +56,6 @@ fn render_queue_mode(frame: &mut Frame, state: &AppState, area: Rect) {
     } else {
         render_track_list(frame, state, area);
     }
-}
-
-/// Render the recently played albums mode.
-fn render_recently_played_mode(frame: &mut Frame, state: &AppState, area: Rect) {
-    let t = theme();
-
-    let block = Block::default()
-        .title(" recently played (Ctrl+N to switch) ")
-        .title_style(Style::default().fg(t.colors.fg_accent))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(t.colors.fg_accent))
-        .style(Style::default().bg(t.colors.bg_primary));
-
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    if state.recently_played_loading {
-        let loading = Paragraph::new("Loading recently played albums...")
-            .style(Style::default().fg(t.colors.fg_muted))
-            .alignment(Alignment::Center);
-        frame.render_widget(loading, inner);
-        return;
-    }
-
-    if state.recently_played_albums.is_empty() {
-        let msg = Paragraph::new("No recently played albums found.\nPlay some music to build history.")
-            .style(Style::default().fg(t.colors.fg_muted))
-            .alignment(Alignment::Center);
-        frame.render_widget(msg, inner);
-        return;
-    }
-
-    // Render list of recently played albums
-    let items: Vec<ListItem> = state.recently_played_albums
-        .iter()
-        .enumerate()
-        .map(|(i, album)| {
-            let title = truncate_str(&album.title, 40);
-            let artist = album.artist_name();
-            let artist_str = truncate_str(&artist, 25);
-            let year = album.year.map(|y| y.to_string()).unwrap_or_default();
-
-            let line = format!("{:<42} {:<27} {:>4}", title, artist_str, year);
-
-            let style = if i == state.list_state.queue_index {
-                Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
-            } else {
-                Style::default().fg(t.colors.fg_primary)
-            };
-
-            ListItem::new(line).style(style)
-        })
-        .collect();
-
-    let list = List::new(items);
-    frame.render_widget(list, inner);
-
-    // Footer
-    let footer = format!("{}/{} albums", state.list_state.queue_index + 1, state.recently_played_albums.len());
-    let footer_area = Rect::new(
-        area.x + area.width.saturating_sub(footer.len() as u16 + 2),
-        area.y + area.height - 1,
-        footer.len() as u16 + 1,
-        1,
-    );
-    frame.render_widget(
-        Paragraph::new(footer).style(Style::default().fg(t.colors.fg_muted)),
-        footer_area,
-    );
 }
 
 /// Render the album artwork.

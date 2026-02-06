@@ -48,6 +48,7 @@ pub enum Action {
     ToggleMute,
     ToggleShuffle,
     CycleRepeat,
+    StartPendingPlayback,
 
     // Queue management
     PlayTrack(Track),
@@ -76,7 +77,6 @@ pub enum Action {
     LoadStyleAlbums,           // Load albums in selected style
     CycleGenreContentType,     // Ctrl+G when in genres: cycle Genres -> Artist -> Album -> Moods -> Styles
     RefreshGenreView,          // Refresh genre view after mode change (shared logic)
-    CycleGenreSort,            // Cycle through sort modes
 
     // Artist view mode cycling
     CycleArtistViewMode, // Ctrl+A when in Artists: cycle Artist → Album Artist → Album
@@ -206,4 +206,8 @@ pub enum Action {
     // Search popup (Ctrl+F)
     OpenSearchPopup,
     CloseSearchPopup,
+
+    // Library picker popup (Ctrl+Alt+S)
+    OpenLibraryPicker,
+    CloseLibraryPicker,
 }

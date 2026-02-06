@@ -1,0 +1,210 @@
+//! Navigation dispatch handlers: SetView, NextView, PrevView, NextMode, PrevMode,
+//! SetCategory, ToggleFocus.
+
+use crate::app::{Action, AppState, Event};
+use crate::app::state::{BrowseCategory, BrowseItem, Focus, GenreContentType, RightPanelMode, View};
+use crate::api::PlexClient;
+
+use anyhow::Result;
+use tokio::sync::mpsc;
+
+use super::helpers;
+
+/// Dispatch navigation actions. Returns follow-up actions.
+pub async fn dispatch(
+    event_tx: &mpsc::Sender<Event>,
+    action: Action,
+    state: &mut AppState,
+    client: &mut PlexClient,
+) -> Result<Vec<Action>> {
+    let mut follow_ups = vec![];
+
+    match action {
+        Action::SetView(view) => {
+            state.view = view;
+        }
+        Action::NextView => {
+            // Tab: cycle through nav bar views
+            // Order: Artists → Playlists → Genres → Folders → Now Playing → Artists
+            if state.view == View::NowPlaying {
+                // From Now Playing, go to Artists
+                state.view = View::Browse;
+                follow_ups.push(Action::SetCategory(BrowseCategory::Artists));
+            } else if state.view == View::Browse {
+                // Cycle through browse categories, then to Now Playing
+                match state.browse_category {
+                    BrowseCategory::Artists => {
+                        follow_ups.push(Action::SetCategory(BrowseCategory::Playlists));
+                    }
+                    BrowseCategory::Playlists => {
+                        follow_ups.push(Action::SetCategory(BrowseCategory::Genres));
+                    }
+                    BrowseCategory::Genres => {
+                        follow_ups.push(Action::SetCategory(BrowseCategory::Folders));
+                    }
+                    BrowseCategory::Folders => {
+                        state.view = View::NowPlaying;
+                    }
+                }
+            } else {
+                // From other views (Help, Settings, Search, Similar), go to Browse
+                state.view = View::Browse;
+            }
+        }
+        Action::PrevView => {
+            // Shift+Tab: cycle backwards through nav bar views
+            // Order: Artists ← Playlists ← Genres ← Folders ← Now Playing ← Artists
+            if state.view == View::NowPlaying {
+                // From Now Playing, go to Folders
+                state.view = View::Browse;
+                follow_ups.push(Action::SetCategory(BrowseCategory::Folders));
+            } else if state.view == View::Browse {
+                // Cycle backwards through browse categories, or to Now Playing
+                match state.browse_category {
+                    BrowseCategory::Artists => {
+                        state.view = View::NowPlaying;
+                    }
+                    BrowseCategory::Playlists => {
+                        follow_ups.push(Action::SetCategory(BrowseCategory::Artists));
+                    }
+                    BrowseCategory::Genres => {
+                        follow_ups.push(Action::SetCategory(BrowseCategory::Playlists));
+                    }
+                    BrowseCategory::Folders => {
+                        follow_ups.push(Action::SetCategory(BrowseCategory::Genres));
+                    }
+                }
+            } else {
+                // From other views (Help, Settings, Search, Similar), go to Browse
+                state.view = View::Browse;
+            }
+        }
+        Action::NextMode => {
+            // Shift+Down: cycle modes within current category
+            if state.view == View::NowPlaying {
+                state.now_playing_mode = state.now_playing_mode.next();
+                follow_ups.push(Action::RefreshNowPlayingView);
+            } else if state.view == View::Browse {
+                match state.browse_category {
+                    BrowseCategory::Artists => {
+                        state.artist_view_mode = state.artist_view_mode.next();
+                        follow_ups.push(Action::RefreshArtistView);
+                    }
+                    BrowseCategory::Playlists => {
+                        state.playlists_mode = state.playlists_mode.next();
+                        follow_ups.push(Action::RefreshPlaylistsView);
+                    }
+                    BrowseCategory::Genres => {
+                        state.genre_content_type = state.genre_content_type.next();
+                        follow_ups.push(Action::RefreshGenreView);
+                    }
+                    BrowseCategory::Folders => {
+                        // Folders has no modes to cycle
+                    }
+                }
+            }
+        }
+        Action::PrevMode => {
+            // Shift+Up: cycle modes backwards within current category
+            if state.view == View::NowPlaying {
+                state.now_playing_mode = state.now_playing_mode.prev();
+                follow_ups.push(Action::RefreshNowPlayingView);
+            } else if state.view == View::Browse {
+                match state.browse_category {
+                    BrowseCategory::Artists => {
+                        state.artist_view_mode = state.artist_view_mode.prev();
+                        follow_ups.push(Action::RefreshArtistView);
+                    }
+                    BrowseCategory::Playlists => {
+                        state.playlists_mode = state.playlists_mode.prev();
+                        follow_ups.push(Action::RefreshPlaylistsView);
+                    }
+                    BrowseCategory::Genres => {
+                        state.genre_content_type = state.genre_content_type.prev();
+                        follow_ups.push(Action::RefreshGenreView);
+                    }
+                    BrowseCategory::Folders => {
+                        // Folders has no modes to cycle
+                    }
+                }
+            }
+        }
+        Action::SetCategory(category) => {
+            if state.browse_category != category {
+                state.browse_category = category;
+                state.focus = Focus::Left;
+                // Clear right panel
+                state.right_panel_mode = RightPanelMode::Empty;
+                state.selected_artist_albums.clear();
+                state.selected_album_tracks.clear();
+
+                // Load category data if needed (and not already loading)
+                match category {
+                    BrowseCategory::Artists => {
+                        if state.artists.is_empty() && !state.artists_loading {
+                            helpers::load_artists(event_tx, state, client);
+                        } else if !state.artists.is_empty() {
+                            // Initialize artist_nav with existing artists
+                            let title = state.artist_view_mode.name();
+                            let items = BrowseItem::from_artists(&state.artists);
+                            state.artist_nav.reset(title, items);
+                        }
+                    }
+                    BrowseCategory::Playlists => {
+                        if state.playlists.is_empty() && !state.playlists_loading {
+                            helpers::load_playlists(event_tx, state, client);
+                        }
+                    }
+                    BrowseCategory::Genres => {
+                        // Load the appropriate content based on current genre content type
+                        match state.genre_content_type {
+                            GenreContentType::Genres => {
+                                if state.genres.is_empty() && !state.genres_loading {
+                                    follow_ups.push(Action::LoadGenres);
+                                }
+                            }
+                            GenreContentType::ArtistGenres => {
+                                if state.artist_genres.is_empty() && !state.artist_genres_loading {
+                                    follow_ups.push(Action::LoadArtistGenres);
+                                }
+                            }
+                            GenreContentType::AlbumGenres => {
+                                if state.album_genres.is_empty() && !state.album_genres_loading {
+                                    follow_ups.push(Action::LoadAlbumGenres);
+                                }
+                            }
+                            GenreContentType::Moods => {
+                                if state.moods.is_empty() && !state.moods_loading {
+                                    follow_ups.push(Action::LoadMoods);
+                                }
+                            }
+                            GenreContentType::Styles => {
+                                if state.styles.is_empty() && !state.styles_loading {
+                                    follow_ups.push(Action::LoadStyles);
+                                }
+                            }
+                            GenreContentType::Stations => {
+                                if state.station_nav.columns.is_empty() && !state.stations_loading {
+                                    follow_ups.push(Action::LoadStations);
+                                }
+                            }
+                        }
+                    }
+                    BrowseCategory::Folders => {
+                        if state.folder_state.is_none() {
+                            follow_ups.push(Action::LoadFolderRoot);
+                        }
+                    }
+                }
+            }
+        }
+        Action::ToggleFocus => {
+            state.focus = match state.focus {
+                Focus::Left => Focus::Right,
+                Focus::Right => Focus::Left,
+            };
+        }
+        _ => unreachable!("dispatch_navigation called with non-navigation action: {:?}", action),
+    }
+    Ok(follow_ups)
+}

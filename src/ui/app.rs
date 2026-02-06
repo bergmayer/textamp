@@ -47,6 +47,11 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         render_search_popup(frame, state);
     }
 
+    // Render library picker popup if active
+    if state.library_picker_active {
+        render_library_picker(frame, state);
+    }
+
     // Render error popup if present
     if let Some(ref error) = state.last_error {
         render_error_popup(frame, error);
@@ -117,8 +122,11 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
                 (None, None)
             };
 
-            // Playlists view with dynamic Miller columns
-            if !state.playlist_nav.is_empty() {
+            if state.playlists_mode == crate::app::state::PlaylistsMode::Stations {
+                // Stations mode - render station_nav Miller columns
+                render_station_view(frame, state, filter_results, filter_column, layout.left_panel, layout.right_panel);
+            } else if !state.playlist_nav.is_empty() {
+                // Playlists view with dynamic Miller columns
                 let title = state.playlists_mode.name();
                 render_browse_miller_columns(
                     frame,
@@ -977,6 +985,10 @@ fn render_category_list(frame: &mut Frame, state: &AppState, area: Rect) {
                     }).collect();
                     (items, state.list_state.playlists_index)
                 }
+                PlaylistsMode::Stations | PlaylistsMode::RecentlyPlayed => {
+                    // Stations and RecentlyPlayed are rendered via Miller columns, not this fallback
+                    (vec![], 0)
+                }
                 PlaylistsMode::RecentlyAdded => {
                     let items: Vec<ListItem> = state.recently_added_albums.iter().enumerate().map(|(i, album)| {
                         let is_selected = i == state.list_state.playlists_index;
@@ -1072,10 +1084,7 @@ fn render_right_panel(frame: &mut Frame, state: &AppState, area: Rect) {
         RightPanelMode::ArtistAlbums => format!(" {} albums ", state.selected_artist_name),
         RightPanelMode::AlbumTracks => format!(" {} ", state.selected_album_title),
         RightPanelMode::CategoryTracks => " tracks ".to_string(),
-        RightPanelMode::CategoryAlbums => {
-            // Show sort mode in title for genre albums
-            format!(" albums (by {}) ", state.genre_sort_mode.name())
-        }
+        RightPanelMode::CategoryAlbums => " albums ".to_string(),
     };
 
     let border_style = if is_focused {
@@ -1351,11 +1360,70 @@ fn render_search_popup(frame: &mut Frame, state: &AppState) {
     // Use 80% width and 70% height for the search popup
     let area = centered_rect(80, 70, frame.area());
 
-    // Clear the area behind the popup
+    // Render the search screen content inside the popup area
+    // (filter.rs handles its own Clear and background)
+    screens::filter::render(frame, state, area);
+}
+
+/// Render the library picker popup (Ctrl+Alt+S).
+fn render_library_picker(frame: &mut Frame, state: &AppState) {
+    let t = theme();
+    let area = centered_rect(40, 30, frame.area());
+
     frame.render_widget(Clear, area);
 
-    // Render the search screen content inside the popup area
-    screens::filter::render(frame, state, area);
+    let block = Block::default()
+        .title(" switch library ")
+        .title_style(Style::default().fg(t.colors.fg_accent))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(t.colors.border_focused))
+        .style(Style::default().bg(t.colors.bg_primary));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if state.libraries.is_empty() {
+        let msg = Paragraph::new("No libraries available")
+            .style(Style::default().fg(t.colors.fg_muted));
+        frame.render_widget(msg, inner);
+        return;
+    }
+
+    // Split inner area: library list + help line
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(1),    // library list
+            Constraint::Length(1), // help line
+        ])
+        .split(inner);
+
+    // Build library list items
+    let items: Vec<ListItem> = state.libraries.iter().enumerate().map(|(i, lib)| {
+        let is_selected = i == state.library_picker_index;
+        let is_active = state.active_library.as_deref() == Some(&lib.key);
+
+        let prefix = if is_selected { "> " } else { "  " };
+        let suffix = if is_active { " *" } else { "" };
+        let text = format!("{}{}{}", prefix, lib.title, suffix);
+
+        let style = if is_selected {
+            Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
+        } else {
+            Style::default().fg(t.colors.fg_primary)
+        };
+
+        ListItem::new(text).style(style)
+    }).collect();
+
+    let list = List::new(items);
+    frame.render_widget(list, chunks[0]);
+
+    // Help line
+    let help = Paragraph::new("Enter: switch | Esc: close")
+        .style(Style::default().fg(t.colors.fg_muted))
+        .alignment(Alignment::Center);
+    frame.render_widget(help, chunks[1]);
 }
 
 fn render_error_popup(frame: &mut Frame, error: &str) {

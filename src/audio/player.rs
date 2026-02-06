@@ -11,11 +11,13 @@
 use super::rodio_backend::RodioBackend;
 use super::streaming::{BlockingReader, StreamingBuffer};
 use super::traits::AudioBackend;
+use crate::app::Event;
 use anyhow::{anyhow, Result};
 use futures::StreamExt;
 use reqwest::header::HeaderMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::mpsc;
 
 
 /// High-level audio player with streaming support.
@@ -27,7 +29,7 @@ use std::time::Duration;
 ///
 /// ```ignore
 /// let mut player = AudioPlayer::new()?;
-/// player.play_url("http://example.com/track.mp3").await?;
+/// player.play_url("http://example.com/track.mp3", event_tx).await?;
 /// player.pause();
 /// player.resume();
 /// player.stop();
@@ -36,6 +38,9 @@ pub struct AudioPlayer {
     backend: RodioBackend,
     /// Current streaming buffer (kept alive during playback)
     _stream_buffer: Option<Arc<StreamingBuffer>>,
+    /// Shared inbox for pending playback — spawned tasks deliver buffers here,
+    /// and start_pending_playback() reads from it on the main thread.
+    pending_playback: Arc<Mutex<Option<(Arc<StreamingBuffer>, u64)>>>,
 }
 
 impl AudioPlayer {
@@ -49,126 +54,88 @@ impl AudioPlayer {
         Ok(Self {
             backend,
             _stream_buffer: None,
+            pending_playback: Arc::new(Mutex::new(None)),
         })
     }
 
-    /// Play audio from a URL with streaming support.
+    /// Play audio from a URL (non-blocking).
     ///
-    /// This method:
-    /// 1. Starts downloading the audio file
-    /// 2. Buffers a minimum amount (256KB) for format detection
-    /// 3. Begins playback while download continues in background
-    ///
-    /// This significantly reduces time-to-first-audio compared to
-    /// downloading the entire file first.
-    pub async fn play_url(&mut self, url: &str) -> Result<()> {
-        self.play_url_with_headers(url, HeaderMap::new()).await
+    /// Spawns the HTTP request and buffer setup in a background task.
+    /// Returns immediately — the event loop stays responsive.
+    /// Sends `BufferingEnd` event when playback is ready to start.
+    pub async fn play_url(&mut self, url: &str, event_tx: mpsc::Sender<Event>) -> Result<()> {
+        self.play_url_with_headers(url, HeaderMap::new(), None, event_tx).await
     }
 
-    /// Play audio from a URL with custom headers.
+    /// Play audio from a URL with optional fallback (non-blocking).
     ///
-    /// Same as `play_url` but allows passing custom HTTP headers.
-    /// Use this for Plex transcode URLs which require headers like
-    /// `X-Plex-Client-Identifier`.
-    pub async fn play_url_with_headers(&mut self, url: &str, headers: HeaderMap) -> Result<()> {
-        // Stop any existing playback
+    /// This method:
+    /// 1. Stops current playback synchronously
+    /// 2. Spawns a background task that fetches the audio
+    /// 3. Returns immediately (no blocking network I/O)
+    /// 4. The background task sends `BufferingEnd` when ready
+    /// 5. `StartPendingPlayback` then starts actual audio output
+    ///
+    /// If `fallback_url` is provided and the primary URL fails,
+    /// the background task automatically tries the fallback.
+    pub async fn play_url_with_headers(
+        &mut self,
+        url: &str,
+        headers: HeaderMap,
+        fallback_url: Option<String>,
+        event_tx: mpsc::Sender<Event>,
+    ) -> Result<()> {
+        // Stop any existing playback synchronously
         self.stop();
 
-        tracing::debug!("Fetching audio from: {}", url);
-        let client = reqwest::Client::new();
-        let response = client.get(url).headers(headers).send().await?;
+        let pending = self.pending_playback.clone();
+        let url = url.to_string();
 
-        if !response.status().is_success() {
-            // Log error details for debugging
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            tracing::error!("Audio fetch failed: HTTP {} - Body: {}", status, body);
-            return Err(anyhow!("Failed to fetch audio: HTTP {}", status));
-        }
-
-        // Get content length for progress tracking
-        let content_length = response
-            .headers()
-            .get(reqwest::header::CONTENT_LENGTH)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse::<usize>().ok());
-
-        let total_size = content_length.unwrap_or(0);
-
-        // For small files (< 1MB) with known size, use simple buffered approach
-        // This is safe because the download is quick
-        if total_size > 0 && total_size < 1024 * 1024 {
-            return self.play_url_simple(response).await;
-        }
-
-        // For unknown size or large files, use streaming to avoid blocking
-        // This prevents the event loop from freezing during download
-        let buffer = if total_size > 0 {
-            Arc::new(StreamingBuffer::with_size_hint(total_size))
-        } else {
-            // Unknown size - use streaming without size hint
-            // Use a reasonable default allocation (10MB)
-            Arc::new(StreamingBuffer::with_size_hint(10 * 1024 * 1024))
-        };
-
-        // For byte_len hint to decoder, use actual size or a large value for unknown
-        let byte_len_hint = if total_size > 0 { total_size as u64 } else { u64::MAX };
-
-        // Start download task
-        let buffer_clone = buffer.clone();
-        let _download_handle = tokio::spawn(async move {
-            let mut stream = response.bytes_stream();
-            while let Some(chunk_result) = stream.next().await {
-                match chunk_result {
-                    Ok(chunk) => {
-                        buffer_clone.append(&chunk);
-                    }
-                    Err(e) => {
-                        buffer_clone.set_error(format!("Download error: {}", e));
-                        return;
+        tokio::spawn(async move {
+            // Try primary URL
+            match fetch_and_buffer(&url, &headers, &pending, &event_tx).await {
+                Ok(()) => return,
+                Err(primary_err) => {
+                    tracing::warn!("Primary stream failed: {}", primary_err);
+                    // Try fallback if available
+                    if let Some(ref fb_url) = fallback_url {
+                        let redacted = fb_url.split("X-Plex-Token=").next().unwrap_or(fb_url);
+                        tracing::info!("Trying fallback (transcode): {}...", redacted);
+                        match fetch_and_buffer(fb_url, &headers, &pending, &event_tx).await {
+                            Ok(()) => return,
+                            Err(fb_err) => {
+                                tracing::error!("Fallback stream also failed: {}", fb_err);
+                                let _ = event_tx.send(Event::PlaybackError(
+                                    format!("Playback failed: {}", fb_err)
+                                )).await;
+                            }
+                        }
+                    } else {
+                        let _ = event_tx.send(Event::PlaybackError(
+                            format!("Playback failed: {}", primary_err)
+                        )).await;
                     }
                 }
             }
-            buffer_clone.set_complete();
         });
-
-        // Wait for minimum buffer before starting playback
-        let mut wait_count = 0;
-        while !buffer.has_min_buffer() && wait_count < 100 {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            wait_count += 1;
-
-            // Check for early error
-            if let Some(err) = buffer.error() {
-                return Err(anyhow!("Download failed: {}", err));
-            }
-        }
-
-        if !buffer.has_min_buffer() {
-            return Err(anyhow!("Timeout waiting for initial buffer"));
-        }
-
-        // Start playback from streaming buffer
-        let reader = BlockingReader::new(&buffer);
-
-        self.backend
-            .play_streaming(reader, byte_len_hint)
-            .map_err(|e| anyhow!("Playback error: {}", e))?;
-
-        // Keep buffer alive during playback
-        self._stream_buffer = Some(buffer);
 
         Ok(())
     }
 
-    /// Simple playback for small files - downloads fully before playing.
-    async fn play_url_simple(&mut self, response: reqwest::Response) -> Result<()> {
-        let bytes = response.bytes().await?;
-        let data = bytes.to_vec();
-
-        self.backend
-            .play_data(data)
-            .map_err(|e| anyhow!("Playback error: {}", e))
+    /// Start playback from the pending buffer.
+    ///
+    /// Called when `BufferingEnd` event is received, indicating the streaming
+    /// buffer has enough data for format detection and playback start.
+    /// Safe to call when no pending playback exists (no-op).
+    pub fn start_pending_playback(&mut self) -> Result<()> {
+        let pending = self.pending_playback.lock().unwrap().take();
+        if let Some((buffer, byte_len_hint)) = pending {
+            let reader = BlockingReader::new(&buffer);
+            self.backend.play_streaming(reader, byte_len_hint)
+                .map_err(|e| anyhow!("Playback error: {}", e))?;
+            self._stream_buffer = Some(buffer);
+        }
+        Ok(())
     }
 
     /// Play audio from raw bytes.
@@ -191,8 +158,9 @@ impl AudioPlayer {
         self.backend.resume();
     }
 
-    /// Stop playback.
+    /// Stop playback and clear pending state.
     pub fn stop(&mut self) {
+        *self.pending_playback.lock().unwrap() = None;
         self._stream_buffer = None;
         self.backend.stop();
     }
@@ -233,4 +201,98 @@ impl AudioPlayer {
     pub fn position(&self) -> Option<Duration> {
         self.backend.position()
     }
+}
+
+/// Fetch audio from a URL, set up streaming buffer, and signal readiness.
+///
+/// This runs inside a spawned task. On success, sets the pending_playback
+/// buffer and sends `BufferingEnd`. On failure, returns the error for
+/// the caller to handle (e.g., try a fallback URL).
+async fn fetch_and_buffer(
+    url: &str,
+    _headers: &HeaderMap,
+    pending: &Arc<Mutex<Option<(Arc<StreamingBuffer>, u64)>>>,
+    event_tx: &mpsc::Sender<Event>,
+) -> Result<(), String> {
+    tracing::debug!("Fetching audio from: {}", url);
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
+
+    let response = client.get(url).send().await
+        .map_err(|e| format!("Failed to fetch audio: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        tracing::error!("Audio fetch failed: HTTP {} - Body: {}", status, body);
+        return Err(format!("HTTP {}", status));
+    }
+
+    // Get content length for progress tracking
+    let content_length = response
+        .headers()
+        .get(reqwest::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok());
+    let total_size = content_length.unwrap_or(0);
+
+    // Small files (< 1MB): download fully, wrap in complete buffer
+    if total_size > 0 && total_size < 1024 * 1024 {
+        let bytes = response.bytes().await
+            .map_err(|e| format!("Download failed: {}", e))?;
+        let data = bytes.to_vec();
+        let size = data.len();
+        let buffer = Arc::new(StreamingBuffer::with_size_hint(size));
+        buffer.append(&data);
+        buffer.set_complete();
+        *pending.lock().unwrap() = Some((buffer, size as u64));
+        let _ = event_tx.send(Event::BufferingEnd).await;
+        return Ok(());
+    }
+
+    // Large files: streaming buffer with progressive download
+    let buffer = if total_size > 0 {
+        Arc::new(StreamingBuffer::with_size_hint(total_size))
+    } else {
+        Arc::new(StreamingBuffer::with_size_hint(10 * 1024 * 1024))
+    };
+    let byte_len_hint = if total_size > 0 { total_size as u64 } else { u64::MAX };
+
+    // Start download task
+    let dl_buffer = buffer.clone();
+    tokio::spawn(async move {
+        let mut stream = response.bytes_stream();
+        while let Some(chunk_result) = stream.next().await {
+            match chunk_result {
+                Ok(chunk) => dl_buffer.append(&chunk),
+                Err(e) => {
+                    dl_buffer.set_error(format!("Download error: {}", e));
+                    return;
+                }
+            }
+        }
+        dl_buffer.set_complete();
+    });
+
+    // Wait for minimum buffer before signaling ready
+    let wait_buffer = buffer.clone();
+    let mut wait_count = 0;
+    while !wait_buffer.has_min_buffer() && wait_count < 100 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        wait_count += 1;
+        if let Some(err) = wait_buffer.error() {
+            return Err(format!("Download failed: {}", err));
+        }
+    }
+    if !wait_buffer.has_min_buffer() {
+        return Err("Timeout waiting for initial buffer".to_string());
+    }
+
+    // Deliver buffer and signal ready
+    *pending.lock().unwrap() = Some((buffer, byte_len_hint));
+    let _ = event_tx.send(Event::BufferingEnd).await;
+    Ok(())
 }

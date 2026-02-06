@@ -16,9 +16,56 @@ textamp is a specialized, lightweight alternative to Plexamp for power users who
 - **Album artwork**: Displays cover art in supported terminals (Kitty, iTerm2, Sixel)
 - **Search & Filter**: Global search and tabbed filtering (Artists, Album Artists, Albums, Playlists, Tracks, Genres)
 - **Folder browsing**: Miller columns view (like macOS Finder)
-- **Settings screen**: Configure server, library modes, preferences, and data management
+- **Settings screen**: Account, libraries, playback, and themes
 - **Fast startup**: Library data cached to disk for instant display, refreshes in background
 - **High-quality playback**: Direct streaming without transcoding
+
+## Speed
+
+textamp is designed to feel instant. Every interaction — browsing, searching, switching libraries, jumping to a letter — should happen without perceptible delay.
+
+### Caching
+
+Library data (artists, albums, playlists, genres, stations) is cached to disk per-library. On startup, cached data loads immediately so you can browse without waiting for your Plex server. Fresh data is fetched in the background and merged automatically — a toast notification appears if anything changed.
+
+- **72-hour refresh**: Cache older than 72 hours triggers a background refresh
+- **32-day refresh**: Very stale data is automatically refreshed when idle (2+ minutes)
+- **Manual refresh**: `F5` forces a refresh of the current view
+- **Per-library**: Each library has its own cache, preserved when switching
+- **Auto-save**: Cache saves periodically while idle and on quit
+- **Track not found**: If playback fails with a 404, you'll be prompted to refresh
+
+Subfolder caches (Folders view) work differently: they're loaded lazily when you navigate into them, and very stale entries (32+ days) are deleted rather than refreshed. Press `F5` to refresh any folder that seems outdated.
+
+To clear all cached data: Settings (F2) > Account > Clear Cache & Reload.
+
+### Miller Columns
+
+Artists, Genres, Playlists, Folders, and Stations all use Miller columns — the three-pane column view pioneered by macOS Finder. Selecting an item in the left column shows its children in the next column to the right. This lets you drill through Artist → Albums → Tracks (or Genre → Albums → Tracks, etc.) without loading new screens, keeping your place in each column as you navigate.
+
+### Keyboard Navigation
+
+Every view is navigable without a mouse. `Tab`/`Shift+Tab` moves between categories. `Shift+↓`/`Shift+↑` cycles modes within a category (e.g., Artists → Album Artists → Albums). Arrow keys, `Enter`, and `Backspace` navigate the Miller columns. `Page Up`/`Page Down`, `Home`/`End` work everywhere.
+
+### Alphabetic Jump
+
+Press any letter `A-Z` to jump to the first item starting with that letter. Press `Shift+[letter]` to refine within the current first letter — if you're on an item starting with "A" and press `Shift+N`, you jump to the first "An..." item (like "Andrew").
+
+### Inline Filter
+
+Press `/` to activate a real-time filter on the current column. Type to narrow results instantly. The filter stays active as you drill down, so you can filter artists, select one, then browse their albums without losing the filter.
+
+### Search Popup
+
+`Ctrl+F` opens a floating search dialog with tabs for Artists, Album Artists, Albums, Playlists, Tracks, and Genres. Selecting a result plays it without closing search, so you can keep searching.
+
+### Radio Shortcuts
+
+`Ctrl+Alt+L` starts Library Radio instantly. `Ctrl+Alt+R` starts Random Album Radio. `Alt+R` on any selection creates a radio — track radio for similar tracks, album radio for similar albums, artist radio for an artist's catalog. No menus, no confirmation dialogs.
+
+### Library Switching
+
+`Ctrl+Alt+S` opens a quick picker to switch between Plex libraries. The switch is instant — cached data for the new library loads immediately while a background refresh runs.
 
 ## Installation
 
@@ -67,45 +114,6 @@ textamp checks for XDG environment variables first, then falls back to platform 
 | Waveforms | `$XDG_CACHE_HOME/textamp/waveforms/` | `~/.cache/textamp/waveforms/` | `~/Library/Caches/textamp/waveforms/` |
 
 The library cache stores artist, album, playlist, and genre data for fast startup (refreshes in background). Waveform data is cached for the audio visualizer.
-
-### Caching Behavior
-
-textamp uses an aggressive caching strategy for fast startup:
-
-- **Instant display**: On startup, cached data is loaded immediately so you can browse your library without waiting
-- **Background refresh**: Fresh data is fetched from your Plex server in the background and merged automatically
-- **72-hour TTL**: Cache is considered "stale" after 72 hours and triggers a background refresh
-- **Manual refresh**: Press `F5` to force refresh the current view (Artists, Playlists, Genres, etc.)
-- **Change notifications**: A toast appears in the bottom-right when refreshed data differs from cache
-- **Very stale refresh**: Data older than 32 days is automatically refreshed when idle (2+ minutes)
-- **Track not found**: If playback fails with a 404 error, you'll be prompted to refresh the cache
-- **Per-library caches**: Each library has its own cache file, preserved when switching libraries
-
-The cache is saved periodically while idle and on quit. To clear all cached data, use Settings (F2) > Data > Clear Cache.
-
-### Subfolder Caching (Folders View)
-
-Subfolders in the Folders view (`Ctrl+O`) have special caching behavior that differs from other library data:
-
-| Behavior | Standard Caches | Subfolder Caches |
-|----------|-----------------|------------------|
-| **Loading** | Preloaded on library load | Lazy (only when navigated to) |
-| **72h staleness** | Background refresh | No automatic refresh |
-| **32d very stale** | Background refresh when idle | **Deleted** (not refreshed) |
-| **Manual refresh** | F5 refreshes category | F5 refreshes focused folder |
-
-This design has several benefits:
-
-1. **Fast navigation**: Frequently-used folders load instantly from cache
-2. **No stale folder bloat**: Very old folder data is automatically pruned
-3. **Accurate data**: Folder structures change more than metadata, so stale data is deleted rather than kept
-4. **User control**: Press F5 to refresh any folder that seems outdated
-
-When you navigate into a subfolder:
-1. If cached and less than 32 days old: displays instantly from cache
-2. If not cached or very stale: fetches from server and caches the result
-
-Subfolder caches include both sub-subfolders and tracks, so the entire folder tree you've browsed is preserved.
 
 ## Configuration
 
@@ -166,14 +174,14 @@ Change themes in Settings (F2) > Interface, or set in config file.
 | Key | Action |
 |-----|--------|
 | `Ctrl+A` | Artists (cycles: Artists → Album Artists → Albums) |
-| `Ctrl+P` | Playlists (cycles: All → Recently Added) |
+| `Ctrl+P` | Playlists (cycles: All → Stations → Recently Added → Recently Played) |
 | `Ctrl+G` | Genres (cycles: Genres → Artist Genres → Album Genres → Moods → Styles → Stations) |
 | `Ctrl+O` | Folders |
 
 ### Views
 | Key | Action |
 |-----|--------|
-| `Ctrl+N` | Now Playing (cycles: Queue → Recently Played → Visualizer) |
+| `Ctrl+N` | Now Playing (cycles: Queue → Now Playing) |
 | `F1` / `?` | Help screen |
 | `F2` | Settings |
 
@@ -187,32 +195,17 @@ Change themes in Settings (F2) > Interface, or set in config file.
 | `Alt+E` | Add selection to queue (track or album) |
 | `Alt+S` | Similar albums/tracks |
 | `Alt+V` | Sonic Adventure (see below) |
-| `Alt+O` | Cycle sort order (in Genres) or tabs (in Search) |
+| `Ctrl+Alt+L` | Library Radio (station based on your library) |
+| `Ctrl+Alt+R` | Random Album Radio (shuffled albums) |
+| `Ctrl+Alt+S` | Quick library switcher |
 
 ### Search / Filter (Ctrl+F)
 
-The unified search screen has tabs for different content types:
-- **All**: Global search across Artists, Albums, and Tracks
-- **Artists**: Filter artists by name
-- **Album Artists**: Filter by album artist tag
-- **Albums**: Filter albums by title
-- **Playlists**: Filter playlists
-- **Tracks**: Filter tracks by title
-- **Genres**: Filter genres
-
-| Key | Action |
-|-----|--------|
-| `Tab` / `Shift+Tab` | Switch between tabs |
-| `←` / `→` | Switch sections in All tab (Artists/Albums/Tracks) |
-| `↑` / `↓` | Navigate results |
-| `Enter` | Execute search (if query changed) or select result |
-| `Esc` | Close search |
-
-Type to enter a search query. Results update when you press Enter. Selecting a track or album plays it while staying in search, so you can continue searching.
+The unified search screen has tabs for different content types: Artists, Album Artists, Albums, Playlists, Tracks, and Genres. Use `Tab`/`Shift+Tab` to switch tabs. Selecting a track or album plays it while staying in search.
 
 ### Navigation Flow
 - **Artists** (`Ctrl+A`): Press again to cycle between Artists, Album Artists, and Albums views
-- **Playlists** (`Ctrl+P`): Press again to cycle between All Playlists, Recently Added albums, and Recent Playlists
+- **Playlists** (`Ctrl+P`): Press again to cycle between All Playlists, Stations, Recently Added, and Recently Played albums
 - **Genres** (`Ctrl+G`): Press again to cycle between Genres, Plex Genres, and Moods
 - **Folders** (`Ctrl+O`): Miller columns navigation (3 columns visible)
 
@@ -228,10 +221,7 @@ The Genres view (`Ctrl+G`) provides three content types that you cycle through b
 - **Plex Genres**: Plex's standardized genre categories (e.g., "Rock", "Jazz", "Classical")
 - **Moods**: Plexamp-style mood tags (e.g., "Energetic", "Melancholic")
 
-Additional shortcuts:
-- **Alt+O** cycles album sort order: artist, album artist, album title
-- Select a genre/mood to see albums, then drill into tracks
-- The view remembers your mode when you navigate away and back
+Select a genre/mood to see albums, then drill into tracks. The view remembers your mode when you navigate away and back.
 
 ### Queue vs Radio
 
@@ -251,7 +241,7 @@ textamp distinguishes between two playback modes:
 
 **Stations** (`Ctrl+T`) - Curated Plex stations:
 - Library Radio, Deep Cuts, Time Travel, and more
-- Miller columns navigation (Mood Radio has sub-moods, etc.)
+- Mood Radio has sub-moods, Style Radio has sub-styles, etc.
 - Automatically fetches more tracks as needed
 
 Only one mode is active at a time. Adding items to the queue (Alt+E) while radio is playing converts radio to queue mode.
@@ -266,8 +256,6 @@ Sonic Adventure creates a "sonic bridge" between two tracks - a playlist that tr
 4. The adventure replaces your queue and starts playing
 
 Tracks can be selected from Browse view or from Search/Filter (Ctrl+F, Tracks tab).
-
-Press `Esc` at any point to cancel adventure mode.
 
 ### Similar Albums
 The similar albums feature is context-aware:
@@ -285,18 +273,11 @@ Access Plexamp-style radio stations with `Ctrl+T`:
 - **Mood Radio** - Plays by mood (Aggressive, Atmospheric, etc.)
 - **Decade Radio** - Plays music from specific decades
 
-**Miller Columns Navigation**: Categories with sub-stations are marked with `›`. Press `Enter` or `→` to drill into a category (adds a new column). Press `←` or `Backspace` to move focus back to the previous column. Up to three columns are visible at once.
-
 Requires Plex Pass and sonic analysis enabled on your server.
 
 ### Folders (Ctrl+O)
 
-Miller columns style navigation (like macOS Finder):
-- Three columns visible at once
-- `Enter` / `→` to open folder or play track
-- `←` / `Backspace` to go back to parent
-- `A-Z` to jump to items starting with that letter
-- `♪` icon shows the currently playing track
+Miller columns style navigation (like macOS Finder). `♪` icon shows the currently playing track.
 
 ### Now Playing (Ctrl+N)
 
@@ -304,12 +285,11 @@ Press `Ctrl+N` to cycle between views:
 - **Queue**: Current queue or radio tracks
   - Scroll up to see play history (~20 tracks)
   - `Del` removes a track from queue (queue mode only)
-  - `Alt+O` cycles sort: queue order → by album → shuffled
-  - `Alt+P` saves the current queue as a playlist
+  - `Ctrl+S` saves the current queue as a playlist
   - Maximum 500 tracks in the queue
-- **Recently Played**: Albums played on this server (synced from Plex)
-- **Visualizer**: Audio visualizer with current track info
-  - `Alt+O` cycles visualizer styles: Bars, Spectrum, Waveform, Level Meter
+  - Enter/double-click on the currently playing track switches to Now Playing view
+- **Now Playing**: Album art, track info, and waveform seekbar
+  - Left/Right seeks ±1s, click waveform to seek
 
 Play history is automatically synced to your Plex server, so tracks you play in textamp show up in Plexamp's Recently Played and other Plex clients.
 
@@ -329,8 +309,7 @@ Play history is automatically synced to your Plex server, so tracks you play in 
 |-----|--------|
 | `F5` | Refresh current view (updates cache) |
 | `Ctrl+Q` | Quit |
-| `Ctrl+C` | Quit |
-| `Esc` | Close view / Return to browse |
+| `Esc` | Cancel / Go back |
 
 ## Album Artwork
 

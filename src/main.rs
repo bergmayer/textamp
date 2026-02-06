@@ -332,6 +332,7 @@ async fn run_test_mode() -> Result<()> {
     state.terminal_height = 30;
     state.connection = ConnectionState::Connected {
         username: "test_user".to_string(),
+        has_plex_pass: false,
     };
 
     // Load libraries
@@ -677,17 +678,14 @@ fn display_exit_logo() {
     use std::io::{self, Write};
 
     // Embedded ANSI art logo
-    static LOGO_ANSI: &[u8] = include_bytes!("../textamp_logo.ansi");
+    static LOGO_ANSI: &[u8] = include_bytes!("../textamp.ansi");
 
     // ANSI color codes (Cubic Player style)
-    // Bright cyan for top URL
     const BRIGHT_CYAN: &str = "\x1b[38;2;0;187;187m";
-    // Dimmer cyan for secondary URL
     const DIM_CYAN: &str = "\x1b[38;2;0;135;135m";
-    // Dark gray for placeholder text (lines 1 and 3)
     const DARK_GRAY: &str = "\x1b[38;2;85;85;85m";
-    // Dim gray for separator lines
     const DIM_GRAY: &str = "\x1b[38;2;68;68;68m";
+    const PURPLE: &str = "\x1b[38;2;200;170;255m";
     const RESET: &str = "\x1b[0m";
 
     // Clear screen and move cursor to top
@@ -698,17 +696,22 @@ fn display_exit_logo() {
     let _ = io::stdout().write_all(LOGO_ANSI);
     let _ = io::stdout().flush();
 
-    // Cubic Player style footer
-    // Top separator line
-    println!("{DIM_GRAY}  . - . _ . - . _ . - . _ . - . _ . - . _ . - . _ . - . _ . - . _ . - . _ . - .{RESET}");
+    // Horizontal separator line with player/version label (Cubic Player style)
+    // Line of ─ runs from left edge, interrupted by .- P L A Y E R -.- v1.0.0 -.
+    // Total width matches ANSI art (~72 cols)
+    let version = env!("CARGO_PKG_VERSION");
+    let suffix = format!(" -.- v{version} -.");
+    let label_width = 3 + 11 + suffix.len(); // ".- " + "P L A Y E R" + suffix
+    let line = "\u{2500}".repeat(72usize.saturating_sub(label_width));
+    println!("{DIM_GRAY}{line}.- {PURPLE}P L A Y E R{DIM_GRAY}{suffix}{RESET}");
 
-    // Two-column layout: URLs on left (bright/dim cyan), placeholder text on right (dark/default/dark)
-    println!("  {BRIGHT_CYAN}https://github.com/bergmayer/textamp{RESET}                {DARK_GRAY}placeholder text{RESET}");
-    println!("       {DIM_CYAN}http://www.bergmayer.net{RESET}                         placeholder text");
-    println!("                                                        {DARK_GRAY}placeholder text{RESET}");
+    // Two-column layout within 72 cols, divider at ~col 33
+    println!(" {BRIGHT_CYAN}http://bergmayer.net/textamp{RESET}     {DARK_GRAY}Why be bleak{RESET}");
+    println!("      {DIM_CYAN}https://app.plex.tv/{RESET}      {DIM_GRAY}|{RESET}     when you can be Blake?");
+    println!("                                 {DIM_GRAY}. {DARK_GRAY}Jhon Balance{RESET}                        {DIM_GRAY}.{RESET}");
 
-    // Bottom separator line
-    println!("{DIM_GRAY}  . - . _ . - . _ . - . _ . - . _ . - . _ . - . _ . - . _ . - . _ . - . _ . - .{RESET}");
+    // Bottom corners (two-box Cubic Player style, 72 cols)
+    println!("{DIM_GRAY}\u{2514}.                              .\u{2518}.                                   .\u{2518}{RESET}");
 
     // Farewell message (no color - default terminal text)
     println!("have a nice day...");

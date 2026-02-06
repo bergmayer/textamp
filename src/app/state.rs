@@ -348,6 +348,8 @@ pub struct AuthState {
     pub server_index: usize,
     /// Error message to display
     pub error_message: Option<String>,
+    /// Plex Pass status (cached during auth flow for server selection)
+    pub has_plex_pass: bool,
 }
 
 /// Root application state.
@@ -394,7 +396,6 @@ pub struct AppState {
     pub genre_content_type: GenreContentType,  // Genres / Artist / Album / Moods / Styles cycle
     pub genre_albums: Vec<Album>,  // Albums in selected genre/mood
     pub genre_albums_index: usize,
-    pub genre_sort_mode: GenreSortMode,
 
     // Artist view mode (Artist vs Album Artist)
     pub artist_view_mode: ArtistViewMode,
@@ -513,12 +514,12 @@ pub struct AppState {
     // Sonic Adventure state
     pub adventure: AdventureState,
 
-    // Now Playing view mode (Queue vs Recently Played vs Visualizer)
+    // Now Playing view mode (Queue vs Now Playing)
     pub now_playing_mode: NowPlayingMode,
     pub recently_played_albums: Vec<Album>,
     pub recently_played_loading: bool,
 
-    // Playlists view mode (All vs Recently Added)
+    // Playlists view mode (All vs Stations vs Recently Added vs Recently Played)
     pub playlists_mode: PlaylistsMode,
     pub recently_added_albums: Vec<Album>,
     pub recently_added_loading: bool,
@@ -552,6 +553,10 @@ pub struct AppState {
 
     // Search popup state (Ctrl+F - floating dialog, not a full view)
     pub search_popup_active: bool,
+
+    // Library picker popup state (Ctrl+Alt+S)
+    pub library_picker_active: bool,
+    pub library_picker_index: usize,
 }
 
 /// Playback mode - determines behavior (finite queue vs continuous radio).
@@ -867,7 +872,6 @@ impl AppState {
             genre_content_type: GenreContentType::default(),
             genre_albums: Vec::new(),
             genre_albums_index: 0,
-            genre_sort_mode: GenreSortMode::default(),
             artist_view_mode: ArtistViewMode::default(),
             right_panel_mode: RightPanelMode::Empty,
             selected_artist_albums: Vec::new(),
@@ -950,6 +954,8 @@ impl AppState {
             list_filter_category: BrowseCategory::Artists,
             list_filter_column: 0,
             search_popup_active: false,
+            library_picker_active: false,
+            library_picker_index: 0,
         }
     }
 
@@ -1063,7 +1069,9 @@ impl AppState {
             BrowseCategory::Playlists => {
                 match self.playlists_mode {
                     PlaylistsMode::All => self.playlists.len(),
+                    PlaylistsMode::Stations => 0, // Handled via station_nav
                     PlaylistsMode::RecentlyAdded => self.recently_added_albums.len(),
+                    PlaylistsMode::RecentlyPlayed => self.recently_played_albums.len(),
                 }
             }
             BrowseCategory::Genres => {
@@ -1143,10 +1151,12 @@ impl AppState {
                         self.playlists.get(self.list_state.playlists_index)
                             .map(|p| p.rating_key.clone())
                     }
+                    PlaylistsMode::Stations => None, // Handled via station_nav
                     PlaylistsMode::RecentlyAdded => {
                         self.recently_added_albums.get(self.list_state.playlists_index)
                             .map(|a| a.rating_key.clone())
                     }
+                    PlaylistsMode::RecentlyPlayed => None, // Handled via playlist_nav
                 }
             }
             BrowseCategory::Genres => self.current_genre_list().get(self.genres_index)
@@ -1177,10 +1187,12 @@ impl AppState {
                         self.playlists.get(self.list_state.playlists_index)
                             .map(|p| p.title.clone())
                     }
+                    PlaylistsMode::Stations => None, // Handled via station_nav
                     PlaylistsMode::RecentlyAdded => {
                         self.recently_added_albums.get(self.list_state.playlists_index)
                             .map(|a| a.title.clone())
                     }
+                    PlaylistsMode::RecentlyPlayed => None, // Handled via playlist_nav
                 }
             }
             BrowseCategory::Genres => self.current_genre_list().get(self.genres_index)
@@ -1216,7 +1228,7 @@ pub enum ConnectionState {
     Authenticating,
     AuthPending { pin_code: String, pin_id: u64 },
     Connecting,
-    Connected { username: String },
+    Connected { username: String, has_plex_pass: bool },
     Error(String),
 }
 
@@ -1245,8 +1257,6 @@ pub enum NowPlayingMode {
     /// Show current queue/radio tracks
     #[default]
     Queue,
-    /// Show recently played albums (like Plexamp)
-    RecentlyPlayed,
     /// Now Playing view with artwork and waveform seekbar
     NowPlaying,
 }
@@ -1254,8 +1264,7 @@ pub enum NowPlayingMode {
 impl NowPlayingMode {
     pub fn next(&self) -> Self {
         match self {
-            NowPlayingMode::Queue => NowPlayingMode::RecentlyPlayed,
-            NowPlayingMode::RecentlyPlayed => NowPlayingMode::NowPlaying,
+            NowPlayingMode::Queue => NowPlayingMode::NowPlaying,
             NowPlayingMode::NowPlaying => NowPlayingMode::Queue,
         }
     }
@@ -1263,15 +1272,13 @@ impl NowPlayingMode {
     pub fn prev(&self) -> Self {
         match self {
             NowPlayingMode::Queue => NowPlayingMode::NowPlaying,
-            NowPlayingMode::RecentlyPlayed => NowPlayingMode::Queue,
-            NowPlayingMode::NowPlaying => NowPlayingMode::RecentlyPlayed,
+            NowPlayingMode::NowPlaying => NowPlayingMode::Queue,
         }
     }
 
     pub fn name(&self) -> &'static str {
         match self {
             NowPlayingMode::Queue => "queue",
-            NowPlayingMode::RecentlyPlayed => "recently played",
             NowPlayingMode::NowPlaying => "now playing",
         }
     }
@@ -1283,27 +1290,39 @@ pub enum PlaylistsMode {
     /// Show all playlists
     #[default]
     All,
+    /// Show radio stations
+    Stations,
     /// Show recently added albums
     RecentlyAdded,
+    /// Show recently played albums
+    RecentlyPlayed,
 }
 
 impl PlaylistsMode {
     pub fn next(&self) -> Self {
         match self {
-            PlaylistsMode::All => PlaylistsMode::RecentlyAdded,
-            PlaylistsMode::RecentlyAdded => PlaylistsMode::All,
+            PlaylistsMode::All => PlaylistsMode::Stations,
+            PlaylistsMode::Stations => PlaylistsMode::RecentlyAdded,
+            PlaylistsMode::RecentlyAdded => PlaylistsMode::RecentlyPlayed,
+            PlaylistsMode::RecentlyPlayed => PlaylistsMode::All,
         }
     }
 
-    /// For a two-state enum, prev() is equivalent to next()
     pub fn prev(&self) -> Self {
-        self.next()
+        match self {
+            PlaylistsMode::All => PlaylistsMode::RecentlyPlayed,
+            PlaylistsMode::Stations => PlaylistsMode::All,
+            PlaylistsMode::RecentlyAdded => PlaylistsMode::Stations,
+            PlaylistsMode::RecentlyPlayed => PlaylistsMode::RecentlyAdded,
+        }
     }
 
     pub fn name(&self) -> &'static str {
         match self {
             PlaylistsMode::All => "playlists",
+            PlaylistsMode::Stations => "stations",
             PlaylistsMode::RecentlyAdded => "recently added",
+            PlaylistsMode::RecentlyPlayed => "recently played",
         }
     }
 }
@@ -1502,33 +1521,6 @@ impl GenreContentType {
     }
 }
 
-/// Sort mode for albums within a genre/mood.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum GenreSortMode {
-    #[default]
-    Artist,
-    AlbumArtist,
-    AlbumTitle,
-}
-
-impl GenreSortMode {
-    pub fn next(&self) -> Self {
-        match self {
-            GenreSortMode::Artist => GenreSortMode::AlbumArtist,
-            GenreSortMode::AlbumArtist => GenreSortMode::AlbumTitle,
-            GenreSortMode::AlbumTitle => GenreSortMode::Artist,
-        }
-    }
-
-    pub fn name(&self) -> &'static str {
-        match self {
-            GenreSortMode::Artist => "artist",
-            GenreSortMode::AlbumArtist => "album artist",
-            GenreSortMode::AlbumTitle => "album",
-        }
-    }
-}
-
 /// Sort mode for the play queue in Now Playing view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum QueueSortMode {
@@ -1701,56 +1693,51 @@ impl ListStates {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SettingsSection {
     #[default]
-    Server,
+    Account,
     Libraries,
     Playback,
     Interface,
-    Data,
     About,
 }
 
 impl SettingsSection {
     pub fn all() -> &'static [SettingsSection] {
         &[
-            SettingsSection::Server,
+            SettingsSection::Account,
             SettingsSection::Libraries,
             SettingsSection::Playback,
             SettingsSection::Interface,
-            SettingsSection::Data,
             SettingsSection::About,
         ]
     }
 
     pub fn name(&self) -> &'static str {
         match self {
-            SettingsSection::Server => "Server",
+            SettingsSection::Account => "Account",
             SettingsSection::Libraries => "Libraries",
             SettingsSection::Playback => "Playback",
             SettingsSection::Interface => "Interface",
-            SettingsSection::Data => "Data",
             SettingsSection::About => "About",
         }
     }
 
     pub fn next(&self) -> Self {
         match self {
-            SettingsSection::Server => SettingsSection::Libraries,
+            SettingsSection::Account => SettingsSection::Libraries,
             SettingsSection::Libraries => SettingsSection::Playback,
             SettingsSection::Playback => SettingsSection::Interface,
-            SettingsSection::Interface => SettingsSection::Data,
-            SettingsSection::Data => SettingsSection::About,
-            SettingsSection::About => SettingsSection::Server,
+            SettingsSection::Interface => SettingsSection::About,
+            SettingsSection::About => SettingsSection::Account,
         }
     }
 
     pub fn prev(&self) -> Self {
         match self {
-            SettingsSection::Server => SettingsSection::About,
-            SettingsSection::Libraries => SettingsSection::Server,
+            SettingsSection::Account => SettingsSection::About,
+            SettingsSection::Libraries => SettingsSection::Account,
             SettingsSection::Playback => SettingsSection::Libraries,
             SettingsSection::Interface => SettingsSection::Playback,
-            SettingsSection::Data => SettingsSection::Interface,
-            SettingsSection::About => SettingsSection::Data,
+            SettingsSection::About => SettingsSection::Interface,
         }
     }
 }
@@ -1778,12 +1765,14 @@ pub struct SettingsState {
     pub editing: bool,
     /// Pending server discovery
     pub discovering_servers: bool,
-    /// Username being edited (Server section)
+    /// Username being edited (Account section sign-in)
     pub username_input: String,
-    /// Password being edited (Server section)
+    /// Password being edited (Account section sign-in)
     pub password_input: String,
     /// Which credential field is being edited (None = not editing credentials)
     pub editing_credential: Option<CredentialField>,
+    /// Whether the Account section is in sign-in mode (showing login form)
+    pub signing_in: bool,
 }
 
 /// Which credential field is being edited in settings.
@@ -1840,6 +1829,7 @@ pub enum RefreshCategory {
     Moods,
     Styles,
     Stations,
+    RecentlyPlayed,
     Folders,
 }
 
@@ -1852,6 +1842,7 @@ impl RefreshCategory {
             RefreshCategory::Albums,
             RefreshCategory::Playlists,
             RefreshCategory::RecentlyAdded,
+            RefreshCategory::RecentlyPlayed,
             RefreshCategory::Genres,
             RefreshCategory::ArtistGenres,
             RefreshCategory::AlbumGenres,
@@ -1870,6 +1861,7 @@ impl RefreshCategory {
             RefreshCategory::Albums => "Albums",
             RefreshCategory::Playlists => "Playlists",
             RefreshCategory::RecentlyAdded => "Recently Added",
+            RefreshCategory::RecentlyPlayed => "Recently Played",
             RefreshCategory::Genres => "Genres",
             RefreshCategory::ArtistGenres => "Artist Genres",
             RefreshCategory::AlbumGenres => "Album Genres",

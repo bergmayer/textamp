@@ -1,6 +1,6 @@
 [package]
 name = "textamp"
-version = "0.2.0"
+version = "1.0.0"
 edition = "2021"
 description = "A keyboard-driven TUI client for Plex Music"
 license = "MIT"

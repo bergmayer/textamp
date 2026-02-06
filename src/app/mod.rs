@@ -5,6 +5,7 @@
 mod action;
 mod event;
 mod event_loop;
+mod handlers;
 
 pub mod state;
 

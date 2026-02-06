@@ -34,7 +34,7 @@ NAVIGATION
   Shift+Up        Cycle modes backwards
   Enter / Right   Select / Drill down / Play
   Left / Bksp     Go back / Move focus left
-  Esc             Close view / Cancel adventure / Close filter
+  Esc             Cancel / Go back
   Page Up/Down    Scroll by page
   Home/End        Jump to top/bottom
   A-Z             Jump to first item starting with letter
@@ -43,12 +43,12 @@ NAVIGATION
 
 CATEGORIES (Ctrl+key - works from any view)
   Ctrl+A          Artists (cycles: artists/album artists/albums)
-  Ctrl+P          Playlists (cycles: all/recently added)
+  Ctrl+P          Playlists (cycles: all/stations/recently added/recently played)
   Ctrl+G          Genres (cycles: genres/artist/album/moods/styles/stations)
   Ctrl+O          Folders
 
 VIEWS
-  Ctrl+N          Now Playing (cycles: queue/recently played/visualizer)
+  Ctrl+N          Now Playing (cycles: queue/now playing)
   F1 / ?          This help screen
   F2              Settings
 
@@ -62,49 +62,35 @@ COMMANDS
                   Track: adds single track
                   Album: adds all tracks from album
   Alt+S           Show similar albums/tracks
-  Alt+V           Start Sonic Adventure (see below)
-  Alt+O           Cycle filter tabs (in Search view)
-                  Cycle sort order (in Genres view)
+  Alt+V           Sonic Adventure (see below)
+  Ctrl+Alt+L      Library Radio (station based on your library)
+  Ctrl+Alt+R      Random Album Radio (shuffled albums)
+  Ctrl+Alt+S      Quick library switcher
 
 SEARCH POPUP (Ctrl+F)
-  Tabs: All | Artists | Album Artists | Albums |
+  Tabs: Artists | Album Artists | Albums |
         Playlists | Tracks | Genres
   Tab / Shift+Tab Switch between tabs
-  Alt+O           Cycle filter tabs
-  Up / Down       Navigate results
-  Type text       Enter search query
-  Enter           Search (if query changed) or select
-  Esc             Close popup
-  All tab:        3-column view (Artists | Albums | Tracks)
-                  Left/Right to switch column focus
 
 INLINE FILTER (/ key)
-  /               Activate filter box in transport bar
-  Click 🔍        Click search icon to activate filter
-  Type text       Filter current column in real-time
-  Up/Down         Navigate within filtered results
-  Enter           Select item and drill down (filter persists)
-  Esc             Close filter and restore full list
-  Note: Filter stays on original column when navigating
+  /               Activate filter in transport bar
+  Filter stays on original column when drilling down
 
 PLAYBACK
   Space           Play / Pause
-  Ctrl+Left       Previous track
-  Ctrl+Right      Next track
+  < / Ctrl+Left    Previous track
+  > / Ctrl+Right   Next track
   Ctrl+Up/Down    Volume up/down
   Shift+Left      Seek backward 10 seconds
   Shift+Right     Seek forward 10 seconds
   Play history syncs to Plex server
 
 NOW PLAYING (Ctrl+N)
-  Ctrl+N cycles:  Queue -> Recently Played -> Now Playing
+  Ctrl+N cycles:  Queue -> Now Playing
   Queue mode      Current queue or radio tracks
-                  Scroll up to see play history (~20 tracks)
                   Del to remove from queue
                   Ctrl+S to save as playlist
-  Recently Played Albums played on this server
   Now Playing     Album art, track info, waveform seekbar
-                  Left/Right seeks ±1s, click to seek
 
 RADIO (Alt+R on selection)
   Track Radio     Similar individual tracks (sonic)
@@ -118,60 +104,22 @@ SONIC ADVENTURE (Alt+V)
   3. Enter length (5-100 tracks)
   4. Adventure replaces queue, starts playing
   Tracks can be selected from Browse or Search (Tracks tab)
-  Esc             Cancel adventure mode
 
 PLAYLISTS (Ctrl+P)
-  Ctrl+P cycles:  All -> Recently Added
-  All             All playlists
-  Recently Added  Albums recently added to library
+  Ctrl+P cycles:  All -> Stations -> Recently Added -> Recently Played
 
 GENRES (Ctrl+G)
-  3-column view (Genre | Albums | Tracks)
   Ctrl+G cycles:  Genres -> Artist Genres -> Album Genres -> Moods -> Styles -> Stations
-  Alt+O           Cycle sort: artist/album artist/album
-  Left / Right    Move focus between columns
-  Up / Down       Navigate within current column
-  Enter           Play selected track, or focus next column
-
-STATIONS (via Ctrl+G cycle)
-  Enter / Right   Drill into category or play station
-  Left / Bksp     Move focus to previous column
-  › suffix indicates drillable category
 
 FOLDERS (Ctrl+O)
-  Enter / Right   Open folder or play track
-  Left / Bksp     Go back to parent folder
   ♪ icon shows currently playing track
 
 SETTINGS (F2)
-  Server          Username/password, server selection
-                  Enter to edit credentials, restart to apply
-  Libraries       Switch between music libraries
-  Playback        View playback settings
-  Interface       Change theme (Dark/Solarized/Borland)
-  Data            Clear Cache & Reload / Sign Out
-
-MOUSE SUPPORT
-  Transport Bar   Click ▶/⏸ icon to play/pause
-                  Click anywhere on seek bar to jump
-                  Drag the ● indicator to scrub
-  Bottom Bar      Click to switch views/categories
-                  Click active item to cycle modes
-  Browse View     Click left panel to select item
-                  Click right panel to select
-                  Double-click to drill down or play
-  Now Playing     Click queue item to select
-                  Double-click to jump to track
-                  Click waveform to seek, drag ● to scrub
-  Search          Click tabs to switch
-                  Click results to select
-  Settings        Click sections or items
-  Scroll Wheel    Scroll lists (all views)
+  F2              Account, libraries, playback, themes
 
 GENERAL
   F5              Refresh current view (updates cache)
   Ctrl+Q          Quit
-  Ctrl+C          Quit
 "#;
 
     // Count lines for scroll clamping
