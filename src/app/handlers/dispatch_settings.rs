@@ -447,6 +447,7 @@ pub async fn dispatch(
                 state.selected_album_tracks.clear();
                 state.folder_state = None;
                 state.folder_contents_cache.clear();
+                state.playlist_tracks_cache.clear();
                 state.list_state.reset();
 
                 // Clear Miller column navigation states
@@ -598,6 +599,11 @@ pub async fn dispatch(
                             if !cached.recently_played_albums.is_empty() {
                                 state.recently_played_albums = cached.recently_played_albums;
                             }
+
+                            // Playlist tracks cache
+                            if !cached.playlist_tracks.is_empty() {
+                                state.playlist_tracks_cache = cached.playlist_tracks;
+                            }
                         }
                     }
                 }
@@ -636,6 +642,7 @@ pub async fn dispatch(
                         state.playlists.clear();
                         state.folder_state = None;
                         state.folder_contents_cache.clear();
+                        state.playlist_tracks_cache.clear();
 
                         // Reload from API
                         if let Some(lib_key) = &state.active_library {

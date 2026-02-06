@@ -17,7 +17,7 @@
 //! This design prevents accumulation of stale folder data while still
 //! providing fast navigation for frequently-accessed folders.
 
-use super::models::{Album, Artist, FolderItem, Genre, Playlist, Station};
+use super::models::{Album, Artist, FolderItem, Genre, Playlist, Station, Track};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -99,6 +99,10 @@ pub struct CacheData {
     pub recently_added_albums: Vec<Album>,
     #[serde(default)]
     pub recently_played_albums: Vec<Album>,
+
+    // Playlist tracks cache (playlist_key -> tracks)
+    #[serde(default)]
+    pub playlist_tracks: HashMap<String, Vec<Track>>,
 }
 
 impl CacheData {

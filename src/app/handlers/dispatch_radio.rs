@@ -3,7 +3,7 @@
 //! NavigateStationsBack.
 
 use crate::app::{Action, AppState, Event};
-use crate::app::state::{ActiveStation, PlaybackMode, RadioMode, StationColumn, View};
+use crate::app::state::{PlaybackMode, RadioMode, View};
 use crate::api::PlexClient;
 use crate::audio::AudioPlayer;
 
@@ -262,54 +262,56 @@ pub async fn dispatch(
                 })
                 .unwrap_or_else(|| "Radio".to_string());
 
-            state.set_status(format!("Starting {}...", station_title));
+            // Set loading state immediately - UI stays responsive
+            state.stations_loading = true;
+            state.station_nav.loading = true;
+            state.set_status(format!("Loading {}...", station_title));
 
-            // IMPORTANT: Station queue creation has a 30-second timeout to prevent freezes.
-            // If it takes longer, show an error rather than blocking the UI indefinitely.
-            let queue_future = client.create_station_queue(&station_key);
-            let timeout_duration = std::time::Duration::from_secs(30);
+            // Spawn background task for station queue creation (non-blocking)
+            let tx = event_tx.clone();
+            let client_clone = client.clone();
+            let sk = station_key.clone();
+            let st = station_title.clone();
+            let lib_key = state.active_library.clone();
+            tokio::spawn(async move {
+                let queue_future = client_clone.create_station_queue(&sk);
+                let timeout_duration = std::time::Duration::from_secs(30);
 
-            match tokio::time::timeout(timeout_duration, queue_future).await {
-                Ok(Ok(tracks)) => {
-                    if tracks.is_empty() {
-                        state.set_error("Station returned no tracks".to_string());
-                    } else {
-                        state.playback_mode = PlaybackMode::Radio;
-                        state.radio.clear();
-                        state.radio.active_station = Some(ActiveStation {
-                            key: station_key.clone(),
-                            title: station_title.clone(),
-                        });
-                        state.radio.tracks = tracks;
-                        state.radio.track_index = Some(0);
-
-                        // For Time Travel Radio: initialize chronological continuation state
-                        if station_key.contains("timeTravel") {
-                            if let Some(lib_key) = &state.active_library {
-                                if let Ok(decades) = client.get_time_travel_decades(lib_key).await {
-                                    state.radio.time_travel_decades = decades;
-                                    // We started with first 3 decades, next fetch starts at index 3
-                                    state.radio.time_travel_index = 3;
-                                    tracing::info!("Time Travel Radio: initialized with {} decades, next fetch from index 3",
-                                        state.radio.time_travel_decades.len());
-                                }
+                match tokio::time::timeout(timeout_duration, queue_future).await {
+                    Ok(Ok(tracks)) => {
+                        // For Time Travel Radio: fetch decades in same background task
+                        let time_travel_decades = if sk.contains("timeTravel") {
+                            if let Some(ref lk) = lib_key {
+                                client_clone.get_time_travel_decades(lk).await.unwrap_or_default()
+                            } else {
+                                vec![]
                             }
-                        }
+                        } else {
+                            vec![]
+                        };
 
-                        state.view = View::NowPlaying;
-                        helpers::play_current_track(event_tx, state, client, audio).await;
-                        state.set_status(format!("Playing {} ({} tracks)", station_title, state.radio.tracks.len()));
+                        let _ = tx.send(Event::StationTracksLoaded {
+                            station_key: sk,
+                            station_title: st,
+                            tracks,
+                            time_travel_decades,
+                        }).await;
+                    }
+                    Ok(Err(e)) => {
+                        let _ = tx.send(Event::StationLoadFailed {
+                            station_key: sk,
+                            error: format!("Failed to start station: {}", e),
+                        }).await;
+                    }
+                    Err(_) => {
+                        tracing::warn!("Station queue creation timed out after 30 seconds: {}", sk);
+                        let _ = tx.send(Event::StationLoadFailed {
+                            station_key: sk,
+                            error: "Station timed out - try a different station".into(),
+                        }).await;
                     }
                 }
-                Ok(Err(e)) => {
-                    state.set_error(format!("Failed to start station: {}", e));
-                }
-                Err(_) => {
-                    // Timeout - this prevents indefinite freezes
-                    state.set_error("Station timed out - try a different station".to_string());
-                    tracing::warn!("Station queue creation timed out after 30 seconds: {}", station_key);
-                }
-            }
+            });
         }
         Action::DrillIntoStation(station_key, station_title) => {
             // Drill into a station category (e.g., Mood Radio -> sub-moods)
@@ -317,65 +319,58 @@ pub async fn dispatch(
             state.station_nav.loading = true;
             state.set_status(format!("Loading {}...", station_title));
 
-            match client.get_station_children(&station_key).await {
-                Ok(children) => {
-                    if children.is_empty() {
-                        // No children - treat as playable station
-                        state.stations_loading = false;
-                        state.station_nav.loading = false;
-                        state.set_status(format!("Starting {}...", station_title));
+            // Spawn background task for child loading (non-blocking)
+            let tx = event_tx.clone();
+            let client_clone = client.clone();
+            let sk = station_key.clone();
+            let st = station_title.clone();
+            tokio::spawn(async move {
+                match client_clone.get_station_children(&sk).await {
+                    Ok(children) => {
+                        if children.is_empty() {
+                            // No children - treat as playable station
+                            let queue_future = client_clone.create_station_queue(&sk);
+                            let timeout_duration = std::time::Duration::from_secs(30);
 
-                        // IMPORTANT: Station queue creation has a 30-second timeout to prevent freezes.
-                        let queue_future = client.create_station_queue(&station_key);
-                        let timeout_duration = std::time::Duration::from_secs(30);
-
-                        match tokio::time::timeout(timeout_duration, queue_future).await {
-                            Ok(Ok(tracks)) => {
-                                if tracks.is_empty() {
-                                    state.set_error("Station returned no tracks".to_string());
-                                } else {
-                                    state.playback_mode = PlaybackMode::Radio;
-                                    state.radio.clear();
-                                    state.radio.active_station = Some(ActiveStation {
-                                        key: station_key.clone(),
-                                        title: station_title.clone(),
-                                    });
-                                    state.radio.tracks = tracks;
-                                    state.radio.track_index = Some(0);
-                                    state.view = View::NowPlaying;
-                                    helpers::play_current_track(event_tx, state, client, audio).await;
-                                    state.set_status(format!("Playing {} ({} tracks)", station_title, state.radio.tracks.len()));
+                            match tokio::time::timeout(timeout_duration, queue_future).await {
+                                Ok(Ok(tracks)) => {
+                                    let _ = tx.send(Event::StationTracksLoaded {
+                                        station_key: sk,
+                                        station_title: st,
+                                        tracks,
+                                        time_travel_decades: vec![],
+                                    }).await;
+                                }
+                                Ok(Err(e)) => {
+                                    let _ = tx.send(Event::StationLoadFailed {
+                                        station_key: sk,
+                                        error: format!("Failed to start station: {}", e),
+                                    }).await;
+                                }
+                                Err(_) => {
+                                    tracing::warn!("Station queue creation timed out after 30 seconds: {}", sk);
+                                    let _ = tx.send(Event::StationLoadFailed {
+                                        station_key: sk,
+                                        error: "Station timed out - try a different station".into(),
+                                    }).await;
                                 }
                             }
-                            Ok(Err(e)) => {
-                                state.set_error(format!("Failed to start station: {}", e));
-                            }
-                            Err(_) => {
-                                state.set_error("Station timed out - try a different station".to_string());
-                                tracing::warn!("Station queue creation timed out after 30 seconds: {}", station_key);
-                            }
+                        } else {
+                            let _ = tx.send(Event::StationChildrenLoaded {
+                                station_key: sk,
+                                station_title: st,
+                                children,
+                            }).await;
                         }
-                    } else {
-                        // Push new column with children (Miller columns style)
-                        state.station_nav.push_column(StationColumn::new(
-                            Some(station_key.clone()),
-                            station_title.clone(),
-                            children.clone(),
-                        ));
-                        // Also update the legacy state for compatibility
-                        state.stations = children;
-                        state.stations_index = 0;
-                        state.stations_loading = false;
-                        state.station_nav.loading = false;
-                        state.clear_error();
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Event::StationLoadFailed {
+                            station_key: sk,
+                            error: format!("Failed to load station children: {}", e),
+                        }).await;
                     }
                 }
-                Err(e) => {
-                    state.set_error(format!("Failed to load station children: {}", e));
-                    state.stations_loading = false;
-                    state.station_nav.loading = false;
-                }
-            }
+            });
         }
         Action::NavigateStationsBack => {
             // Go back in Miller columns (just move focus left - data already in memory)
@@ -387,6 +382,11 @@ pub async fn dispatch(
                     state.stations_index = col.selected_index;
                 }
             }
+        }
+        Action::PlayCurrentRadioTrack => {
+            // Play the current track in radio mode (stays in Radio playback mode)
+            state.consecutive_playback_errors = 0;
+            helpers::play_current_track(event_tx, state, client, audio).await;
         }
         _ => unreachable!("dispatch_radio called with non-radio action: {:?}", action),
     }

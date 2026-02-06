@@ -15,9 +15,6 @@
 
 use crate::api::models::Track;
 
-/// Maximum number of tracks in the queue.
-pub const MAX_QUEUE_SIZE: usize = 500;
-
 /// Maximum number of tracks in play history.
 pub const MAX_HISTORY_SIZE: usize = 50;
 
@@ -101,12 +98,7 @@ impl QueueManager {
     }
 
     /// Add a single track to the end of the queue.
-    ///
-    /// Returns false if the queue is at max capacity.
     pub fn enqueue(&mut self, track: Track) -> bool {
-        if self.tracks.len() >= MAX_QUEUE_SIZE {
-            return false;
-        }
         self.tracks.push(track);
         true
     }
@@ -115,10 +107,8 @@ impl QueueManager {
     ///
     /// Returns the number of tracks actually added.
     pub fn enqueue_many(&mut self, tracks: Vec<Track>) -> usize {
-        let available = MAX_QUEUE_SIZE.saturating_sub(self.tracks.len());
-        let to_add: Vec<_> = tracks.into_iter().take(available).collect();
-        let added = to_add.len();
-        self.tracks.extend(to_add);
+        let added = tracks.len();
+        self.tracks.extend(tracks);
         added
     }
 
@@ -223,10 +213,6 @@ impl QueueManager {
 
     /// Insert a track to play next (after current position).
     pub fn play_next(&mut self, track: Track) -> bool {
-        if self.tracks.len() >= MAX_QUEUE_SIZE {
-            return false;
-        }
-
         let insert_pos = self.current_index.map(|idx| idx + 1).unwrap_or(0);
         self.tracks.insert(insert_pos.min(self.tracks.len()), track);
         true
@@ -254,12 +240,7 @@ impl QueueManager {
 
     /// Extend queue with additional tracks.
     pub fn extend(&mut self, tracks: impl IntoIterator<Item = Track>) {
-        for track in tracks {
-            if self.tracks.len() >= MAX_QUEUE_SIZE {
-                break;
-            }
-            self.tracks.push(track);
-        }
+        self.tracks.extend(tracks);
     }
 
     /// Get track keys for creating a playlist.
@@ -276,22 +257,14 @@ pub struct PlaybackService;
 impl PlaybackService {
     /// Add a single track to the end of the queue.
     pub fn enqueue_track(queue: &mut Vec<Track>, track: Track) -> bool {
-        if queue.len() >= MAX_QUEUE_SIZE {
-            return false;
-        }
         queue.push(track);
         true
     }
 
     /// Add multiple tracks to the end of the queue.
     pub fn enqueue_tracks(queue: &mut Vec<Track>, tracks: Vec<Track>) -> usize {
-        let available_space = MAX_QUEUE_SIZE.saturating_sub(queue.len());
-        let to_add = tracks.into_iter().take(available_space);
-        let mut added = 0;
-        for track in to_add {
-            queue.push(track);
-            added += 1;
-        }
+        let added = tracks.len();
+        queue.extend(tracks);
         added
     }
 
@@ -423,10 +396,6 @@ impl PlaybackService {
 
     /// Insert a track to play next.
     pub fn play_next(queue: &mut Vec<Track>, queue_index: Option<usize>, track: Track) -> bool {
-        if queue.len() >= MAX_QUEUE_SIZE {
-            return false;
-        }
-
         let insert_pos = queue_index.map(|idx| idx + 1).unwrap_or(0);
         queue.insert(insert_pos.min(queue.len()), track);
         true

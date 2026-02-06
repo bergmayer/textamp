@@ -173,9 +173,6 @@ pub async fn dispatch(
                 state.playback.position_ms = new_pos;
             }
         }
-        Action::ToggleShuffle => {
-            state.playback.shuffle = !state.playback.shuffle;
-        }
         Action::CycleRepeat => {
             state.playback.repeat_mode = state.playback.repeat_mode.next();
         }
@@ -183,6 +180,7 @@ pub async fn dispatch(
             match audio.start_pending_playback() {
                 Ok(()) => {
                     state.playback.status = PlayStatus::Playing;
+                    state.consecutive_playback_errors = 0;
                 }
                 Err(e) => {
                     state.set_error(format!("Playback error: {}", e));

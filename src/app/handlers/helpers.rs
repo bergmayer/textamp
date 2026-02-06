@@ -1202,6 +1202,7 @@ pub fn maybe_save_cache_async(event_tx: &mpsc::Sender<Event>, state: &mut AppSta
     cache_data.stations = state.stations.clone();
     cache_data.recently_added_albums = state.recently_added_albums.clone();
     cache_data.recently_played_albums = state.recently_played_albums.clone();
+    cache_data.playlist_tracks = state.playlist_tracks_cache.clone();
 
     let event_tx = event_tx.clone();
     tokio::spawn(async move {

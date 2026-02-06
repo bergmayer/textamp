@@ -101,7 +101,7 @@ pub enum Event {
     WaveformCacheHit { track_key: String, data: WaveformData },
 
     // Station loading (background)
-    StationTracksLoaded { station_key: String, station_title: String, tracks: Vec<Track> },
+    StationTracksLoaded { station_key: String, station_title: String, tracks: Vec<Track>, time_travel_decades: Vec<String> },
     StationLoadFailed { station_key: String, error: String },
     StationChildrenLoaded { station_key: String, station_title: String, children: Vec<Station> },
 
@@ -111,6 +111,10 @@ pub enum Event {
 
     // Radio track fetching (background)
     RadioTracksLoaded { tracks: Vec<Track>, time_travel_index: Option<usize> },
+
+    // Playlist tracks loading (non-blocking)
+    PlaylistTracksForMillerLoaded { playlist_key: String, tracks: Vec<Track> },
+    PlaylistTracksForMillerFailed { playlist_key: String, error: String },
 
     // Inline list filter
     ListFilterCompleted {

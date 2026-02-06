@@ -429,6 +429,8 @@ pub struct AppState {
     pub play_history: Vec<Track>,
     /// Whether user is currently dragging the seek indicator
     pub seeking_drag: bool,
+    /// Consecutive playback errors (for auto-skip with limit)
+    pub consecutive_playback_errors: u32,
     /// Plex session identifier for timeline reporting.
     /// Generated when starting a new playback context (queue, radio, etc.).
     /// Used to correlate all timeline reports to a single session.
@@ -487,6 +489,9 @@ pub struct AppState {
     pub artist_nav: BrowseNavigationState,
     pub genre_nav: BrowseNavigationState,
     pub playlist_nav: BrowseNavigationState,
+
+    // In-memory playlist tracks cache (playlist_key -> tracks)
+    pub playlist_tracks_cache: HashMap<String, Vec<Track>>,
 
     // Artwork state
     pub artwork_thumb: Option<String>,
@@ -893,6 +898,7 @@ impl AppState {
             queue_sort_mode: QueueSortMode::default(),
             play_history: Vec::new(),
             seeking_drag: false,
+            consecutive_playback_errors: 0,
             plex_session_id: None,
             last_progress_report: None,
             search_query: String::new(),
@@ -921,6 +927,7 @@ impl AppState {
             artist_nav: BrowseNavigationState::new(),
             genre_nav: BrowseNavigationState::new(),
             playlist_nav: BrowseNavigationState::new(),
+            playlist_tracks_cache: HashMap::new(),
             artwork_thumb: None,
             artwork_data: None,
             artwork_loading: false,
@@ -1530,25 +1537,14 @@ pub enum QueueSortMode {
     /// Original queue order (as items were added)
     #[default]
     QueueOrder,
-    /// Grouped by album
-    Album,
     /// Shuffled order
     Shuffle,
 }
 
 impl QueueSortMode {
-    pub fn next(&self) -> Self {
-        match self {
-            QueueSortMode::QueueOrder => QueueSortMode::Album,
-            QueueSortMode::Album => QueueSortMode::Shuffle,
-            QueueSortMode::Shuffle => QueueSortMode::QueueOrder,
-        }
-    }
-
     pub fn name(&self) -> &'static str {
         match self {
             QueueSortMode::QueueOrder => "queue order",
-            QueueSortMode::Album => "by artist/album",
             QueueSortMode::Shuffle => "shuffled",
         }
     }
@@ -1595,7 +1591,6 @@ pub struct PlaybackState {
     pub duration_ms: u64,
     pub volume: f32,
     pub muted: bool,
-    pub shuffle: bool,
     pub repeat_mode: RepeatMode,
 }
 
@@ -1607,7 +1602,6 @@ impl Default for PlaybackState {
             duration_ms: 0,
             volume: 0.8,
             muted: false,
-            shuffle: false,
             repeat_mode: RepeatMode::Off,
         }
     }

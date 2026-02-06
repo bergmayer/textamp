@@ -4,7 +4,7 @@
 //! with album artwork and play history support.
 //! Cycles between Queue and Now Playing modes.
 
-use crate::app::state::{PlaybackMode, NowPlayingMode, PlayStatus};
+use crate::app::state::{PlaybackMode, NowPlayingMode, PlayStatus, QueueSortMode};
 use crate::app::AppState;
 use crate::services::NavigationService;
 use crate::ui::theme::theme;
@@ -120,7 +120,13 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
                 " radio ".to_string()
             }
         }
-        PlaybackMode::Queue | PlaybackMode::None => " queue ".to_string(),
+        PlaybackMode::Queue | PlaybackMode::None => {
+            if state.queue_sort_mode == QueueSortMode::Shuffle {
+                " queue (shuffled) ".to_string()
+            } else {
+                " queue ".to_string()
+            }
+        }
     };
 
     let block = Block::default()

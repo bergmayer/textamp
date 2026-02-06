@@ -97,15 +97,8 @@ pub async fn dispatch(
                             state.radio.clear();
                         }
 
-                        // Add tracks to queue, respecting 500 track limit
-                        const MAX_QUEUE_SIZE: usize = 500;
-                        let mut added = 0;
-                        for track in tracks {
-                            if state.queue.len() < MAX_QUEUE_SIZE {
-                                state.queue.push(track);
-                                added += 1;
-                            }
-                        }
+                        let added = tracks.len();
+                        state.queue.extend(tracks);
                         state.set_status(format!("Added {} tracks from \"{}\" to queue", added, title));
                     }
                 }
@@ -123,11 +116,48 @@ pub async fn dispatch(
                 PlaybackMode::Queue | PlaybackMode::None => {
                     state.queue.clear();
                     state.queue_index = None;
+                    state.queue_original.clear();
+                    state.queue_sort_mode = QueueSortMode::QueueOrder;
                 }
             }
             audio.stop();
             audio.track_cache.flush();
             state.playback.status = PlayStatus::Stopped;
+        }
+        Action::ToggleQueueShuffle => {
+            use crate::audio::cache;
+            use crate::services::PlaybackService;
+
+            match state.queue_sort_mode {
+                QueueSortMode::QueueOrder => {
+                    // Save original order, then shuffle
+                    state.queue_original = state.queue.clone();
+                    let (shuffled, new_idx) = PlaybackService::shuffle_queue(
+                        state.queue.clone(), state.queue_index,
+                    );
+                    state.queue = shuffled;
+                    state.queue_index = new_idx; // always Some(0)
+                    state.queue_sort_mode = QueueSortMode::Shuffle;
+                    state.list_state.queue_index = state.play_history.len();
+                }
+                QueueSortMode::Shuffle => {
+                    // Restore original order, find current track
+                    let current_key = state.current_track().map(|t| t.rating_key.clone());
+                    state.queue = std::mem::take(&mut state.queue_original);
+                    state.queue_sort_mode = QueueSortMode::QueueOrder;
+                    // Find current track in restored order
+                    if let Some(key) = current_key {
+                        state.queue_index = state.queue.iter().position(|t| t.rating_key == key);
+                    }
+                    if let Some(idx) = state.queue_index {
+                        state.list_state.queue_index = state.play_history.len() + idx;
+                    }
+                }
+            }
+            // Flush and re-prefetch based on new queue order
+            audio.track_cache.flush();
+            let upcoming = cache::get_upcoming_tracks(state);
+            cache::trigger_prefetch(&audio.track_cache, &upcoming, client);
         }
         Action::RemoveFromQueue(idx) => {
             if idx < state.queue.len() {
@@ -277,13 +307,7 @@ pub async fn dispatch(
                     state.radio.clear();
                 }
 
-                // Add tracks to queue, respecting 500 track limit
-                const MAX_QUEUE_SIZE: usize = 500;
-                for track in tracks_to_add {
-                    if state.queue.len() < MAX_QUEUE_SIZE {
-                        state.queue.push(track);
-                    }
-                }
+                state.queue.extend(tracks_to_add);
                 state.set_status(format!("Added to queue ({} tracks)", state.queue.len()));
             }
         }

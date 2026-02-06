@@ -12,8 +12,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// Maximum number of cached tracks.
-const MAX_ENTRIES: usize = 20;
+/// Maximum number of cached tracks (10 upcoming + 3 recently played).
+const MAX_ENTRIES: usize = 13;
 
 /// Maximum total cache size in bytes (800 MB).
 const MAX_BYTES: usize = 800 * 1024 * 1024;
@@ -190,8 +190,41 @@ async fn download_with_retry(url: &str) -> Result<Vec<u8>, String> {
             Ok(response) => {
                 let status = response.status();
                 if status.is_success() {
+                    // Check for HTML content-type (Plex can return HTML errors with 200)
+                    let is_html = response.headers()
+                        .get(reqwest::header::CONTENT_TYPE)
+                        .and_then(|v| v.to_str().ok())
+                        .map(|ct| ct.contains("text/html"))
+                        .unwrap_or(false);
+                    if is_html {
+                        if attempt + 1 < MAX_RETRIES {
+                            let delay = backoff_secs[attempt as usize];
+                            tracing::debug!("Pre-fetch got HTML content-type (attempt {}), retrying in {}s", attempt + 1, delay);
+                            tokio::time::sleep(Duration::from_secs(delay)).await;
+                            continue;
+                        }
+                        return Err("Server returned HTML instead of audio".to_string());
+                    }
+
                     match response.bytes().await {
-                        Ok(bytes) => return Ok(bytes.to_vec()),
+                        Ok(bytes) => {
+                            let data = bytes.to_vec();
+                            // Check downloaded bytes for HTML markers (small responses only)
+                            if data.len() < 1024 * 1024 {
+                                let prefix = &data[..data.len().min(256)];
+                                let text = String::from_utf8_lossy(prefix).to_lowercase();
+                                if text.contains("<!doctype html") || text.contains("<html") || text.contains("<head") {
+                                    if attempt + 1 < MAX_RETRIES {
+                                        let delay = backoff_secs[attempt as usize];
+                                        tracing::debug!("Pre-fetch got HTML body (attempt {}), retrying in {}s", attempt + 1, delay);
+                                        tokio::time::sleep(Duration::from_secs(delay)).await;
+                                        continue;
+                                    }
+                                    return Err("Server returned HTML instead of audio".to_string());
+                                }
+                            }
+                            return Ok(data);
+                        }
                         Err(e) => {
                             if attempt + 1 < MAX_RETRIES {
                                 let delay = backoff_secs[attempt as usize];

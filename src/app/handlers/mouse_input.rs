@@ -554,6 +554,11 @@ fn handle_now_playing_down(click_row: u16, click_col: u16, state: &mut AppState)
                 0u16
             };
 
+            // Click on title bar (row 0) of track list toggles shuffle
+            if click_row == 0 && click_col >= artwork_width && !state.queue.is_empty() {
+                return vec![Action::ToggleQueueShuffle];
+            }
+
             // Track list starts after artwork
             if click_col >= artwork_width {
                 // Visual row (accounting for border)

@@ -46,7 +46,6 @@ pub enum Action {
     VolumeUp,
     VolumeDown,
     ToggleMute,
-    ToggleShuffle,
     CycleRepeat,
     StartPendingPlayback,
 
@@ -59,7 +58,7 @@ pub enum Action {
     EnqueueAlbum { rating_key: String, title: String },  // Load album tracks and add to queue
     ClearQueue,
     RemoveFromQueue(usize),
-    ShuffleQueue,
+    ToggleQueueShuffle,
     JumpToQueueIndex(usize),      // Jump to and play a specific queue index
     PromptSavePlaylist,           // Alt+P: Prompt user for playlist name
     SaveQueueAsPlaylist(String),  // Save queue with given name
@@ -151,6 +150,7 @@ pub enum Action {
     StopRadio,
     FetchMoreRadioTracks,
     JumpToRadioTrack(usize),  // Jump to track in radio queue without clearing
+    PlayCurrentRadioTrack,    // Play current track in radio mode (stays in Radio playback mode)
 
     // Stations (Plexamp-style radio stations)
     LoadStations,

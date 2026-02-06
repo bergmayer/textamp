@@ -185,21 +185,43 @@ pub async fn dispatch(
         // ================================================================
 
         Action::LoadPlaylistTracksForMiller { playlist_key } => {
-            // Load tracks for playlist and add as new column in playlist_nav
-            state.playlist_nav.loading = true;
-
-            match client.get_playlist_tracks(&playlist_key).await {
-                Ok(tracks) => {
-                    let items = BrowseItem::from_tracks(&tracks);
-                    // Store full tracks for playback (includes media info)
-                    let col = BrowseColumn::new_with_tracks("tracks", items, tracks);
-                    state.playlist_nav.push_column(col);
-                }
-                Err(e) => {
-                    state.set_error(format!("Failed to load playlist tracks: {}", e));
-                }
+            // Check if we already have these tracks cached in state
+            if let Some(cached_tracks) = state.playlist_tracks_cache.get(&playlist_key) {
+                let items = BrowseItem::from_tracks(cached_tracks);
+                let col = BrowseColumn::new_with_tracks("tracks", items, cached_tracks.clone());
+                state.playlist_nav.push_column(col);
+            } else {
+                // Load asynchronously with retry
+                state.playlist_nav.loading = true;
+                let tx = event_tx.clone();
+                let client_clone = client.clone();
+                let pk = playlist_key.clone();
+                tokio::spawn(async move {
+                    let backoff = [1u64, 2, 4];
+                    let mut last_err = String::new();
+                    for attempt in 0..3u32 {
+                        match client_clone.get_playlist_tracks(&pk).await {
+                            Ok(tracks) => {
+                                let _ = tx.send(Event::PlaylistTracksForMillerLoaded {
+                                    playlist_key: pk, tracks,
+                                }).await;
+                                return;
+                            }
+                            Err(e) => {
+                                last_err = format!("{}", e);
+                                if attempt < 2 {
+                                    let delay = backoff[attempt as usize];
+                                    tracing::debug!("Playlist load failed (attempt {}), retrying in {}s: {}", attempt + 1, delay, last_err);
+                                    tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                                }
+                            }
+                        }
+                    }
+                    let _ = tx.send(Event::PlaylistTracksForMillerFailed {
+                        playlist_key: pk, error: last_err,
+                    }).await;
+                });
             }
-            state.playlist_nav.loading = false;
         }
 
         Action::LoadAlbumTracksForPlaylistMiller { album_key } => {

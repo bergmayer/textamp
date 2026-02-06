@@ -239,6 +239,12 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
             // Alt+E = Enqueue selection
             return vec![Action::EnqueueSelection];
         }
+        (KeyModifiers::ALT, KeyCode::Char('o')) => {
+            // Alt+O = Toggle queue shuffle
+            if !state.queue.is_empty() {
+                return vec![Action::ToggleQueueShuffle];
+            }
+        }
         (KeyModifiers::ALT, KeyCode::Char('s')) => {
             // Alt+S = Similar albums/tracks for current context
             return get_similar_action(state);

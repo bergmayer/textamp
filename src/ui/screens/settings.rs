@@ -361,10 +361,6 @@ fn render_playback_content(frame: &mut Frame, state: &AppState, area: Rect) {
             Style::default().fg(t.colors.fg_primary),
         )),
         Line::from(Span::styled(
-            format!("  Shuffle: {}", if state.playback.shuffle { "on" } else { "off" }),
-            Style::default().fg(t.colors.fg_primary),
-        )),
-        Line::from(Span::styled(
             format!("  Repeat: {}", state.playback.repeat_mode.label().trim()),
             Style::default().fg(t.colors.fg_primary),
         )),

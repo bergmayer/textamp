@@ -163,11 +163,6 @@ fn build_right_content(state: &AppState) -> String {
         }
     }
 
-    // Shuffle indicator (always visible)
-    if state.playback.shuffle {
-        right.push_str(" 🔀");
-    }
-
     // Repeat indicator (always visible)
     match state.playback.repeat_mode {
         crate::app::state::RepeatMode::All => right.push_str(" 🔁"),

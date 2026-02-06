@@ -323,7 +323,7 @@ impl EventLoop {
             // Playback control
             TogglePlayPause | Pause | Play | Stop | Next | Previous
             | VolumeUp | VolumeDown | ToggleMute | Seek(_) | SeekRelative(_)
-            | ToggleShuffle | CycleRepeat | StartPendingPlayback => {
+            | CycleRepeat | StartPendingPlayback => {
                 handlers::dispatch_playback::dispatch(&self.event_tx, action, state, client, audio).await?
             }
 
@@ -331,7 +331,8 @@ impl EventLoop {
             PlayTrack(_) | PlayTrackFromCategory(_) | PlayAlbum { .. }
             | EnqueueAlbum { .. } | ClearQueue | RemoveFromQueue(_)
             | JumpToQueueIndex(_) | PlayRecentlyPlayedAlbum(_)
-            | EnqueueSelection | PromptSavePlaylist | SaveQueueAsPlaylist(_) => {
+            | EnqueueSelection | PromptSavePlaylist | SaveQueueAsPlaylist(_)
+            | ToggleQueueShuffle => {
                 handlers::dispatch_queue::dispatch(&self.event_tx, action, state, client, audio).await?
             }
 
@@ -364,6 +365,7 @@ impl EventLoop {
             // Radio and stations
             StartTrackRadio { .. } | StartAlbumRadio { .. } | StartArtistRadio { .. }
             | StopRadio | JumpToRadioTrack(_) | FetchMoreRadioTracks
+            | PlayCurrentRadioTrack
             | PlayStation(_) | DrillIntoStation(_, _) | NavigateStationsBack => {
                 handlers::dispatch_radio::dispatch(&self.event_tx, action, state, client, audio).await?
             }

@@ -30,7 +30,7 @@ pub use folder_service::{FolderColumn, FolderItem, FolderItemType, FolderNavigat
 pub use library_service::LibraryService;
 pub use list_filter_service::{filter_with_priority, filter_browse_items, filter_folder_items, filter_stations, DEFAULT_MAX_RESULTS};
 pub use navigation_service::NavigationService;
-pub use playback_service::{PlaybackService, QueueManager, NavigationResult, MAX_QUEUE_SIZE, MAX_HISTORY_SIZE};
+pub use playback_service::{PlaybackService, QueueManager, NavigationResult, MAX_HISTORY_SIZE};
 pub use preload_service::{ConnectionParams, PreloadService};
 pub use search_filter_service::{FilteredItem, SearchFilterService};
 pub use selection_service::{SelectionContext, SelectionService, SimilarSource};

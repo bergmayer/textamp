@@ -61,6 +61,7 @@ COMMANDS
   Alt+E           Add selection to queue (enqueue)
                   Track: adds single track
                   Album: adds all tracks from album
+  Alt+O           Toggle queue shuffle
   Alt+S           Show similar albums/tracks
   Alt+V           Sonic Adventure (see below)
   Ctrl+Alt+L      Library Radio (station based on your library)

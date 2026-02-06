@@ -356,7 +356,18 @@ pub fn handle_app_event(
             vec![]
         }
         Event::PlaybackError(msg) => {
-            // Check for 404/not found errors - offer to refresh cache
+            state.playback.status = PlayStatus::Stopped;
+            state.consecutive_playback_errors += 1;
+
+            // Auto-skip on error (up to 3 consecutive failures)
+            // Suppress error display during auto-skip — just silently retry
+            if state.consecutive_playback_errors <= 3 {
+                tracing::warn!("Playback error (attempt {}/3, auto-skipping): {}", state.consecutive_playback_errors, msg);
+                return vec![Action::Next];
+            }
+
+            // After 3 consecutive failures, show error to user
+            state.consecutive_playback_errors = 0;
             if msg.contains("404") || msg.to_lowercase().contains("not found") {
                 state.confirm_dialog = Some(crate::app::state::ConfirmDialog {
                     title: "Track Not Found".to_string(),
@@ -364,9 +375,8 @@ pub fn handle_app_event(
                     on_confirm: crate::app::state::ConfirmAction::RefreshCache,
                 });
             } else {
-                state.set_error(format!("Playback error: {}", msg));
+                state.set_error("Playback stopped after 3 consecutive errors".to_string());
             }
-            state.playback.status = PlayStatus::Stopped;
             vec![]
         }
         Event::BufferingStart => {
@@ -374,6 +384,7 @@ pub fn handle_app_event(
             vec![]
         }
         Event::BufferingEnd => {
+            state.consecutive_playback_errors = 0;
             vec![Action::StartPendingPlayback]
         }
         Event::PositionUpdate(pos) => {
@@ -691,29 +702,34 @@ pub fn handle_app_event(
             }
             vec![]
         }
-        Event::StationTracksLoaded { station_key, station_title, tracks } => {
+        Event::StationTracksLoaded { station_key, station_title, tracks, time_travel_decades } => {
             state.stations_loading = false;
             state.station_nav.loading = false;
 
             if tracks.is_empty() {
                 state.set_error("Station returned no tracks (is Sonic Analysis enabled in Plex settings?)".to_string());
             } else {
-                // Start playing the station
+                // Start playing the station in Radio mode
                 state.playback_mode = PlaybackMode::Radio;
                 state.radio.clear();
                 state.radio.active_station = Some(crate::app::state::ActiveStation {
                     key: station_key,
                     title: station_title.clone(),
                 });
-                state.radio.tracks = tracks.clone();
+                state.radio.tracks = tracks;
                 state.radio.track_index = Some(0);
-                state.view = View::NowPlaying;
-                state.set_status(format!("Playing {} ({} tracks)", station_title, tracks.len()));
 
-                // Return action to play the first track
-                if let Some(track) = tracks.first().cloned() {
-                    return vec![Action::PlayTrack(track)];
+                // Time Travel Radio initialization
+                if !time_travel_decades.is_empty() {
+                    state.radio.time_travel_decades = time_travel_decades;
+                    state.radio.time_travel_index = 3;
+                    tracing::info!("Time Travel Radio: initialized with {} decades, next fetch from index 3",
+                        state.radio.time_travel_decades.len());
                 }
+
+                state.view = View::NowPlaying;
+                state.set_status(format!("Playing {} ({} tracks)", station_title, state.radio.tracks.len()));
+                return vec![Action::PlayCurrentRadioTrack];
             }
             vec![]
         }
@@ -789,6 +805,23 @@ pub fn handle_app_event(
                 return vec![Action::Next];
             }
 
+            vec![]
+        }
+
+        // Playlist tracks loaded (non-blocking)
+        Event::PlaylistTracksForMillerLoaded { playlist_key, tracks } => {
+            state.playlist_nav.loading = false;
+            // Cache in state
+            state.playlist_tracks_cache.insert(playlist_key, tracks.clone());
+            state.cache_dirty = true;
+            let items = crate::app::state::BrowseItem::from_tracks(&tracks);
+            let col = crate::app::state::BrowseColumn::new_with_tracks("tracks", items, tracks);
+            state.playlist_nav.push_column(col);
+            vec![]
+        }
+        Event::PlaylistTracksForMillerFailed { playlist_key: _, error } => {
+            state.playlist_nav.loading = false;
+            state.set_error(format!("Failed to load playlist: {}", error));
             vec![]
         }
 

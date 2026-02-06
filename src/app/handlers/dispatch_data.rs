@@ -175,6 +175,11 @@ pub async fn dispatch(
                                     if !cached.recently_played_albums.is_empty() {
                                         state.recently_played_albums = cached.recently_played_albums;
                                     }
+
+                                    // Playlist tracks cache
+                                    if !cached.playlist_tracks.is_empty() {
+                                        state.playlist_tracks_cache = cached.playlist_tracks;
+                                    }
                                 }
                             }
                         }

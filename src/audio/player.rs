@@ -212,6 +212,24 @@ impl AudioPlayer {
 /// This runs inside a spawned task. On success, sets the pending_playback
 /// buffer and sends `BufferingEnd`. On failure, returns the error for
 /// the caller to handle (e.g., try a fallback URL).
+/// Check if a response has an HTML content-type header.
+fn is_html_content_type(response: &reqwest::Response) -> bool {
+    response.headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|ct| ct.contains("text/html"))
+        .unwrap_or(false)
+}
+
+/// Check if raw bytes look like HTML (starts with common HTML markers).
+fn looks_like_html(data: &[u8]) -> bool {
+    // Check first 256 bytes for HTML signatures
+    let prefix = &data[..data.len().min(256)];
+    let text = String::from_utf8_lossy(prefix);
+    let lower = text.to_lowercase();
+    lower.contains("<!doctype html") || lower.contains("<html") || lower.contains("<head")
+}
+
 async fn fetch_and_buffer(
     url: &str,
     _headers: &HeaderMap,
@@ -225,7 +243,7 @@ async fn fetch_and_buffer(
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))?;
 
-    // Retry loop with exponential backoff for transient errors
+    // Retry loop with exponential backoff for transient errors (including HTML responses)
     let backoff_secs = [1u64, 2, 4];
     let max_retries = 3u32;
     let mut last_error = String::new();
@@ -236,26 +254,41 @@ async fn fetch_and_buffer(
                 Ok(resp) => {
                     let status = resp.status();
                     if status.is_success() {
+                        // Check for HTML content-type on successful responses
+                        // Plex sometimes returns HTML error pages with 200 status
+                        if is_html_content_type(&resp) {
+                            last_error = "Server returned HTML instead of audio".to_string();
+                            let body = resp.text().await.unwrap_or_default();
+                            if attempt + 1 < max_retries {
+                                let delay = backoff_secs[attempt as usize];
+                                tracing::debug!("Audio fetch got HTML response (attempt {}), retrying in {}s - Body: {}",
+                                    attempt + 1, delay, &body[..body.len().min(200)]);
+                                tokio::time::sleep(Duration::from_secs(delay)).await;
+                                continue;
+                            }
+                            tracing::warn!("Audio fetch got HTML after {} retries", max_retries);
+                            return Err(last_error);
+                        }
                         break 'retry resp;
                     }
 
-                    // Retry on 5xx and 429
+                    // Retry on 5xx, 429, and HTML error bodies
                     if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
                         let body = resp.text().await.unwrap_or_default();
                         last_error = format!("HTTP {}", status);
                         if attempt + 1 < max_retries {
                             let delay = backoff_secs[attempt as usize];
-                            tracing::debug!("Audio fetch HTTP {} (attempt {}), retrying in {}s - Body: {}", status, attempt + 1, delay, body);
+                            tracing::debug!("Audio fetch HTTP {} (attempt {}), retrying in {}s", status, attempt + 1, delay);
                             tokio::time::sleep(Duration::from_secs(delay)).await;
                             continue;
                         }
-                        tracing::error!("Audio fetch failed: HTTP {} - Body: {}", status, body);
+                        tracing::error!("Audio fetch failed: HTTP {} - Body: {}", status, &body[..body.len().min(200)]);
                         return Err(last_error);
                     }
 
                     // 4xx (except 429) - don't retry
                     let body = resp.text().await.unwrap_or_default();
-                    tracing::error!("Audio fetch failed: HTTP {} - Body: {}", status, body);
+                    tracing::error!("Audio fetch failed: HTTP {} - Body: {}", status, &body[..body.len().min(200)]);
                     return Err(format!("HTTP {}", status));
                 }
                 Err(e) => {
@@ -281,11 +314,18 @@ async fn fetch_and_buffer(
         .and_then(|v| v.parse::<usize>().ok());
     let total_size = content_length.unwrap_or(0);
 
-    // Small files (< 1MB): download fully, wrap in complete buffer
+    // Small files (< 1MB): download fully, check for HTML, wrap in complete buffer
     if total_size > 0 && total_size < 1024 * 1024 {
         let bytes = response.bytes().await
             .map_err(|e| format!("Download failed: {}", e))?;
         let data = bytes.to_vec();
+
+        // Detect HTML that slipped through without a text/html content-type
+        if looks_like_html(&data) {
+            tracing::warn!("Downloaded data looks like HTML, not audio ({} bytes)", data.len());
+            return Err("Server returned HTML instead of audio".to_string());
+        }
+
         let size = data.len();
         let buffer = Arc::new(StreamingBuffer::with_size_hint(size));
         buffer.append(&data);
