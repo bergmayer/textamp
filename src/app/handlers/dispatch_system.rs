@@ -21,6 +21,16 @@ pub async fn dispatch(
 ) -> Result<Vec<Action>> {
     match action {
         Action::Quit => {
+            // Report playback stop to Plex before quitting
+            if state.playback.status != crate::app::state::PlayStatus::Stopped {
+                if let Some(track) = state.current_track().cloned() {
+                    helpers::report_playback_stop_to_plex(
+                        &track, state.playback.position_ms, false,
+                        state.plex_session_id.clone(), client,
+                    );
+                }
+            }
+
             // Save cache to disk before quitting
             if let Some(lib_key) = &state.active_library {
                 use crate::cache::CacheData;

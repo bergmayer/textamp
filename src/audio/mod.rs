@@ -14,11 +14,13 @@
 //! - Web: Implement `AudioBackend` using Web Audio API
 //! - The rest of the app interacts only with the trait, not concrete implementations
 
+pub mod cache;
 mod player;
 mod rodio_backend;
 mod streaming;
 mod traits;
 
+pub use cache::TrackAudioCache;
 pub use player::AudioPlayer;
 pub use rodio_backend::RodioBackend;
 pub use streaming::StreamingBuffer;

@@ -618,6 +618,22 @@ pub fn handle_app_event(
                 }
             }
 
+            // Periodic playback progress report to Plex (~10 seconds)
+            if state.playback.status == PlayStatus::Playing {
+                let should_report = state.last_progress_report
+                    .map(|t| t.elapsed() > Duration::from_secs(10))
+                    .unwrap_or(true);
+                if should_report {
+                    if let Some(track) = state.current_track().cloned() {
+                        helpers::report_playback_progress_to_plex(
+                            &track, state.playback.position_ms,
+                            state.plex_session_id.clone(), client,
+                        );
+                        state.last_progress_report = Some(std::time::Instant::now());
+                    }
+                }
+            }
+
             // Periodic cache save: save if dirty, idle for 30+ seconds, and 2+ minutes since last save
             helpers::maybe_save_cache_async(&event_tx,state);
 

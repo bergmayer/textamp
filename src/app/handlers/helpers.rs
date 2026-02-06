@@ -9,6 +9,7 @@ use crate::app::state::{
 use crate::api::PlexClient;
 use crate::api::models::Track;
 use crate::audio::AudioPlayer;
+use crate::audio::cache;
 use crate::cache::LibraryCache;
 
 use std::time::Duration;
@@ -777,6 +778,30 @@ pub async fn play_current_track(
             state.artwork_loading = false;
         }
 
+        // Check track cache first (pre-fetched audio data)
+        if let Some(cached_data) = audio.track_cache.get(&track.rating_key) {
+            tracing::info!("Cache hit for: {} - {}", track.artist_name(), track.title);
+            // Stop current playback before starting cached playback
+            audio.stop();
+            match audio.play_data(cached_data) {
+                Ok(()) => {
+                    state.playback.status = PlayStatus::Playing;
+                    report_playback_to_plex(event_tx, &track, state.plex_session_id.clone(), client);
+                    state.last_progress_report = Some(std::time::Instant::now());
+                    update_local_recently_played(state, &track);
+                    // Trigger pre-fetch for next tracks
+                    let upcoming = cache::get_upcoming_tracks(state);
+                    cache::trigger_prefetch(&audio.track_cache, &upcoming, client);
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!("Cached playback failed, falling back to stream: {}", e);
+                    audio.track_cache.remove(&track.rating_key);
+                    // Fall through to normal streaming path
+                }
+            }
+        }
+
         // Build stream URLs: primary (direct) + fallback (transcode)
         let primary_url = client.get_stream_url(&track).ok();
         let fallback_url = client.get_transcoded_stream_url(&track).ok();
@@ -790,7 +815,11 @@ pub async fn play_current_track(
                 return;
             }
             report_playback_to_plex(event_tx, &track, state.plex_session_id.clone(), client);
+            state.last_progress_report = Some(std::time::Instant::now());
             update_local_recently_played(state, &track);
+            // Trigger pre-fetch for next tracks
+            let upcoming = cache::get_upcoming_tracks(state);
+            cache::trigger_prefetch(&audio.track_cache, &upcoming, client);
         } else if let Some(url) = fallback_url {
             let redacted = url.split("X-Plex-Token=").next().unwrap_or(&url);
             tracing::info!("Using transcoded stream for: {} - URL: {}...", track.title, redacted);
@@ -800,7 +829,11 @@ pub async fn play_current_track(
                 return;
             }
             report_playback_to_plex(event_tx, &track, state.plex_session_id.clone(), client);
+            state.last_progress_report = Some(std::time::Instant::now());
             update_local_recently_played(state, &track);
+            // Trigger pre-fetch for next tracks
+            let upcoming = cache::get_upcoming_tracks(state);
+            cache::trigger_prefetch(&audio.track_cache, &upcoming, client);
         } else {
             tracing::error!("Cannot get any stream URL (track has {} media items)", track.media.len());
             state.set_error("Failed to get stream URL".to_string());
@@ -859,6 +892,29 @@ pub fn report_playback_stop_to_plex(
                 tracing::debug!("Failed to report playback stop: {}", e);
             } else {
                 tracing::debug!("Reported playback stop for: {} (continuing={}, session={:?})", track_clone.title, continuing, session_id);
+            }
+        });
+    }
+}
+
+/// Report playback progress to Plex server in background.
+pub fn report_playback_progress_to_plex(
+    track: &Track,
+    position_ms: u64,
+    session_id: Option<String>,
+    client: &PlexClient,
+) {
+    if let Some(server_url) = client.server_url() {
+        let track_clone = track.clone();
+        let server_url = server_url.to_string();
+        let token = client.token().map(|s| s.to_string());
+        let client_id = client.client_identifier().to_string();
+
+        tokio::spawn(async move {
+            let client = crate::api::PlexClient::new_with_url(&server_url, token.as_deref(), &client_id);
+
+            if let Err(e) = client.report_playback_progress(&track_clone, position_ms, session_id.as_deref()).await {
+                tracing::debug!("Failed to report playback progress: {}", e);
             }
         });
     }

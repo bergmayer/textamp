@@ -94,6 +94,7 @@ pub async fn dispatch(
             if let Some(col) = state.artist_nav.columns.get(column_index) {
                 let tracks = helpers::collect_tracks_from_column(col);
                 if !tracks.is_empty() {
+                    audio.track_cache.flush();
                     state.queue.clear();
                     state.queue.extend(tracks);
                     state.queue_index = Some(track_index);
@@ -169,6 +170,7 @@ pub async fn dispatch(
             if let Some(col) = state.genre_nav.columns.get(column_index) {
                 let tracks = helpers::collect_tracks_from_column(col);
                 if !tracks.is_empty() {
+                    audio.track_cache.flush();
                     state.queue.clear();
                     state.queue.extend(tracks);
                     state.queue_index = Some(track_index);
@@ -224,6 +226,7 @@ pub async fn dispatch(
             if let Some(col) = state.playlist_nav.columns.get(column_index) {
                 let tracks = helpers::collect_tracks_from_column(col);
                 if !tracks.is_empty() {
+                    audio.track_cache.flush();
                     state.queue.clear();
                     state.queue.extend(tracks);
                     state.queue_index = Some(track_index);

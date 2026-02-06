@@ -76,8 +76,9 @@ pub async fn dispatch(
             state.station_nav.focused_column = 0;
             state.list_state.reset();
 
-            // Stop playback
+            // Stop playback and flush track cache
             audio.stop();
+            audio.track_cache.flush();
             state.playback.status = PlayStatus::Stopped;
 
             // Clear all server-related config (keep app settings like theme/playback)
@@ -454,8 +455,19 @@ pub async fn dispatch(
                 state.playlist_nav = crate::app::state::BrowseNavigationState::new();
                 state.station_nav = crate::app::state::StationNavigationState::new();
 
-                // Stop playback and clear queue (tracks belong to the old library)
+                // Report playback stop to Plex before switching libraries
+                if state.playback.status != PlayStatus::Stopped {
+                    if let Some(track) = state.current_track().cloned() {
+                        helpers::report_playback_stop_to_plex(
+                            &track, state.playback.position_ms, false,
+                            state.plex_session_id.clone(), client,
+                        );
+                    }
+                }
+
+                // Stop playback, flush track cache, and clear queue (tracks belong to the old library)
                 audio.stop();
+                audio.track_cache.flush();
                 state.playback.status = PlayStatus::Stopped;
                 state.playback.position_ms = 0;
                 state.playback.duration_ms = 0;

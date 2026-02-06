@@ -8,6 +8,7 @@
 //! The separation allows the backend to be synchronous (important for FFI)
 //! while the player handles the async network operations.
 
+use super::cache::TrackAudioCache;
 use super::rodio_backend::RodioBackend;
 use super::streaming::{BlockingReader, StreamingBuffer};
 use super::traits::AudioBackend;
@@ -41,6 +42,8 @@ pub struct AudioPlayer {
     /// Shared inbox for pending playback — spawned tasks deliver buffers here,
     /// and start_pending_playback() reads from it on the main thread.
     pending_playback: Arc<Mutex<Option<(Arc<StreamingBuffer>, u64)>>>,
+    /// Cache for pre-fetched track audio data.
+    pub track_cache: Arc<TrackAudioCache>,
 }
 
 impl AudioPlayer {
@@ -55,6 +58,7 @@ impl AudioPlayer {
             backend,
             _stream_buffer: None,
             pending_playback: Arc::new(Mutex::new(None)),
+            track_cache: Arc::new(TrackAudioCache::new()),
         })
     }
 
@@ -221,15 +225,53 @@ async fn fetch_and_buffer(
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))?;
 
-    let response = client.get(url).send().await
-        .map_err(|e| format!("Failed to fetch audio: {}", e))?;
+    // Retry loop with exponential backoff for transient errors
+    let backoff_secs = [1u64, 2, 4];
+    let max_retries = 3u32;
+    let mut last_error = String::new();
 
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        tracing::error!("Audio fetch failed: HTTP {} - Body: {}", status, body);
-        return Err(format!("HTTP {}", status));
-    }
+    let response = 'retry: {
+        for attempt in 0..max_retries {
+            match client.get(url).send().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    if status.is_success() {
+                        break 'retry resp;
+                    }
+
+                    // Retry on 5xx and 429
+                    if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                        let body = resp.text().await.unwrap_or_default();
+                        last_error = format!("HTTP {}", status);
+                        if attempt + 1 < max_retries {
+                            let delay = backoff_secs[attempt as usize];
+                            tracing::debug!("Audio fetch HTTP {} (attempt {}), retrying in {}s - Body: {}", status, attempt + 1, delay, body);
+                            tokio::time::sleep(Duration::from_secs(delay)).await;
+                            continue;
+                        }
+                        tracing::error!("Audio fetch failed: HTTP {} - Body: {}", status, body);
+                        return Err(last_error);
+                    }
+
+                    // 4xx (except 429) - don't retry
+                    let body = resp.text().await.unwrap_or_default();
+                    tracing::error!("Audio fetch failed: HTTP {} - Body: {}", status, body);
+                    return Err(format!("HTTP {}", status));
+                }
+                Err(e) => {
+                    last_error = format!("Failed to fetch audio: {}", e);
+                    if attempt + 1 < max_retries {
+                        let delay = backoff_secs[attempt as usize];
+                        tracing::debug!("Audio fetch error (attempt {}), retrying in {}s: {}", attempt + 1, delay, e);
+                        tokio::time::sleep(Duration::from_secs(delay)).await;
+                        continue;
+                    }
+                    return Err(last_error);
+                }
+            }
+        }
+        return Err(last_error);
+    };
 
     // Get content length for progress tracking
     let content_length = response

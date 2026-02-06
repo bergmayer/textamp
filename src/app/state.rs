@@ -433,6 +433,8 @@ pub struct AppState {
     /// Generated when starting a new playback context (queue, radio, etc.).
     /// Used to correlate all timeline reports to a single session.
     pub plex_session_id: Option<String>,
+    /// Last time a progress report was sent to Plex (for periodic ~10s updates).
+    pub last_progress_report: Option<std::time::Instant>,
 
     // Search
     pub search_query: String,
@@ -892,6 +894,7 @@ impl AppState {
             play_history: Vec::new(),
             seeking_drag: false,
             plex_session_id: None,
+            last_progress_report: None,
             search_query: String::new(),
             search_results: None,
             search_loading: false,

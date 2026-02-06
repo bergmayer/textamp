@@ -98,8 +98,15 @@ pub async fn dispatch(
                         } else if state.playback.repeat_mode == crate::app::state::RepeatMode::All {
                             state.queue_index = Some(0);
                             helpers::play_current_track(event_tx, state, client, audio).await;
+                        } else {
+                            // End of queue: report final stop to Plex (not continuing)
+                            if let Some(track) = state.current_track().cloned() {
+                                helpers::report_playback_stop_to_plex(&track, state.playback.position_ms, false, state.plex_session_id.clone(), client);
+                            }
+                            audio.stop();
+                            state.playback.status = PlayStatus::Stopped;
+                            state.plex_session_id = None;
                         }
-                        // else: stop at end of queue
                     }
                 }
             }

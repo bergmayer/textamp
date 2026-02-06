@@ -43,6 +43,7 @@ pub async fn dispatch(
                     state.radio.clear();
                 }
                 // Queue all tracks from current position
+                audio.track_cache.flush();
                 state.queue = state.selected_album_tracks[idx..].to_vec();
                 state.queue_index = Some(0);
                 state.queue_original.clear();
@@ -69,6 +70,7 @@ pub async fn dispatch(
                         if state.playback_mode == PlaybackMode::Radio {
                             state.radio.clear();
                         }
+                        audio.track_cache.flush();
                         state.queue = tracks;
                         state.queue_index = Some(0);
                         state.queue_original.clear();
@@ -124,6 +126,7 @@ pub async fn dispatch(
                 }
             }
             audio.stop();
+            audio.track_cache.flush();
             state.playback.status = PlayStatus::Stopped;
         }
         Action::RemoveFromQueue(idx) => {

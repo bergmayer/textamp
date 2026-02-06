@@ -53,7 +53,8 @@ pub async fn dispatch(
                 None
             };
 
-            // Clear queue and start with seed track if found
+            // Clear queue and track cache, start with seed track if found
+            audio.track_cache.flush();
             state.queue.clear();
             if let Some(track) = seed_track {
                 state.queue.push(track);
