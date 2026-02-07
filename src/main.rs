@@ -713,7 +713,7 @@ fn display_exit_logo() {
     // Two-column layout within 72 cols, divider at ~col 33
     println!(" {BRIGHT_CYAN}http://bergmayer.net/textamp{RESET}     {DARK_GRAY}Why be bleak{RESET}");
     println!("      {DIM_CYAN}https://app.plex.tv/{RESET}      {DIM_GRAY}|{RESET}     when you can be Blake?");
-    println!("                                 {DIM_GRAY}. {DARK_GRAY}Jhon Balance{RESET}                        {DIM_GRAY}.{RESET}");
+    println!("                                {DIM_GRAY}. {DARK_GRAY}Jhon Balance{RESET}                         {DIM_GRAY}.{RESET}");
 
     // Bottom corners (two-box Cubic Player style, 72 cols)
     println!("{DIM_GRAY}\u{2514}.                              .\u{2518}.                                   .\u{2518}{RESET}");
