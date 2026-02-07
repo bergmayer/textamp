@@ -128,33 +128,54 @@ pub async fn dispatch(
             use crate::audio::cache;
             use crate::services::PlaybackService;
 
-            match state.queue_sort_mode {
-                QueueSortMode::QueueOrder => {
-                    // Save original order, then shuffle
-                    state.queue_original = state.queue.clone();
-                    let (shuffled, new_idx) = PlaybackService::shuffle_queue(
-                        state.queue.clone(), state.queue_index,
-                    );
-                    state.queue = shuffled;
-                    state.queue_index = new_idx; // always Some(0)
-                    state.queue_sort_mode = QueueSortMode::Shuffle;
-                    state.list_state.queue_index = state.play_history.len();
-                }
-                QueueSortMode::Shuffle => {
-                    // Restore original order, find current track
-                    let current_key = state.current_track().map(|t| t.rating_key.clone());
-                    state.queue = std::mem::take(&mut state.queue_original);
-                    state.queue_sort_mode = QueueSortMode::QueueOrder;
-                    // Find current track in restored order
-                    if let Some(key) = current_key {
-                        state.queue_index = state.queue.iter().position(|t| t.rating_key == key);
+            if state.playback_mode == PlaybackMode::Radio {
+                // Shuffle/unshuffle radio tracks
+                match state.queue_sort_mode {
+                    QueueSortMode::QueueOrder => {
+                        state.queue_original = state.radio.tracks.clone();
+                        let (shuffled, new_idx) = PlaybackService::shuffle_queue(
+                            state.radio.tracks.clone(), state.radio.track_index,
+                        );
+                        state.radio.tracks = shuffled;
+                        state.radio.track_index = new_idx;
+                        state.queue_sort_mode = QueueSortMode::Shuffle;
                     }
-                    if let Some(idx) = state.queue_index {
-                        state.list_state.queue_index = state.play_history.len() + idx;
+                    QueueSortMode::Shuffle => {
+                        let current_key = state.current_track().map(|t| t.rating_key.clone());
+                        state.radio.tracks = std::mem::take(&mut state.queue_original);
+                        state.queue_sort_mode = QueueSortMode::QueueOrder;
+                        if let Some(key) = current_key {
+                            state.radio.track_index = state.radio.tracks.iter().position(|t| t.rating_key == key);
+                        }
+                    }
+                }
+            } else {
+                // Shuffle/unshuffle queue tracks
+                match state.queue_sort_mode {
+                    QueueSortMode::QueueOrder => {
+                        state.queue_original = state.queue.clone();
+                        let (shuffled, new_idx) = PlaybackService::shuffle_queue(
+                            state.queue.clone(), state.queue_index,
+                        );
+                        state.queue = shuffled;
+                        state.queue_index = new_idx; // always Some(0)
+                        state.queue_sort_mode = QueueSortMode::Shuffle;
+                        state.list_state.queue_index = state.play_history.len();
+                    }
+                    QueueSortMode::Shuffle => {
+                        let current_key = state.current_track().map(|t| t.rating_key.clone());
+                        state.queue = std::mem::take(&mut state.queue_original);
+                        state.queue_sort_mode = QueueSortMode::QueueOrder;
+                        if let Some(key) = current_key {
+                            state.queue_index = state.queue.iter().position(|t| t.rating_key == key);
+                        }
+                        if let Some(idx) = state.queue_index {
+                            state.list_state.queue_index = state.play_history.len() + idx;
+                        }
                     }
                 }
             }
-            // Flush and re-prefetch based on new queue order
+            // Flush and re-prefetch based on new order
             audio.track_cache.flush();
             let upcoming = cache::get_upcoming_tracks(state);
             cache::trigger_prefetch(&audio.track_cache, &upcoming, client);

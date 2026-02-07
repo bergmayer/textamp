@@ -6,8 +6,8 @@
 
 use crate::app::{Action, AppState, Event};
 use crate::app::state::{
-    ArtistViewMode, BrowseItem, BrowseNavigationState, Focus, GenreContentType,
-    NowPlayingMode, PlaylistsMode, RightPanelMode, StationColumn,
+    ArtistViewMode, BrowseCategory, BrowseItem, BrowseNavigationState, Focus,
+    GenreContentType, NowPlayingMode, PlaylistsMode, RightPanelMode, StationColumn,
 };
 use crate::api::PlexClient;
 
@@ -419,6 +419,74 @@ pub async fn dispatch(
                     Err(e) => {
                         tracing::warn!("Failed to load recently added albums: {}", e);
                         state.recently_added_loading = false;
+                    }
+                }
+            }
+        }
+        Action::ToggleBrowseShuffle => {
+            match state.browse_category {
+                BrowseCategory::Artists => {
+                    if let Some(col) = state.artist_nav.focused_mut() {
+                        if col.is_shuffled() {
+                            col.unshuffle();
+                        } else {
+                            col.shuffle();
+                        }
+                    }
+                    state.artist_nav.truncate_right();
+                }
+                BrowseCategory::Playlists => {
+                    if state.playlists_mode == PlaylistsMode::Stations {
+                        if let Some(col) = state.station_nav.focused_mut() {
+                            if col.is_shuffled() {
+                                col.unshuffle();
+                            } else {
+                                col.shuffle();
+                            }
+                        }
+                        state.station_nav.truncate_right_columns();
+                    } else {
+                        if let Some(col) = state.playlist_nav.focused_mut() {
+                            if col.is_shuffled() {
+                                col.unshuffle();
+                            } else {
+                                col.shuffle();
+                            }
+                        }
+                        state.playlist_nav.truncate_right();
+                    }
+                }
+                BrowseCategory::Genres => {
+                    if state.genre_content_type == GenreContentType::Stations {
+                        if let Some(col) = state.station_nav.focused_mut() {
+                            if col.is_shuffled() {
+                                col.unshuffle();
+                            } else {
+                                col.shuffle();
+                            }
+                        }
+                        state.station_nav.truncate_right_columns();
+                    } else {
+                        if let Some(col) = state.genre_nav.focused_mut() {
+                            if col.is_shuffled() {
+                                col.unshuffle();
+                            } else {
+                                col.shuffle();
+                            }
+                        }
+                        state.genre_nav.truncate_right();
+                    }
+                }
+                BrowseCategory::Folders => {
+                    if let Some(ref mut folder_state) = state.folder_state {
+                        if let Some(col) = folder_state.focused_mut() {
+                            if col.is_shuffled() {
+                                col.unshuffle();
+                            } else {
+                                col.shuffle();
+                            }
+                        }
+                        folder_state.columns.truncate(folder_state.focused_column + 1);
                     }
                 }
             }

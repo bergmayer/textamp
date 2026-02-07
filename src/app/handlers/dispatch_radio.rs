@@ -33,7 +33,7 @@ pub async fn dispatch(
             // Generate new session ID for this playback context
             state.plex_session_id = Some(helpers::generate_plex_session_id());
 
-            // Start track radio - fetch similar tracks, shuffle to avoid album clustering
+            // Start sonic track radio - fetch similar tracks, shuffle to avoid album clustering
             state.radio_state.mode = RadioMode::Track;
             state.radio_state.seed_track_key = Some(track_key.clone());
             state.radio_state.seed_title = title.clone();
@@ -89,7 +89,7 @@ pub async fn dispatch(
                         // Extend queue with shuffled similar tracks
                         state.queue.extend(new_tracks.clone());
 
-                        state.set_status(format!("{} radio: {} tracks", title, state.queue.len()));
+                        state.set_status(format!("Sonic radio: {} ({} tracks)", title, state.queue.len()));
                     } else if state.queue.is_empty() {
                         state.set_error("No similar tracks found".to_string());
                     }
@@ -111,7 +111,7 @@ pub async fn dispatch(
             // Generate new session ID for this playback context
             state.plex_session_id = Some(helpers::generate_plex_session_id());
 
-            // Start album radio - play album then similar albums
+            // Start sonic album radio - play album then similar albums
             state.radio_state.mode = RadioMode::Album;
             state.radio_state.seed_track_key = Some(album_key.clone());
             state.radio_state.seed_title = title;
@@ -157,7 +157,7 @@ pub async fn dispatch(
             // Generate new session ID for this playback context
             state.plex_session_id = Some(helpers::generate_plex_session_id());
 
-            // Start artist radio - play artist's tracks then similar
+            // Start sonic artist radio - play artist's tracks then similar
             state.radio_state.mode = RadioMode::Artist;
             state.radio_state.seed_track_key = Some(artist_key.clone());
             state.radio_state.seed_title = title;

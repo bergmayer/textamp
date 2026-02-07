@@ -126,12 +126,13 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
     // Title depends on playback mode
     let title = match state.playback_mode {
         PlaybackMode::Radio => {
+            let suffix = if state.queue_sort_mode == QueueSortMode::Shuffle { " (shuffled)" } else { "" };
             if let Some(ref station) = state.radio.active_station {
-                format!(" {} ", station.title)
+                format!(" {}{} ", station.title, suffix)
             } else if let Some(ref seed) = state.radio.seed {
-                format!(" {} ", seed.title)
+                format!(" {}{} ", seed.title, suffix)
             } else {
-                " radio ".to_string()
+                format!(" radio{} ", suffix)
             }
         }
         PlaybackMode::Queue | PlaybackMode::None => {

@@ -21,7 +21,6 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(t.colors.border_focused))
         .style(Style::default().bg(t.colors.bg_primary));
-
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -55,15 +54,15 @@ VIEWS
 COMMANDS
   Ctrl+F          Search popup (floating dialog)
   Ctrl+S          Save queue as playlist (Now Playing)
-  Alt+R           Create radio from selection
+  Alt+R           Sonic radio from selection
                   Track: similar individual tracks
                   Album: similar albums played in order
-  Alt+E           Add selection to queue (enqueue)
+  Alt+Q           Add selection to queue (enqueue)
                   Track: adds single track
                   Album: adds all tracks from album
-  Alt+O           Toggle queue shuffle
-  Alt+S           Show similar albums/tracks
-  Alt+V           Sonic Adventure (see below)
+  Alt+S           Shuffle view / queue
+  Alt+M           Show similar albums/tracks
+  Alt+A           Sonic Adventure (see below)
   Ctrl+Alt+L      Library Radio (station based on your library)
   Ctrl+Alt+R      Random Album Radio (shuffled albums)
   Ctrl+Alt+S      Quick library switcher
@@ -93,15 +92,15 @@ NOW PLAYING (Ctrl+N)
                   Ctrl+S to save as playlist
   Now Playing     Album art, track info, waveform seekbar
 
-RADIO (Alt+R on selection)
-  Track Radio     Similar individual tracks (sonic)
+SONIC RADIO (Alt+R on selection)
+  Track Radio     Similar individual tracks
   Album Radio     Tracks from similar albums in order
   Station Radio   Plex curated stations (via Ctrl+G)
 
-SONIC ADVENTURE (Alt+V)
+SONIC ADVENTURE (Alt+A)
   Creates a sonic bridge between two tracks.
-  1. Select start track, press Alt+V
-  2. Navigate to end track, press Alt+V
+  1. Select start track, press Alt+A
+  2. Navigate to end track, press Alt+A
   3. Enter length (5-100 tracks)
   4. Adventure replaces queue, starts playing
   Tracks can be selected from Browse or Search (Tracks tab)

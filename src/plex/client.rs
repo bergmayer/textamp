@@ -1470,73 +1470,48 @@ impl PlexClient {
     // Sonic Similarity
     // ========================================================================
 
-    /// Get sonically similar tracks using the sonicallySimilar filter.
+    /// Get sonically similar tracks via the /nearest endpoint.
     pub async fn get_similar_tracks(
         &self,
         rating_key: &str,
         limit: u32,
     ) -> Result<Vec<Track>, ApiError> {
-        let section_id = self.get_library_section_id(rating_key).await?;
-
-        let Some(section_id) = section_id else {
-            tracing::warn!("Could not determine library section for track {}", rating_key);
-            return Ok(Vec::new());
-        };
-
         let path = format!(
-            "{}/{}/all?type={}&sonicallySimilar={}&limit={}",
-            EP_LIBRARY_SECTIONS, section_id, TYPE_TRACK, rating_key, limit
+            "{}/{}/nearest?limit={}&maxDistance=0.25",
+            EP_LIBRARY_METADATA, rating_key, limit
         );
 
         let response: TracksResponse = self.get(&path).await?;
         let tracks = response.media_container.metadata;
 
         tracing::info!(
-            "get_similar_tracks for {} in section {} found {} tracks",
-            rating_key, section_id, tracks.len()
+            "get_similar_tracks for {} found {} tracks",
+            rating_key, tracks.len()
         );
 
         Ok(tracks)
     }
 
-    /// Get sonically similar albums using Plex's sonicallySimilar filter.
+    /// Get sonically similar albums via the /nearest endpoint.
     pub async fn get_similar_albums(
         &self,
         rating_key: &str,
         limit: u32,
     ) -> Result<Vec<Album>, ApiError> {
-        let section_id = self.get_library_section_id(rating_key).await?;
-
-        let Some(section_id) = section_id else {
-            tracing::warn!("Could not determine library section for album {}", rating_key);
-            return Ok(Vec::new());
-        };
-
         let path = format!(
-            "{}/{}/all?type={}&sonicallySimilar={}&limit={}",
-            EP_LIBRARY_SECTIONS, section_id, TYPE_ALBUM, rating_key, limit
+            "{}/{}/nearest?limit={}&maxDistance=0.25",
+            EP_LIBRARY_METADATA, rating_key, limit
         );
 
         let response: AlbumsResponse = self.get(&path).await?;
         let albums = response.media_container.metadata;
 
         tracing::info!(
-            "get_similar_albums for {} in section {} found {} albums",
-            rating_key, section_id, albums.len()
+            "get_similar_albums for {} found {} albums",
+            rating_key, albums.len()
         );
 
         Ok(albums)
-    }
-
-    /// Get the library section ID for an item.
-    async fn get_library_section_id(&self, rating_key: &str) -> Result<Option<u32>, ApiError> {
-        let meta_path = format!("{}/{}", EP_LIBRARY_METADATA, rating_key);
-        let raw = self.get::<serde_json::Value>(&meta_path).await?;
-        Ok(raw
-            .get("MediaContainer")
-            .and_then(|mc| mc.get("librarySectionID"))
-            .and_then(|v| v.as_u64())
-            .map(|v| v as u32))
     }
 
     // ========================================================================

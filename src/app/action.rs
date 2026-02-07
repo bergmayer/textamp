@@ -46,7 +46,6 @@ pub enum Action {
     VolumeUp,
     VolumeDown,
     ToggleMute,
-    CycleRepeat,
     StartPendingPlayback,
     RetryCurrentTrack,    // Replay current track without resetting error counter
 
@@ -55,11 +54,12 @@ pub enum Action {
     PlayTrackFromCategory(usize),
     PlayAlbum { rating_key: String },  // Load album tracks and play them
     QueueTrack(Track),
-    EnqueueSelection,  // Alt+E: Add current selection to end of queue
+    EnqueueSelection,  // Alt+Q: Add current selection to end of queue
     EnqueueAlbum { rating_key: String, title: String },  // Load album tracks and add to queue
     ClearQueue,
     RemoveFromQueue(usize),
     ToggleQueueShuffle,
+    ToggleBrowseShuffle,
     JumpToQueueIndex(usize),      // Jump to and play a specific queue index
     PromptSavePlaylist,           // Alt+P: Prompt user for playlist name
     SaveQueueAsPlaylist(String),  // Save queue with given name
@@ -144,7 +144,7 @@ pub enum Action {
     LoadAlbumTracksForPlaylistMiller { album_key: String },  // For Recently Added mode
     PlayPlaylistTrackFromMiller { column_index: usize, track_index: usize },
 
-    // Radio mode
+    // Sonic radio mode
     StartTrackRadio { track_key: String, title: String },
     StartAlbumRadio { album_key: String, title: String },
     StartArtistRadio { artist_key: String, title: String },

@@ -127,15 +127,37 @@ pub async fn dispatch(
                 // Get the folder key and selected item from the focused column
                 let selected_key = folder_state.selected_item().map(|item| item.key.clone());
                 let selected_index = folder_state.focused().map(|col| col.selected_index).unwrap_or(0);
+                let is_shuffled = folder_state.focused().map(|col| col.is_shuffled()).unwrap_or(false);
+                // Capture track key order from column items for shuffle reordering
+                let column_track_keys: Vec<String> = if is_shuffled {
+                    folder_state.focused().map(|col| {
+                        col.items.iter()
+                            .filter_map(|item| item.rating_key.clone())
+                            .collect()
+                    }).unwrap_or_default()
+                } else {
+                    vec![]
+                };
 
                 if let Some(col) = folder_state.focused() {
                     if let Some(ref folder_key) = col.key {
                         match client.get_folder_tracks(folder_key).await {
-                            Ok(tracks) => {
+                            Ok(mut tracks) => {
+                                // Reorder tracks to match shuffled column order
+                                if is_shuffled && !column_track_keys.is_empty() {
+                                    use std::collections::HashMap;
+                                    let pos_map: HashMap<&str, usize> = column_track_keys.iter()
+                                        .enumerate()
+                                        .map(|(i, k)| (k.as_str(), i))
+                                        .collect();
+                                    tracks.sort_by_key(|t| {
+                                        pos_map.get(t.rating_key.as_str()).copied().unwrap_or(usize::MAX)
+                                    });
+                                }
+
                                 // Find the index of the selected track
                                 let start_idx = if let Some(ref sel_key) = selected_key {
                                     tracks.iter().position(|t| {
-                                        // Match by rating_key or by position
                                         t.rating_key == *sel_key || t.key == *sel_key
                                     }).unwrap_or(selected_index.min(tracks.len().saturating_sub(1)))
                                 } else {

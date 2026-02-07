@@ -2,7 +2,7 @@
 //!
 //! Layout:
 //! Left:  ▶ 00:00 ━━●──────────── 04:32  │  Track by Artist from Album
-//! Right: [notification OR volume] shuffle repeat
+//! Right: [notification OR volume]
 //!
 //! Notifications temporarily cover the volume widget when active.
 
@@ -90,9 +90,9 @@ fn build_adventure_text(state: &AppState) -> String {
         let start_title = state.adventure.start_track.as_ref()
             .map(|t| truncate_str(&t.title, 20))
             .unwrap_or_default();
-        format!("🌟 ADVENTURE: {} → select END (Alt+V)", start_title)
+        format!("🌟 ADVENTURE: {} → select END (Alt+A)", start_title)
     } else {
-        "🌟 ADVENTURE: select START track (Alt+V)".to_string()
+        "🌟 ADVENTURE: select START track (Alt+A)".to_string()
     }
 }
 
@@ -161,13 +161,6 @@ fn build_right_content(state: &AppState) -> String {
         } else {
             right.push_str(&format!("🔊 {}%", vol_pct));
         }
-    }
-
-    // Repeat indicator (always visible)
-    match state.playback.repeat_mode {
-        crate::app::state::RepeatMode::All => right.push_str(" 🔁"),
-        crate::app::state::RepeatMode::One => right.push_str(" 🔂"),
-        _ => {}
     }
 
     right

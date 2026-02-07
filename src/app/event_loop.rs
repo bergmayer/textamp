@@ -323,7 +323,7 @@ impl EventLoop {
             // Playback control
             TogglePlayPause | Pause | Play | Stop | Next | Previous
             | VolumeUp | VolumeDown | ToggleMute | Seek(_) | SeekRelative(_)
-            | CycleRepeat | StartPendingPlayback | RetryCurrentTrack => {
+            | StartPendingPlayback | RetryCurrentTrack => {
                 handlers::dispatch_playback::dispatch(&self.event_tx, action, state, client, audio).await?
             }
 
@@ -352,7 +352,8 @@ impl EventLoop {
             | CycleGenreContentType | RefreshGenreView
             | CycleArtistViewMode | RefreshArtistView | CycleNowPlayingMode
             | RefreshNowPlayingView | LoadRecentlyPlayedAlbums
-            | CyclePlaylistsMode | RefreshPlaylistsView | LoadRecentlyAddedAlbums => {
+            | CyclePlaylistsMode | RefreshPlaylistsView | LoadRecentlyAddedAlbums
+            | ToggleBrowseShuffle => {
                 handlers::dispatch_browse::dispatch(&self.event_tx, action, state, client).await?
             }
 

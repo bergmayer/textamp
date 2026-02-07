@@ -46,7 +46,7 @@ pub async fn dispatch(
                 if let Some(ref folder_state) = state.folder_state {
                     if folder_state.library_key == *lib_key {
                         if let Some(root_col) = folder_state.columns.first() {
-                            cache_data.root_folders = root_col.items.clone();
+                            cache_data.root_folders = root_col.unshuffled_items().to_vec();
                         }
                     } else {
                         tracing::debug!("Not saving folder_state on quit - belongs to different library (expected {}, got {})",

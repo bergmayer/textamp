@@ -232,25 +232,27 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
 
         // Alt key commands (global)
         (KeyModifiers::ALT, KeyCode::Char('r')) => {
-            // Alt+R = Create radio from current selection
+            // Alt+R = Sonic radio from current selection
             return create_station_from_context(state);
         }
-        (KeyModifiers::ALT, KeyCode::Char('e')) => {
-            // Alt+E = Enqueue selection
+        (KeyModifiers::ALT, KeyCode::Char('q')) => {
+            // Alt+Q = Queue selection (enqueue)
             return vec![Action::EnqueueSelection];
         }
-        (KeyModifiers::ALT, KeyCode::Char('o')) => {
-            // Alt+O = Toggle queue shuffle
-            if !state.queue.is_empty() {
+        (KeyModifiers::ALT, KeyCode::Char('s')) => {
+            // Alt+S = Shuffle: browse view or queue/radio depending on context
+            if state.view == View::Browse {
+                return vec![Action::ToggleBrowseShuffle];
+            } else if !state.queue.is_empty() || !state.radio.tracks.is_empty() {
                 return vec![Action::ToggleQueueShuffle];
             }
         }
-        (KeyModifiers::ALT, KeyCode::Char('s')) => {
-            // Alt+S = Similar albums/tracks for current context
+        (KeyModifiers::ALT, KeyCode::Char('m')) => {
+            // Alt+M = More like this (similar albums/tracks)
             return get_similar_action(state);
         }
-        (KeyModifiers::ALT, KeyCode::Char('v')) => {
-            // Alt+V = Sonic Adventure
+        (KeyModifiers::ALT, KeyCode::Char('a')) => {
+            // Alt+A = Sonic Adventure
             return handle_adventure_key(state);
         }
         // Ctrl+Alt shortcuts
@@ -1216,10 +1218,10 @@ fn reset_right_panel(state: &mut AppState) {
     state.selected_album_title.clear();
 }
 
-/// Create a station from current context (artist, album, or track).
-/// Track selected -> Track radio (individual similar tracks)
-/// Album selected -> Album radio (similar albums played in order)
-/// Artist selected -> Artist radio
+/// Create a sonic radio from current context (artist, album, or track).
+/// Track selected -> Sonic track radio (individual similar tracks)
+/// Album selected -> Sonic album radio (similar albums played in order)
+/// Artist selected -> Sonic artist radio
 fn create_station_from_context(state: &AppState) -> Vec<Action> {
     // If viewing album tracks, create TRACK radio for the highlighted track
     if state.focus == Focus::Right && state.right_panel_mode == RightPanelMode::AlbumTracks {
@@ -1289,7 +1291,7 @@ fn create_station_from_context(state: &AppState) -> Vec<Action> {
     vec![]
 }
 
-/// Handle Alt+V for Sonic Adventure.
+/// Handle Alt+A for Sonic Adventure.
 fn handle_adventure_key(state: &mut AppState) -> Vec<Action> {
     // Ignore if already generating
     if state.adventure.generating {

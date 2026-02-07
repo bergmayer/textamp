@@ -11,7 +11,7 @@ textamp is a specialized, lightweight alternative to Plexamp for power users who
 - **Library views**: Artists, Playlists, Genres, Folders, and Stations
 - **Sonic similarity**: Discover similar albums (context-aware)
 - **Plexamp Stations**: Library Radio, Deep Cuts, Time Travel, Mood, Decade Radio
-- **Create Radio**: Generate radio from any track, album, or artist
+- **Sonic Radio**: Generate radio from any track, album, or artist using sonic similarity
 - **Sonic Adventure**: Create a sonic bridge between two tracks
 - **Album artwork**: Displays cover art in supported terminals (Kitty, iTerm2, Sixel)
 - **Search & Filter**: Global search and tabbed filtering (Artists, Album Artists, Albums, Playlists, Tracks, Genres)
@@ -61,7 +61,7 @@ Press `/` to activate a real-time filter on the current column. Type to narrow r
 
 ### Radio Shortcuts
 
-`Ctrl+Alt+L` starts Library Radio instantly. `Ctrl+Alt+R` starts Random Album Radio. `Alt+R` on any selection creates a radio — track radio for similar tracks, album radio for similar albums, artist radio for an artist's catalog. No menus, no confirmation dialogs.
+`Ctrl+Alt+L` starts Library Radio instantly. `Ctrl+Alt+R` starts Random Album Radio. `Alt+R` on any selection creates a sonic radio — sonic track radio for similar tracks, sonic album radio for similar albums, sonic artist radio for an artist's catalog. No menus, no confirmation dialogs.
 
 ### Library Switching
 
@@ -191,10 +191,11 @@ Change themes in Settings (F2) > Interface, or set in config file.
 |-----|--------|
 | `Ctrl+F` | Search popup (floating dialog) |
 | `Ctrl+S` | Save queue as playlist (in Now Playing) |
-| `Alt+R` | Create radio from selection |
-| `Alt+E` | Add selection to queue (track or album) |
-| `Alt+S` | Similar albums/tracks |
-| `Alt+V` | Sonic Adventure (see below) |
+| `Alt+R` | Sonic radio from selection |
+| `Alt+Q` | Add selection to queue (track or album) |
+| `Alt+S` | Shuffle view / queue |
+| `Alt+M` | Similar albums/tracks |
+| `Alt+A` | Sonic Adventure (see below) |
 | `Ctrl+Alt+L` | Library Radio (station based on your library) |
 | `Ctrl+Alt+R` | Random Album Radio (shuffled albums) |
 | `Ctrl+Alt+S` | Quick library switcher |
@@ -229,29 +230,29 @@ textamp distinguishes between two playback modes:
 
 **Queue** (`Ctrl+N`) - A finite, user-controlled playlist:
 - Play an album or playlist to populate the queue
-- Queue stops at the end (unless repeat is enabled)
+- Queue stops at the end
 - Navigate and select tracks without disrupting the queue
 - Maximum 500 tracks in the queue
 - ~20 tracks of play history visible above current tracks
 
-**Radio** (`Alt+R`) - Create radio from selection:
-- **Track Radio**: When a track is selected, creates a radio of sonically similar individual tracks (shuffled to avoid album clustering)
-- **Album Radio**: When an album is selected, plays similar albums in order (full albums sequentially)
-- **Artist Radio**: When an artist is selected, plays that artist's tracks
+**Sonic Radio** (`Alt+R`) - Create radio from selection using sonic similarity:
+- **Sonic Track Radio**: When a track is selected, creates a radio of sonically similar individual tracks (shuffled to avoid album clustering)
+- **Sonic Album Radio**: When an album is selected, plays similar albums in order (full albums sequentially)
+- **Sonic Artist Radio**: When an artist is selected, plays that artist's tracks
 
-**Stations** (`Ctrl+T`) - Curated Plex stations:
-- Library Radio, Deep Cuts, Time Travel, and more
-- Mood Radio has sub-moods, Style Radio has sub-styles, etc.
+**Stations** (via `Ctrl+G` or `Ctrl+P` cycling) - Curated Plex stations:
+- Seven station types: Library, Deep Cuts, Time Travel, Random Album, Mood, Style, Decade
+- Category stations (Mood, Style, Decade) drill into sub-stations via Miller columns
 - Automatically fetches more tracks as needed
 
-Only one mode is active at a time. Adding items to the queue (Alt+E) while radio is playing converts radio to queue mode.
+Only one mode is active at a time. Adding items to the queue (Alt+Q) while radio is playing converts radio to queue mode.
 
 ### Sonic Adventure
 
 Sonic Adventure creates a "sonic bridge" between two tracks - a playlist that transitions smoothly from your start track to your end track using Plex's sonic similarity analysis.
 
-1. Select a start track and press `Alt+V`
-2. Navigate to your destination track and press `Alt+V` again
+1. Select a start track and press `Alt+A`
+2. Navigate to your destination track and press `Alt+A` again
 3. Enter the desired length (5-100 tracks)
 4. The adventure replaces your queue and starts playing
 
@@ -264,16 +265,23 @@ The similar albums feature is context-aware:
 - Otherwise: shows similar to the currently playing track's album
 
 ### Stations (Plexamp Radio)
-Access Plexamp-style radio stations with `Ctrl+T`:
-- **Library Radio** - Shuffles your most-played tracks
-- **Deep Cuts Radio** - Plays lesser-known tracks from your library
-- **Time Travel Radio** - Chronological journey through your library's history, starting from earliest decades and progressing forward
-- **Random Album Radio** - Plays full random albums
-- **Style Radio** - Plays by musical style/genre (drill into sub-styles)
-- **Mood Radio** - Plays by mood (Aggressive, Atmospheric, etc.)
-- **Decade Radio** - Plays music from specific decades
 
-Requires Plex Pass and sonic analysis enabled on your server.
+Access stations by cycling `Ctrl+G` (Genres → ... → Stations) or `Ctrl+P` (Playlists → Stations → ...). Stations use Miller columns — the first four are directly playable, while the last three are categories you drill into to pick a sub-station.
+
+**Directly playable:**
+
+- **Library Radio** — Random tracks from your entire library. Each batch is a fresh random selection with no weighting.
+- **Deep Cuts Radio** — Tracks you haven't played much. Sorted by play count ascending, then randomized, so rarely-heard tracks surface first.
+- **Time Travel Radio** — A chronological walk through your library starting from its earliest decade. Picks a couple of albums per decade, takes a few tracks from each, then advances forward in time. Wraps around to the beginning when it reaches the end, so it plays indefinitely.
+- **Random Album Radio** — Picks a random album and plays it front to back. When it finishes, fetches another random album.
+
+**Category stations (drill in to select):**
+
+- **Mood Radio** — Browse moods like Aggressive, Atmospheric, Energetic, Melancholic, etc. Select a mood to hear tracks tagged with it. Mood metadata lives on individual tracks, so filtering is direct.
+- **Style Radio** — Browse musical styles like Rock, Jazz, Electronic, etc. Select a style to hear albums in that style. Style metadata is on albums rather than tracks, so the station picks random matching albums and plays their tracks.
+- **Decade Radio** — Browse decades (1950s, 1960s, ...). Select one to hear music from that era. Like Style, decade metadata is album-level — the station picks random albums from the chosen decade and plays their tracks.
+
+All stations use Plex's PlayQueue API for server-side track selection when available, falling back to direct library queries if needed. Stations do not use sonic similarity — that's used by Sonic Radio (Alt+R), Similar (Alt+M), and Sonic Adventure (Alt+A). Some station features may require Plex Pass.
 
 ### Folders (Ctrl+O)
 

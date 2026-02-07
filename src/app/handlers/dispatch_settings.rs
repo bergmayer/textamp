@@ -590,14 +590,14 @@ pub async fn dispatch(
                 requested_length: 20,
                 generating: false,
             };
-            state.set_status("Adventure: select START track (Alt+V)".to_string());
+            state.set_status("Adventure: select START track (Alt+A)".to_string());
         }
         Action::SetAdventureStart(track) => {
             state.adventure.active = true;
             state.adventure.start_track = Some(track.clone());
             state.adventure.end_track = None;
             state.adventure.generating = false;
-            state.set_status(format!("Adventure: {} → select END (Alt+V)", truncate_str(&track.title, 25)));
+            state.set_status(format!("Adventure: {} → select END (Alt+A)", truncate_str(&track.title, 25)));
         }
         Action::SetAdventureEnd(track) => {
             state.adventure.end_track = Some(track);

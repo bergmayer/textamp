@@ -329,15 +329,25 @@ fn render_folder_view(
             let border_color = if is_focused { t.colors.border_focused } else { t.colors.border };
             let is_root = col_idx == 0;
 
-            // Only show title for root column
+            // Show title for root column, or any shuffled column
+            let title = if is_root && col.is_shuffled() {
+                " folders (shuffled) ".to_string()
+            } else if is_root {
+                " folders ".to_string()
+            } else if col.is_shuffled() {
+                format!(" {} (shuffled) ", col.title)
+            } else {
+                String::new()
+            };
+
             let mut block = Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(border_color))
                 .style(Style::default().bg(t.colors.bg_primary));
 
-            if is_root {
+            if !title.is_empty() {
                 block = block
-                    .title(" folders ")
+                    .title(title)
                     .title_style(Style::default().fg(t.colors.fg_accent));
             }
 
@@ -554,9 +564,13 @@ fn render_browse_miller_columns(
 
         let border_color = if is_focused { t.colors.border_focused } else { t.colors.border };
 
-        // Only show title for root column
-        let title = if is_root {
+        // Show title for root column, or any shuffled column
+        let title = if is_root && col.is_shuffled() {
+            format!(" {} (shuffled) ", root_title)
+        } else if is_root {
             format!(" {} ", root_title)
+        } else if col.is_shuffled() {
+            format!(" {} (shuffled) ", col.title)
         } else {
             String::new()
         };
@@ -796,20 +810,27 @@ fn render_station_view(
 
         let border_color = if is_focused { t.colors.border_focused } else { t.colors.border };
 
-        // Only show title for root column (col_idx == 0)
-        let block = if col_idx == 0 {
-            Block::default()
-                .title(format!(" {} ", col.title))
-                .title_style(Style::default().fg(t.colors.fg_accent))
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(border_color))
-                .style(Style::default().bg(t.colors.bg_primary))
+        // Show title for root column, or any shuffled column
+        let title = if col_idx == 0 && col.is_shuffled() {
+            format!(" {} (shuffled) ", col.title)
+        } else if col_idx == 0 {
+            format!(" {} ", col.title)
+        } else if col.is_shuffled() {
+            format!(" {} (shuffled) ", col.title)
         } else {
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(border_color))
-                .style(Style::default().bg(t.colors.bg_primary))
+            String::new()
         };
+
+        let mut block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(border_color))
+            .style(Style::default().bg(t.colors.bg_primary));
+
+        if !title.is_empty() {
+            block = block
+                .title(title)
+                .title_style(Style::default().fg(t.colors.fg_accent));
+        }
 
         let inner = block.inner(col_area);
         frame.render_widget(block, col_area);
@@ -1338,6 +1359,19 @@ fn render_shortcuts(frame: &mut Frame, state: &AppState, area: Rect) {
         ("F1", "help", state.view == View::Help),
         ("F2", "settings", state.view == View::Settings),
     ];
+
+    // Library name indicator (left-aligned, under transport time)
+    if let Some(lib_name) = state.active_library.as_ref()
+        .and_then(|key| state.libraries.iter().find(|l| &l.key == key))
+    {
+        let lib_label = Paragraph::new(
+            Span::styled(
+                format!(" [{}]", lib_name.title),
+                Style::default().fg(t.colors.fg_accent_dim).bg(t.colors.bg_secondary),
+            )
+        ).style(Style::default().bg(t.colors.bg_secondary));
+        frame.render_widget(lib_label, area);
+    }
 
     // Build spans with highlighting for current view
     let mut spans: Vec<Span> = Vec::new();

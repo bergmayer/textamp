@@ -993,7 +993,7 @@ pub fn handle_app_event(
             state.radio_state.fetching = false;
             if !tracks.is_empty() {
                 state.queue.extend(tracks);
-                state.set_status(format!("Album radio: {} tracks queued", state.queue.len()));
+                state.set_status(format!("Sonic album radio: {} tracks queued", state.queue.len()));
             }
             vec![]
         }

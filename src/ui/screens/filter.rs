@@ -26,7 +26,6 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(t.colors.fg_accent))
         .style(Style::default().bg(t.colors.bg_primary));
-
     let inner = block.inner(popup_area);
     frame.render_widget(block, popup_area);
 

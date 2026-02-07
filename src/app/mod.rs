@@ -12,4 +12,4 @@ pub mod state;
 pub use action::Action;
 pub use event::Event;
 pub use event_loop::EventLoop;
-pub use state::{AppState, AuthState, AuthStep, ConnectionState, PlayStatus, RepeatMode, View, BrowseCategory, Focus, RightPanelMode};
+pub use state::{AppState, AuthState, AuthStep, ConnectionState, PlayStatus, View, BrowseCategory, Focus, RightPanelMode};

@@ -212,6 +212,9 @@ pub struct FolderColumn {
     pub items: Vec<FolderItem>,
     /// Currently selected index
     pub selected_index: usize,
+    /// Original items before shuffle (None if not shuffled)
+    #[serde(skip)]
+    original_items: Option<Vec<FolderItem>>,
 }
 
 impl FolderColumn {
@@ -222,12 +225,40 @@ impl FolderColumn {
             title,
             items,
             selected_index: 0,
+            original_items: None,
         }
     }
 
     /// Get the selected item, if any.
     pub fn selected_item(&self) -> Option<&FolderItem> {
         self.items.get(self.selected_index)
+    }
+
+    /// Whether this column is currently shuffled.
+    pub fn is_shuffled(&self) -> bool {
+        self.original_items.is_some()
+    }
+
+    /// Shuffle items. Saves originals for restore.
+    pub fn shuffle(&mut self) {
+        use rand::seq::SliceRandom;
+        self.original_items = Some(self.items.clone());
+        let mut rng = rand::rng();
+        self.items.shuffle(&mut rng);
+        self.selected_index = 0;
+    }
+
+    /// Restore original order.
+    pub fn unshuffle(&mut self) {
+        if let Some(items) = self.original_items.take() {
+            self.items = items;
+        }
+        self.selected_index = 0;
+    }
+
+    /// Get items in their original (unshuffled) order for cache persistence.
+    pub fn unshuffled_items(&self) -> &[FolderItem] {
+        self.original_items.as_deref().unwrap_or(&self.items)
     }
 }
 

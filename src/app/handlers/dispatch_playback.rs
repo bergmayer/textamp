@@ -1,5 +1,5 @@
 //! Playback dispatch handlers: TogglePlayPause, Pause, Play, Stop, Next, Previous,
-//! VolumeUp, VolumeDown, ToggleMute, Seek, SeekRelative, ToggleShuffle, CycleRepeat.
+//! VolumeUp, VolumeDown, ToggleMute, Seek, SeekRelative, ToggleShuffle.
 
 use crate::app::{Action, AppState, Event};
 use crate::app::state::{PlayStatus, PlaybackMode};
@@ -95,9 +95,6 @@ pub async fn dispatch(
                         if idx + 1 < state.queue.len() {
                             state.queue_index = Some(idx + 1);
                             helpers::play_current_track(event_tx, state, client, audio).await;
-                        } else if state.playback.repeat_mode == crate::app::state::RepeatMode::All {
-                            state.queue_index = Some(0);
-                            helpers::play_current_track(event_tx, state, client, audio).await;
                         } else {
                             // End of queue: report final stop to Plex (not continuing)
                             if let Some(track) = state.current_track().cloned() {
@@ -172,9 +169,6 @@ pub async fn dispatch(
             if audio.try_seek(position) {
                 state.playback.position_ms = new_pos;
             }
-        }
-        Action::CycleRepeat => {
-            state.playback.repeat_mode = state.playback.repeat_mode.next();
         }
         Action::StartPendingPlayback => {
             match audio.start_pending_playback() {

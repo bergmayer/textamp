@@ -73,7 +73,6 @@ fn render_content(frame: &mut Frame, state: &AppState, area: Rect) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color))
         .style(Style::default().bg(t.colors.bg_primary));
-
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -358,10 +357,6 @@ fn render_playback_content(frame: &mut Frame, state: &AppState, area: Rect) {
         Line::from(""),
         Line::from(Span::styled(
             format!("  Volume: {:.0}%", state.playback.volume * 100.0),
-            Style::default().fg(t.colors.fg_primary),
-        )),
-        Line::from(Span::styled(
-            format!("  Repeat: {}", state.playback.repeat_mode.label().trim()),
             Style::default().fg(t.colors.fg_primary),
         )),
     ];

@@ -276,6 +276,10 @@ pub struct BrowseColumn {
     pub selected_index: usize,
     /// Full Track objects for track columns (used for playback with media info)
     pub tracks: Vec<crate::plex::models::Track>,
+    /// Original items before shuffle (None if not shuffled)
+    original_items: Option<Vec<BrowseItem>>,
+    /// Original tracks before shuffle (None if not shuffled)
+    original_tracks: Option<Vec<crate::plex::models::Track>>,
 }
 
 impl BrowseColumn {
@@ -285,6 +289,8 @@ impl BrowseColumn {
             items,
             selected_index: 0,
             tracks: vec![],
+            original_items: None,
+            original_tracks: None,
         }
     }
 
@@ -295,11 +301,51 @@ impl BrowseColumn {
             items,
             selected_index: 0,
             tracks,
+            original_items: None,
+            original_tracks: None,
         }
     }
 
     pub fn selected_item(&self) -> Option<&BrowseItem> {
         self.items.get(self.selected_index)
+    }
+
+    /// Whether this column is currently shuffled.
+    pub fn is_shuffled(&self) -> bool {
+        self.original_items.is_some()
+    }
+
+    /// Shuffle items (and tracks in parallel). Saves originals for restore.
+    pub fn shuffle(&mut self) {
+        use rand::seq::SliceRandom;
+        // Save originals (fresh copy each time for re-shuffle)
+        self.original_items = Some(self.items.clone());
+        self.original_tracks = if self.tracks.is_empty() { None } else { Some(self.tracks.clone()) };
+
+        // Build index permutation and apply to both vecs
+        let mut indices: Vec<usize> = (0..self.items.len()).collect();
+        let mut rng = rand::rng();
+        indices.shuffle(&mut rng);
+
+        let orig_items = self.original_items.as_ref().unwrap();
+        self.items = indices.iter().map(|&i| orig_items[i].clone()).collect();
+
+        if let Some(ref orig_tracks) = self.original_tracks {
+            self.tracks = indices.iter().filter_map(|&i| orig_tracks.get(i).cloned()).collect();
+        }
+
+        self.selected_index = 0;
+    }
+
+    /// Restore original order.
+    pub fn unshuffle(&mut self) {
+        if let Some(items) = self.original_items.take() {
+            self.items = items;
+        }
+        if let Some(tracks) = self.original_tracks.take() {
+            self.tracks = tracks;
+        }
+        self.selected_index = 0;
     }
 }
 
@@ -706,9 +752,9 @@ pub enum RadioSeedMode {
 impl RadioSeedMode {
     pub fn label(&self) -> &'static str {
         match self {
-            RadioSeedMode::Track => "track radio",
-            RadioSeedMode::Album => "album radio",
-            RadioSeedMode::Artist => "artist radio",
+            RadioSeedMode::Track => "sonic track radio",
+            RadioSeedMode::Album => "sonic album radio",
+            RadioSeedMode::Artist => "sonic artist radio",
         }
     }
 }
@@ -793,6 +839,8 @@ pub struct StationColumn {
     pub stations: Vec<Station>,
     /// Currently selected index
     pub selected_index: usize,
+    /// Original stations before shuffle (None if not shuffled)
+    original_stations: Option<Vec<Station>>,
 }
 
 impl StationColumn {
@@ -803,12 +851,35 @@ impl StationColumn {
             title,
             stations,
             selected_index: 0,
+            original_stations: None,
         }
     }
 
     /// Get the selected station, if any.
     pub fn selected_station(&self) -> Option<&Station> {
         self.stations.get(self.selected_index)
+    }
+
+    /// Whether this column is currently shuffled.
+    pub fn is_shuffled(&self) -> bool {
+        self.original_stations.is_some()
+    }
+
+    /// Shuffle stations. Saves originals for restore.
+    pub fn shuffle(&mut self) {
+        use rand::seq::SliceRandom;
+        self.original_stations = Some(self.stations.clone());
+        let mut rng = rand::rng();
+        self.stations.shuffle(&mut rng);
+        self.selected_index = 0;
+    }
+
+    /// Restore original order.
+    pub fn unshuffle(&mut self) {
+        if let Some(stations) = self.original_stations.take() {
+            self.stations = stations;
+        }
+        self.selected_index = 0;
     }
 }
 
@@ -917,19 +988,19 @@ impl StationNavigationState {
     }
 }
 
-// Seed-based radio (Alt+R) - separate from station-based radio (via Ctrl+G Stations)
-// radio_state is used for track/album/artist radio seeded from user selection.
+// Sonic radio (Alt+R) - separate from station-based radio (via Ctrl+G Stations)
+// radio_state is used for sonic radio seeded from user selection.
 // This is distinct from RadioPlaybackState which is for Plexamp stations.
-/// Radio mode for seed-based radio (track/album/artist radio via Alt+R).
+/// Radio mode for sonic radio (track/album/artist radio via Alt+R).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RadioMode {
     #[default]
     Off,
-    /// Track radio - plays similar tracks based on a seed track
+    /// Sonic track radio - plays similar tracks based on a seed track
     Track,
-    /// Album radio - plays album then similar albums
+    /// Sonic album radio - plays album then similar albums
     Album,
-    /// Artist radio - plays artist's tracks then similar
+    /// Sonic artist radio - plays artist's tracks then similar
     Artist,
 }
 
@@ -937,14 +1008,14 @@ impl RadioMode {
     pub fn label(&self) -> &'static str {
         match self {
             RadioMode::Off => "",
-            RadioMode::Track => "track radio",
-            RadioMode::Album => "album radio",
-            RadioMode::Artist => "artist radio",
+            RadioMode::Track => "sonic track radio",
+            RadioMode::Album => "sonic album radio",
+            RadioMode::Artist => "sonic artist radio",
         }
     }
 }
 
-/// Seed-based radio state for similarity-based playback (Alt+R).
+/// Sonic radio state for similarity-based playback (Alt+R).
 /// Distinct from RadioPlaybackState which handles Plexamp stations (via Ctrl+G).
 #[derive(Debug, Clone, Default)]
 pub struct RadioState {
@@ -1715,7 +1786,6 @@ pub struct PlaybackState {
     pub duration_ms: u64,
     pub volume: f32,
     pub muted: bool,
-    pub repeat_mode: RepeatMode,
 }
 
 impl Default for PlaybackState {
@@ -1726,7 +1796,6 @@ impl Default for PlaybackState {
             duration_ms: 0,
             volume: 0.8,
             muted: false,
-            repeat_mode: RepeatMode::Off,
         }
     }
 }
@@ -1738,32 +1807,6 @@ pub enum PlayStatus {
     Playing,
     Paused,
     Buffering,
-}
-
-/// Repeat mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RepeatMode {
-    Off,
-    All,
-    One,
-}
-
-impl RepeatMode {
-    pub fn next(self) -> Self {
-        match self {
-            RepeatMode::Off => RepeatMode::All,
-            RepeatMode::All => RepeatMode::One,
-            RepeatMode::One => RepeatMode::Off,
-        }
-    }
-
-    pub fn label(&self) -> &'static str {
-        match self {
-            RepeatMode::Off => "      ",
-            RepeatMode::All => "repeat",
-            RepeatMode::One => "rep. 1",
-        }
-    }
 }
 
 /// Waveform seekbar state.
