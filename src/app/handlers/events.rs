@@ -383,27 +383,29 @@ pub fn handle_app_event(
                 .unwrap_or_else(|| "unknown".to_string());
             let qi = state.queue_index.unwrap_or(9999);
 
-            // First 3 errors: retry the SAME track with a brief delay
-            // (handles cold-start / transient server issues)
-            if state.consecutive_playback_errors <= 3 {
-                tracing::warn!("Playback error (retry {}/3 for queue[{}] '{}'): {}",
-                    state.consecutive_playback_errors, qi, track_info, msg);
+            // First 5 errors: retry the SAME track with increasing delays
+            // (handles cold-start / remote relay warm-up)
+            if state.consecutive_playback_errors <= 5 {
+                let delays_ms = [500, 1000, 1500, 2000, 2500];
+                let delay = delays_ms[(state.consecutive_playback_errors as usize - 1).min(delays_ms.len() - 1)];
+                tracing::warn!("Playback error (retry {}/5 for queue[{}] '{}', delay {}ms): {}",
+                    state.consecutive_playback_errors, qi, track_info, delay, msg);
                 let tx = event_tx.clone();
                 tokio::spawn(async move {
-                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
                     let _ = tx.send(Event::RetryAfterDelay).await;
                 });
                 return vec![];
             }
 
-            // Errors 4-6: auto-skip to next track
-            if state.consecutive_playback_errors <= 6 {
-                tracing::warn!("Playback error (skipping queue[{}] '{}', attempt {}/6): {}",
+            // Errors 6-8: auto-skip to next track
+            if state.consecutive_playback_errors <= 8 {
+                tracing::warn!("Playback error (skipping queue[{}] '{}', attempt {}/8): {}",
                     qi, track_info, state.consecutive_playback_errors, msg);
                 return vec![Action::Next];
             }
 
-            // After 6 consecutive failures, show error to user
+            // After 8 consecutive failures, show error to user
             state.consecutive_playback_errors = 0;
             if msg.contains("404") || msg.to_lowercase().contains("not found") {
                 state.confirm_dialog = Some(crate::app::state::ConfirmDialog {

@@ -359,10 +359,10 @@ async fn fetch_and_buffer(
         dl_buffer.set_complete();
     });
 
-    // Wait for minimum buffer before signaling ready
+    // Wait for minimum buffer before signaling ready (10s timeout for remote servers)
     let wait_buffer = buffer.clone();
     let mut wait_count = 0;
-    while !wait_buffer.has_min_buffer() && wait_count < 100 {
+    while !wait_buffer.has_min_buffer() && wait_count < 200 {
         tokio::time::sleep(Duration::from_millis(50)).await;
         wait_count += 1;
         if let Some(err) = wait_buffer.error() {
