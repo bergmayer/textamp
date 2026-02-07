@@ -226,31 +226,22 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
         let prefix = if is_current { "♪ " } else { "  " };
 
         let (title_str, artist_str) = if is_selected && state.view == crate::app::state::View::NowPlaying {
-            // Marquee scroll for selected track: combine title + artist as full text
-            let full_text = format!("{}  {}", track.title, track.artist_name());
-            let marquee_width = title_width + 1 + artist_width; // title + gap + artist
+            // Marquee scroll for the title column of the selected track
             let marquee_key = format!("np:{}", i);
 
             let mut marquee = state.marquee.borrow_mut();
             if marquee.selection_key != marquee_key {
-                marquee.reset(marquee_key, full_text.clone(), marquee_width);
+                marquee.reset(marquee_key, track.title.clone(), title_width);
             }
 
-            if marquee.phase == crate::app::state::MarqueePhase::Inactive {
-                // Text fits — render normally
-                (pad_right(&track.title, title_width), pad_right(&track.artist_name(), artist_width))
+            let title_display = if marquee.phase == crate::app::state::MarqueePhase::Inactive {
+                pad_right(&track.title, title_width)
             } else {
-                // Get scrolled text and split into title/artist columns
-                let scrolled = marquee.display_text();
+                let text = marquee.display_text();
                 drop(marquee);
-                // The scrolled text is the full combined line; pad to total width
-                // We render it as one block spanning both columns
-                let combined = pad_right(&scrolled, title_width + 1 + artist_width);
-                // Split: first title_width chars = title, then 1 space, then artist_width chars
-                let title_part: String = combined.chars().take(title_width).collect();
-                let artist_part: String = combined.chars().skip(title_width + 1).take(artist_width).collect();
-                (title_part, artist_part)
-            }
+                text
+            };
+            (title_display, pad_right(&track.artist_name(), artist_width))
         } else {
             (pad_right(&track.title, title_width), pad_right(&track.artist_name(), artist_width))
         };
