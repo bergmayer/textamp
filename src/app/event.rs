@@ -63,6 +63,7 @@ pub enum Event {
     PositionUpdate(u64),
     BufferingStart,
     BufferingEnd,
+    RetryAfterDelay,
 
     // Image loading events
     ImageLoaded { key: String },

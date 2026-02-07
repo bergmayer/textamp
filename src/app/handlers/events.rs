@@ -378,19 +378,32 @@ pub fn handle_app_event(
             state.playback.status = PlayStatus::Stopped;
             state.consecutive_playback_errors += 1;
 
-            // First error: retry the SAME track (handles transient startup issues)
-            if state.consecutive_playback_errors == 1 {
-                tracing::warn!("Playback error (retrying same track): {}", msg);
-                return vec![Action::RetryCurrentTrack];
+            let track_info = state.current_track()
+                .map(|t| format!("{} - {}", t.artist_name(), t.title))
+                .unwrap_or_else(|| "unknown".to_string());
+            let qi = state.queue_index.unwrap_or(9999);
+
+            // First 3 errors: retry the SAME track with a brief delay
+            // (handles cold-start / transient server issues)
+            if state.consecutive_playback_errors <= 3 {
+                tracing::warn!("Playback error (retry {}/3 for queue[{}] '{}'): {}",
+                    state.consecutive_playback_errors, qi, track_info, msg);
+                let tx = event_tx.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    let _ = tx.send(Event::RetryAfterDelay).await;
+                });
+                return vec![];
             }
 
-            // Subsequent errors: auto-skip to next track
-            if state.consecutive_playback_errors <= 4 {
-                tracing::warn!("Playback error (attempt {}/4, auto-skipping): {}", state.consecutive_playback_errors, msg);
+            // Errors 4-6: auto-skip to next track
+            if state.consecutive_playback_errors <= 6 {
+                tracing::warn!("Playback error (skipping queue[{}] '{}', attempt {}/6): {}",
+                    qi, track_info, state.consecutive_playback_errors, msg);
                 return vec![Action::Next];
             }
 
-            // After 4 consecutive failures, show error to user
+            // After 6 consecutive failures, show error to user
             state.consecutive_playback_errors = 0;
             if msg.contains("404") || msg.to_lowercase().contains("not found") {
                 state.confirm_dialog = Some(crate::app::state::ConfirmDialog {
@@ -402,6 +415,9 @@ pub fn handle_app_event(
                 state.set_error("Playback stopped after multiple consecutive errors".to_string());
             }
             vec![]
+        }
+        Event::RetryAfterDelay => {
+            vec![Action::RetryCurrentTrack]
         }
         Event::BufferingStart => {
             state.playback.status = PlayStatus::Buffering;
