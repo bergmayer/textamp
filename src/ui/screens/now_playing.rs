@@ -9,7 +9,7 @@ use crate::app::AppState;
 use crate::services::NavigationService;
 use crate::ui::theme::theme;
 use crate::ui::artwork::ArtworkRenderer;
-use crate::util::{format_duration, truncate_str};
+use crate::util::{format_duration, pad_right};
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
@@ -174,6 +174,16 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
     let selected_idx = state.list_state.queue_index;
     let visible_height = inner.height as usize;
 
+    // Dynamic column widths based on available space
+    // Layout: prefix(2) gap(2) title(T) gap(2) artist(A) gap(1) duration(6)
+    // Fixed overhead: 2 + 2 + 2 + 1 + 6 = 13
+    let total_width = inner.width as usize;
+    let fixed_overhead = 13;
+    let remaining = total_width.saturating_sub(fixed_overhead);
+    // Split remaining ~60% title / ~40% artist (minimum 8 each)
+    let title_width = (remaining * 6 / 10).max(8);
+    let artist_width = remaining.saturating_sub(title_width).max(8);
+
     // Build combined list: history (dimmed) + current tracks
     let history_len = state.play_history.len();
     let total_display = history_len + tracks.len();
@@ -191,12 +201,12 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
         }
 
         let prefix = "  ";
-        let title_str = truncate_str(&track.title, 30);
-        let artist = truncate_str(&track.artist_name(), 20);
+        let title_str = pad_right(&track.title, title_width);
+        let artist = pad_right(&track.artist_name(), artist_width);
         let duration = format_duration(track.duration_ms());
 
         let line = format!(
-            "{}  {:<32} {:<22} {:>6}",
+            "{}  {} {} {:>6}",
             prefix, title_str, artist, duration
         );
 
@@ -214,13 +224,42 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
         let is_selected = i == selected_idx;
 
         let prefix = if is_current { "♪ " } else { "  " };
-        let title_str = truncate_str(&track.title, 30);
-        let artist = truncate_str(&track.artist_name(), 20);
+
+        let (title_str, artist_str) = if is_selected && state.view == crate::app::state::View::NowPlaying {
+            // Marquee scroll for selected track: combine title + artist as full text
+            let full_text = format!("{}  {}", track.title, track.artist_name());
+            let marquee_width = title_width + 1 + artist_width; // title + gap + artist
+            let marquee_key = format!("np:{}", i);
+
+            let mut marquee = state.marquee.borrow_mut();
+            if marquee.selection_key != marquee_key {
+                marquee.reset(marquee_key, full_text.clone(), marquee_width);
+            }
+
+            if marquee.phase == crate::app::state::MarqueePhase::Inactive {
+                // Text fits — render normally
+                (pad_right(&track.title, title_width), pad_right(&track.artist_name(), artist_width))
+            } else {
+                // Get scrolled text and split into title/artist columns
+                let scrolled = marquee.display_text();
+                drop(marquee);
+                // The scrolled text is the full combined line; pad to total width
+                // We render it as one block spanning both columns
+                let combined = pad_right(&scrolled, title_width + 1 + artist_width);
+                // Split: first title_width chars = title, then 1 space, then artist_width chars
+                let title_part: String = combined.chars().take(title_width).collect();
+                let artist_part: String = combined.chars().skip(title_width + 1).take(artist_width).collect();
+                (title_part, artist_part)
+            }
+        } else {
+            (pad_right(&track.title, title_width), pad_right(&track.artist_name(), artist_width))
+        };
+
         let duration = format_duration(track.duration_ms());
 
         let line = format!(
-            "{}  {:<32} {:<22} {:>6}",
-            prefix, title_str, artist, duration
+            "{}  {} {} {:>6}",
+            prefix, title_str, artist_str, duration
         );
 
         let style = if is_selected {

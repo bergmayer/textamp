@@ -183,8 +183,12 @@ pub async fn dispatch(
                     state.consecutive_playback_errors = 0;
                 }
                 Err(e) => {
-                    state.set_error(format!("Playback error: {}", e));
-                    state.playback.status = PlayStatus::Stopped;
+                    // Route through PlaybackError for retry/skip logic
+                    let tx = event_tx.clone();
+                    let msg = format!("{}", e);
+                    tokio::spawn(async move {
+                        let _ = tx.send(Event::PlaybackError(msg)).await;
+                    });
                 }
             }
         }

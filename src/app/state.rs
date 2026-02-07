@@ -9,6 +9,117 @@ use crate::services::{FolderNavigationState, WaveformData};
 use crate::ui::theme::ThemeName;
 use std::collections::HashMap;
 
+/// Marquee scroll animation phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarqueePhase {
+    /// Initial 4-second pause showing truncated text
+    Waiting,
+    /// Scrolling left, revealing full content
+    Scrolling,
+    /// 2-second pause at the end with full text visible
+    PausedAtEnd,
+    /// Text fits in the display width, no scrolling needed
+    Inactive,
+}
+
+/// State for marquee scroll animation on truncated text.
+#[derive(Debug, Clone)]
+pub struct MarqueeState {
+    /// Key identifying current selection (e.g. "np:5", "miller:2:3")
+    pub selection_key: String,
+    /// Full un-truncated text being scrolled
+    pub full_text: String,
+    /// Available display width for the field
+    pub display_width: usize,
+    /// Current scroll offset (chars from start)
+    pub scroll_offset: usize,
+    /// Current animation phase
+    pub phase: MarqueePhase,
+    /// When current phase started
+    pub phase_start: std::time::Instant,
+    /// When last scroll step happened (for 150ms timing)
+    pub last_scroll: std::time::Instant,
+}
+
+impl Default for MarqueeState {
+    fn default() -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            selection_key: String::new(),
+            full_text: String::new(),
+            display_width: 0,
+            scroll_offset: 0,
+            phase: MarqueePhase::Inactive,
+            phase_start: now,
+            last_scroll: now,
+        }
+    }
+}
+
+impl MarqueeState {
+    /// Reset marquee for a new selection.
+    pub fn reset(&mut self, key: String, full_text: String, display_width: usize) {
+        use unicode_width::UnicodeWidthStr;
+
+        let text_width = UnicodeWidthStr::width(full_text.as_str());
+        let now = std::time::Instant::now();
+
+        self.selection_key = key;
+        self.full_text = full_text;
+        self.display_width = display_width;
+        self.scroll_offset = 0;
+        self.phase_start = now;
+        self.last_scroll = now;
+
+        if text_width <= display_width {
+            self.phase = MarqueePhase::Inactive;
+        } else {
+            self.phase = MarqueePhase::Waiting;
+        }
+    }
+
+    /// Get the display slice for the current scroll offset.
+    /// Returns a string padded to exactly display_width.
+    pub fn display_text(&self) -> String {
+        if self.phase == MarqueePhase::Inactive || self.full_text.is_empty() {
+            return crate::util::pad_right(&self.full_text, self.display_width);
+        }
+
+        match self.phase {
+            MarqueePhase::Waiting | MarqueePhase::PausedAtEnd if self.scroll_offset == 0 => {
+                // Show normally truncated text
+                crate::util::pad_right(&self.full_text, self.display_width)
+            }
+            _ => {
+                // Extract substring starting at scroll_offset (by display column)
+                let mut col = 0;
+                let mut start_byte = 0;
+                let mut found_start = false;
+                for (i, ch) in self.full_text.char_indices() {
+                    let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                    if col >= self.scroll_offset && !found_start {
+                        start_byte = i;
+                        found_start = true;
+                    }
+                    col += ch_w;
+                }
+                if !found_start {
+                    start_byte = self.full_text.len();
+                }
+                let substr = &self.full_text[start_byte..];
+                crate::util::pad_right(substr, self.display_width)
+            }
+        }
+    }
+
+    /// Maximum scroll offset (how far we can scroll).
+    pub fn max_scroll(&self) -> usize {
+        use unicode_width::UnicodeWidthStr;
+        let text_width = UnicodeWidthStr::width(self.full_text.as_str());
+        text_width.saturating_sub(self.display_width)
+    }
+}
+
 /// Notification type - determines display behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotificationType {
@@ -564,6 +675,9 @@ pub struct AppState {
     // Library picker popup state (Ctrl+Alt+S)
     pub library_picker_active: bool,
     pub library_picker_index: usize,
+
+    // Marquee scroll animation state (RefCell for interior mutability during render)
+    pub marquee: std::cell::RefCell<MarqueeState>,
 }
 
 /// Playback mode - determines behavior (finite queue vs continuous radio).
@@ -966,6 +1080,7 @@ impl AppState {
             search_popup_active: false,
             library_picker_active: false,
             library_picker_index: 0,
+            marquee: std::cell::RefCell::new(MarqueeState::default()),
         }
     }
 

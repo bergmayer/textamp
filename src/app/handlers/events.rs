@@ -705,6 +705,40 @@ pub fn handle_app_event(
                 }
             }
 
+            // Marquee scroll animation
+            {
+                use crate::app::state::MarqueePhase;
+                let mut marquee = state.marquee.borrow_mut();
+                match marquee.phase {
+                    MarqueePhase::Waiting => {
+                        if marquee.phase_start.elapsed() >= Duration::from_secs(4) {
+                            marquee.phase = MarqueePhase::Scrolling;
+                            marquee.phase_start = std::time::Instant::now();
+                            marquee.last_scroll = std::time::Instant::now();
+                        }
+                    }
+                    MarqueePhase::Scrolling => {
+                        if marquee.last_scroll.elapsed() >= Duration::from_millis(150) {
+                            marquee.scroll_offset += 1;
+                            marquee.last_scroll = std::time::Instant::now();
+                            let max = marquee.max_scroll();
+                            if marquee.scroll_offset >= max {
+                                marquee.phase = MarqueePhase::PausedAtEnd;
+                                marquee.phase_start = std::time::Instant::now();
+                            }
+                        }
+                    }
+                    MarqueePhase::PausedAtEnd => {
+                        if marquee.phase_start.elapsed() >= Duration::from_secs(2) {
+                            marquee.scroll_offset = 0;
+                            marquee.phase = MarqueePhase::Waiting;
+                            marquee.phase_start = std::time::Instant::now();
+                        }
+                    }
+                    MarqueePhase::Inactive => {}
+                }
+            }
+
             // Periodic cache save: save if dirty, idle for 30+ seconds, and 2+ minutes since last save
             helpers::maybe_save_cache_async(&event_tx,state);
 

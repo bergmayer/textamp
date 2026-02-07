@@ -136,7 +136,7 @@ impl AudioPlayer {
         if let Some((buffer, byte_len_hint)) = pending {
             let reader = BlockingReader::new(&buffer);
             self.backend.play_streaming(reader, byte_len_hint)
-                .map_err(|e| anyhow!("Playback error: {}", e))?;
+                .map_err(|e| anyhow!("Decode error: {}", e))?;
             self._stream_buffer = Some(buffer);
         }
         Ok(())

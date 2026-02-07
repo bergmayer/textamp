@@ -93,6 +93,41 @@ pub fn truncate_middle(s: &str, max_len: usize) -> String {
     format!("{}…{}", start, end)
 }
 
+/// Pad or truncate a string to exactly `width` display columns using unicode-width.
+///
+/// If the string is shorter, pads with spaces. If longer, truncates with "...".
+pub fn pad_right(s: &str, width: usize) -> String {
+    use unicode_width::UnicodeWidthStr;
+
+    let display_width = UnicodeWidthStr::width(s);
+    if display_width <= width {
+        // Pad with spaces to fill remaining width
+        let padding = width - display_width;
+        format!("{}{}", s, " ".repeat(padding))
+    } else {
+        // Truncate: walk chars until we reach width - 3, then add "..."
+        if width < 3 {
+            return ".".repeat(width);
+        }
+        let target = width - 3;
+        let mut current_width = 0;
+        let mut end_byte = 0;
+        for (i, ch) in s.char_indices() {
+            let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            if current_width + ch_width > target {
+                end_byte = i;
+                break;
+            }
+            current_width += ch_width;
+            end_byte = i + ch.len_utf8();
+        }
+        let truncated = &s[..end_byte];
+        // Pad truncated part if char widths don't sum exactly to target
+        let pad = target - UnicodeWidthStr::width(truncated);
+        format!("{}{}...", truncated, " ".repeat(pad))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

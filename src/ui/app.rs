@@ -99,6 +99,7 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
                 let title = state.artist_view_mode.name();
                 render_browse_miller_columns(
                     frame,
+                    state,
                     &state.artist_nav,
                     title,
                     current_track_key,
@@ -130,6 +131,7 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
                 let title = state.playlists_mode.name();
                 render_browse_miller_columns(
                     frame,
+                    state,
                     &state.playlist_nav,
                     title,
                     current_track_key,
@@ -170,6 +172,7 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
                 let title = state.genre_content_type.name();
                 render_browse_miller_columns(
                     frame,
+                    state,
                     &state.genre_nav,
                     title,
                     current_track_key,
@@ -461,6 +464,7 @@ fn render_folder_view(
 /// When filter_results is Some, only show items at the matched indices in the filter_column.
 fn render_browse_miller_columns(
     frame: &mut Frame,
+    state: &AppState,
     nav: &crate::app::state::BrowseNavigationState,
     root_title: &str,
     current_track_key: Option<&str>,
@@ -635,23 +639,38 @@ fn render_browse_miller_columns(
                             _ => "▸ ", // Drillable items get arrow
                         };
 
-                        // Display text with middle truncation
-                        let display_text = match item {
+                        // Full text (before truncation)
+                        let full_text = match item {
                             BrowseItem::Album { title, artist, .. } => {
-                                // Show "Album - Artist" for albums
-                                let full = format!("{} - {}", title, artist);
-                                truncate_middle(&full, max_text_width)
+                                format!("{} - {}", title, artist)
                             }
                             BrowseItem::Track { title, track_number, .. } => {
-                                // Show "NN. Title" for tracks
                                 if let Some(num) = track_number {
-                                    let full = format!("{:02}. {}", num, title);
-                                    truncate_middle(&full, max_text_width)
+                                    format!("{:02}. {}", num, title)
                                 } else {
-                                    truncate_middle(title, max_text_width)
+                                    title.clone()
                                 }
                             }
-                            _ => truncate_middle(item.title(), max_text_width),
+                            _ => item.title().to_string(),
+                        };
+
+                        // Marquee for selected+focused item, or truncate normally
+                        let display_text = if is_selected && is_focused {
+                            let marquee_key = format!("miller:{}:{}", col_idx, orig_idx);
+                            let mut marquee = state.marquee.borrow_mut();
+                            if marquee.selection_key != marquee_key {
+                                marquee.reset(marquee_key, full_text.clone(), max_text_width);
+                            }
+                            if marquee.phase == crate::app::state::MarqueePhase::Inactive {
+                                truncate_middle(&full_text, max_text_width)
+                            } else {
+                                let text = marquee.display_text();
+                                drop(marquee);
+                                // Trim to max_text_width (display_text already pads)
+                                text.chars().take(max_text_width).collect()
+                            }
+                        } else {
+                            truncate_middle(&full_text, max_text_width)
                         };
 
                         let style = if is_now_playing {
