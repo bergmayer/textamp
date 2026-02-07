@@ -678,6 +678,9 @@ pub struct AppState {
 
     // Marquee scroll animation state (RefCell for interior mutability during render)
     pub marquee: std::cell::RefCell<MarqueeState>,
+
+    // Library switch loading state
+    pub library_loading: bool,
 }
 
 /// Playback mode - determines behavior (finite queue vs continuous radio).
@@ -1081,6 +1084,7 @@ impl AppState {
             library_picker_active: false,
             library_picker_index: 0,
             marquee: std::cell::RefCell::new(MarqueeState::default()),
+            library_loading: false,
         }
     }
 
@@ -1123,12 +1127,17 @@ impl AppState {
             // Don't show adventure selection messages here - they're in the transport text
         }
 
-        // Priority 2: Station loading (ongoing)
+        // Priority 2: Library loading (ongoing)
+        if self.library_loading {
+            return Some(Notification::ongoing("Loading library..."));
+        }
+
+        // Priority 3: Station loading (ongoing)
         if self.station_nav.loading {
             return Some(Notification::ongoing("Loading station..."));
         }
 
-        // Priority 3: Background refresh (ongoing)
+        // Priority 4: Background refresh (ongoing)
         if !self.background_refresh_in_progress.is_empty() {
             let categories: Vec<_> = self.background_refresh_in_progress
                 .iter()
@@ -1142,22 +1151,22 @@ impl AppState {
             return Some(Notification::ongoing(msg));
         }
 
-        // Priority 4: Waveform generation (ongoing)
+        // Priority 5: Waveform generation (ongoing)
         if self.waveform.generating {
             return Some(Notification::ongoing("Generating waveform..."));
         }
 
-        // Priority 5: Cache saving (ongoing)
+        // Priority 6: Cache saving (ongoing)
         if self.cache_save_in_progress {
             return Some(Notification::ongoing("Saving cache..."));
         }
 
-        // Priority 6: Toast notifications (transient)
+        // Priority 7: Toast notifications (transient)
         if let Some(ref msg) = self.toast_message {
             return Some(Notification::toast(msg.clone()));
         }
 
-        // Priority 7: Status messages (transient)
+        // Priority 8: Status messages (transient)
         if let Some(ref msg) = self.status_message {
             return Some(Notification::toast(msg.clone()));
         }

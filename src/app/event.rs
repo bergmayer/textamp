@@ -89,6 +89,10 @@ pub enum Event {
     RecentlyAddedPreloaded { library_key: String, albums: Vec<Album> },
     RecentlyPlayedPreloaded { library_key: String, albums: Vec<Album> },
 
+    // Library switch (async cache load)
+    LibraryCacheLoaded { library_key: String, cached: Box<crate::plex::CacheData> },
+    LibraryCacheLoadFailed { library_key: String },
+
     // Cache management
     CacheSaved,
     CacheRefreshCompleted {

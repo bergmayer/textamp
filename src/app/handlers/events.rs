@@ -4,7 +4,7 @@
 
 use crate::app::{Action, AppState, Event};
 use crate::app::state::{
-    BrowseCategory, ConnectionState, PlayStatus, PlaybackMode,
+    BrowseCategory, BrowseItem, ConnectionState, PlayStatus, PlaybackMode,
     SearchSection, View,
 };
 use crate::api::{PlexAuth, PlexClient};
@@ -747,6 +747,144 @@ pub fn handle_app_event(
             // Very stale background refresh (32 days, 2min idle)
             helpers::maybe_refresh_very_stale(&event_tx,state, client);
 
+            vec![]
+        }
+        Event::LibraryCacheLoaded { library_key, cached } => {
+            state.library_loading = false;
+
+            // Ignore if user switched to a different library while loading
+            if state.active_library.as_ref() != Some(&library_key) {
+                tracing::debug!("Ignoring cache load for {} (active library changed)", library_key);
+                return vec![];
+            }
+
+            // Validate cache belongs to this library
+            if cached.library_key != library_key {
+                tracing::warn!("Cache library_key mismatch: expected {}, got {} - ignoring cache",
+                    library_key, cached.library_key);
+                return vec![];
+            }
+
+            tracing::info!("Library switch: loaded from cache: {} artists, {} albums, {} folders",
+                cached.artists.len(), cached.albums.len(), cached.root_folders.len());
+
+            // Find library name for folder root column
+            let lib_name = state.libraries.iter()
+                .find(|l| l.key == library_key)
+                .map(|l| l.title.clone())
+                .unwrap_or_else(|| library_key.clone());
+
+            // Core library data - IMPORTANT: Always re-sort after loading from cache
+            if !cached.artists.is_empty() {
+                state.artists = cached.artists;
+                state.artists.sort_by(|a, b| helpers::sort_key(&a.title).cmp(&helpers::sort_key(&b.title)));
+                state.artists_total = state.artists.len() as u32;
+                let items = BrowseItem::from_artists(&state.artists);
+                state.artist_nav.reset(state.artist_view_mode.name(), items);
+            }
+            if !cached.albums.is_empty() {
+                state.albums = cached.albums;
+                state.albums.sort_by(|a, b| helpers::sort_key(&a.title).cmp(&helpers::sort_key(&b.title)));
+                state.albums_total = state.albums.len() as u32;
+            }
+            if !cached.playlists.is_empty() {
+                state.playlists = cached.playlists.clone();
+                let items = BrowseItem::from_playlists(&state.playlists);
+                state.playlist_nav.reset("playlists", items);
+            }
+
+            // Folders
+            if !cached.root_folders.is_empty() {
+                use crate::services::{FolderColumn, FolderNavigationState};
+                let root_column = FolderColumn::new(None, lib_name, cached.root_folders);
+                state.folder_state = Some(FolderNavigationState {
+                    library_key: library_key.clone(),
+                    columns: vec![root_column],
+                    focused_column: 0,
+                    loading: false,
+                });
+            }
+            if !cached.folder_contents.is_empty() {
+                state.folder_contents_cache = cached.folder_contents;
+                let removed = crate::services::CacheService::filter_stale_subfolders_default(&mut state.folder_contents_cache);
+                if removed > 0 {
+                    tracing::info!("Library switch: removed {} very stale subfolder caches", removed);
+                    state.cache_dirty = true;
+                }
+                tracing::debug!("Library switch: loaded {} cached subfolders", state.folder_contents_cache.len());
+            } else {
+                state.folder_contents_cache.clear();
+            }
+
+            // Genres, artist genres, album genres, moods, styles
+            if !cached.genres.is_empty() {
+                state.genres = cached.genres;
+                if state.genre_content_type == crate::app::state::GenreContentType::Genres {
+                    let items = BrowseItem::from_genres(&state.genres);
+                    state.genre_nav.reset("genres", items);
+                }
+            }
+            if !cached.artist_genres.is_empty() {
+                state.artist_genres = cached.artist_genres;
+                if state.genre_content_type == crate::app::state::GenreContentType::ArtistGenres {
+                    let items = BrowseItem::from_genres(&state.artist_genres);
+                    state.genre_nav.reset("artist genres", items);
+                }
+            }
+            if !cached.album_genres.is_empty() {
+                state.album_genres = cached.album_genres;
+                if state.genre_content_type == crate::app::state::GenreContentType::AlbumGenres {
+                    let items = BrowseItem::from_genres(&state.album_genres);
+                    state.genre_nav.reset("album genres", items);
+                }
+            }
+            if !cached.moods.is_empty() {
+                state.moods = cached.moods;
+                if state.genre_content_type == crate::app::state::GenreContentType::Moods {
+                    let items = BrowseItem::from_genres(&state.moods);
+                    state.genre_nav.reset("moods", items);
+                }
+            }
+            if !cached.styles.is_empty() {
+                state.styles = cached.styles;
+                if state.genre_content_type == crate::app::state::GenreContentType::Styles {
+                    let items = BrowseItem::from_genres(&state.styles);
+                    state.genre_nav.reset("styles", items);
+                }
+            }
+
+            // Stations
+            if !cached.stations.is_empty() {
+                state.stations = cached.stations.clone();
+                state.station_nav.columns.clear();
+                state.station_nav.columns.push(crate::app::state::StationColumn::new(
+                    None,
+                    "Stations".to_string(),
+                    cached.stations,
+                ));
+                state.station_nav.focused_column = 0;
+            }
+
+            // Recent content
+            if !cached.recently_added_albums.is_empty() {
+                state.recently_added_albums = cached.recently_added_albums;
+            }
+            if !cached.recently_played_albums.is_empty() {
+                state.recently_played_albums = cached.recently_played_albums;
+            }
+
+            // Playlist tracks cache
+            if !cached.playlist_tracks.is_empty() {
+                state.playlist_tracks_cache = cached.playlist_tracks;
+            }
+
+            vec![]
+        }
+        Event::LibraryCacheLoadFailed { library_key } => {
+            state.library_loading = false;
+            if state.active_library.as_ref() == Some(&library_key) {
+                tracing::debug!("No cache for library {} - waiting for API preload", library_key);
+            }
             vec![]
         }
         Event::CacheSaved => {
