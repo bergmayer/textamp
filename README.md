@@ -1,8 +1,12 @@
 # textamp
 
-A keyboard-driven Terminal User Interface (TUI) client for Plex Music, written in Rust.
+A keyboard-driven terminal-based client for Plex Music.
 
-textamp is a specialized, lightweight alternative to Plexamp for power users who live in the terminal. Inspired by musikcube's efficient navigation.
+I use Plex to listen to my music collection but while Plexamp (the offical music client) is pretty good on mobile, I have never liked it on the desktop. This app is designed to offer super-fast navigation of a large music library, and to make my some of my favorite Plex music features (Random Album Radio, Library Radio, Sonic Adventure and Sonic Similarity) available in a fast, keyboard-driven interface (there's mouse support, too), and to add a few new features, such as viewing your artists in a shuffled order, to enable more serendipity and to help surface music that might otherwise be overlooked.  Additionally, in addition to my main music libray, I have two other audio libraries, one for spoken word, and one for unofficial releases, live recordings, and so forth--a.k.a., bootlegs.  For these libraries, folder-based navigation works better than metadata organization: many files are not tagged properly, and there are often many variations of the same album (different pressings, unofficial remixes) that challenge traditional metadata categories. So, the app is designed to also be fast at navigating the underlying folder structure of libraries, for this kind of content, and to support fast switching between libraries.  To ensure good performance, the app aggressively caches library data and pre-fetches songs in the play queue. 
+
+The main interface paradigm is "Miller columns," which is the same as "column view" in macOS Finder, and close to how iTunes worked before it got all crudded up (with the exception that tracks themselves are in a column in textamp).
+
+The app was also inspired by other great terminal / text mode music players, such as cmus and Cubic Player (which is the inspiration for the logo and exit message).
 
 ## Features
 
