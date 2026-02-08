@@ -57,6 +57,7 @@ COMMANDS
   Alt+R           Sonic radio from selection
                   Track: similar individual tracks
                   Album: similar albums played in order
+                  Artist: artist + similar artists
   Alt+Q           Add selection to queue (enqueue)
                   Track: adds single track
                   Album: adds all tracks from album
@@ -95,6 +96,7 @@ NOW PLAYING (Ctrl+N)
 SONIC RADIO (Alt+R on selection)
   Track Radio     Similar individual tracks
   Album Radio     Tracks from similar albums in order
+  Artist Radio    Tracks from the artist and similar artists
   Station Radio   Plex curated stations (via Ctrl+G)
 
 SONIC ADVENTURE (Alt+A)

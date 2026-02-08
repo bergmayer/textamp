@@ -22,7 +22,7 @@ mod navigation_service;
 mod playback_service;
 mod preload_service;
 mod search_filter_service;
-mod selection_service;
+
 
 pub use adventure::generate_adventure;
 pub use cache_service::{CacheDataSources, CacheSaveConditions, CacheService, CACHE_IDLE_THRESHOLD_SECS, CACHE_SAVE_INTERVAL_SECS};
@@ -33,7 +33,7 @@ pub use navigation_service::NavigationService;
 pub use playback_service::{PlaybackService, QueueManager, NavigationResult, MAX_HISTORY_SIZE};
 pub use preload_service::{ConnectionParams, PreloadService};
 pub use search_filter_service::{FilteredItem, SearchFilterService};
-pub use selection_service::{SelectionContext, SelectionService, SimilarSource};
+
 
 // Re-export waveform from plex module for backward compatibility
 pub use crate::plex::{WaveformCache, WaveformData, WaveformError, generate_waveform};

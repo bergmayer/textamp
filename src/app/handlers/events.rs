@@ -69,8 +69,29 @@ pub fn handle_app_event(
         }
         Event::ServerConnectionSucceeded { server_name, url } => {
             tracing::info!("Server connection succeeded: {} at {}", server_name, url);
-            client.set_server(url);
+            client.set_server(url.clone());
+
+            // Persist the updated URL so future startups use the working URL
+            if let Some(server) = state.available_servers.iter().find(|s| {
+                s.connections.iter().any(|c| c.uri == url)
+            }) {
+                let server_info = crate::plex::ServerInfo {
+                    url: url.clone(),
+                    identifier: server.client_identifier.clone(),
+                    name: server.name.clone(),
+                };
+                if let Err(e) = PlexAuth::update_server_info(&server_info) {
+                    tracing::warn!("Failed to persist updated server URL: {}", e);
+                }
+            }
+
             state.set_status(format!("Connected to {}", server_name));
+
+            // If libraries haven't loaded yet (stale URL recovery), retry
+            if state.libraries.is_empty() {
+                tracing::info!("Retrying data load with new server URL");
+                return vec![Action::LoadInitialData];
+            }
             vec![]
         }
         Event::ServerConnectionFailed { server_name } => {
@@ -97,6 +118,7 @@ pub fn handle_app_event(
             state.auth_state.field_index = 0;
             state.auth_state.editing = false;
             state.auth_state.error_message = None;
+            state.is_fresh_login = true;
             vec![]
         }
         Event::AuthServersReady { token, username, servers, client_identifier, has_plex_pass } => {
@@ -153,18 +175,55 @@ pub fn handle_app_event(
         }
         Event::LibrariesLoaded(libs) => {
             tracing::info!("LibrariesLoaded: received {} libraries", libs.len());
-            for lib in &libs {
-                tracing::debug!("  Library: {} (key={}, type={})", lib.title, lib.key, lib.library_type);
-            }
             state.libraries = libs.into_iter().filter(|l| l.is_music()).collect();
             tracing::info!("After filtering: {} music libraries", state.libraries.len());
+
+            if state.libraries.is_empty() {
+                tracing::warn!("No music libraries found after filtering!");
+                return vec![];
+            }
+
+            // Check if active library is still valid
+            let active_valid = state.active_library.as_ref()
+                .map(|key| state.libraries.iter().any(|l| l.key == *key))
+                .unwrap_or(false);
+
+            if active_valid {
+                // Fix folder root column title (was placeholder from cache load)
+                if let Some(ref lib_key) = state.active_library.clone() {
+                    if let Some(lib) = state.libraries.iter().find(|l| l.key == *lib_key) {
+                        if let Some(ref mut fs) = state.folder_state {
+                            if let Some(root_col) = fs.columns.first_mut() {
+                                root_col.title = lib.title.clone();
+                            }
+                        }
+                    }
+                }
+
+                // If cache was loaded (artists exist), preloads are already running
+                if !state.artists.is_empty() {
+                    tracing::info!("Library already loaded from cache, skipping reload");
+                    return vec![];
+                }
+
+                // Active library valid but no cached data - start full preload
+                let lib_key = state.active_library.clone().unwrap();
+                let lib_title = state.libraries.iter()
+                    .find(|l| l.key == lib_key)
+                    .map(|l| l.title.clone())
+                    .unwrap_or_else(|| "Music".to_string());
+                tracing::info!("Active library {} has no cached data, starting preloads", lib_key);
+                helpers::preload_all_library_data(event_tx, &lib_key, &lib_title, client);
+                return vec![];
+            }
+
+            // No valid active library - pick one
             if let Some(lib) = state.libraries.first() {
                 tracing::info!("Selected music library: {} (key={})", lib.title, lib.key);
-                state.active_library = Some(lib.key.clone());
-                // Now that we have an active library, load artists
-                return vec![Action::LoadArtists];
-            } else {
-                tracing::warn!("No music libraries found after filtering!");
+                let lib_key = lib.key.clone();
+                let lib_title = lib.title.clone();
+                state.active_library = Some(lib_key.clone());
+                helpers::preload_all_library_data(event_tx, &lib_key, &lib_title, client);
             }
             vec![]
         }
@@ -174,11 +233,11 @@ pub fn handle_app_event(
             state.artists = artists;
             state.artists_loading = false;
 
-            // Initialize artist_nav if we're in Artists category
+            // Update artist_nav if we're in Artists category
             if state.browse_category == BrowseCategory::Artists && !state.artists.is_empty() {
                 let title = state.artist_view_mode.name();
                 let items = crate::app::state::BrowseItem::from_artists(&state.artists);
-                state.artist_nav.reset(title, items);
+                state.artist_nav.update_root_items(title, items);
             }
             vec![]
         }
@@ -209,9 +268,9 @@ pub fn handle_app_event(
                 });
             }
 
-            // Initialize playlist_nav with the playlists list
+            // Update playlist_nav with the playlists list
             let items = crate::app::state::BrowseItem::from_playlists(&playlists);
-            state.playlist_nav.reset("playlists", items);
+            state.playlist_nav.update_root_items("playlists", items);
             state.playlists = playlists;
             state.playlists_loading = false;
             vec![]
@@ -352,6 +411,13 @@ pub fn handle_app_event(
             vec![]
         }
         Event::TrackEnded => {
+            // Ignore stale TrackEnded events. The tick loop only sends TrackEnded
+            // when status is Playing. If status has since changed (e.g., a new station
+            // started and set Buffering/Stopped), this event is from the old track.
+            if state.playback.status != PlayStatus::Playing {
+                return vec![];
+            }
+
             // Report stop to Plex when track ends naturally
             // continuing=true because we're about to play the next track
             if let Some(track) = state.current_track().cloned() {
@@ -472,10 +538,10 @@ pub fn handle_app_event(
                 state.artists_total = count as u32;
                 state.cache_dirty = true;
                 tracing::debug!("Artists preloaded: {} items", count);
-                // Rebuild Miller columns
+                // Update Miller columns (preserves drill-down state)
                 if !state.artists.is_empty() {
                     let items = crate::app::state::BrowseItem::from_artists(&state.artists);
-                    state.artist_nav.reset(state.artist_view_mode.name(), items);
+                    state.artist_nav.update_root_items(state.artist_view_mode.name(), items);
                 }
             }
             vec![]
@@ -527,10 +593,13 @@ pub fn handle_app_event(
                 state.playlists = playlists;
                 state.cache_dirty = true;
                 tracing::debug!("Playlists preloaded: {} items", count);
-                // Rebuild Miller columns
+                // Update Miller columns
                 if !state.playlists.is_empty() {
                     let items = crate::app::state::BrowseItem::from_playlists(&state.playlists);
-                    state.playlist_nav.reset(state.playlists_mode.name(), items);
+                    state.playlist_nav.update_root_items(state.playlists_mode.name(), items);
+                } else {
+                    // Clear nav when library has no playlists (overrides stale cache data)
+                    state.playlist_nav = crate::app::state::BrowseNavigationState::new();
                 }
             }
             vec![]
@@ -548,7 +617,7 @@ pub fn handle_app_event(
                 tracing::debug!("Genres preloaded: {} items", count);
                 if state.genre_content_type == crate::app::state::GenreContentType::Genres {
                     let items = crate::app::state::BrowseItem::from_genres(&state.genres);
-                    state.genre_nav.reset("genres", items);
+                    state.genre_nav.update_root_items("genres", items);
                 }
             }
             vec![]
@@ -566,7 +635,7 @@ pub fn handle_app_event(
                 tracing::debug!("Artist genres preloaded: {} items", count);
                 if state.genre_content_type == crate::app::state::GenreContentType::ArtistGenres {
                     let items = crate::app::state::BrowseItem::from_genres(&state.artist_genres);
-                    state.genre_nav.reset("artist genres", items);
+                    state.genre_nav.update_root_items("artist genres", items);
                 }
             }
             vec![]
@@ -584,7 +653,7 @@ pub fn handle_app_event(
                 tracing::debug!("Album genres preloaded: {} items", count);
                 if state.genre_content_type == crate::app::state::GenreContentType::AlbumGenres {
                     let items = crate::app::state::BrowseItem::from_genres(&state.album_genres);
-                    state.genre_nav.reset("album genres", items);
+                    state.genre_nav.update_root_items("album genres", items);
                 }
             }
             vec![]
@@ -602,7 +671,7 @@ pub fn handle_app_event(
                 tracing::debug!("Moods preloaded: {} items", count);
                 if state.genre_content_type == crate::app::state::GenreContentType::Moods {
                     let items = crate::app::state::BrowseItem::from_genres(&state.moods);
-                    state.genre_nav.reset("moods", items);
+                    state.genre_nav.update_root_items("moods", items);
                 }
             }
             vec![]
@@ -620,7 +689,7 @@ pub fn handle_app_event(
                 tracing::debug!("Styles preloaded: {} items", count);
                 if state.genre_content_type == crate::app::state::GenreContentType::Styles {
                     let items = crate::app::state::BrowseItem::from_genres(&state.styles);
-                    state.genre_nav.reset("styles", items);
+                    state.genre_nav.update_root_items("styles", items);
                 }
             }
             vec![]
@@ -742,10 +811,10 @@ pub fn handle_app_event(
             }
 
             // Periodic cache save: save if dirty, idle for 30+ seconds, and 2+ minutes since last save
-            helpers::maybe_save_cache_async(&event_tx,state);
+            helpers::maybe_save_cache_async(event_tx, state);
 
             // Very stale background refresh (32 days, 2min idle)
-            helpers::maybe_refresh_very_stale(&event_tx,state, client);
+            helpers::maybe_refresh_very_stale(event_tx, state, client);
 
             vec![]
         }
@@ -985,7 +1054,6 @@ pub fn handle_app_event(
             ));
             // Also update the legacy state for compatibility
             state.stations = children;
-            state.stations_index = 0;
             state.clear_error();
             vec![]
         }
@@ -1034,7 +1102,7 @@ pub fn handle_app_event(
             // Auto-advance if we were stuck at end of radio list waiting for more tracks
             if added > 0
                 && state.playback_mode == PlaybackMode::Radio
-                && state.radio.track_index.map_or(false, |idx| idx + 1 >= old_len)
+                && state.radio.track_index.is_some_and(|idx| idx + 1 >= old_len)
             {
                 return vec![Action::Next];
             }
@@ -1071,9 +1139,9 @@ pub fn handle_app_event(
         // Inline list filter completed
         Event::ListFilterCompleted { version, results } => {
             // Only apply if this is the most recent filter version
-            if version == state.list_filter_version {
-                state.list_filter_loading = false;
-                state.list_filter_results = Some(results);
+            if version == state.list_filter.version {
+                state.list_filter.loading = false;
+                state.list_filter.results = Some(results);
             }
             vec![]
         }

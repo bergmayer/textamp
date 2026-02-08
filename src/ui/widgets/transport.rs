@@ -24,7 +24,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     frame.render_widget(bg, area);
 
     // Special case: Inline list filter mode shows filter box
-    if state.list_filter_active {
+    if state.list_filter.active {
         render_with_filter(frame, state, area);
         return;
     }
@@ -201,14 +201,14 @@ fn render_with_filter(frame: &mut Frame, state: &AppState, area: Rect) {
 
     // Build filter box with cursor - minimum 20 chars wide for comfortable typing
     let min_filter_width: usize = 24;
-    let query_display = if state.list_filter_loading {
-        format!("{}...", state.list_filter_query)
+    let query_display = if state.list_filter.loading {
+        format!("{}...", state.list_filter.query)
     } else {
-        format!("{}▋", state.list_filter_query)
+        format!("{}▋", state.list_filter.query)
     };
 
     // Show match count if we have results
-    let match_suffix = if let Some(ref results) = state.list_filter_results {
+    let match_suffix = if let Some(ref results) = state.list_filter.results {
         if results.has_more {
             format!(" ({}/{}+)", results.matched_indices.len(), results.total_matches)
         } else if results.matched_indices.is_empty() {

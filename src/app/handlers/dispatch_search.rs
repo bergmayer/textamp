@@ -110,14 +110,14 @@ pub async fn dispatch(
 
         // Inline list filter actions
         Action::ActivateListFilter => {
-            state.list_filter_active = true;
-            state.list_filter_query.clear();
-            state.list_filter_results = None;
-            state.list_filter_loading = false;
-            state.list_filter_selected = 0;
+            state.list_filter.active = true;
+            state.list_filter.query.clear();
+            state.list_filter.results = None;
+            state.list_filter.loading = false;
+            state.list_filter.selected = 0;
             // Capture which category and column the filter was activated on
-            state.list_filter_category = state.browse_category;
-            state.list_filter_column = match state.browse_category {
+            state.list_filter.category = state.browse_category;
+            state.list_filter.column = match state.browse_category {
                 BrowseCategory::Artists => state.artist_nav.focused_column,
                 BrowseCategory::Playlists => state.playlist_nav.focused_column,
                 BrowseCategory::Genres => {
@@ -133,19 +133,19 @@ pub async fn dispatch(
             };
         }
         Action::DeactivateListFilter => {
-            state.list_filter_active = false;
-            state.list_filter_query.clear();
-            state.list_filter_results = None;
-            state.list_filter_loading = false;
-            state.list_filter_selected = 0;
+            state.list_filter.active = false;
+            state.list_filter.query.clear();
+            state.list_filter.results = None;
+            state.list_filter.loading = false;
+            state.list_filter.selected = 0;
         }
         Action::FilteredListUp => {
             // Navigate up within filtered results and update the target column's selection
-            if state.list_filter_selected > 0 {
-                state.list_filter_selected -= 1;
+            if state.list_filter.selected > 0 {
+                state.list_filter.selected -= 1;
                 // Update the column's selected_index to match
-                if let Some(ref results) = state.list_filter_results {
-                    if let Some(&item_idx) = results.matched_indices.get(state.list_filter_selected) {
+                if let Some(ref results) = state.list_filter.results {
+                    if let Some(&item_idx) = results.matched_indices.get(state.list_filter.selected) {
                         super::key_input::update_filter_column_selection(state, item_idx);
                     }
                 }
@@ -153,10 +153,10 @@ pub async fn dispatch(
         }
         Action::FilteredListDown => {
             // Navigate down within filtered results and update the target column's selection
-            if let Some(ref results) = state.list_filter_results {
-                if state.list_filter_selected + 1 < results.matched_indices.len() {
-                    state.list_filter_selected += 1;
-                    if let Some(&item_idx) = results.matched_indices.get(state.list_filter_selected) {
+            if let Some(ref results) = state.list_filter.results {
+                if state.list_filter.selected + 1 < results.matched_indices.len() {
+                    state.list_filter.selected += 1;
+                    if let Some(&item_idx) = results.matched_indices.get(state.list_filter.selected) {
                         super::key_input::update_filter_column_selection(state, item_idx);
                     }
                 }
@@ -165,8 +165,8 @@ pub async fn dispatch(
         Action::SelectFilteredItem => {
             // Select the currently highlighted filtered item and drill down
             // Filter stays active and continues to apply to the original column
-            if let Some(ref results) = state.list_filter_results.clone() {
-                if let Some(&item_idx) = results.matched_indices.get(state.list_filter_selected) {
+            if let Some(ref results) = state.list_filter.results.clone() {
+                if let Some(&item_idx) = results.matched_indices.get(state.list_filter.selected) {
                     // Update the column's selected_index to point to this item
                     super::key_input::update_filter_column_selection(state, item_idx);
 
@@ -177,23 +177,23 @@ pub async fn dispatch(
             }
         }
         Action::AppendListFilterChar(c) => {
-            state.list_filter_query.push(c);
+            state.list_filter.query.push(c);
             // Trigger filter execution
             execute_list_filter(event_tx, state).await?;
         }
         Action::DeleteListFilterChar => {
-            state.list_filter_query.pop();
-            if state.list_filter_query.is_empty() {
-                state.list_filter_results = None;
-                state.list_filter_loading = false;
+            state.list_filter.query.pop();
+            if state.list_filter.query.is_empty() {
+                state.list_filter.results = None;
+                state.list_filter.loading = false;
             } else {
                 execute_list_filter(event_tx, state).await?;
             }
         }
         Action::ClearListFilter => {
-            state.list_filter_query.clear();
-            state.list_filter_results = None;
-            state.list_filter_loading = false;
+            state.list_filter.query.clear();
+            state.list_filter.results = None;
+            state.list_filter.loading = false;
         }
         Action::ExecuteListFilter => {
             execute_list_filter(event_tx, state).await?;
@@ -240,22 +240,22 @@ async fn execute_list_filter(
     use crate::services::{filter_browse_items, filter_folder_items, filter_stations, DEFAULT_MAX_RESULTS};
 
     // Increment version for debouncing
-    state.list_filter_version = state.list_filter_version.wrapping_add(1);
-    let version = state.list_filter_version;
-    let query = state.list_filter_query.clone();
+    state.list_filter.version = state.list_filter.version.wrapping_add(1);
+    let version = state.list_filter.version;
+    let query = state.list_filter.query.clone();
 
     if query.is_empty() {
-        state.list_filter_results = None;
-        state.list_filter_loading = false;
+        state.list_filter.results = None;
+        state.list_filter.loading = false;
         return Ok(());
     }
 
-    state.list_filter_loading = true;
+    state.list_filter.loading = true;
 
     // Use the filter's captured category and column (not the currently focused one)
     let event_tx = event_tx.clone();
-    let category = state.list_filter_category;
-    let column = state.list_filter_column;
+    let category = state.list_filter.category;
+    let column = state.list_filter.column;
 
     match category {
         BrowseCategory::Artists => {

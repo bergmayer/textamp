@@ -16,6 +16,7 @@ pub struct PlexClient {
     client_info: PlexClientInfo,
     auth_token: Option<String>,
     server_url: Option<String>,
+    cached_machine_id: Option<String>,
 }
 
 impl PlexClient {
@@ -31,6 +32,7 @@ impl PlexClient {
             client_info,
             auth_token: None,
             server_url: None,
+            cached_machine_id: None,
         }
     }
 
@@ -54,6 +56,7 @@ impl PlexClient {
             client_info,
             auth_token: token.map(|s| s.to_string()),
             server_url: Some(server_url.trim_end_matches('/').to_string()),
+            cached_machine_id: None,
         }
     }
 
@@ -70,6 +73,7 @@ impl PlexClient {
     /// Set the server URL.
     pub fn set_server(&mut self, url: String) {
         self.server_url = Some(url.trim_end_matches('/').to_string());
+        self.cached_machine_id = None;
     }
 
     /// Get the current server URL.
@@ -399,12 +403,20 @@ impl PlexClient {
     // Playlist Methods
     // ========================================================================
 
-    /// Get all playlists.
+    /// Get playlists, optionally filtered by library section.
+    ///
+    /// When `section_id` is provided, only playlists belonging to that library
+    /// are returned (uses Plex `sectionID` filter). Without it, returns all
+    /// audio playlists server-wide.
     ///
     /// Deduplicates smart playlists (like "❤️ Tracks", "Recently Added") which
     /// Plex creates once per music library with identical titles.
-    pub async fn get_playlists(&self) -> Result<Vec<Playlist>, ApiError> {
-        let response: PlaylistsResponse = self.get(EP_PLAYLISTS_AUDIO).await?;
+    pub async fn get_playlists(&self, section_id: Option<&str>) -> Result<Vec<Playlist>, ApiError> {
+        let endpoint = match section_id {
+            Some(id) => format!("{}&sectionID={}", EP_PLAYLISTS_AUDIO, id),
+            None => EP_PLAYLISTS_AUDIO.to_string(),
+        };
+        let response: PlaylistsResponse = self.get(&endpoint).await?;
         let mut playlists = response.media_container.metadata;
 
         // Deduplicate smart playlists by title (Plex creates one per library)
@@ -924,9 +936,9 @@ impl PlexClient {
     }
 
     /// Get radio stations for a music library.
-    /// Returns the 7 standard Plex station types.
+    /// Returns the 8 standard Plex station types.
     pub async fn get_stations(&self, library_key: &str) -> Result<Vec<Station>, ApiError> {
-        // Plex has 7 standard station types for music libraries.
+        // Plex has 8 station types for music libraries (7 standard + On This Day).
         // Rather than parse the hubs API (which returns expanded mood/style lists),
         // we construct these directly.
         let stations = vec![
@@ -967,6 +979,15 @@ impl PlexClient {
                 description: Some("Play a random album from your library".to_string()),
             },
             Station {
+                key: format!("{}/{}/stations/onThisDay", EP_LIBRARY_SECTIONS, library_key),
+                title: "On This Day".to_string(),
+                station_type: "station".to_string(),
+                identifier: Some("onThisDay".to_string()),
+                thumb: None,
+                art: None,
+                description: Some("Albums released on today's date".to_string()),
+            },
+            Station {
                 key: format!("{}/{}/mood", EP_LIBRARY_SECTIONS, library_key),
                 title: "Mood Radio".to_string(),
                 station_type: "station.category".to_string(),
@@ -995,7 +1016,7 @@ impl PlexClient {
             },
         ];
 
-        tracing::debug!("Returning {} standard station types", stations.len());
+        tracing::debug!("Returning {} station types", stations.len());
         Ok(stations)
     }
 
@@ -1027,7 +1048,7 @@ impl PlexClient {
     // =============================================================================
 
     /// Create a play queue from a station.
-    pub async fn create_station_queue(&self, station_key: &str) -> Result<Vec<Track>, ApiError> {
+    pub async fn create_station_queue(&mut self, station_key: &str) -> Result<Vec<Track>, ApiError> {
         tracing::debug!("Creating station queue for key: {}", station_key);
 
         // Handle filtered stations (mood/style/decade with id/title parameters)
@@ -1044,54 +1065,71 @@ impl PlexClient {
 
         tracing::debug!("Station type: {}, library: {}", station_type, library_key);
 
-        // Try to create tracks based on station type using direct queries
-        // This is more reliable than the playQueue endpoint which may not work on all servers
+        // Try to create tracks based on station type.
+        // For library/deepCuts/randomAlbum, try PlayQueue API first for server-curated results,
+        // then fall back to direct queries if PlayQueue fails or returns empty.
         match *station_type {
-            "library" => {
-                // Library Radio: random tracks from library
-                let path = format!(
-                    "{}/{}/all?type={}&sort=random&limit={}",
-                    EP_LIBRARY_SECTIONS, library_key, TYPE_TRACK, DEFAULT_SEARCH_LIMIT
-                );
-                let response: TracksResponse = self.get(&path).await?;
-                tracing::info!("Library radio: {} tracks", response.media_container.metadata.len());
-                Ok(response.media_container.metadata)
-            }
-            "deepCuts" => {
-                // Deep Cuts: tracks with low play count, sorted by plays ascending then random
-                let path = format!(
-                    "{}/{}/all?type={}&sort=viewCount:asc,random&limit={}",
-                    EP_LIBRARY_SECTIONS, library_key, TYPE_TRACK, DEFAULT_SEARCH_LIMIT
-                );
-                let response: TracksResponse = self.get(&path).await?;
-                tracing::info!("Deep cuts radio: {} tracks", response.media_container.metadata.len());
-                Ok(response.media_container.metadata)
+            "library" | "deepCuts" | "randomAlbum" => {
+                // Try PlayQueue API first (server has access to popularity, ratings, play history)
+                match self.create_station_queue_via_playqueue(station_key).await {
+                    Ok(tracks) if !tracks.is_empty() => {
+                        tracing::info!("{} radio via PlayQueue: {} tracks", station_type, tracks.len());
+                        return Ok(tracks);
+                    }
+                    Ok(_) => tracing::debug!("{} PlayQueue returned no tracks, trying fallback", station_type),
+                    Err(e) => tracing::debug!("{} PlayQueue failed ({}), trying fallback", station_type, e),
+                }
+
+                // Fallback to direct queries
+                match *station_type {
+                    "library" => {
+                        let path = format!(
+                            "{}/{}/all?type={}&sort=random&limit={}",
+                            EP_LIBRARY_SECTIONS, library_key, TYPE_TRACK, DEFAULT_SEARCH_LIMIT
+                        );
+                        let response: TracksResponse = self.get(&path).await?;
+                        tracing::info!("Library radio fallback: {} tracks", response.media_container.metadata.len());
+                        Ok(response.media_container.metadata)
+                    }
+                    "deepCuts" => {
+                        let path = format!(
+                            "{}/{}/all?type={}&sort=viewCount:asc,random&limit={}",
+                            EP_LIBRARY_SECTIONS, library_key, TYPE_TRACK, DEFAULT_SEARCH_LIMIT
+                        );
+                        let response: TracksResponse = self.get(&path).await?;
+                        tracing::info!("Deep cuts radio fallback: {} tracks", response.media_container.metadata.len());
+                        Ok(response.media_container.metadata)
+                    }
+                    "randomAlbum" => {
+                        let albums_path = format!(
+                            "{}/{}/all?type={}&sort=random&limit=1",
+                            EP_LIBRARY_SECTIONS, library_key, TYPE_ALBUM
+                        );
+                        let albums_resp: AlbumsResponse = self.get(&albums_path).await?;
+
+                        if let Some(album) = albums_resp.media_container.metadata.first() {
+                            let tracks_path = format!(
+                                "{}/{}/children",
+                                EP_LIBRARY_METADATA, album.rating_key
+                            );
+                            let tracks_resp: TracksResponse = self.get(&tracks_path).await?;
+                            tracing::info!("Random album radio fallback: {} - {} tracks", album.title, tracks_resp.media_container.metadata.len());
+                            Ok(tracks_resp.media_container.metadata)
+                        } else {
+                            tracing::warn!("No albums found in library");
+                            Ok(vec![])
+                        }
+                    }
+                    _ => unreachable!(),
+                }
             }
             "timeTravel" => {
                 // Time Travel Radio: chronological journey through your library's history
-                // Starts from earliest decades, plays a few tracks from each, then jumps forward
                 return self.create_time_travel_queue(library_key).await;
             }
-            "randomAlbum" => {
-                // Random Album: get a random album and return its tracks
-                let albums_path = format!(
-                    "{}/{}/all?type={}&sort=random&limit=1",
-                    EP_LIBRARY_SECTIONS, library_key, TYPE_ALBUM
-                );
-                let albums_resp: AlbumsResponse = self.get(&albums_path).await?;
-
-                if let Some(album) = albums_resp.media_container.metadata.first() {
-                    let tracks_path = format!(
-                        "{}/{}/children",
-                        EP_LIBRARY_METADATA, album.rating_key
-                    );
-                    let tracks_resp: TracksResponse = self.get(&tracks_path).await?;
-                    tracing::info!("Random album radio: {} - {} tracks", album.title, tracks_resp.media_container.metadata.len());
-                    Ok(tracks_resp.media_container.metadata)
-                } else {
-                    tracing::warn!("No albums found in library");
-                    Ok(vec![])
-                }
+            "onThisDay" => {
+                // On This Day: albums released on today's date
+                return self.create_on_this_day_queue(library_key).await;
             }
             _ => {
                 // For other station types, try the playQueue API as fallback
@@ -1101,9 +1139,9 @@ impl PlexClient {
     }
 
     /// Create station queue using the playQueue API (may not work on all servers).
-    async fn create_station_queue_via_playqueue(&self, station_key: &str) -> Result<Vec<Track>, ApiError> {
-        let server = self.require_server()?;
-        let token = self.require_token()?;
+    async fn create_station_queue_via_playqueue(&mut self, station_key: &str) -> Result<Vec<Track>, ApiError> {
+        let server = self.require_server()?.to_string();
+        let token = self.require_token()?.to_string();
 
         let machine_id = self.get_server_machine_id().await?;
         tracing::debug!("Server machine ID: {}", machine_id);
@@ -1152,7 +1190,7 @@ impl PlexClient {
 
     /// Create a filtered play queue for mood/style/decade stations.
     /// Uses the playQueue API which is what Plexamp uses for these stations.
-    async fn create_filtered_station_queue(&self, station_key: &str) -> Result<Vec<Track>, ApiError> {
+    async fn create_filtered_station_queue(&mut self, station_key: &str) -> Result<Vec<Track>, ApiError> {
         tracing::info!("Creating filtered station queue for: {}", station_key);
 
         // Try playQueue API first (this is what Plexamp uses)
@@ -1283,7 +1321,7 @@ impl PlexClient {
     ///
     /// If PlayQueue fails, falls back to a LIMITED manual approach starting from earliest decades.
     /// NEVER make more than 10 sequential network calls for any station.
-    async fn create_time_travel_queue(&self, library_key: &str) -> Result<Vec<Track>, ApiError> {
+    async fn create_time_travel_queue(&mut self, library_key: &str) -> Result<Vec<Track>, ApiError> {
         // Try PlayQueue API first (preferred - server does the work)
         let station_key = format!("{}/{}/stations/timeTravel", EP_LIBRARY_SECTIONS, library_key);
 
@@ -1399,15 +1437,110 @@ impl PlexClient {
         Ok(all_tracks)
     }
 
+    /// Create On This Day queue from the music hubs API.
+    /// Finds the "music.onthisday" hub and fetches tracks from its albums.
+    async fn create_on_this_day_queue(&self, library_key: &str) -> Result<Vec<Track>, ApiError> {
+        let hubs = self.get_music_hubs(library_key).await?;
+
+        // Find the On This Day hub
+        let otd_hub = hubs.into_iter().find(|h| h.hub_identifier == "music.onthisday");
+        let hub = match otd_hub {
+            Some(h) => h,
+            None => {
+                tracing::info!("On This Day: no hub found (no albums released on today's date)");
+                return Ok(vec![]);
+            }
+        };
+
+        if hub.metadata.is_empty() {
+            tracing::info!("On This Day: hub found but no albums");
+            return Ok(vec![]);
+        }
+
+        tracing::info!("On This Day: found {} albums in hub", hub.metadata.len());
+
+        // Fetch tracks from each album (limit to 10 API calls per design guidelines)
+        let mut all_tracks = Vec::new();
+        for album_meta in hub.metadata.iter().take(10) {
+            match self.get_album_tracks(&album_meta.rating_key).await {
+                Ok(tracks) => {
+                    tracing::debug!("On This Day: {} - {} tracks", album_meta.title, tracks.len());
+                    all_tracks.extend(tracks);
+                }
+                Err(e) => {
+                    tracing::warn!("On This Day: failed to get tracks for '{}': {}", album_meta.title, e);
+                }
+            }
+        }
+
+        tracing::info!("On This Day: {} total tracks from {} albums",
+            all_tracks.len(), hub.metadata.len().min(10));
+
+        Ok(all_tracks)
+    }
+
+    /// Create an artist radio queue using the PlayQueue API.
+    /// This includes tracks from similar artists (server-side MusicBrainz/Last.fm data).
+    pub async fn create_artist_radio_queue(&mut self, artist_rating_key: &str) -> Result<Vec<Track>, ApiError> {
+        let server = self.require_server()?.to_string();
+        let token = self.require_token()?.to_string();
+
+        let machine_id = self.get_server_machine_id().await?;
+
+        let uri = format!(
+            "server://{}/com.plexapp.plugins.library/library/metadata/{}",
+            machine_id, artist_rating_key
+        );
+
+        let path = format!(
+            "{}?type=audio&shuffle=1&continuous=1&uri={}",
+            EP_PLAY_QUEUES,
+            urlencoding::encode(&uri)
+        );
+
+        let url = format!("{}{}&{}={}", server, path, HEADER_PLEX_TOKEN, token);
+
+        tracing::debug!("Artist radio PlayQueue: POST {}", path);
+
+        let response = self
+            .http
+            .post(&url)
+            .headers(self.build_headers()?)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let message = response.text().await.unwrap_or_default();
+            tracing::error!("Artist radio PlayQueue failed: {} - {}", status, message);
+            return Err(ApiError::ServerError { status, message });
+        }
+
+        let text = response.text().await?;
+        let queue: PlayQueueResponse = serde_json::from_str(&text).map_err(|e| {
+            tracing::error!("Artist radio PlayQueue parse error: {} - Response: {}", e, &text[..text.len().min(500)]);
+            ApiError::ParseError(format!("Artist radio PlayQueue parse error: {}", e))
+        })?;
+
+        tracing::info!("Artist radio PlayQueue: {} tracks", queue.media_container.metadata.len());
+        Ok(queue.media_container.metadata)
+    }
+
     /// Get the server's machine identifier (needed for playQueue URIs).
-    async fn get_server_machine_id(&self) -> Result<String, ApiError> {
+    /// Caches the result to avoid redundant network calls.
+    async fn get_server_machine_id(&mut self) -> Result<String, ApiError> {
+        if let Some(ref id) = self.cached_machine_id {
+            return Ok(id.clone());
+        }
         let response: serde_json::Value = self.get("/").await?;
-        response
+        let id = response
             .get("MediaContainer")
             .and_then(|mc| mc.get("machineIdentifier"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
-            .ok_or_else(|| ApiError::ParseError("Could not get server machine ID".to_string()))
+            .ok_or_else(|| ApiError::ParseError("Could not get server machine ID".to_string()))?;
+        self.cached_machine_id = Some(id.clone());
+        Ok(id)
     }
 
     // ========================================================================

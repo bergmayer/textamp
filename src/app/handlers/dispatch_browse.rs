@@ -42,7 +42,6 @@ pub async fn dispatch(
                         // Keep legacy state in sync
                         state.stations = stations;
                         state.stations_loading = false;
-                        state.stations_index = 0;
                     }
                     Err(e) => {
                         state.set_error(format!("Failed to load stations: {}", e));

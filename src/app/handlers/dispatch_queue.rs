@@ -177,7 +177,7 @@ pub async fn dispatch(
             }
             // Flush and re-prefetch based on new order
             audio.track_cache.flush();
-            let upcoming = cache::get_upcoming_tracks(state);
+            let upcoming = helpers::get_upcoming_tracks(state);
             cache::trigger_prefetch(&audio.track_cache, &upcoming, client);
         }
         Action::RemoveFromQueue(idx) => {

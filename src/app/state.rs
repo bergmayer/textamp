@@ -466,6 +466,22 @@ impl BrowseNavigationState {
         self.loading = false;
     }
 
+    /// Update root column items without resetting navigation.
+    /// Preserves drill-down columns, selections, and focused column.
+    pub fn update_root_items(&mut self, title: impl Into<String>, items: Vec<BrowseItem>) {
+        if let Some(col) = self.columns.get_mut(0) {
+            col.title = title.into();
+            let old_idx = col.selected_index;
+            col.items = items;
+            col.selected_index = old_idx.min(col.items.len().saturating_sub(1));
+        } else {
+            // No columns yet - initialize
+            self.columns = vec![BrowseColumn::new(title, items)];
+            self.focused_column = 0;
+        }
+        self.loading = false;
+    }
+
     /// Check if empty (no columns).
     pub fn is_empty(&self) -> bool {
         self.columns.is_empty()
@@ -520,6 +536,9 @@ pub struct AppState {
 
     // Authentication flow state
     pub auth_state: AuthState,
+    /// True when user went through the login form (no stored credentials).
+    /// Used to ignore saved default_library and prefer "Music" by name.
+    pub is_fresh_login: bool,
 
     // Navigation (musikcube-style)
     pub view: View,
@@ -670,7 +689,6 @@ pub struct AppState {
     // Stations state (Plexamp-style radio stations) - legacy, use station_nav instead
     pub stations: Vec<Station>,
     pub stations_loading: bool,
-    pub stations_index: usize,
 
     // Theme
     pub theme: ThemeName,
@@ -705,15 +723,8 @@ pub struct AppState {
     // Confirmation dialog
     pub confirm_dialog: Option<ConfirmDialog>,
 
-    // Inline list filter state
-    pub list_filter_active: bool,
-    pub list_filter_query: String,
-    pub list_filter_version: u64,
-    pub list_filter_loading: bool,
-    pub list_filter_results: Option<ListFilterResults>,
-    pub list_filter_selected: usize,  // Index into matched_indices (which filtered result is selected)
-    pub list_filter_category: BrowseCategory,  // Which category the filter applies to
-    pub list_filter_column: usize,  // Which column index the filter applies to
+    // Inline list filter state (/ key in browse view)
+    pub list_filter: ListFilterState,
 
     // Search popup state (Ctrl+F - floating dialog, not a full view)
     pub search_popup_active: bool,
@@ -1040,6 +1051,7 @@ impl AppState {
             active_library: None,
             available_servers: Vec::new(),
             auth_state: AuthState::default(),
+            is_fresh_login: false,
             view: View::Auth,
             previous_view: None,
             help_scroll: 0,
@@ -1125,7 +1137,6 @@ impl AppState {
             station_nav: StationNavigationState::default(),
             stations: Vec::new(),
             stations_loading: false,
-            stations_index: 0,
             theme: ThemeName::default(),
             adventure: AdventureState::default(),
             now_playing_mode: NowPlayingMode::default(),
@@ -1143,14 +1154,7 @@ impl AppState {
             toast_message: None,
             toast_show_time: None,
             confirm_dialog: None,
-            list_filter_active: false,
-            list_filter_query: String::new(),
-            list_filter_version: 0,
-            list_filter_loading: false,
-            list_filter_results: None,
-            list_filter_selected: 0,
-            list_filter_category: BrowseCategory::Artists,
-            list_filter_column: 0,
+            list_filter: ListFilterState::default(),
             search_popup_active: false,
             library_picker_active: false,
             library_picker_index: 0,
@@ -1191,11 +1195,8 @@ impl AppState {
     /// Returns None if no notification should be shown.
     pub fn current_notification(&self) -> Option<Notification> {
         // Priority 1: Adventure mode notifications (ongoing)
-        if self.adventure.active {
-            if self.adventure.generating {
-                return Some(Notification::ongoing("🌟 Generating sonic bridge..."));
-            }
-            // Don't show adventure selection messages here - they're in the transport text
+        if self.adventure.active && self.adventure.generating {
+            return Some(Notification::ongoing("🌟 Generating sonic bridge..."));
         }
 
         // Priority 2: Library loading (ongoing)
@@ -2049,6 +2050,37 @@ pub struct ConfirmDialog {
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
     RefreshCache,
+}
+
+/// Inline list filter state (/ key in browse view).
+#[derive(Debug, Clone)]
+pub struct ListFilterState {
+    pub active: bool,
+    pub query: String,
+    pub version: u64,
+    pub loading: bool,
+    pub results: Option<ListFilterResults>,
+    /// Index into matched_indices (which filtered result is selected).
+    pub selected: usize,
+    /// Which category the filter applies to.
+    pub category: BrowseCategory,
+    /// Which column index the filter applies to.
+    pub column: usize,
+}
+
+impl Default for ListFilterState {
+    fn default() -> Self {
+        Self {
+            active: false,
+            query: String::new(),
+            version: 0,
+            loading: false,
+            results: None,
+            selected: 0,
+            category: BrowseCategory::Artists,
+            column: 0,
+        }
+    }
 }
 
 /// Results from inline list filter.

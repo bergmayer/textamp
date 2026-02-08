@@ -157,7 +157,7 @@ pub async fn dispatch(
             // Generate new session ID for this playback context
             state.plex_session_id = Some(helpers::generate_plex_session_id());
 
-            // Start sonic artist radio - play artist's tracks then similar
+            // Start sonic artist radio
             state.radio_state.mode = RadioMode::Artist;
             state.radio_state.seed_track_key = Some(artist_key.clone());
             state.radio_state.seed_title = title;
@@ -165,15 +165,31 @@ pub async fn dispatch(
             state.radio_state.fetching = true;
             state.view = View::NowPlaying;
 
-            // Load artist's tracks
-            match client.get_artist_all_tracks(&artist_key).await {
-                Ok(tracks) => {
+            // Try PlayQueue API first (includes tracks from similar artists)
+            let mut got_tracks = false;
+            match client.create_artist_radio_queue(&artist_key).await {
+                Ok(tracks) if !tracks.is_empty() => {
+                    tracing::info!("Artist radio via PlayQueue: {} tracks (includes similar artists)", tracks.len());
                     state.queue = tracks;
                     state.queue_index = Some(0);
                     helpers::play_current_track(event_tx, state, client, audio).await;
+                    got_tracks = true;
                 }
-                Err(e) => {
-                    state.set_error(format!("Failed to load artist tracks: {}", e));
+                Ok(_) => tracing::debug!("Artist radio PlayQueue returned no tracks, falling back"),
+                Err(e) => tracing::debug!("Artist radio PlayQueue failed ({}), falling back", e),
+            }
+
+            // Fallback: load artist's own tracks
+            if !got_tracks {
+                match client.get_artist_all_tracks(&artist_key).await {
+                    Ok(tracks) => {
+                        state.queue = tracks;
+                        state.queue_index = Some(0);
+                        helpers::play_current_track(event_tx, state, client, audio).await;
+                    }
+                    Err(e) => {
+                        state.set_error(format!("Failed to load artist tracks: {}", e));
+                    }
                 }
             }
             state.radio_state.fetching = false;
@@ -240,6 +256,11 @@ pub async fn dispatch(
                 helpers::report_playback_stop_to_plex(&current, state.playback.position_ms, true, state.plex_session_id.clone(), client);
             }
 
+            // Stop audio immediately to prevent stale TrackEnded events from the
+            // old track being processed after the new station starts playing.
+            audio.stop();
+            state.playback.status = crate::app::state::PlayStatus::Stopped;
+
             // Generate new session ID for this playback context
             state.plex_session_id = Some(helpers::generate_plex_session_id());
 
@@ -269,7 +290,7 @@ pub async fn dispatch(
 
             // Spawn background task for station queue creation (non-blocking)
             let tx = event_tx.clone();
-            let client_clone = client.clone();
+            let mut client_clone = client.clone();
             let sk = station_key.clone();
             let st = station_title.clone();
             let lib_key = state.active_library.clone();
@@ -321,7 +342,7 @@ pub async fn dispatch(
 
             // Spawn background task for child loading (non-blocking)
             let tx = event_tx.clone();
-            let client_clone = client.clone();
+            let mut client_clone = client.clone();
             let sk = station_key.clone();
             let st = station_title.clone();
             tokio::spawn(async move {
@@ -379,7 +400,6 @@ pub async fn dispatch(
                 // Update legacy state to match focused column
                 if let Some(col) = state.station_nav.focused() {
                     state.stations = col.stations.clone();
-                    state.stations_index = col.selected_index;
                 }
             }
         }

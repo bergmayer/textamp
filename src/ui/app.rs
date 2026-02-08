@@ -15,7 +15,7 @@
 //! │ ^A artists │ ^P playlists │ ^N queue │ ^S similar │ ? │
 //! └──────────────────────────────────────────────────────────────┘
 
-use crate::app::state::{View, Focus, BrowseCategory, GenreContentType, InputDialog, ConfirmDialog};
+use crate::app::state::{View, BrowseCategory, GenreContentType, InputDialog, ConfirmDialog};
 use crate::app::AppState;
 use crate::services::NavigationService;
 use super::layout::{AppLayout, FullScreenLayout, centered_rect};
@@ -87,38 +87,32 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
     match state.browse_category {
         BrowseCategory::Artists => {
             // Get filter info if filter applies to this category
-            let (filter_results, filter_column) = if state.list_filter_active
-                && state.list_filter_category == BrowseCategory::Artists {
-                (state.list_filter_results.as_ref(), Some(state.list_filter_column))
+            let (filter_results, filter_column) = if state.list_filter.active
+                && state.list_filter.category == BrowseCategory::Artists {
+                (state.list_filter.results.as_ref(), Some(state.list_filter.column))
             } else {
                 (None, None)
             };
 
             // Artists view with dynamic Miller columns
-            if !state.artist_nav.is_empty() {
-                let title = state.artist_view_mode.name();
-                render_browse_miller_columns(
-                    frame,
-                    state,
-                    &state.artist_nav,
-                    title,
-                    current_track_key,
-                    filter_results,
-                    filter_column,
-                    layout.left_panel,
-                    layout.right_panel,
-                );
-            } else {
-                // Fallback to old rendering until nav is populated
-                render_category_list(frame, state, layout.left_panel);
-                render_right_panel(frame, state, layout.right_panel);
-            }
+            let title = state.artist_view_mode.name();
+            render_browse_miller_columns(
+                frame,
+                state,
+                &state.artist_nav,
+                title,
+                current_track_key,
+                filter_results,
+                filter_column,
+                layout.left_panel,
+                layout.right_panel,
+            );
         }
         BrowseCategory::Playlists => {
             // Get filter info if filter applies to this category
-            let (filter_results, filter_column) = if state.list_filter_active
-                && state.list_filter_category == BrowseCategory::Playlists {
-                (state.list_filter_results.as_ref(), Some(state.list_filter_column))
+            let (filter_results, filter_column) = if state.list_filter.active
+                && state.list_filter.category == BrowseCategory::Playlists {
+                (state.list_filter.results.as_ref(), Some(state.list_filter.column))
             } else {
                 (None, None)
             };
@@ -126,7 +120,7 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
             if state.playlists_mode == crate::app::state::PlaylistsMode::Stations {
                 // Stations mode - render station_nav Miller columns
                 render_station_view(frame, state, filter_results, filter_column, layout.left_panel, layout.right_panel);
-            } else if !state.playlist_nav.is_empty() {
+            } else {
                 // Playlists view with dynamic Miller columns
                 let title = state.playlists_mode.name();
                 render_browse_miller_columns(
@@ -140,19 +134,15 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
                     layout.left_panel,
                     layout.right_panel,
                 );
-            } else {
-                // Fallback to old rendering until nav is populated
-                render_category_list(frame, state, layout.left_panel);
-                render_right_panel(frame, state, layout.right_panel);
             }
         }
         BrowseCategory::Genres => {
             // Genres cycle includes Stations
             if state.genre_content_type == GenreContentType::Stations {
                 // Get filter info if filter applies to stations (Genres category with Stations type)
-                let (filter_results, filter_column) = if state.list_filter_active
-                    && state.list_filter_category == BrowseCategory::Genres {
-                    (state.list_filter_results.as_ref(), Some(state.list_filter_column))
+                let (filter_results, filter_column) = if state.list_filter.active
+                    && state.list_filter.category == BrowseCategory::Genres {
+                    (state.list_filter.results.as_ref(), Some(state.list_filter.column))
                 } else {
                     (None, None)
                 };
@@ -161,9 +151,9 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
                 render_station_view(frame, state, filter_results, filter_column, layout.left_panel, layout.right_panel);
             } else {
                 // Get filter info if filter applies to this category
-                let (filter_results, filter_column) = if state.list_filter_active
-                    && state.list_filter_category == BrowseCategory::Genres {
-                    (state.list_filter_results.as_ref(), Some(state.list_filter_column))
+                let (filter_results, filter_column) = if state.list_filter.active
+                    && state.list_filter.category == BrowseCategory::Genres {
+                    (state.list_filter.results.as_ref(), Some(state.list_filter.column))
                 } else {
                     (None, None)
                 };
@@ -185,9 +175,9 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
         }
         BrowseCategory::Folders => {
             // Get filter info if filter applies to this category
-            let (filter_results, filter_column) = if state.list_filter_active
-                && state.list_filter_category == BrowseCategory::Folders {
-                (state.list_filter_results.as_ref(), Some(state.list_filter_column))
+            let (filter_results, filter_column) = if state.list_filter.active
+                && state.list_filter.category == BrowseCategory::Folders {
+                (state.list_filter.results.as_ref(), Some(state.list_filter.column))
             } else {
                 (None, None)
             };
@@ -926,389 +916,6 @@ fn render_station_view(
                 );
             }
         }
-    }
-}
-
-/// Render the category list (left panel).
-fn render_category_list(frame: &mut Frame, state: &AppState, area: Rect) {
-    let t = theme();
-    let is_focused = state.focus == Focus::Left;
-    let category = state.browse_category;
-
-    // Title shows category type, with mode indicator for genres, artists, and playlists
-    let title = match category {
-        BrowseCategory::Genres => {
-            format!(" {} ", state.genre_content_type.name())
-        }
-        BrowseCategory::Artists => {
-            format!(" {} ", state.artist_view_mode.name())
-        }
-        BrowseCategory::Playlists => {
-            format!(" {} ", state.playlists_mode.name())
-        }
-        _ => format!(" {} ", category.name()),
-    };
-
-    let border_style = if is_focused {
-        Style::default().fg(t.colors.border_focused)
-    } else {
-        Style::default().fg(t.colors.border)
-    };
-
-    let block = Block::default()
-        .title(title)
-        .title_style(if is_focused {
-            Style::default().fg(t.colors.fg_accent)
-        } else {
-            Style::default().fg(t.colors.fg_accent)
-        })
-        .borders(Borders::ALL)
-        .border_style(border_style)
-        .style(Style::default().bg(t.colors.bg_primary));
-
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    // Get items for current category
-    let (items, selected) = match category {
-        BrowseCategory::Artists => {
-            use crate::app::state::ArtistViewMode;
-            // Show artists or albums based on view mode
-            match state.artist_view_mode {
-                ArtistViewMode::Artist | ArtistViewMode::AlbumArtist => {
-                    let items: Vec<ListItem> = state.artists.iter().enumerate().map(|(i, artist)| {
-                        let is_selected = i == state.list_state.artists_index;
-                        let style = if is_selected && is_focused {
-                            Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
-                        } else if is_selected {
-                            Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
-                        } else {
-                            Style::default().fg(t.colors.fg_primary)
-                        };
-                        ListItem::new(artist.title.as_str()).style(style)
-                    }).collect();
-                    (items, state.list_state.artists_index)
-                }
-                ArtistViewMode::Album => {
-                    // Show albums by title
-                    let items: Vec<ListItem> = state.albums.iter().enumerate().map(|(i, album)| {
-                        let is_selected = i == state.list_state.albums_index;
-                        let style = if is_selected && is_focused {
-                            Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
-                        } else if is_selected {
-                            Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
-                        } else {
-                            Style::default().fg(t.colors.fg_primary)
-                        };
-                        // Show album title with artist
-                        let artist = album.parent_title.as_deref().unwrap_or("Unknown");
-                        ListItem::new(format!("{} - {}", album.title, artist)).style(style)
-                    }).collect();
-                    (items, state.list_state.albums_index)
-                }
-            }
-        }
-        BrowseCategory::Playlists => {
-            use crate::app::state::PlaylistsMode;
-            match state.playlists_mode {
-                PlaylistsMode::All => {
-                    let items: Vec<ListItem> = state.playlists.iter().enumerate().map(|(i, playlist)| {
-                        let is_selected = i == state.list_state.playlists_index;
-                        let style = if is_selected && is_focused {
-                            Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
-                        } else if is_selected {
-                            Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
-                        } else {
-                            Style::default().fg(t.colors.fg_primary)
-                        };
-                        ListItem::new(playlist.title.as_str()).style(style)
-                    }).collect();
-                    (items, state.list_state.playlists_index)
-                }
-                PlaylistsMode::Stations | PlaylistsMode::RecentlyPlayed => {
-                    // Stations and RecentlyPlayed are rendered via Miller columns, not this fallback
-                    (vec![], 0)
-                }
-                PlaylistsMode::RecentlyAdded => {
-                    let items: Vec<ListItem> = state.recently_added_albums.iter().enumerate().map(|(i, album)| {
-                        let is_selected = i == state.list_state.playlists_index;
-                        let style = if is_selected && is_focused {
-                            Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
-                        } else if is_selected {
-                            Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
-                        } else {
-                            Style::default().fg(t.colors.fg_primary)
-                        };
-                        let artist = album.artist_name();
-                        ListItem::new(format!("{} - {}", album.title, artist)).style(style)
-                    }).collect();
-                    (items, state.list_state.playlists_index)
-                }
-            }
-        }
-        BrowseCategory::Genres => {
-            // Show genres, normalized genres, or moods based on current content type
-            let items: Vec<ListItem> = state.current_genre_list().iter().enumerate().map(|(i, genre)| {
-                let is_selected = i == state.genres_index;
-                let style = if is_selected && is_focused {
-                    Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
-                } else if is_selected {
-                    Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
-                } else {
-                    Style::default().fg(t.colors.fg_primary)
-                };
-                ListItem::new(genre.title.as_str()).style(style)
-            }).collect();
-            (items, state.genres_index)
-        }
-        BrowseCategory::Folders => {
-            // Folders category uses the folder view, not category list
-            // Return empty - folder view is rendered separately
-            (vec![], 0)
-        }
-    };
-
-    if items.is_empty() {
-        let msg = if state.artists_loading || state.albums_loading || state.playlists_loading || state.genres_loading {
-            "Loading..."
-        } else if category == BrowseCategory::Folders {
-            "" // Folders handled separately
-        } else {
-            "No items"
-        };
-        let empty = Paragraph::new(msg)
-            .style(Style::default().fg(t.colors.fg_muted))
-            .alignment(Alignment::Center);
-        frame.render_widget(empty, inner);
-    } else {
-        // Calculate visible window
-        let visible_height = inner.height as usize;
-        let total = items.len();
-        let scroll_offset = NavigationService::calc_scroll_offset(selected, visible_height, total);
-
-        let visible_items: Vec<ListItem> = items.into_iter()
-            .skip(scroll_offset)
-            .take(visible_height)
-            .collect();
-
-        let list = List::new(visible_items);
-        frame.render_widget(list, inner);
-
-        // Position indicator
-        if total > visible_height {
-            let footer = format!("{}/{}", selected + 1, total);
-            let footer_area = Rect::new(
-                area.x + area.width.saturating_sub(footer.len() as u16 + 2),
-                area.y + area.height - 1,
-                footer.len() as u16 + 1,
-                1,
-            );
-            frame.render_widget(
-                Paragraph::new(footer).style(Style::default().fg(t.colors.fg_muted)),
-                footer_area,
-            );
-        }
-    }
-}
-
-/// Render the right panel (albums or tracks depending on mode).
-fn render_right_panel(frame: &mut Frame, state: &AppState, area: Rect) {
-    use crate::app::state::RightPanelMode;
-
-    let t = theme();
-    let is_focused = state.focus == Focus::Right;
-
-    // Determine title based on mode
-    let title = match state.right_panel_mode {
-        RightPanelMode::Empty => " select item ".to_string(),
-        RightPanelMode::ArtistAlbums => format!(" {} albums ", state.selected_artist_name),
-        RightPanelMode::AlbumTracks => format!(" {} ", state.selected_album_title),
-        RightPanelMode::CategoryTracks => " tracks ".to_string(),
-        RightPanelMode::CategoryAlbums => " albums ".to_string(),
-    };
-
-    let border_style = if is_focused {
-        Style::default().fg(t.colors.border_focused)
-    } else {
-        Style::default().fg(t.colors.border)
-    };
-
-    let block = Block::default()
-        .title(title)
-        .title_style(if is_focused {
-            Style::default().fg(t.colors.fg_accent)
-        } else {
-            Style::default().fg(t.colors.fg_accent)
-        })
-        .borders(Borders::ALL)
-        .border_style(border_style)
-        .style(Style::default().bg(t.colors.bg_primary));
-
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    if state.right_panel_loading {
-        let loading = Paragraph::new("Loading...")
-            .style(Style::default().fg(t.colors.fg_muted))
-            .alignment(Alignment::Center);
-        frame.render_widget(loading, inner);
-        return;
-    }
-
-    match state.right_panel_mode {
-        RightPanelMode::Empty => {
-            let msg = format!("Select {} to view content", state.browse_category.name());
-            let empty = Paragraph::new(msg)
-                .style(Style::default().fg(t.colors.fg_muted))
-                .alignment(Alignment::Center);
-            frame.render_widget(empty, inner);
-        }
-        RightPanelMode::ArtistAlbums => {
-            render_album_list(frame, state, inner, is_focused);
-        }
-        RightPanelMode::AlbumTracks | RightPanelMode::CategoryTracks => {
-            let tracks = if state.right_panel_mode == RightPanelMode::AlbumTracks {
-                &state.selected_album_tracks
-            } else {
-                &state.selected_album_tracks // For category tracks too
-            };
-
-            if tracks.is_empty() {
-                let empty = Paragraph::new("No tracks")
-                    .style(Style::default().fg(t.colors.fg_muted))
-                    .alignment(Alignment::Center);
-                frame.render_widget(empty, inner);
-            } else {
-                let current_track_key = state.current_track().map(|t| t.rating_key.as_str());
-                widgets::track_list::render(
-                    frame,
-                    tracks,
-                    state.list_state.tracks_index,
-                    current_track_key,
-                    inner,
-                );
-            }
-        }
-        RightPanelMode::CategoryAlbums => {
-            render_genre_album_list(frame, state, inner, is_focused);
-        }
-    }
-}
-
-/// Render album list in the right panel.
-fn render_album_list(frame: &mut Frame, state: &AppState, area: Rect, is_focused: bool) {
-    let t = theme();
-
-    // Total includes "All Tracks" entry at index 0
-    let total = state.selected_artist_albums.len() + 1;
-    let selected_idx = state.list_state.right_albums_index;
-    let visible_height = area.height as usize;
-
-    let scroll_offset = NavigationService::calc_scroll_offset(selected_idx, visible_height, total);
-
-    let mut items: Vec<ListItem> = Vec::with_capacity(visible_height);
-
-    // Build items for visible range
-    for i in scroll_offset..(scroll_offset + visible_height).min(total) {
-        let is_selected = i == selected_idx;
-
-        let line = if i == 0 {
-            // "All Tracks" entry
-            "► All Tracks".to_string()
-        } else {
-            // Album entry (index - 1 to get actual album)
-            let album = &state.selected_artist_albums[i - 1];
-            let year = album.year.map(|y| format!(" ({})", y)).unwrap_or_default();
-            let track_count = album.leaf_count.map(|c| format!(" [{} tracks]", c)).unwrap_or_default();
-            format!("{}{}{}", album.title, year, track_count)
-        };
-
-        let style = if is_selected && is_focused {
-            Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
-        } else if is_selected {
-            Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
-        } else {
-            Style::default().fg(t.colors.fg_primary)
-        };
-
-        items.push(ListItem::new(line).style(style));
-    }
-
-    let list = List::new(items);
-    frame.render_widget(list, area);
-
-    // Position indicator
-    if total > visible_height {
-        let footer = format!("{}/{}", selected_idx + 1, total);
-        let footer_area = Rect::new(
-            area.x + area.width.saturating_sub(footer.len() as u16 + 2),
-            area.y + area.height.saturating_sub(1),
-            footer.len() as u16 + 1,
-            1,
-        );
-        frame.render_widget(
-            Paragraph::new(footer).style(Style::default().fg(t.colors.fg_muted)),
-            footer_area,
-        );
-    }
-}
-
-/// Render album list for genre/mood view.
-fn render_genre_album_list(frame: &mut Frame, state: &AppState, area: Rect, is_focused: bool) {
-    let t = theme();
-
-    let total = state.genre_albums.len();
-    let selected_idx = state.genre_albums_index;
-    let visible_height = area.height as usize;
-
-    if total == 0 {
-        let empty = Paragraph::new("No albums")
-            .style(Style::default().fg(t.colors.fg_muted))
-            .alignment(Alignment::Center);
-        frame.render_widget(empty, area);
-        return;
-    }
-
-    let scroll_offset = NavigationService::calc_scroll_offset(selected_idx, visible_height, total);
-
-    let mut items: Vec<ListItem> = Vec::with_capacity(visible_height);
-
-    for i in scroll_offset..(scroll_offset + visible_height).min(total) {
-        let is_selected = i == selected_idx;
-        let album = &state.genre_albums[i];
-
-        // Format: Album Title - Artist (Year)
-        let year = album.year.map(|y| format!(" ({})", y)).unwrap_or_default();
-        let artist = album.parent_title.as_deref().unwrap_or("Unknown");
-        let line = format!("{} - {}{}", album.title, artist, year);
-
-        let style = if is_selected && is_focused {
-            Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
-        } else if is_selected {
-            Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
-        } else {
-            Style::default().fg(t.colors.fg_primary)
-        };
-
-        items.push(ListItem::new(line).style(style));
-    }
-
-    let list = List::new(items);
-    frame.render_widget(list, area);
-
-    // Position indicator
-    if total > visible_height {
-        let footer = format!("{}/{}", selected_idx + 1, total);
-        let footer_area = Rect::new(
-            area.x + area.width.saturating_sub(footer.len() as u16 + 2),
-            area.y + area.height.saturating_sub(1),
-            footer.len() as u16 + 1,
-            1,
-        );
-        frame.render_widget(
-            Paragraph::new(footer).style(Style::default().fg(t.colors.fg_muted)),
-            footer_area,
-        );
     }
 }
 

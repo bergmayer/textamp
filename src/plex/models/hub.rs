@@ -157,6 +157,8 @@ impl Station {
             StationKind::TimeTravel
         } else if id.contains("randomalbum") || title_lower.contains("random album") {
             StationKind::RandomAlbum
+        } else if id.contains("onthisday") || title_lower.contains("on this day") {
+            StationKind::OnThisDay
         } else if id.contains("style") || title_lower.contains("style") {
             StationKind::Style
         } else if id.contains("mood") || title_lower.contains("mood") {
@@ -194,6 +196,7 @@ pub enum StationKind {
     DeepCuts,
     TimeTravel,
     RandomAlbum,
+    OnThisDay,
     Style,
     Mood,
     Decade,
@@ -209,6 +212,7 @@ impl StationKind {
             StationKind::DeepCuts => "Deep Cuts Radio",
             StationKind::TimeTravel => "Time Travel Radio",
             StationKind::RandomAlbum => "Random Album Radio",
+            StationKind::OnThisDay => "On This Day",
             StationKind::Style => "Style Radio",
             StationKind::Mood => "Mood Radio",
             StationKind::Decade => "Decade Radio",

@@ -53,7 +53,6 @@ pub enum Action {
     PlayTrack(Track),
     PlayTrackFromCategory(usize),
     PlayAlbum { rating_key: String },  // Load album tracks and play them
-    QueueTrack(Track),
     EnqueueSelection,  // Alt+Q: Add current selection to end of queue
     EnqueueAlbum { rating_key: String, title: String },  // Load album tracks and add to queue
     ClearQueue,

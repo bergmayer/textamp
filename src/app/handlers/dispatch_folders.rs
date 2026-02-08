@@ -179,12 +179,33 @@ pub async fn dispatch(
                         // Root folder - get all tracks from library root
                         if let Some(lib_key) = &state.active_library {
                             match client.get_library_root_tracks(lib_key).await {
-                                Ok(tracks) => {
+                                Ok(mut tracks) => {
                                     if !tracks.is_empty() {
+                                        // Reorder tracks to match shuffled column order
+                                        if is_shuffled && !column_track_keys.is_empty() {
+                                            use std::collections::HashMap;
+                                            let pos_map: HashMap<&str, usize> = column_track_keys.iter()
+                                                .enumerate()
+                                                .map(|(i, k)| (k.as_str(), i))
+                                                .collect();
+                                            tracks.sort_by_key(|t| {
+                                                pos_map.get(t.rating_key.as_str()).copied().unwrap_or(usize::MAX)
+                                            });
+                                        }
+
+                                        // Find the index of the selected track
+                                        let start_idx = if let Some(ref sel_key) = selected_key {
+                                            tracks.iter().position(|t| {
+                                                t.rating_key == *sel_key || t.key == *sel_key
+                                            }).unwrap_or(selected_index.min(tracks.len().saturating_sub(1)))
+                                        } else {
+                                            0
+                                        };
+
                                         state.queue = tracks;
-                                        state.queue_index = Some(0);
+                                        state.queue_index = Some(start_idx);
                                         state.playback_mode = PlaybackMode::Queue;
-                                        if let Some(track) = state.queue.first().cloned() {
+                                        if let Some(track) = state.queue.get(start_idx).cloned() {
                                             helpers::play_track(event_tx, track, state, client, audio).await;
                                         }
                                     }

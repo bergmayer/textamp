@@ -188,38 +188,81 @@ impl EventLoop {
                 tracing::info!("Loaded stored auth: client_identifier={}, server_url={:?}",
                     stored.client_identifier, stored.server_url);
 
-                // Fast path: if we have stored server_url + username, test it directly.
-                // This skips two round-trips to plex.tv (verify_token + get_servers)
-                // and makes startup near-instant for local servers.
+                // Fast path: if we have stored server_url + username, trust them
+                // and proceed immediately. This gives instant startup.
+                // A background task validates the URL and recovers if it's stale.
                 if let (Some(ref server_url), Some(ref username)) = (&stored.server_url, &stored.username) {
-                    tracing::info!("Fast path: testing stored server URL directly");
-                    match crate::plex::test_connection(server_url, &stored.token, &stored.client_identifier).await {
-                        Ok(()) => {
-                            tracing::info!("Fast path succeeded: {} reachable", server_url);
-                            let _ = event_tx.send(Event::AuthSuccess {
-                                token: stored.token.clone(),
-                                username: username.clone(),
-                                server_url: server_url.clone(),
-                                servers: vec![], // Populated by background refresh below
-                                client_identifier: stored.client_identifier.clone(),
-                                has_plex_pass: stored.has_plex_pass,
-                            }).await;
+                    tracing::info!("Fast path: using stored credentials (instant startup)");
+                    let _ = event_tx.send(Event::AuthSuccess {
+                        token: stored.token.clone(),
+                        username: username.clone(),
+                        server_url: server_url.clone(),
+                        servers: vec![],
+                        client_identifier: stored.client_identifier.clone(),
+                        has_plex_pass: stored.has_plex_pass,
+                    }).await;
 
-                            // Background: refresh server list (needed for settings)
-                            let event_tx_bg = event_tx.clone();
-                            let token = stored.token.clone();
-                            let auth = PlexAuth::from_stored_auth(&stored);
-                            tokio::spawn(async move {
-                                if let Ok(servers) = auth.get_servers(&token).await {
-                                    let _ = event_tx_bg.send(Event::ServersDiscovered(servers)).await;
+                    // Background: discover servers and validate stored URL.
+                    // If the stored URL is stale, find a working one and update.
+                    let event_tx_bg = event_tx.clone();
+                    let stored_bg = stored.clone();
+                    tokio::spawn(async move {
+                        let auth = PlexAuth::from_stored_auth(&stored_bg);
+                        let token = &stored_bg.token;
+                        let client_id = &stored_bg.client_identifier;
+
+                        // Step 1: Discover servers from plex.tv (for settings + recovery)
+                        let servers = match auth.get_servers(token).await {
+                            Ok(s) => {
+                                let _ = event_tx_bg.send(Event::ServersDiscovered(s.clone())).await;
+                                s
+                            }
+                            Err(e) => {
+                                tracing::warn!("Background server discovery failed: {}", e);
+                                return;
+                            }
+                        };
+
+                        // Step 2: Test if stored URL is still valid
+                        if let Some(ref url) = stored_bg.server_url {
+                            match crate::plex::test_connection(url, token, client_id).await {
+                                Ok(()) => {
+                                    tracing::info!("Background: stored URL valid");
+                                    return; // All good
                                 }
-                            });
-                            return;
+                                Err(e) => {
+                                    tracing::warn!("Background: stored URL failed ({}), searching for alternative", e);
+                                }
+                            }
                         }
-                        Err(e) => {
-                            tracing::info!("Fast path failed ({}), falling back to full auth", e);
+
+                        // Step 3: Stored URL is stale - find a working connection
+                        let working_url = if let Some(ref stored_id) = stored_bg.server_identifier {
+                            if let Some(server) = servers.iter().find(|s| &s.client_identifier == stored_id) {
+                                tracing::info!("Testing connections for stored server: {}", server.name);
+                                helpers::find_working_connection(server, token, client_id).await
+                            } else {
+                                helpers::find_working_connection_from_servers(&servers, token, client_id).await
+                            }
+                        } else {
+                            helpers::find_working_connection_from_servers(&servers, token, client_id).await
+                        };
+
+                        if let Some(url) = working_url {
+                            tracing::info!("Background: found working URL: {}", url);
+                            let server_name = servers.iter()
+                                .find(|s| s.connections.iter().any(|c| c.uri == url))
+                                .map(|s| s.name.clone())
+                                .unwrap_or_else(|| "Server".to_string());
+                            let _ = event_tx_bg.send(Event::ServerConnectionSucceeded {
+                                server_name,
+                                url,
+                            }).await;
+                        } else {
+                            tracing::warn!("Background: no working connections found for any server");
                         }
-                    }
+                    });
+                    return;
                 }
 
                 // Slow path: verify token with plex.tv, discover servers, test connections

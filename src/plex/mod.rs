@@ -278,7 +278,7 @@ impl PlexService {
     }
 
     /// Get playlists with cache-first strategy.
-    pub async fn get_playlists_cached(&self) -> Vec<Playlist> {
+    pub async fn get_playlists_cached(&self, section_id: Option<&str>) -> Vec<Playlist> {
         // Try cache first
         {
             let data_lock = self.cache_data.read().await;
@@ -290,7 +290,7 @@ impl PlexService {
         }
 
         // Fallback to API
-        match self.client.get_playlists().await {
+        match self.client.get_playlists(section_id).await {
             Ok(playlists) => {
                 // Update cache
                 {

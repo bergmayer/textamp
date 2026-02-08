@@ -5,8 +5,6 @@
 
 use crate::api::PlexClient;
 use crate::api::models::Track;
-use crate::app::AppState;
-use crate::app::state::PlaybackMode;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -264,32 +262,6 @@ async fn download_with_retry(url: &str) -> Result<Vec<u8>, String> {
     }
 
     Err("Max retries exceeded".to_string())
-}
-
-/// Compute the list of upcoming tracks to pre-fetch from current state.
-pub fn get_upcoming_tracks(state: &AppState) -> Vec<Track> {
-    match state.playback_mode {
-        PlaybackMode::Queue | PlaybackMode::None => {
-            if let Some(idx) = state.queue_index {
-                let start = idx + 1;
-                let end = (start + 10).min(state.queue.len());
-                if start < state.queue.len() {
-                    return state.queue[start..end].to_vec();
-                }
-            }
-            vec![]
-        }
-        PlaybackMode::Radio => {
-            if let Some(idx) = state.radio.track_index {
-                let start = idx + 1;
-                let end = (start + 10).min(state.radio.tracks.len());
-                if start < state.radio.tracks.len() {
-                    return state.radio.tracks[start..end].to_vec();
-                }
-            }
-            vec![]
-        }
-    }
 }
 
 /// Spawn background tasks to pre-fetch upcoming tracks.

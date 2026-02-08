@@ -12,14 +12,28 @@ use super::cache::TrackAudioCache;
 use super::rodio_backend::RodioBackend;
 use super::streaming::{BlockingReader, StreamingBuffer};
 use super::traits::AudioBackend;
-use crate::app::Event;
 use anyhow::{anyhow, Result};
 use futures::StreamExt;
 use reqwest::header::HeaderMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
+/// Events emitted by the audio player to signal state changes.
+///
+/// This decouples the audio module from the app event system,
+/// making it portable to other platforms.
+#[derive(Debug, Clone)]
+pub enum AudioEvent {
+    /// Streaming buffer has enough data to start playback.
+    BufferingReady,
+    /// An error occurred during audio fetching or playback.
+    Error(String),
+}
+
+/// Shared pending playback buffer: spawned tasks write here, main thread reads.
+type PendingPlayback = Arc<Mutex<Option<(Arc<StreamingBuffer>, u64)>>>;
 
 /// High-level audio player with streaming support.
 ///
@@ -41,9 +55,13 @@ pub struct AudioPlayer {
     _stream_buffer: Option<Arc<StreamingBuffer>>,
     /// Shared inbox for pending playback — spawned tasks deliver buffers here,
     /// and start_pending_playback() reads from it on the main thread.
-    pending_playback: Arc<Mutex<Option<(Arc<StreamingBuffer>, u64)>>>,
+    pending_playback: PendingPlayback,
     /// Cache for pre-fetched track audio data.
     pub track_cache: Arc<TrackAudioCache>,
+    /// Generation counter to detect stale background fetch tasks.
+    /// Incremented on each play_url_with_headers call; spawned tasks check
+    /// this before delivering results to discard stale fetches.
+    playback_generation: Arc<AtomicU64>,
 }
 
 impl AudioPlayer {
@@ -59,6 +77,7 @@ impl AudioPlayer {
             _stream_buffer: None,
             pending_playback: Arc::new(Mutex::new(None)),
             track_cache: Arc::new(TrackAudioCache::new()),
+            playback_generation: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -66,8 +85,8 @@ impl AudioPlayer {
     ///
     /// Spawns the HTTP request and buffer setup in a background task.
     /// Returns immediately — the event loop stays responsive.
-    /// Sends `BufferingEnd` event when playback is ready to start.
-    pub async fn play_url(&mut self, url: &str, event_tx: mpsc::Sender<Event>) -> Result<()> {
+    /// Sends `AudioEvent::BufferingReady` when playback is ready to start.
+    pub async fn play_url(&mut self, url: &str, event_tx: mpsc::Sender<AudioEvent>) -> Result<()> {
         self.play_url_with_headers(url, HeaderMap::new(), None, event_tx).await
     }
 
@@ -77,7 +96,7 @@ impl AudioPlayer {
     /// 1. Stops current playback synchronously
     /// 2. Spawns a background task that fetches the audio
     /// 3. Returns immediately (no blocking network I/O)
-    /// 4. The background task sends `BufferingEnd` when ready
+    /// 4. The background task sends `AudioEvent::BufferingReady` when ready
     /// 5. `StartPendingPlayback` then starts actual audio output
     ///
     /// If `fallback_url` is provided and the primary URL fails,
@@ -87,35 +106,38 @@ impl AudioPlayer {
         url: &str,
         headers: HeaderMap,
         fallback_url: Option<String>,
-        event_tx: mpsc::Sender<Event>,
+        event_tx: mpsc::Sender<AudioEvent>,
     ) -> Result<()> {
         // Stop any existing playback synchronously
         self.stop();
 
+        // Increment generation so any in-flight fetch tasks become stale
+        let expected_gen = self.playback_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let generation = self.playback_generation.clone();
         let pending = self.pending_playback.clone();
         let url = url.to_string();
 
         tokio::spawn(async move {
             // Try primary URL
-            match fetch_and_buffer(&url, &headers, &pending, &event_tx).await {
-                Ok(()) => return,
+            match fetch_and_buffer(&url, &headers, &pending, &event_tx, &generation, expected_gen).await {
+                Ok(()) => {},
                 Err(primary_err) => {
                     tracing::warn!("Primary stream failed: {}", primary_err);
                     // Try fallback if available
                     if let Some(ref fb_url) = fallback_url {
                         let redacted = fb_url.split("X-Plex-Token=").next().unwrap_or(fb_url);
                         tracing::info!("Trying fallback (transcode): {}...", redacted);
-                        match fetch_and_buffer(fb_url, &headers, &pending, &event_tx).await {
-                            Ok(()) => return,
+                        match fetch_and_buffer(fb_url, &headers, &pending, &event_tx, &generation, expected_gen).await {
+                            Ok(()) => {},
                             Err(fb_err) => {
                                 tracing::error!("Fallback stream also failed: {}", fb_err);
-                                let _ = event_tx.send(Event::PlaybackError(
+                                let _ = event_tx.send(AudioEvent::Error(
                                     format!("Playback failed: {}", fb_err)
                                 )).await;
                             }
                         }
                     } else {
-                        let _ = event_tx.send(Event::PlaybackError(
+                        let _ = event_tx.send(AudioEvent::Error(
                             format!("Playback failed: {}", primary_err)
                         )).await;
                     }
@@ -233,8 +255,10 @@ fn looks_like_html(data: &[u8]) -> bool {
 async fn fetch_and_buffer(
     url: &str,
     _headers: &HeaderMap,
-    pending: &Arc<Mutex<Option<(Arc<StreamingBuffer>, u64)>>>,
-    event_tx: &mpsc::Sender<Event>,
+    pending: &PendingPlayback,
+    event_tx: &mpsc::Sender<AudioEvent>,
+    generation: &Arc<AtomicU64>,
+    expected_gen: u64,
 ) -> Result<(), String> {
     tracing::debug!("Fetching audio from: {}", url);
 
@@ -326,12 +350,17 @@ async fn fetch_and_buffer(
             return Err("Server returned HTML instead of audio".to_string());
         }
 
+        // Discard if a newer playback request has superseded this one
+        if generation.load(Ordering::SeqCst) != expected_gen {
+            tracing::debug!("Stale fetch (small file) discarded (gen {} != current {})", expected_gen, generation.load(Ordering::SeqCst));
+            return Ok(());
+        }
         let size = data.len();
         let buffer = Arc::new(StreamingBuffer::with_size_hint(size));
         buffer.append(&data);
         buffer.set_complete();
         *pending.lock().unwrap() = Some((buffer, size as u64));
-        let _ = event_tx.send(Event::BufferingEnd).await;
+        let _ = event_tx.send(AudioEvent::BufferingReady).await;
         return Ok(());
     }
 
@@ -373,8 +402,14 @@ async fn fetch_and_buffer(
         return Err("Timeout waiting for initial buffer".to_string());
     }
 
+    // Discard if a newer playback request has superseded this one
+    if generation.load(Ordering::SeqCst) != expected_gen {
+        tracing::debug!("Stale fetch (streaming) discarded (gen {} != current {})", expected_gen, generation.load(Ordering::SeqCst));
+        return Ok(());
+    }
+
     // Deliver buffer and signal ready
     *pending.lock().unwrap() = Some((buffer, byte_len_hint));
-    let _ = event_tx.send(Event::BufferingEnd).await;
+    let _ = event_tx.send(AudioEvent::BufferingReady).await;
     Ok(())
 }

@@ -7,7 +7,7 @@ use crate::app::{Action, AppState, Event};
 use crate::app::state::{BrowseCategory, BrowseItem, Focus, RightPanelMode, View};
 use crate::api::PlexClient;
 use crate::api::models::{Album, Track};
-use crate::cache::LibraryCache;
+use crate::cache::{CacheData, LibraryCache};
 use crate::config::Config;
 use crate::services::{CacheService, FolderColumn, FolderNavigationState};
 
@@ -39,162 +39,51 @@ pub async fn dispatch(
             crate::ui::theme::set_theme(state.theme);
             tracing::info!("Loaded theme: {}", state.theme.display_name());
 
-            // Load libraries
-            match client.get_libraries().await {
-                Ok(libs) => {
-                    tracing::info!("Loaded {} total libraries", libs.len());
-                    state.libraries = libs.into_iter().filter(|l| l.is_music()).collect();
-                    tracing::info!("After filtering: {} music libraries", state.libraries.len());
+            // Determine library key from config (instant, no network)
+            let saved_key = if state.is_fresh_login {
+                state.is_fresh_login = false;
+                None // Fresh login - wait for LibrariesLoaded to pick
+            } else {
+                config.libraries.default_library.clone()
+            };
 
-                    // Select library: saved default > "Music" by name > alphabetical
-                    let lib = if let Some(ref default_key) = config.libraries.default_library {
-                        state.libraries.iter()
-                            .find(|l| &l.key == default_key)
-                            .or_else(|| pick_default_library(&state.libraries))
-                    } else {
-                        pick_default_library(&state.libraries)
-                    };
+            // If we have a saved library key, load from cache immediately (no network)
+            if let Some(ref lib_key) = saved_key {
+                state.active_library = Some(lib_key.clone());
 
-                    if let Some(lib) = lib {
-                        tracing::info!("Selected music library: {} (key={})", lib.title, lib.key);
-                        let lib_key = lib.key.clone();
-                        let lib_title = lib.title.clone();
-                        state.active_library = Some(lib_key.clone());
+                if let Some(cache) = LibraryCache::new() {
+                    if let Some(cached) = cache.load(lib_key) {
+                        if cached.library_key != *lib_key {
+                            tracing::warn!("Cache library_key mismatch: expected {}, got {} - ignoring cache",
+                                lib_key, cached.library_key);
+                        } else {
+                            tracing::info!("Loading from cache: {} artists, {} albums, {} folders, {} genres",
+                                cached.artists.len(), cached.albums.len(), cached.root_folders.len(), cached.genres.len());
 
-                        // Try to load ALL cached data for instant display
-                        if let Some(cache) = LibraryCache::new() {
-                            if let Some(cached) = cache.load(&lib_key) {
-                                // Validate cache belongs to this library
-                                if cached.library_key != lib_key {
-                                    tracing::warn!("Cache library_key mismatch: expected {}, got {} - ignoring cache",
-                                        lib_key, cached.library_key);
-                                } else {
-                                    tracing::info!("Loading from cache: {} artists, {} albums, {} folders, {} genres",
-                                        cached.artists.len(), cached.albums.len(), cached.root_folders.len(), cached.genres.len());
+                            let lib_title = "Music".to_string();
+                            load_from_cache(state, cached, lib_key, &lib_title);
 
-                                    // Core library data
-                                    // IMPORTANT: Always re-sort after loading from cache
-                                    // Cache may have been saved with API order, not alphabetical
-                                    if !cached.artists.is_empty() {
-                                        state.artists = cached.artists;
-                                        state.artists.sort_by(|a, b| helpers::sort_key(&a.title).cmp(&helpers::sort_key(&b.title)));
-                                        state.artists_total = state.artists.len() as u32;
-                                        // Initialize artist_nav for Miller columns
-                                        let items = BrowseItem::from_artists(&state.artists);
-                                        state.artist_nav.reset(state.artist_view_mode.name(), items);
-                                    }
-                                    if !cached.albums.is_empty() {
-                                        state.albums = cached.albums;
-                                        state.albums.sort_by(|a, b| helpers::sort_key(&a.title).cmp(&helpers::sort_key(&b.title)));
-                                        state.albums_total = state.albums.len() as u32;
-                                    }
-                                    if !cached.playlists.is_empty() {
-                                        state.playlists = cached.playlists.clone();
-                                        // Initialize playlist_nav for Miller columns
-                                        let items = BrowseItem::from_playlists(&state.playlists);
-                                        state.playlist_nav.reset("playlists", items);
-                                    }
-
-                                    // Folders
-                                    if !cached.root_folders.is_empty() {
-                                        let root_column = FolderColumn::new(None, lib_title.clone(), cached.root_folders);
-                                        state.folder_state = Some(FolderNavigationState {
-                                            library_key: lib_key.clone(),
-                                            columns: vec![root_column],
-                                            focused_column: 0,
-                                            loading: false,
-                                        });
-                                    }
-                                    // Load cached subfolder contents with staleness filtering
-                                    // Very stale entries (>32 days) are deleted, not refreshed
-                                    if !cached.folder_contents.is_empty() {
-                                        state.folder_contents_cache = cached.folder_contents;
-                                        let removed = CacheService::filter_stale_subfolders_default(&mut state.folder_contents_cache);
-                                        if removed > 0 {
-                                            tracing::info!("Removed {} very stale subfolder caches on load", removed);
-                                            state.cache_dirty = true;  // Save the filtered cache
-                                        }
-                                        tracing::debug!("Loaded {} cached subfolders", state.folder_contents_cache.len());
-                                    }
-
-                                    // Genres, artist genres, album genres, moods, styles
-                                    if !cached.genres.is_empty() {
-                                        state.genres = cached.genres;
-                                        // Initialize genre_nav if this is the default genre type
-                                        if state.genre_content_type == crate::app::state::GenreContentType::Genres {
-                                            let items = BrowseItem::from_genres(&state.genres);
-                                            state.genre_nav.reset("genres", items);
-                                        }
-                                    }
-                                    if !cached.artist_genres.is_empty() {
-                                        state.artist_genres = cached.artist_genres;
-                                        if state.genre_content_type == crate::app::state::GenreContentType::ArtistGenres {
-                                            let items = BrowseItem::from_genres(&state.artist_genres);
-                                            state.genre_nav.reset("artist genres", items);
-                                        }
-                                    }
-                                    if !cached.album_genres.is_empty() {
-                                        state.album_genres = cached.album_genres;
-                                        if state.genre_content_type == crate::app::state::GenreContentType::AlbumGenres {
-                                            let items = BrowseItem::from_genres(&state.album_genres);
-                                            state.genre_nav.reset("album genres", items);
-                                        }
-                                    }
-                                    if !cached.moods.is_empty() {
-                                        state.moods = cached.moods;
-                                        if state.genre_content_type == crate::app::state::GenreContentType::Moods {
-                                            let items = BrowseItem::from_genres(&state.moods);
-                                            state.genre_nav.reset("moods", items);
-                                        }
-                                    }
-                                    if !cached.styles.is_empty() {
-                                        state.styles = cached.styles;
-                                        if state.genre_content_type == crate::app::state::GenreContentType::Styles {
-                                            let items = BrowseItem::from_genres(&state.styles);
-                                            state.genre_nav.reset("styles", items);
-                                        }
-                                    }
-
-                                    // Stations - populate both legacy and Miller columns
-                                    if !cached.stations.is_empty() {
-                                        state.stations = cached.stations.clone();
-                                        // Initialize Miller columns with root column
-                                        state.station_nav.columns.clear();
-                                        state.station_nav.columns.push(crate::app::state::StationColumn::new(
-                                            None,
-                                            "Stations".to_string(),
-                                            cached.stations,
-                                        ));
-                                        state.station_nav.focused_column = 0;
-                                    }
-
-                                    // Recent content
-                                    if !cached.recently_added_albums.is_empty() {
-                                        state.recently_added_albums = cached.recently_added_albums;
-                                    }
-                                    if !cached.recently_played_albums.is_empty() {
-                                        state.recently_played_albums = cached.recently_played_albums;
-                                    }
-
-                                    // Playlist tracks cache
-                                    if !cached.playlist_tracks.is_empty() {
-                                        state.playlist_tracks_cache = cached.playlist_tracks;
-                                    }
-                                }
-                            }
+                            // Start background API refresh
+                            helpers::preload_all_library_data(event_tx, lib_key, &lib_title, client);
                         }
-
-                        // Refresh from API in background
-                        helpers::preload_all_library_data(event_tx, &lib_key, &lib_title, client);
-                    } else {
-                        tracing::warn!("No music libraries found!");
                     }
                 }
-                Err(e) => {
-                    tracing::error!("Failed to load libraries: {}", e);
-                    state.set_error(format!("Failed to load libraries: {}", e));
-                }
             }
+
+            // Fetch libraries from API in background (non-blocking)
+            let tx = event_tx.clone();
+            let client_clone = client.clone();
+            tokio::spawn(async move {
+                match client_clone.get_libraries().await {
+                    Ok(libs) => {
+                        let _ = tx.send(Event::LibrariesLoaded(libs)).await;
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to load libraries: {}", e);
+                        let _ = tx.send(Event::DataLoadError(format!("Failed to load libraries: {}", e))).await;
+                    }
+                }
+            });
         }
         Action::LoadLibraries => {
             tracing::info!("Action::LoadLibraries - fetching libraries");
@@ -352,7 +241,8 @@ pub async fn dispatch(
                 }
                 BrowseCategory::Playlists => {
                     if state.playlists.is_empty() {
-                        if let Ok(playlists) = client.get_playlists().await {
+                        let section_id = state.active_library.as_deref();
+                        if let Ok(playlists) = client.get_playlists(section_id).await {
                             state.playlists = playlists;
                         }
                     }
@@ -544,15 +434,108 @@ pub async fn dispatch(
     Ok(vec![])
 }
 
-/// Pick the default library when no saved default exists.
-/// Prefers a library named "Music" (case-insensitive), then alphabetical.
-fn pick_default_library(libraries: &[crate::api::models::Library]) -> Option<&crate::api::models::Library> {
-    // Prefer "Music" by name
-    if let Some(lib) = libraries.iter().find(|l| l.title.eq_ignore_ascii_case("music")) {
-        return Some(lib);
+/// Load cached library data into state for instant startup.
+/// Mirrors the LibraryCacheLoaded event handler logic.
+fn load_from_cache(state: &mut AppState, cached: CacheData, lib_key: &str, lib_title: &str) {
+    // Core library data - IMPORTANT: Always re-sort after loading from cache
+    if !cached.artists.is_empty() {
+        state.artists = cached.artists;
+        state.artists.sort_by(|a, b| helpers::sort_key(&a.title).cmp(&helpers::sort_key(&b.title)));
+        state.artists_total = state.artists.len() as u32;
+        let items = BrowseItem::from_artists(&state.artists);
+        state.artist_nav.reset(state.artist_view_mode.name(), items);
     }
-    // Fallback: first alphabetically by title
-    libraries.iter().min_by(|a, b| {
-        helpers::sort_key(&a.title).cmp(&helpers::sort_key(&b.title))
-    })
+    if !cached.albums.is_empty() {
+        state.albums = cached.albums;
+        state.albums.sort_by(|a, b| helpers::sort_key(&a.title).cmp(&helpers::sort_key(&b.title)));
+        state.albums_total = state.albums.len() as u32;
+    }
+    if !cached.playlists.is_empty() {
+        state.playlists = cached.playlists.clone();
+        let items = BrowseItem::from_playlists(&state.playlists);
+        state.playlist_nav.reset("playlists", items);
+    }
+
+    // Folders
+    if !cached.root_folders.is_empty() {
+        let root_column = FolderColumn::new(None, lib_title.to_string(), cached.root_folders);
+        state.folder_state = Some(FolderNavigationState {
+            library_key: lib_key.to_string(),
+            columns: vec![root_column],
+            focused_column: 0,
+            loading: false,
+        });
+    }
+    if !cached.folder_contents.is_empty() {
+        state.folder_contents_cache = cached.folder_contents;
+        let removed = CacheService::filter_stale_subfolders_default(&mut state.folder_contents_cache);
+        if removed > 0 {
+            tracing::info!("Startup: removed {} very stale subfolder caches", removed);
+            state.cache_dirty = true;
+        }
+    } else {
+        state.folder_contents_cache.clear();
+    }
+
+    // Genres, artist genres, album genres, moods, styles
+    if !cached.genres.is_empty() {
+        state.genres = cached.genres;
+        if state.genre_content_type == crate::app::state::GenreContentType::Genres {
+            let items = BrowseItem::from_genres(&state.genres);
+            state.genre_nav.reset("genres", items);
+        }
+    }
+    if !cached.artist_genres.is_empty() {
+        state.artist_genres = cached.artist_genres;
+        if state.genre_content_type == crate::app::state::GenreContentType::ArtistGenres {
+            let items = BrowseItem::from_genres(&state.artist_genres);
+            state.genre_nav.reset("artist genres", items);
+        }
+    }
+    if !cached.album_genres.is_empty() {
+        state.album_genres = cached.album_genres;
+        if state.genre_content_type == crate::app::state::GenreContentType::AlbumGenres {
+            let items = BrowseItem::from_genres(&state.album_genres);
+            state.genre_nav.reset("album genres", items);
+        }
+    }
+    if !cached.moods.is_empty() {
+        state.moods = cached.moods;
+        if state.genre_content_type == crate::app::state::GenreContentType::Moods {
+            let items = BrowseItem::from_genres(&state.moods);
+            state.genre_nav.reset("moods", items);
+        }
+    }
+    if !cached.styles.is_empty() {
+        state.styles = cached.styles;
+        if state.genre_content_type == crate::app::state::GenreContentType::Styles {
+            let items = BrowseItem::from_genres(&state.styles);
+            state.genre_nav.reset("styles", items);
+        }
+    }
+
+    // Stations
+    if !cached.stations.is_empty() {
+        state.stations = cached.stations.clone();
+        state.station_nav.columns.clear();
+        state.station_nav.columns.push(crate::app::state::StationColumn::new(
+            None,
+            "Stations".to_string(),
+            cached.stations,
+        ));
+        state.station_nav.focused_column = 0;
+    }
+
+    // Recent content
+    if !cached.recently_added_albums.is_empty() {
+        state.recently_added_albums = cached.recently_added_albums;
+    }
+    if !cached.recently_played_albums.is_empty() {
+        state.recently_played_albums = cached.recently_played_albums;
+    }
+
+    // Playlist tracks cache
+    if !cached.playlist_tracks.is_empty() {
+        state.playlist_tracks_cache = cached.playlist_tracks;
+    }
 }

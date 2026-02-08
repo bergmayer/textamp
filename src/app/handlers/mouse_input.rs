@@ -301,7 +301,7 @@ fn handle_transport_down(click_col: u16, state: &mut AppState) -> Vec<Action> {
     // Search emoji at far right (last 4 columns to account for emoji width)
     // Only activate filter in Browse view
     if state.view == View::Browse && click_col >= state.terminal_width.saturating_sub(4) {
-        if state.list_filter_active {
+        if state.list_filter.active {
             return vec![Action::DeactivateListFilter];
         } else {
             return vec![Action::ActivateListFilter];

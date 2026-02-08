@@ -21,7 +21,7 @@ mod streaming;
 mod traits;
 
 pub use cache::TrackAudioCache;
-pub use player::AudioPlayer;
+pub use player::{AudioEvent, AudioPlayer};
 pub use rodio_backend::RodioBackend;
 pub use streaming::StreamingBuffer;
 pub use traits::{AudioBackend, AudioError};
