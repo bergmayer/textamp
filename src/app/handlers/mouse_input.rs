@@ -1520,12 +1520,19 @@ fn settings_visual_row_to_item(visual_row: usize, state: &AppState) -> Option<us
                 // Row 0: "Signed in as ..."
                 // Row 1: "Plex Pass: ..."
                 // Row 2: blank
-                // Row 3: "Library: ..." (if active_library)
-                // Row 4: blank (if active_library)
-                // Next row: Sign Out (item 0)
-                let offset = if state.active_library.is_some() { 5 } else { 3 };
-                if visual_row == offset {
-                    Some(0) // Sign Out
+                // Row 3: "Music libraries:" header
+                // Row 4+: libraries (items 0..lib_count-1)
+                // Then: blank
+                // Then: action items (lib_count..lib_count+3) + Sign Out (lib_count+4)
+                let header_rows = 4; // signed_in, plex_pass, blank, "Music libraries:"
+                let lib_count = state.libraries.len();
+                let lib_end = if lib_count == 0 { header_rows + 1 } else { header_rows + lib_count };
+                if visual_row >= header_rows && visual_row < lib_end {
+                    Some(visual_row - header_rows) // Library item
+                } else if visual_row == lib_end {
+                    None // Blank line
+                } else if visual_row > lib_end && visual_row <= lib_end + 5 {
+                    Some(lib_count + (visual_row - lib_end - 1)) // Action items + Sign Out
                 } else {
                     None
                 }
@@ -1540,64 +1547,19 @@ fn settings_visual_row_to_item(visual_row: usize, state: &AppState) -> Option<us
                 }
             }
         }
-        SettingsSection::Libraries => {
-            // Variable header: server info (if connected) + "Music libraries:" + blank
-            let mut header_rows = 0;
-            if state.connected_server_url.is_some() {
-                header_rows += 2; // "Server:" + blank
-                // Server name line (if server found in available_servers)
-                if let Some(ref url) = state.connected_server_url {
-                    if state.available_servers.iter().any(|s| s.connections.iter().any(|c| c.uri == *url)) {
-                        header_rows += 1; // Name
-                    }
-                    header_rows += 1; // Address
-                    let without_scheme = url.trim_start_matches("https://").trim_start_matches("http://");
-                    if without_scheme.contains(':') {
-                        header_rows += 1; // Port
-                    }
-                    header_rows += 1; // Secure
-                    if state.available_servers.iter().any(|s| s.connections.iter().any(|c| c.uri == *url)) {
-                        header_rows += 1; // Connection type
-                    }
-                }
-                header_rows += 1; // blank after server info
-            }
-            header_rows += 2; // "Music libraries:" + blank
-
-            let lib_count = state.libraries.len();
-            if visual_row >= header_rows {
-                let after_header = visual_row - header_rows;
-                if after_header < lib_count {
-                    Some(after_header) // Library item
-                } else if after_header == lib_count {
-                    None // Blank line between libraries and action items
-                } else if after_header <= lib_count + 4 {
-                    Some(after_header - 1) // Action item (subtract 1 for blank line)
-                } else {
-                    None
-                }
+        SettingsSection::About => {
+            // Logo lines + blank + version + description + author + url + blank + "Theme:" header
+            // Theme items are selectable
+            // Count logo lines
+            let logo_lines = crate::ui::screens::settings::ansi_logo_line_count();
+            // logo + blank + version + description + author + url + blank + "Theme:" = logo + 7
+            let theme_start = logo_lines + 7;
+            let theme_count = crate::ui::theme::ThemeName::all().len();
+            if visual_row >= theme_start && visual_row < theme_start + theme_count {
+                Some(visual_row - theme_start)
             } else {
                 None
             }
-        }
-        SettingsSection::Interface => {
-            // Row 0: "Theme:" header
-            // Row 1: blank
-            // Row 2+: theme items → item 0+
-            if visual_row >= 2 {
-                let idx = visual_row - 2;
-                if idx < crate::ui::theme::ThemeName::all().len() {
-                    Some(idx)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        }
-        SettingsSection::Playback | SettingsSection::About => {
-            // No selectable items
-            None
         }
     }
 }

@@ -1777,9 +1777,6 @@ impl ListStates {
 pub enum SettingsSection {
     #[default]
     Account,
-    Libraries,
-    Playback,
-    Interface,
     About,
 }
 
@@ -1787,9 +1784,6 @@ impl SettingsSection {
     pub fn all() -> &'static [SettingsSection] {
         &[
             SettingsSection::Account,
-            SettingsSection::Libraries,
-            SettingsSection::Playback,
-            SettingsSection::Interface,
             SettingsSection::About,
         ]
     }
@@ -1797,19 +1791,13 @@ impl SettingsSection {
     pub fn name(&self) -> &'static str {
         match self {
             SettingsSection::Account => "Account",
-            SettingsSection::Libraries => "Libraries",
-            SettingsSection::Playback => "Playback",
-            SettingsSection::Interface => "Interface",
             SettingsSection::About => "About",
         }
     }
 
     pub fn next(&self) -> Self {
         match self {
-            SettingsSection::Account => SettingsSection::Libraries,
-            SettingsSection::Libraries => SettingsSection::Playback,
-            SettingsSection::Playback => SettingsSection::Interface,
-            SettingsSection::Interface => SettingsSection::About,
+            SettingsSection::Account => SettingsSection::About,
             SettingsSection::About => SettingsSection::Account,
         }
     }
@@ -1817,10 +1805,7 @@ impl SettingsSection {
     pub fn prev(&self) -> Self {
         match self {
             SettingsSection::Account => SettingsSection::About,
-            SettingsSection::Libraries => SettingsSection::Account,
-            SettingsSection::Playback => SettingsSection::Libraries,
-            SettingsSection::Interface => SettingsSection::Playback,
-            SettingsSection::About => SettingsSection::Interface,
+            SettingsSection::About => SettingsSection::Account,
         }
     }
 }

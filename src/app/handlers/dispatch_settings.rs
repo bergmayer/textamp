@@ -77,6 +77,20 @@ pub async fn dispatch(
             state.station_nav.focused_column = 0;
             state.list_state.reset();
 
+            // Clear all server-related state
+            state.connected_server_url = None;
+            state.active_server_id = None;
+            state.cache_timestamp = None;
+            state.playlist_cache_timestamp = None;
+            state.background_refresh_in_progress.clear();
+            state.plex_session_id = None;
+            state.album_art_cache.clear();
+            state.album_art_pending.clear();
+            state.artwork_cache_stats = None;
+            state.waveform = Default::default();
+            state.search_results = None;
+            state.playlist_tracks_cache.clear();
+
             // Stop playback and flush track cache
             audio.stop();
             audio.track_cache.flush();
@@ -91,7 +105,7 @@ pub async fn dispatch(
                 tracing::warn!("Failed to save config after logout: {}", e);
             }
 
-            state.set_status("Logged out. Restart to sign in again.".to_string());
+            state.set_status("Signed out.".to_string());
         }
         Action::AuthSignIn => {
             use crate::app::state::AuthStep;
@@ -259,10 +273,49 @@ pub async fn dispatch(
                             follow_ups.push(Action::SelectServer(server_id));
                         }
                     } else if matches!(state.connection, ConnectionState::Connected { .. }) {
-                        // Signed in: 0=Sign Out
-                        match state.settings_state.item_index {
-                            0 => follow_ups.push(Action::Logout),
-                            _ => {}
+                        use crate::app::state::{ConfirmDialog, ConfirmAction};
+                        let lib_count = state.libraries.len();
+                        let idx = state.settings_state.item_index;
+                        if idx < lib_count {
+                            // Activate selected library
+                            if let Some(lib) = state.libraries.get(idx) {
+                                let lib_key = lib.key.clone();
+                                follow_ups.push(Action::SelectLibrary(lib_key));
+                            }
+                        } else {
+                            match idx - lib_count {
+                                0 => {
+                                    state.confirm_dialog = Some(ConfirmDialog {
+                                        title: "Clear Library Cache".to_string(),
+                                        message: "Clear all cached library data and reload from server?".to_string(),
+                                        on_confirm: ConfirmAction::ClearLibraryCache,
+                                    });
+                                }
+                                1 => {
+                                    state.confirm_dialog = Some(ConfirmDialog {
+                                        title: "Clear Artwork Cache".to_string(),
+                                        message: "Delete all cached album artwork from disk?".to_string(),
+                                        on_confirm: ConfirmAction::ClearArtworkCache,
+                                    });
+                                }
+                                2 => {
+                                    state.confirm_dialog = Some(ConfirmDialog {
+                                        title: "Clear Subfolder Cache".to_string(),
+                                        message: "Clear all cached subfolder contents?".to_string(),
+                                        on_confirm: ConfirmAction::ClearSubfolderCache,
+                                    });
+                                }
+                                3 => {
+                                    // Toggle crawl: start if not running, stop if running
+                                    if state.subfolder_preload_active {
+                                        follow_ups.push(Action::StopSubfolderCrawl);
+                                    } else {
+                                        follow_ups.push(Action::StartSubfolderCrawl);
+                                    }
+                                }
+                                4 => follow_ups.push(Action::Logout),
+                                _ => {}
+                            }
                         }
                     } else {
                         // Not signed in: 0=Sign In
@@ -272,55 +325,7 @@ pub async fn dispatch(
                         }
                     }
                 }
-                SettingsSection::Libraries => {
-                    use crate::app::state::{ConfirmDialog, ConfirmAction};
-                    let lib_count = state.libraries.len();
-                    let idx = state.settings_state.item_index;
-                    if idx < lib_count {
-                        // Activate selected library
-                        if let Some(lib) = state.libraries.get(idx) {
-                            let lib_key = lib.key.clone();
-                            follow_ups.push(Action::SelectLibrary(lib_key));
-                        }
-                    } else {
-                        match idx - lib_count {
-                            0 => {
-                                state.confirm_dialog = Some(ConfirmDialog {
-                                    title: "Clear Library Cache".to_string(),
-                                    message: "Clear all cached library data and reload from server?".to_string(),
-                                    on_confirm: ConfirmAction::ClearLibraryCache,
-                                });
-                            }
-                            1 => {
-                                state.confirm_dialog = Some(ConfirmDialog {
-                                    title: "Clear Artwork Cache".to_string(),
-                                    message: "Delete all cached album artwork from disk?".to_string(),
-                                    on_confirm: ConfirmAction::ClearArtworkCache,
-                                });
-                            }
-                            2 => {
-                                state.confirm_dialog = Some(ConfirmDialog {
-                                    title: "Clear Subfolder Cache".to_string(),
-                                    message: "Clear all cached subfolder contents?".to_string(),
-                                    on_confirm: ConfirmAction::ClearSubfolderCache,
-                                });
-                            }
-                            3 => {
-                                // Toggle crawl: start if not running, stop if running
-                                if state.subfolder_preload_active {
-                                    follow_ups.push(Action::StopSubfolderCrawl);
-                                } else {
-                                    follow_ups.push(Action::StartSubfolderCrawl);
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                SettingsSection::Playback => {
-                    // No action yet for playback settings
-                }
-                SettingsSection::Interface => {
+                SettingsSection::About => {
                     // Apply selected theme
                     if let Some(theme_name) = crate::ui::theme::ThemeName::all().get(state.settings_state.item_index) {
                         state.theme = *theme_name;
@@ -333,9 +338,6 @@ pub async fn dispatch(
                             tracing::warn!("Failed to save theme preference: {}", e);
                         }
                     }
-                }
-                SettingsSection::About => {
-                    // No selectable items in About section
                 }
             }
         }
