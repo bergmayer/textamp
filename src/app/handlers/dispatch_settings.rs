@@ -41,12 +41,10 @@ pub async fn dispatch(
                 }
             }
 
-            // Reset connection state
+            // Reset connection state (keep libraries/servers/URL for display)
             state.connection = ConnectionState::Disconnected;
-            state.active_library = None;
 
-            // Clear all library and browse data
-            state.libraries.clear();
+            // Clear browse data (not needed for display)
             state.artists.clear();
             state.albums.clear();
             state.playlists.clear();
@@ -65,7 +63,6 @@ pub async fn dispatch(
             state.folder_contents_cache.clear();
             state.subfolder_preload_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
             state.subfolder_preload_active = false;
-            state.available_servers.clear();
 
             // Clear playback state
             state.queue.clear();
@@ -77,16 +74,13 @@ pub async fn dispatch(
             state.station_nav.focused_column = 0;
             state.list_state.reset();
 
-            // Clear all server-related state
-            state.connected_server_url = None;
-            state.active_server_id = None;
+            // Clear session/runtime state (keep display state like connected_server_url, libraries, artwork_cache_stats)
             state.cache_timestamp = None;
             state.playlist_cache_timestamp = None;
             state.background_refresh_in_progress.clear();
             state.plex_session_id = None;
             state.album_art_cache.clear();
             state.album_art_pending.clear();
-            state.artwork_cache_stats = None;
             state.waveform = Default::default();
             state.search_results = None;
             state.playlist_tracks_cache.clear();

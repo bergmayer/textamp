@@ -92,10 +92,11 @@ fn render_account_content(frame: &mut Frame, state: &AppState, area: Rect) {
     }
 
     let mut lines = vec![];
+    let connected = matches!(state.connection, ConnectionState::Connected { .. });
 
+    // Account info header
     match &state.connection {
         ConnectionState::Connected { username, has_plex_pass } => {
-            // Account info
             lines.push(Line::from(Span::styled(
                 format!("Signed in as {}", username),
                 Style::default().fg(t.colors.fg_primary),
@@ -103,174 +104,247 @@ fn render_account_content(frame: &mut Frame, state: &AppState, area: Rect) {
             let plex_pass_text = if *has_plex_pass { "Plex Pass: Active" } else { "Plex Pass: Inactive" };
             let plex_pass_color = if *has_plex_pass { t.colors.fg_accent } else { t.colors.fg_muted };
             lines.push(Line::from(Span::styled(plex_pass_text, Style::default().fg(plex_pass_color))));
-            lines.push(Line::from(""));
-
-            // Music libraries
-            let lib_count = state.libraries.len();
-
+        }
+        _ => {
             lines.push(Line::from(Span::styled(
-                "Music libraries:",
+                "Not signed in",
+                Style::default().fg(t.colors.fg_muted),
+            )));
+        }
+    }
+    lines.push(Line::from(""));
+
+    // Music libraries (always shown if we have library data)
+    let lib_count = state.libraries.len();
+    let has_libraries = !state.libraries.is_empty();
+
+    if has_libraries {
+        lines.push(Line::from(Span::styled(
+            "Music libraries:",
+            Style::default().fg(t.colors.fg_accent),
+        )));
+
+        for (i, lib) in state.libraries.iter().enumerate() {
+            let is_active = state.active_library.as_ref() == Some(&lib.key);
+            let is_selected = is_focused && connected && i == state.settings_state.item_index;
+            let prefix = if is_selected { "> " } else { "  " };
+            let active_marker = if is_active { " *" } else { "" };
+            let style = if is_selected { Theme::selected() } else { Style::default().fg(t.colors.fg_primary) };
+            lines.push(Line::from(Span::styled(
+                format!("{}{}{}", prefix, lib.title, active_marker),
+                style,
+            )));
+        }
+
+        if !connected {
+            lines.push(Line::from(Span::styled(
+                "  (not signed in)",
+                Style::default().fg(t.colors.fg_muted),
+            )));
+        }
+
+        lines.push(Line::from(""));
+    }
+
+    // Action buttons
+    if connected {
+        let crawl_label = if state.subfolder_preload_active {
+            "Stop Subfolder Crawl"
+        } else {
+            "Start Subfolder Crawl"
+        };
+        let action_items = [
+            "Clear Library Cache & Reload",
+            "Clear Artwork Cache",
+            "Clear Subfolder Cache",
+            crawl_label,
+            "Sign Out",
+        ];
+        for (i, label) in action_items.iter().enumerate() {
+            let item_idx = lib_count + i;
+            let is_selected = is_focused && item_idx == state.settings_state.item_index;
+            let prefix = if is_selected { "> " } else { "  " };
+            let style = if is_selected { Theme::selected() } else { Style::default().fg(t.colors.fg_primary) };
+            lines.push(Line::from(Span::styled(
+                format!("{}{}", prefix, label),
+                style,
+            )));
+        }
+
+        // Help text
+        lines.push(Line::from(""));
+        let selected_idx = state.settings_state.item_index;
+        let help_text = if !is_focused {
+            "Enter: select"
+        } else if selected_idx < lib_count {
+            "Enter: switch to library"
+        } else {
+            match selected_idx - lib_count {
+                0 => "Clears cached library data and reloads from server",
+                1 => "Clears artwork image cache from disk",
+                2 => "Clears cached subfolder contents",
+                3 => if state.subfolder_preload_active {
+                    "Stops the active subfolder crawl"
+                } else {
+                    "Crawls folder contents (2 levels deep) in background"
+                },
+                4 => "Signs out and clears all cached data",
+                _ => "Enter: select",
+            }
+        };
+        lines.push(Line::from(Span::styled(help_text, Style::default().fg(t.colors.fg_muted))));
+    } else {
+        // Sign In button (item 0)
+        let is_signin_selected = is_focused && state.settings_state.item_index == 0;
+        let signin_prefix = if is_signin_selected { "> " } else { "  " };
+        let signin_style = if is_signin_selected { Theme::selected() } else { Style::default().fg(t.colors.fg_primary) };
+        lines.push(Line::from(Span::styled(
+            format!("{}Sign In", signin_prefix),
+            signin_style,
+        )));
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Enter: start sign-in",
+            Style::default().fg(t.colors.fg_muted),
+        )));
+    }
+
+    // Server info (always shown if we have a server URL)
+    if let Some(ref url) = state.connected_server_url {
+        lines.push(Line::from(""));
+
+        let server_info = state.available_servers.iter()
+            .find(|s| s.connections.iter().any(|c| c.uri == *url));
+
+        if let Some(server) = server_info {
+            lines.push(Line::from(Span::styled(
+                format!("Server: {}", server.name),
                 Style::default().fg(t.colors.fg_accent),
             )));
+        } else {
+            lines.push(Line::from(Span::styled(
+                "Server:",
+                Style::default().fg(t.colors.fg_accent),
+            )));
+        }
 
-            if state.libraries.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    "  No libraries available",
-                    Style::default().fg(t.colors.fg_muted),
-                )));
-            } else {
-                for (i, lib) in state.libraries.iter().enumerate() {
-                    let is_active = state.active_library.as_ref() == Some(&lib.key);
-                    let is_selected = is_focused && i == state.settings_state.item_index;
-                    let prefix = if is_selected { "> " } else { "  " };
-                    let active_marker = if is_active { " *" } else { "" };
-                    let style = if is_selected { Theme::selected() } else { Style::default().fg(t.colors.fg_primary) };
-                    lines.push(Line::from(Span::styled(
-                        format!("{}{}{}", prefix, lib.title, active_marker),
-                        style,
-                    )));
-                }
+        let secure = url.starts_with("https://");
+        let without_scheme = url.trim_start_matches("https://").trim_start_matches("http://");
+        let mut detail_parts = vec![format!("  {}", without_scheme)];
+        if let Some(server) = server_info {
+            if let Some(conn) = server.connections.iter().find(|c| c.uri == *url) {
+                let conn_type = if conn.relay { "relay" } else if conn.local { "local" } else { "remote" };
+                detail_parts.push(conn_type.to_string());
             }
+        }
+        detail_parts.push(if secure { "secure".to_string() } else { "insecure".to_string() });
+        if !connected {
+            detail_parts.push("disconnected".to_string());
+        }
+        lines.push(Line::from(Span::styled(
+            detail_parts.join(" | "),
+            Style::default().fg(t.colors.fg_muted),
+        )));
+    }
 
-            lines.push(Line::from(""));
+    // Cache status (always shown if we have library data or artwork stats)
+    let has_cache_info = state.active_library.is_some()
+        || state.artwork_cache_stats.is_some()
+        || !state.libraries.is_empty();
 
-            // Action buttons + Sign Out
-            let crawl_label = if state.subfolder_preload_active {
-                "Stop Subfolder Crawl"
-            } else {
-                "Start Subfolder Crawl"
-            };
-            let action_items = [
-                "Clear Library Cache & Reload",
-                "Clear Artwork Cache",
-                "Clear Subfolder Cache",
-                crawl_label,
-                "Sign Out",
+    if has_cache_info {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Cache:",
+            Style::default().fg(t.colors.fg_accent),
+        )));
+
+        if connected && state.active_library.is_some() {
+            // Item counts
+            let counts = [
+                ("artists", state.artists.len()),
+                ("albums", state.albums.len()),
+                ("playlists", state.playlists.len()),
+                ("genres", state.genres.len()),
+                ("moods", state.moods.len()),
+                ("styles", state.styles.len()),
+                ("stations", state.stations.len()),
             ];
-            for (i, label) in action_items.iter().enumerate() {
-                let item_idx = lib_count + i;
-                let is_selected = is_focused && item_idx == state.settings_state.item_index;
-                let prefix = if is_selected { "> " } else { "  " };
-                let style = if is_selected { Theme::selected() } else { Style::default().fg(t.colors.fg_primary) };
+            let count_parts: Vec<String> = counts.iter()
+                .filter(|(_, n)| *n > 0)
+                .map(|(label, n)| format!("{} {}", n, label))
+                .collect();
+            if !count_parts.is_empty() {
                 lines.push(Line::from(Span::styled(
-                    format!("{}{}", prefix, label),
-                    style,
-                )));
-            }
-
-            // Help text
-            lines.push(Line::from(""));
-            let selected_idx = state.settings_state.item_index;
-            let help_text = if !is_focused {
-                "Enter: select"
-            } else if selected_idx < lib_count {
-                "Enter: switch to library"
-            } else {
-                match selected_idx - lib_count {
-                    0 => "Clears cached library data and reloads from server",
-                    1 => "Clears artwork image cache from disk",
-                    2 => "Clears cached subfolder contents",
-                    3 => if state.subfolder_preload_active {
-                        "Stops the active subfolder crawl"
-                    } else {
-                        "Crawls folder contents (2 levels deep) in background"
-                    },
-                    4 => "Signs out and clears all cached data",
-                    _ => "Enter: select",
-                }
-            };
-            lines.push(Line::from(Span::styled(help_text, Style::default().fg(t.colors.fg_muted))));
-
-            // Server info
-            if let Some(ref url) = state.connected_server_url {
-                lines.push(Line::from(""));
-
-                // Find server name
-                let server_info = state.available_servers.iter()
-                    .find(|s| s.connections.iter().any(|c| c.uri == *url));
-
-                if let Some(server) = server_info {
-                    lines.push(Line::from(Span::styled(
-                        format!("Server: {}", server.name),
-                        Style::default().fg(t.colors.fg_accent),
-                    )));
-                } else {
-                    lines.push(Line::from(Span::styled(
-                        "Server:",
-                        Style::default().fg(t.colors.fg_accent),
-                    )));
-                }
-
-                // Parse address details
-                let secure = url.starts_with("https://");
-                let without_scheme = url.trim_start_matches("https://").trim_start_matches("http://");
-
-                // Build compact server detail line: address:port | connection_type | secure/insecure
-                let mut detail_parts = vec![format!("  {}", without_scheme)];
-                if let Some(server) = server_info {
-                    if let Some(conn) = server.connections.iter().find(|c| c.uri == *url) {
-                        let conn_type = if conn.relay { "relay" } else if conn.local { "local" } else { "remote" };
-                        detail_parts.push(conn_type.to_string());
-                    }
-                }
-                detail_parts.push(if secure { "secure".to_string() } else { "insecure".to_string() });
-                lines.push(Line::from(Span::styled(
-                    detail_parts.join(" | "),
+                    format!("  {}", count_parts.join(", ")),
                     Style::default().fg(t.colors.fg_muted),
                 )));
             }
 
-            // Cache status
-            if state.active_library.is_some() {
-                lines.push(Line::from(""));
+            // Folder info
+            let root_folder_count = state.folder_state.as_ref()
+                .and_then(|fs| fs.columns.first())
+                .map(|col| col.items.iter()
+                    .filter(|item| item.item_type == crate::services::FolderItemType::Folder)
+                    .count())
+                .unwrap_or(0);
+            let cached_listings = state.folder_contents_cache.len();
+            if root_folder_count > 0 || cached_listings > 0 {
+                let folder_text = if state.subfolder_preload_active {
+                    format!("  {} root folders, {} folder listings (crawling...)", root_folder_count, cached_listings)
+                } else if cached_listings > 0 {
+                    format!("  {} root folders, {} folder listings", root_folder_count, cached_listings)
+                } else {
+                    format!("  {} root folders", root_folder_count)
+                };
+                lines.push(Line::from(Span::styled(folder_text, Style::default().fg(t.colors.fg_muted))));
+            }
+
+            // Cache ages
+            let now_ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let mut age_parts = vec![];
+            if let Some(cache_ts) = state.cache_timestamp {
+                let age = std::time::Duration::from_secs(now_ts.saturating_sub(cache_ts));
+                age_parts.push(format!("Library data: {}", format_duration(age)));
+            }
+            if let Some(playlist_ts) = state.playlist_cache_timestamp {
+                let age = std::time::Duration::from_secs(now_ts.saturating_sub(playlist_ts));
+                age_parts.push(format!("Playlist data: {}", format_duration(age)));
+            }
+            if !age_parts.is_empty() {
                 lines.push(Line::from(Span::styled(
-                    "Cache:",
+                    format!("  {}", age_parts.join(" | ")),
+                    Style::default().fg(t.colors.fg_muted),
+                )));
+            }
+
+            // Last saved
+            let elapsed = state.last_cache_save.elapsed();
+            let dirty_marker = if state.cache_dirty { " (unsaved changes)" } else { "" };
+            lines.push(Line::from(Span::styled(
+                format!("  Last saved: {} ago{}", format_duration(elapsed), dirty_marker),
+                Style::default().fg(t.colors.fg_muted),
+            )));
+
+            // Background refresh
+            if !state.background_refresh_in_progress.is_empty() {
+                let categories: Vec<_> = state.background_refresh_in_progress
+                    .iter()
+                    .map(|c| c.display_name())
+                    .collect();
+                lines.push(Line::from(Span::styled(
+                    format!("  Refreshing: {}", categories.join(", ")),
                     Style::default().fg(t.colors.fg_accent),
                 )));
-
-                // Item counts (compact single line)
-                let counts = [
-                    ("artists", state.artists.len()),
-                    ("albums", state.albums.len()),
-                    ("playlists", state.playlists.len()),
-                    ("genres", state.genres.len()),
-                    ("moods", state.moods.len()),
-                    ("styles", state.styles.len()),
-                    ("stations", state.stations.len()),
-                ];
-                let count_parts: Vec<String> = counts.iter()
-                    .filter(|(_, n)| *n > 0)
-                    .map(|(label, n)| format!("{} {}", n, label))
-                    .collect();
-                if !count_parts.is_empty() {
-                    lines.push(Line::from(Span::styled(
-                        format!("  {}", count_parts.join(", ")),
-                        Style::default().fg(t.colors.fg_muted),
-                    )));
-                }
-
-                // Folder info
-                let root_folder_count = state.folder_state.as_ref()
-                    .and_then(|fs| fs.columns.first())
-                    .map(|col| col.items.iter()
-                        .filter(|item| item.item_type == crate::services::FolderItemType::Folder)
-                        .count())
-                    .unwrap_or(0);
-                let cached_listings = state.folder_contents_cache.len();
-
-                if root_folder_count > 0 || cached_listings > 0 {
-                    let folder_text = if state.subfolder_preload_active {
-                        format!("  {} root folders, {} folder listings (crawling...)", root_folder_count, cached_listings)
-                    } else if cached_listings > 0 {
-                        format!("  {} root folders, {} folder listings", root_folder_count, cached_listings)
-                    } else {
-                        format!("  {} root folders", root_folder_count)
-                    };
-                    lines.push(Line::from(Span::styled(folder_text, Style::default().fg(t.colors.fg_muted))));
-                }
-
-                // Artwork cache
-                if let Some((art_count, art_bytes)) = state.artwork_cache_stats {
+            }
+        } else {
+            // Disconnected or no active library — show artwork stats if available, else "cleared"
+            if let Some((art_count, art_bytes)) = state.artwork_cache_stats {
+                if art_count > 0 {
                     let size_text = if art_bytes >= 1024 * 1024 {
                         format!("{:.1} MB", art_bytes as f64 / (1024.0 * 1024.0))
                     } else if art_bytes >= 1024 {
@@ -282,72 +356,35 @@ fn render_account_content(frame: &mut Frame, state: &AppState, area: Rect) {
                         format!("  Artwork: {} images, {}", art_count, size_text),
                         Style::default().fg(t.colors.fg_muted),
                     )));
-                }
-
-                // Cache ages
-                let now_ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                let mut age_parts = vec![];
-                if let Some(cache_ts) = state.cache_timestamp {
-                    let age = std::time::Duration::from_secs(now_ts.saturating_sub(cache_ts));
-                    age_parts.push(format!("Library data: {}", format_duration(age)));
-                }
-                if let Some(playlist_ts) = state.playlist_cache_timestamp {
-                    let age = std::time::Duration::from_secs(now_ts.saturating_sub(playlist_ts));
-                    age_parts.push(format!("Playlist data: {}", format_duration(age)));
-                }
-                if !age_parts.is_empty() {
+                } else {
                     lines.push(Line::from(Span::styled(
-                        format!("  {}", age_parts.join(" | ")),
+                        "  Cleared",
                         Style::default().fg(t.colors.fg_muted),
                     )));
                 }
-
-                // Last saved
-                let elapsed = state.last_cache_save.elapsed();
-                let dirty_marker = if state.cache_dirty { " (unsaved changes)" } else { "" };
+            } else {
                 lines.push(Line::from(Span::styled(
-                    format!("  Last saved: {} ago{}", format_duration(elapsed), dirty_marker),
+                    "  Cleared",
                     Style::default().fg(t.colors.fg_muted),
                 )));
-
-                // Background refresh
-                if !state.background_refresh_in_progress.is_empty() {
-                    let categories: Vec<_> = state.background_refresh_in_progress
-                        .iter()
-                        .map(|c| c.display_name())
-                        .collect();
-                    lines.push(Line::from(Span::styled(
-                        format!("  Refreshing: {}", categories.join(", ")),
-                        Style::default().fg(t.colors.fg_accent),
-                    )));
-                }
             }
         }
-        _ => {
-            // Not signed in
-            lines.push(Line::from(Span::styled(
-                "Not signed in",
-                Style::default().fg(t.colors.fg_muted),
-            )));
-            lines.push(Line::from(""));
 
-            // Sign In button (item 0)
-            let is_signin_selected = is_focused && state.settings_state.item_index == 0;
-            let signin_prefix = if is_signin_selected { "> " } else { "  " };
-            let signin_style = if is_signin_selected { Theme::selected() } else { Style::default().fg(t.colors.fg_primary) };
-            lines.push(Line::from(Span::styled(
-                format!("{}Sign In", signin_prefix),
-                signin_style,
-            )));
-
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                "Enter: start sign-in",
-                Style::default().fg(t.colors.fg_muted),
-            )));
+        // Artwork cache (show in connected mode too, when active library exists)
+        if connected && state.active_library.is_some() {
+            if let Some((art_count, art_bytes)) = state.artwork_cache_stats {
+                let size_text = if art_bytes >= 1024 * 1024 {
+                    format!("{:.1} MB", art_bytes as f64 / (1024.0 * 1024.0))
+                } else if art_bytes >= 1024 {
+                    format!("{} KB", art_bytes / 1024)
+                } else {
+                    format!("{} B", art_bytes)
+                };
+                lines.push(Line::from(Span::styled(
+                    format!("  Artwork: {} images, {}", art_count, size_text),
+                    Style::default().fg(t.colors.fg_muted),
+                )));
+            }
         }
     }
 
