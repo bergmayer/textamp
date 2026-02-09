@@ -45,11 +45,38 @@ pub async fn dispatch(
             // Check cache first for instant navigation
             if let Some(cached_folder) = state.folder_contents_cache.get(&folder_key) {
                 tracing::debug!("Folder cache hit: {} ({} items)", folder_key, cached_folder.items.len());
-                // Extract folder title from the key if possible, or use a generic title
                 let folder_title = folder_key.split('/').last().unwrap_or("Folder").to_string();
                 if let Some(ref mut folder_state) = state.folder_state {
-                    let new_column = FolderColumn::new(Some(folder_key), folder_title, cached_folder.items.clone());
+                    let new_column = FolderColumn::new(Some(folder_key.clone()), folder_title, cached_folder.items.clone());
                     folder_state.push_column(new_column);
+                }
+
+                // If entry is >= 32 days old, serve from cache (warm) but re-fetch in background
+                let now_ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let age_secs = now_ts.saturating_sub(cached_folder.timestamp);
+                if age_secs >= crate::plex::constants::CACHE_VERY_STALE_THRESHOLD_SECS {
+                    tracing::info!("Warm subfolder cache: {} ({} days old), re-fetching in background",
+                        folder_key, age_secs / (24 * 60 * 60));
+                    let event_tx = event_tx.clone();
+                    let client = client.clone();
+                    let fk = folder_key;
+                    tokio::spawn(async move {
+                        match client.get_folder_contents(&fk).await {
+                            Ok(response) => {
+                                let items = FolderService::from_response(&response);
+                                let _ = event_tx.send(Event::SubfolderRefreshed {
+                                    folder_key: fk,
+                                    cached_folder: CachedFolder::new(items),
+                                }).await;
+                            }
+                            Err(e) => {
+                                tracing::warn!("Warm subfolder re-fetch failed for {}: {}", fk, e);
+                            }
+                        }
+                    });
                 }
             } else {
                 // Not in cache - fetch from API

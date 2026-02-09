@@ -21,6 +21,8 @@ pub enum Action {
     LoadInitialData,
     LoadLibraries,
     SelectLibrary(String),
+    /// Switch to a library on a different server: (library_key, server_identifier)
+    SelectLibraryOnServer(String, String),
     LoadArtists,
     LoadAlbums,
     LoadPlaylists,
@@ -78,7 +80,7 @@ pub enum Action {
     RefreshGenreView,          // Refresh genre view after mode change (shared logic)
 
     // Artist view mode cycling
-    CycleArtistViewMode, // Ctrl+A when in Artists: cycle Artist → Album Artist → Album
+    CycleArtistViewMode, // Ctrl+A when in Artists: cycle Artist → Album
     RefreshArtistView,   // Refresh artist view after mode change (shared logic)
 
     // Now Playing view mode cycling
@@ -116,7 +118,12 @@ pub enum Action {
     SelectServer(String),
     SaveSettings,
     SaveCredentials, // Save username/password from settings
-    ClearCache,      // Clear all cached data and reload
+    ClearCache,      // Clear all cached data and reload (legacy, kept for Account section)
+    ClearLibraryCache,      // Clear main library cache only (artists, albums, etc.)
+    ClearArtworkCache,      // Clear artwork disk cache
+    ClearSubfolderCache,    // Clear subfolder cache entries
+    StartSubfolderCrawl,    // Manual subfolder crawl for current library
+    StopSubfolderCrawl,     // Cancel active subfolder crawl
 
     // Folder navigation
     LoadFolderRoot,

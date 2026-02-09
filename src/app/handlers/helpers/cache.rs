@@ -30,7 +30,11 @@ pub fn maybe_save_cache_async(event_tx: &mpsc::Sender<Event>, state: &mut AppSta
     state.last_cache_save = std::time::Instant::now();
 
     use crate::cache::CacheData;
-    let mut cache_data = CacheData::new(&lib_key);
+    // Preserve the existing cache timestamp so it reflects when data was last
+    // refreshed from the server, not when the cache file was last written to disk.
+    let ts = state.cache_timestamp.unwrap_or_else(CacheData::now);
+    let mut cache_data = CacheData::with_timestamp(&lib_key, ts);
+    cache_data.playlist_timestamp = state.playlist_cache_timestamp.unwrap_or_else(CacheData::now);
     cache_data.artists = state.artists.clone();
     cache_data.albums = state.albums.clone();
     cache_data.playlists = state.playlists.clone();

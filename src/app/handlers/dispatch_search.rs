@@ -242,8 +242,16 @@ pub async fn dispatch(
         // Library picker popup actions
         Action::OpenLibraryPicker => {
             state.library_picker_active = true;
-            // Set index to current active library
-            if let Some(ref active_key) = state.active_library {
+            // Set index to current active library (considering multi-server)
+            if state.has_multiple_servers() {
+                let all_libs = state.all_libraries_with_servers();
+                state.library_picker_index = all_libs.iter()
+                    .position(|(sid, _, lib)| {
+                        state.active_library.as_deref() == Some(lib.key.as_str())
+                            && state.active_server_id.as_deref() == Some(*sid)
+                    })
+                    .unwrap_or(0);
+            } else if let Some(ref active_key) = state.active_library {
                 state.library_picker_index = state.libraries.iter()
                     .position(|lib| lib.key == *active_key)
                     .unwrap_or(0);

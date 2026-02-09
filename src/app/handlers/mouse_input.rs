@@ -1520,15 +1520,12 @@ fn settings_visual_row_to_item(visual_row: usize, state: &AppState) -> Option<us
                 // Row 0: "Signed in as ..."
                 // Row 1: "Plex Pass: ..."
                 // Row 2: blank
-                // Row 3: "Library: ..." (if active_library) or Clear Cache
-                // Row 4: blank (if active_library) or Sign Out
-                // Row 5: Clear Cache (if active_library)
-                // Row 6: Sign Out (if active_library)
+                // Row 3: "Library: ..." (if active_library)
+                // Row 4: blank (if active_library)
+                // Next row: Sign Out (item 0)
                 let offset = if state.active_library.is_some() { 5 } else { 3 };
                 if visual_row == offset {
-                    Some(0) // Clear Cache & Reload
-                } else if visual_row == offset + 1 {
-                    Some(1) // Sign Out
+                    Some(0) // Sign Out
                 } else {
                     None
                 }
@@ -1544,13 +1541,38 @@ fn settings_visual_row_to_item(visual_row: usize, state: &AppState) -> Option<us
             }
         }
         SettingsSection::Libraries => {
-            // Row 0: "Music libraries:" header
-            // Row 1: blank
-            // Row 2+: library items → item 0+
-            if visual_row >= 2 {
-                let idx = visual_row - 2;
-                if idx < state.libraries.len() {
-                    Some(idx)
+            // Variable header: server info (if connected) + "Music libraries:" + blank
+            let mut header_rows = 0;
+            if state.connected_server_url.is_some() {
+                header_rows += 2; // "Server:" + blank
+                // Server name line (if server found in available_servers)
+                if let Some(ref url) = state.connected_server_url {
+                    if state.available_servers.iter().any(|s| s.connections.iter().any(|c| c.uri == *url)) {
+                        header_rows += 1; // Name
+                    }
+                    header_rows += 1; // Address
+                    let without_scheme = url.trim_start_matches("https://").trim_start_matches("http://");
+                    if without_scheme.contains(':') {
+                        header_rows += 1; // Port
+                    }
+                    header_rows += 1; // Secure
+                    if state.available_servers.iter().any(|s| s.connections.iter().any(|c| c.uri == *url)) {
+                        header_rows += 1; // Connection type
+                    }
+                }
+                header_rows += 1; // blank after server info
+            }
+            header_rows += 2; // "Music libraries:" + blank
+
+            let lib_count = state.libraries.len();
+            if visual_row >= header_rows {
+                let after_header = visual_row - header_rows;
+                if after_header < lib_count {
+                    Some(after_header) // Library item
+                } else if after_header == lib_count {
+                    None // Blank line between libraries and action items
+                } else if after_header <= lib_count + 4 {
+                    Some(after_header - 1) // Action item (subtract 1 for blank line)
                 } else {
                     None
                 }

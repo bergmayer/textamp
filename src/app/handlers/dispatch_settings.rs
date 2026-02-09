@@ -259,10 +259,9 @@ pub async fn dispatch(
                             follow_ups.push(Action::SelectServer(server_id));
                         }
                     } else if matches!(state.connection, ConnectionState::Connected { .. }) {
-                        // Signed in: 0=Clear Cache, 1=Sign Out
+                        // Signed in: 0=Sign Out
                         match state.settings_state.item_index {
-                            0 => follow_ups.push(Action::ClearCache),
-                            1 => follow_ups.push(Action::Logout),
+                            0 => follow_ups.push(Action::Logout),
                             _ => {}
                         }
                     } else {
@@ -274,10 +273,48 @@ pub async fn dispatch(
                     }
                 }
                 SettingsSection::Libraries => {
-                    // Activate selected library
-                    if let Some(lib) = state.libraries.get(state.settings_state.item_index) {
-                        let lib_key = lib.key.clone();
-                        follow_ups.push(Action::SelectLibrary(lib_key));
+                    use crate::app::state::{ConfirmDialog, ConfirmAction};
+                    let lib_count = state.libraries.len();
+                    let idx = state.settings_state.item_index;
+                    if idx < lib_count {
+                        // Activate selected library
+                        if let Some(lib) = state.libraries.get(idx) {
+                            let lib_key = lib.key.clone();
+                            follow_ups.push(Action::SelectLibrary(lib_key));
+                        }
+                    } else {
+                        match idx - lib_count {
+                            0 => {
+                                state.confirm_dialog = Some(ConfirmDialog {
+                                    title: "Clear Library Cache".to_string(),
+                                    message: "Clear all cached library data and reload from server?".to_string(),
+                                    on_confirm: ConfirmAction::ClearLibraryCache,
+                                });
+                            }
+                            1 => {
+                                state.confirm_dialog = Some(ConfirmDialog {
+                                    title: "Clear Artwork Cache".to_string(),
+                                    message: "Delete all cached album artwork from disk?".to_string(),
+                                    on_confirm: ConfirmAction::ClearArtworkCache,
+                                });
+                            }
+                            2 => {
+                                state.confirm_dialog = Some(ConfirmDialog {
+                                    title: "Clear Subfolder Cache".to_string(),
+                                    message: "Clear all cached subfolder contents?".to_string(),
+                                    on_confirm: ConfirmAction::ClearSubfolderCache,
+                                });
+                            }
+                            3 => {
+                                // Toggle crawl: start if not running, stop if running
+                                if state.subfolder_preload_active {
+                                    follow_ups.push(Action::StopSubfolderCrawl);
+                                } else {
+                                    follow_ups.push(Action::StartSubfolderCrawl);
+                                }
+                            }
+                            _ => {}
+                        }
                     }
                 }
                 SettingsSection::Playback => {
@@ -335,7 +372,20 @@ pub async fn dispatch(
                                     // Get servers
                                     let servers = auth.get_servers(&token).await.unwrap_or_default();
 
-                                    // Find working server URL (tests connectivity)
+                                    // Multiple servers and no configured URL: show server selection
+                                    if server_url.is_empty() && servers.len() > 1 {
+                                        let has_plex_pass = user.has_plex_pass();
+                                        let _ = event_tx.send(Event::AuthServersReady {
+                                            token,
+                                            username: user.username,
+                                            servers,
+                                            client_identifier: client_id,
+                                            has_plex_pass,
+                                        }).await;
+                                        return;
+                                    }
+
+                                    // Single server or configured URL: connect directly
                                     let final_url = if server_url.is_empty() {
                                         helpers::find_working_connection_from_servers(&servers, &token, &client_id).await
                                     } else {
@@ -524,6 +574,110 @@ pub async fn dispatch(
                 follow_ups.push(Action::SaveSettings);
             }
         }
+        Action::SelectLibraryOnServer(lib_key, server_id) => {
+            // Switch to a library on a different server
+            // First, find the server and connect to it
+            if let Some(server) = state.available_servers.iter().find(|s| s.client_identifier == server_id).cloned() {
+                let token = client.token().map(|s| s.to_string());
+
+                if let Some(token) = token {
+                    // Clear all current data (same as SelectLibrary but more thorough)
+                    state.artists.clear();
+                    state.albums.clear();
+                    state.playlists.clear();
+                    state.genres.clear();
+                    state.artist_genres.clear();
+                    state.album_genres.clear();
+                    state.moods.clear();
+                    state.styles.clear();
+                    state.stations.clear();
+                    state.recently_added_albums.clear();
+                    state.recently_played_albums.clear();
+                    state.selected_artist_albums.clear();
+                    state.selected_album_tracks.clear();
+                    state.folder_state = None;
+                    state.folder_contents_cache.clear();
+                    state.subfolder_preload_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                    state.subfolder_preload_active = false;
+                    state.playlist_tracks_cache.clear();
+                    state.list_state.reset();
+                    state.artist_nav = crate::app::state::BrowseNavigationState::new();
+                    state.genre_nav = crate::app::state::BrowseNavigationState::new();
+                    state.playlist_nav = crate::app::state::BrowseNavigationState::new();
+                    state.station_nav = crate::app::state::StationNavigationState::new();
+
+                    // Stop playback
+                    if state.playback.status != PlayStatus::Stopped {
+                        if let Some(track) = state.current_track().cloned() {
+                            helpers::report_playback_stop_to_plex(
+                                &track, state.playback.position_ms, false,
+                                state.plex_session_id.clone(), client,
+                            );
+                        }
+                    }
+                    audio.stop();
+                    audio.track_cache.flush();
+                    state.playback.status = PlayStatus::Stopped;
+                    state.playback.position_ms = 0;
+                    state.playback.duration_ms = 0;
+                    state.queue.clear();
+                    state.queue_index = None;
+                    state.queue_original.clear();
+                    state.radio.clear();
+                    state.playback_mode = PlaybackMode::Queue;
+                    state.adventure = crate::app::state::AdventureState::default();
+
+                    state.library_loading = true;
+                    let server_name = server.name.clone();
+                    state.set_status(format!("Connecting to {}...", server_name));
+
+                    let client_id = client.client_identifier().to_string();
+                    let event_tx = event_tx.clone();
+                    let server_id_clone = server_id.clone();
+                    let spawn_server_name = server_name.clone();
+
+                    tokio::spawn(async move {
+                        if let Some(url) = helpers::find_working_connection(&server, &token, &client_id).await {
+                            let _ = event_tx.send(Event::ServerConnectionSucceeded {
+                                server_name: spawn_server_name.clone(),
+                                url: url.clone(),
+                            }).await;
+
+                            // Now load libraries from this server
+                            let new_client = crate::api::PlexClient::new_with_url(&url, Some(&token), &client_id);
+                            match new_client.get_libraries().await {
+                                Ok(libs) => {
+                                    let _ = event_tx.send(Event::LibrariesLoaded(libs)).await;
+                                }
+                                Err(e) => {
+                                    tracing::error!("Failed to load libraries from {}: {}", spawn_server_name, e);
+                                }
+                            }
+                        } else {
+                            let _ = event_tx.send(Event::ServerConnectionFailed {
+                                server_name: spawn_server_name,
+                            }).await;
+                        }
+                    });
+
+                    // Update server tracking
+                    state.active_server_id = Some(server_id);
+                    state.active_library = Some(lib_key.clone());
+
+                    // Persist the new server info
+                    let server_info = crate::plex::ServerInfo {
+                        url: String::new(), // Will be updated by ServerConnectionSucceeded
+                        identifier: server_id_clone,
+                        name: server_name.clone(),
+                    };
+                    if let Err(e) = PlexAuth::update_server_info(&server_info) {
+                        tracing::warn!("Failed to persist server info: {}", e);
+                    }
+                }
+            } else {
+                state.set_error("Server not found".to_string());
+            }
+        }
         Action::SaveSettings => {
             // Build updated config from current state
             let mut updated_config = config.clone();
@@ -552,6 +706,9 @@ pub async fn dispatch(
                         state.subfolder_preload_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
                         state.subfolder_preload_active = false;
                         state.playlist_tracks_cache.clear();
+                        state.cache_timestamp = None;
+                        state.playlist_cache_timestamp = None;
+                        state.cache_dirty = true;
 
                         // Reload from API
                         if let Some(lib_key) = &state.active_library {
@@ -585,6 +742,86 @@ pub async fn dispatch(
             } else {
                 state.set_error("Cache not available".to_string());
             }
+        }
+
+        Action::ClearLibraryCache => {
+            // Clear main library cache files and in-memory data (but not subfolders or artwork)
+            if let Some(cache) = LibraryCache::new() {
+                match cache.clear_all() {
+                    Ok(count) => {
+                        tracing::info!("Cleared {} library cache files", count);
+
+                        // Clear in-memory library data
+                        state.artists.clear();
+                        state.albums.clear();
+                        state.playlists.clear();
+                        state.genres.clear();
+                        state.artist_genres.clear();
+                        state.album_genres.clear();
+                        state.moods.clear();
+                        state.styles.clear();
+                        state.stations.clear();
+                        state.recently_added_albums.clear();
+                        state.recently_played_albums.clear();
+                        state.playlist_tracks_cache.clear();
+                        state.cache_timestamp = None;
+                        state.playlist_cache_timestamp = None;
+                        state.cache_dirty = true;
+
+                        // Reload from API
+                        if let Some(lib_key) = &state.active_library {
+                            let lib_key = lib_key.clone();
+                            let lib_name = state.libraries.iter()
+                                .find(|l| l.key == lib_key)
+                                .map(|l| l.title.clone())
+                                .unwrap_or_else(|| lib_key.clone());
+                            helpers::preload_all_library_data(event_tx, &lib_key, &lib_name, client);
+                        }
+
+                        state.set_status(format!("Cleared {} library cache files, reloading...", count));
+                    }
+                    Err(e) => {
+                        state.set_error(format!("Failed to clear library cache: {}", e));
+                    }
+                }
+            } else {
+                state.set_error("Cache not available".to_string());
+            }
+        }
+        Action::ClearArtworkCache => {
+            let artwork_cache = crate::plex::ArtworkCache::default();
+            let removed = artwork_cache.clear_all();
+            tracing::info!("Cleared {} artwork cache files", removed);
+
+            // Clear in-memory artwork
+            state.album_art_cache.clear();
+            state.album_art_pending.clear();
+            state.artwork_cache_stats = Some((0, 0));
+
+            state.set_status(format!("Cleared {} artwork cache files", removed));
+        }
+        Action::ClearSubfolderCache => {
+            let count = state.folder_contents_cache.len();
+            state.folder_contents_cache.clear();
+            state.subfolder_preload_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            state.subfolder_preload_active = false;
+            state.cache_dirty = true;
+
+            tracing::info!("Cleared {} subfolder cache entries", count);
+            state.set_status(format!("Cleared {} subfolder cache entries", count));
+        }
+        Action::StartSubfolderCrawl => {
+            helpers::maybe_start_subfolder_preload(event_tx, state, client);
+            if state.subfolder_preload_active {
+                state.set_status("Subfolder crawl started".to_string());
+            } else {
+                state.set_status("No subfolders to crawl (no root folders loaded)".to_string());
+            }
+        }
+        Action::StopSubfolderCrawl => {
+            state.subfolder_preload_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            state.subfolder_preload_active = false;
+            state.set_status("Subfolder crawl stopped".to_string());
         }
 
         // Sonic Adventure actions

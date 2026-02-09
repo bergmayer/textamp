@@ -455,6 +455,12 @@ pub struct AppState {
     pub available_servers: Vec<PlexServer>,
     pub connected_server_url: Option<String>,
 
+    /// Libraries from all available servers: (server_identifier, server_name, libraries).
+    /// Only populated when multiple servers have music libraries.
+    pub all_server_libraries: Vec<(String, String, Vec<Library>)>,
+    /// Server identifier for the currently active library's server.
+    pub active_server_id: Option<String>,
+
     // Authentication flow state
     pub auth_state: AuthState,
     /// True when user went through the login form (no stored credentials).
@@ -580,7 +586,7 @@ pub struct AppState {
     pub folder_state: Option<FolderNavigationState>,
     /// Cached subfolder contents: folder_key -> CachedFolder with timestamp.
     /// Each entry has its own timestamp for individual staleness tracking.
-    /// Entries older than 32 days are deleted on cache load (not refreshed).
+    /// At 32+ days, entries are served as warm cache and re-fetched in background on access.
     /// Subfolders are only cached when navigated to (lazy caching).
     pub folder_contents_cache: HashMap<String, CachedFolder>,
     /// Whether a subfolder preload crawl is currently active.
@@ -634,6 +640,10 @@ pub struct AppState {
     pub recently_added_loading: bool,
 
     // Cache management
+    /// Timestamp (Unix epoch secs) when core library data was last refreshed from server.
+    pub cache_timestamp: Option<u64>,
+    /// Timestamp (Unix epoch secs) when playlist/dynamic data was last refreshed from server.
+    pub playlist_cache_timestamp: Option<u64>,
     pub cache_dirty: bool,
     pub last_input_time: std::time::Instant,
     pub last_cache_save: std::time::Instant,
@@ -670,6 +680,8 @@ pub struct AppState {
     pub album_art_view: bool,
     pub album_art_cache: HashMap<String, Vec<u8>>,
     pub album_art_pending: std::collections::HashSet<String>,
+    /// Artwork disk cache stats: (file_count, total_bytes). Computed on startup and after clears.
+    pub artwork_cache_stats: Option<(usize, u64)>,
     /// Scroll cooldown for cover art mode (prevents trackpad momentum).
     pub art_scroll_cooldown: Option<std::time::Instant>,
     /// Pinned scroll offset after mouse click to prevent viewport jumping.
@@ -920,6 +932,8 @@ impl AppState {
             active_library: None,
             available_servers: Vec::new(),
             connected_server_url: None,
+            all_server_libraries: Vec::new(),
+            active_server_id: None,
             auth_state: AuthState::default(),
             is_fresh_login: false,
             view: View::Auth,
@@ -1018,6 +1032,8 @@ impl AppState {
             playlists_mode: PlaylistsMode::default(),
             recently_added_albums: Vec::new(),
             recently_added_loading: false,
+            cache_timestamp: None,
+            playlist_cache_timestamp: None,
             cache_dirty: false,
             last_input_time: std::time::Instant::now(),
             last_cache_save: std::time::Instant::now(),
@@ -1036,6 +1052,7 @@ impl AppState {
             album_art_view: false,
             album_art_cache: HashMap::new(),
             album_art_pending: std::collections::HashSet::new(),
+            artwork_cache_stats: None,
             art_scroll_cooldown: None,
             browse_scroll_pin: None,
             browse_click_time: None,
@@ -1062,6 +1079,29 @@ impl AppState {
     pub fn clear_status(&mut self) {
         self.status_message = None;
         self.status_show_time = None;
+    }
+
+    /// Whether multiple servers have music libraries available.
+    pub fn has_multiple_servers(&self) -> bool {
+        self.all_server_libraries.len() > 1
+    }
+
+    /// Get the server name for the currently active library.
+    pub fn active_server_name(&self) -> Option<&str> {
+        let server_id = self.active_server_id.as_ref()?;
+        self.all_server_libraries.iter()
+            .find(|(id, _, _)| id == server_id)
+            .map(|(_, name, _)| name.as_str())
+    }
+
+    /// Get all music libraries across all servers, with server info.
+    /// Returns: Vec<(server_id, server_name, library)>
+    pub fn all_libraries_with_servers(&self) -> Vec<(&str, &str, &Library)> {
+        self.all_server_libraries.iter()
+            .flat_map(|(id, name, libs)| {
+                libs.iter().map(move |lib| (id.as_str(), name.as_str(), lib))
+            })
+            .collect()
     }
 
     /// Set a toast notification (auto-clears after 5 seconds).
@@ -1896,6 +1936,15 @@ impl RefreshCategory {
         ]
     }
 
+    /// Whether this category belongs to the playlist/dynamic timestamp group.
+    pub fn is_playlist_group(&self) -> bool {
+        matches!(self,
+            RefreshCategory::Playlists
+            | RefreshCategory::RecentlyAdded
+            | RefreshCategory::RecentlyPlayed
+        )
+    }
+
     /// Get display name for status messages and toasts.
     pub fn display_name(&self) -> &'static str {
         match self {
@@ -1928,6 +1977,9 @@ pub struct ConfirmDialog {
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
     RefreshCache,
+    ClearLibraryCache,
+    ClearArtworkCache,
+    ClearSubfolderCache,
 }
 
 /// Inline list filter state (/ key in browse view).

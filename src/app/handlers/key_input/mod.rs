@@ -78,17 +78,25 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
     }
 
     // Handle confirm dialog if active
-    if state.confirm_dialog.is_some() {
+    if let Some(dialog) = state.confirm_dialog.take() {
         match key.code {
             KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
-                state.confirm_dialog = None;
-                return helpers::refresh_current_view(state);
+                use crate::app::state::ConfirmAction;
+                return match dialog.on_confirm {
+                    ConfirmAction::RefreshCache => helpers::refresh_current_view(state),
+                    ConfirmAction::ClearLibraryCache => vec![Action::ClearLibraryCache],
+                    ConfirmAction::ClearArtworkCache => vec![Action::ClearArtworkCache],
+                    ConfirmAction::ClearSubfolderCache => vec![Action::ClearSubfolderCache],
+                };
             }
             KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
-                state.confirm_dialog = None;
                 return vec![];
             }
-            _ => return vec![],
+            _ => {
+                // Put dialog back — key not handled
+                state.confirm_dialog = Some(dialog);
+                return vec![];
+            }
         }
     }
 
@@ -192,7 +200,7 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
         (KeyModifiers::CONTROL, KeyCode::Char('a')) => {
             // Ctrl+A = Artists category, or cycle view mode if already there
             if state.view == View::Browse && state.browse_category == BrowseCategory::Artists {
-                // Already in artists view - cycle view mode (Artist → Album Artist → Album)
+                // Already in artists view - cycle view mode (Artist → Album)
                 return vec![Action::CycleArtistViewMode];
             }
             // Not in artists view - switch to it and reset right panel
@@ -344,7 +352,19 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
 
 /// Handle keys when library picker popup is active.
 fn handle_library_picker_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
-    let lib_count = state.libraries.len();
+    // Build flat list matching what render_library_picker shows
+    let multi_server = state.has_multiple_servers();
+    let all_libs: Vec<(&str, &str, &crate::api::models::Library)> = if multi_server {
+        state.all_libraries_with_servers()
+    } else {
+        let server_id = state.active_server_id.as_deref().unwrap_or("");
+        let server_name = state.active_server_name().unwrap_or("");
+        state.libraries.iter()
+            .map(|lib| (server_id, server_name, lib))
+            .collect()
+    };
+
+    let lib_count = all_libs.len();
     if lib_count == 0 {
         state.library_picker_active = false;
         return vec![];
@@ -371,9 +391,18 @@ fn handle_library_picker_keys(key: event::KeyEvent, state: &mut AppState) -> Vec
             state.library_picker_index = lib_count.saturating_sub(1);
         }
         KeyCode::Enter => {
-            if let Some(lib) = state.libraries.get(state.library_picker_index) {
-                let key = lib.key.clone();
-                return vec![Action::SelectLibrary(key), Action::CloseLibraryPicker];
+            if let Some((server_id, _, lib)) = all_libs.get(state.library_picker_index) {
+                let lib_key = lib.key.clone();
+                let is_different_server = state.active_server_id.as_deref() != Some(*server_id);
+
+                if is_different_server && multi_server {
+                    return vec![
+                        Action::SelectLibraryOnServer(lib_key, server_id.to_string()),
+                        Action::CloseLibraryPicker,
+                    ];
+                } else {
+                    return vec![Action::SelectLibrary(lib_key), Action::CloseLibraryPicker];
+                }
             }
         }
         _ => {} // Absorb all other keys

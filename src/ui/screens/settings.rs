@@ -123,17 +123,8 @@ fn render_account_content(frame: &mut Frame, state: &AppState, area: Rect) {
                 lines.push(Line::from(""));
             }
 
-            // Clear Cache (item 0)
-            let is_clear_selected = is_focused && state.settings_state.item_index == 0;
-            let clear_prefix = if is_clear_selected { "> " } else { "  " };
-            let clear_style = if is_clear_selected { Theme::selected() } else { Style::default().fg(t.colors.fg_primary) };
-            lines.push(Line::from(Span::styled(
-                format!("{}Clear Cache & Reload", clear_prefix),
-                clear_style,
-            )));
-
-            // Sign Out (item 1)
-            let is_signout_selected = is_focused && state.settings_state.item_index == 1;
+            // Sign Out (item 0)
+            let is_signout_selected = is_focused && state.settings_state.item_index == 0;
             let signout_prefix = if is_signout_selected { "> " } else { "  " };
             let signout_style = if is_signout_selected { Theme::selected() } else { Style::default().fg(t.colors.fg_primary) };
             lines.push(Line::from(Span::styled(
@@ -143,9 +134,7 @@ fn render_account_content(frame: &mut Frame, state: &AppState, area: Rect) {
 
             // Help text
             lines.push(Line::from(""));
-            let help_text = if is_clear_selected {
-                "Clears cached library data and reloads from server"
-            } else if is_signout_selected {
+            let help_text = if is_signout_selected {
                 "Signs out and clears all cached data"
             } else {
                 "Enter: select action"
@@ -376,6 +365,8 @@ fn render_libraries_content(frame: &mut Frame, state: &AppState, area: Rect) {
     )));
     lines.push(Line::from(""));
 
+    let lib_count = state.libraries.len();
+
     if state.libraries.is_empty() {
         lines.push(Line::from(Span::styled(
             "  No libraries available",
@@ -401,11 +392,52 @@ fn render_libraries_content(frame: &mut Frame, state: &AppState, area: Rect) {
         }
     }
 
+    // Action buttons (after libraries)
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "Enter: switch to library",
-        Style::default().fg(t.colors.fg_muted),
-    )));
+
+    let crawl_label = if state.subfolder_preload_active {
+        "Stop Subfolder Crawl"
+    } else {
+        "Start Subfolder Crawl"
+    };
+    let action_items = [
+        "Clear Library Cache & Reload",
+        "Clear Artwork Cache",
+        "Clear Subfolder Cache",
+        crawl_label,
+    ];
+    for (i, label) in action_items.iter().enumerate() {
+        let item_idx = lib_count + i;
+        let is_selected = is_focused && item_idx == state.settings_state.item_index;
+        let prefix = if is_selected { "> " } else { "  " };
+        let style = if is_selected { Theme::selected() } else { Style::default().fg(t.colors.fg_primary) };
+        lines.push(Line::from(Span::styled(
+            format!("{}{}", prefix, label),
+            style,
+        )));
+    }
+
+    // Help text
+    lines.push(Line::from(""));
+    let selected_idx = state.settings_state.item_index;
+    let help_text = if is_focused && selected_idx < lib_count {
+        "Enter: switch to library"
+    } else if is_focused && selected_idx == lib_count {
+        "Clears cached library data and reloads from server"
+    } else if is_focused && selected_idx == lib_count + 1 {
+        "Clears artwork image cache from disk"
+    } else if is_focused && selected_idx == lib_count + 2 {
+        "Clears cached subfolder contents"
+    } else if is_focused && selected_idx == lib_count + 3 {
+        if state.subfolder_preload_active {
+            "Stops the active subfolder crawl"
+        } else {
+            "Crawls root-level subfolders in background"
+        }
+    } else {
+        "Enter: select"
+    };
+    lines.push(Line::from(Span::styled(help_text, Style::default().fg(t.colors.fg_muted))));
 
     // Cache status section (for active library)
     if state.active_library.is_some() {
@@ -487,11 +519,46 @@ fn render_libraries_content(frame: &mut Frame, state: &AppState, area: Rect) {
             )));
         }
 
+        // Artwork cache stats
+        if let Some((art_count, art_bytes)) = state.artwork_cache_stats {
+            let size_text = if art_bytes >= 1024 * 1024 {
+                format!("{:.1} MB", art_bytes as f64 / (1024.0 * 1024.0))
+            } else if art_bytes >= 1024 {
+                format!("{} KB", art_bytes / 1024)
+            } else {
+                format!("{} B", art_bytes)
+            };
+            lines.push(Line::from(Span::styled(
+                format!("  Artwork cache: {} images, {}", art_count, size_text),
+                Style::default().fg(t.colors.fg_muted),
+            )));
+        }
+
         // Playlist tracks cached
         let cached_playlist_count = state.playlist_tracks_cache.len();
         if cached_playlist_count > 0 {
             lines.push(Line::from(Span::styled(
                 format!("  Playlist tracks: {} playlists cached", cached_playlist_count),
+                Style::default().fg(t.colors.fg_muted),
+            )));
+        }
+
+        // Cache ages (separate timestamps for library vs playlist/dynamic data)
+        let now_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if let Some(cache_ts) = state.cache_timestamp {
+            let cache_age = std::time::Duration::from_secs(now_ts.saturating_sub(cache_ts));
+            lines.push(Line::from(Span::styled(
+                format!("  Library data age: {}", format_duration(cache_age)),
+                Style::default().fg(t.colors.fg_muted),
+            )));
+        }
+        if let Some(playlist_ts) = state.playlist_cache_timestamp {
+            let playlist_age = std::time::Duration::from_secs(now_ts.saturating_sub(playlist_ts));
+            lines.push(Line::from(Span::styled(
+                format!("  Playlist data age: {}", format_duration(playlist_age)),
                 Style::default().fg(t.colors.fg_muted),
             )));
         }

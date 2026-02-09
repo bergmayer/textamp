@@ -156,13 +156,14 @@ pub(super) fn handle_settings_keys(key: event::KeyEvent, state: &mut AppState, c
                                 // username(0), password(1), sign in(2), then servers(3+)
                                 2 + state.available_servers.len()
                             } else if matches!(state.connection, crate::app::state::ConnectionState::Connected { .. }) {
-                                1 // Clear Cache(0), Sign Out(1)
+                                0 // Sign Out(0)
                             } else {
                                 0 // Sign In(0)
                             }
                         }
                         SettingsSection::Libraries => {
-                            state.libraries.len().saturating_sub(1)
+                            // Libraries + 4 action buttons (Clear Library/Artwork/Subfolder, Start Crawl)
+                            (state.libraries.len() + 4).saturating_sub(1)
                         }
                         SettingsSection::Interface => {
                             crate::ui::theme::ThemeName::all().len().saturating_sub(1)

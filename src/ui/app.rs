@@ -1193,12 +1193,22 @@ fn render_shortcuts(frame: &mut Frame, state: &AppState, area: Rect) {
     }
 
     // Library name indicator (left-aligned, under transport time)
+    // When multiple servers exist, show "Library (Server)" format
     if let Some(lib_name) = state.active_library.as_ref()
         .and_then(|key| state.libraries.iter().find(|l| &l.key == key))
     {
+        let label = if state.has_multiple_servers() {
+            if let Some(server_name) = state.active_server_name() {
+                format!(" [{} ({})]", lib_name.title, server_name)
+            } else {
+                format!(" [{}]", lib_name.title)
+            }
+        } else {
+            format!(" [{}]", lib_name.title)
+        };
         let lib_label = Paragraph::new(
             Span::styled(
-                format!(" [{}]", lib_name.title),
+                label,
                 Style::default().fg(t.colors.fg_accent_dim).bg(t.colors.bg_secondary),
             )
         ).style(Style::default().bg(t.colors.bg_secondary));
@@ -1319,7 +1329,7 @@ fn render_search_popup(frame: &mut Frame, state: &AppState) {
 /// Render the library picker popup (Ctrl+Alt+S).
 fn render_library_picker(frame: &mut Frame, state: &AppState) {
     let t = theme();
-    let area = centered_rect(40, 30, frame.area());
+    let area = centered_rect(50, 30, frame.area());
 
     frame.render_widget(Clear, area);
 
@@ -1333,7 +1343,20 @@ fn render_library_picker(frame: &mut Frame, state: &AppState) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if state.libraries.is_empty() {
+    // Build flat list of all libraries across servers
+    let multi_server = state.has_multiple_servers();
+    let all_libs = if multi_server {
+        state.all_libraries_with_servers()
+    } else {
+        // Single server — use current libraries
+        let server_id = state.active_server_id.as_deref().unwrap_or("");
+        let server_name = state.active_server_name().unwrap_or("");
+        state.libraries.iter()
+            .map(|lib| (server_id, server_name, lib))
+            .collect()
+    };
+
+    if all_libs.is_empty() {
         let msg = Paragraph::new("No libraries available")
             .style(Style::default().fg(t.colors.fg_muted));
         frame.render_widget(msg, inner);
@@ -1350,13 +1373,18 @@ fn render_library_picker(frame: &mut Frame, state: &AppState) {
         .split(inner);
 
     // Build library list items
-    let items: Vec<ListItem> = state.libraries.iter().enumerate().map(|(i, lib)| {
+    let items: Vec<ListItem> = all_libs.iter().enumerate().map(|(i, (server_id, server_name, lib))| {
         let is_selected = i == state.library_picker_index;
-        let is_active = state.active_library.as_deref() == Some(&lib.key);
+        let is_active = state.active_library.as_deref() == Some(lib.key.as_str())
+            && state.active_server_id.as_deref() == Some(*server_id);
 
         let prefix = if is_selected { "> " } else { "  " };
         let suffix = if is_active { " *" } else { "" };
-        let text = format!("{}{}{}", prefix, lib.title, suffix);
+        let text = if multi_server {
+            format!("{}{} ({}){}", prefix, lib.title, server_name, suffix)
+        } else {
+            format!("{}{}{}", prefix, lib.title, suffix)
+        };
 
         let style = if is_selected {
             Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)

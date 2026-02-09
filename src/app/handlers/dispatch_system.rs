@@ -35,7 +35,11 @@ pub async fn dispatch(
             if let Some(lib_key) = &state.active_library {
                 use crate::cache::CacheData;
 
-                let mut cache_data = CacheData::new(lib_key);
+                // Preserve the existing cache timestamp so it reflects when data was last
+                // refreshed from the server, not when the file was last written to disk.
+                let ts = state.cache_timestamp.unwrap_or_else(CacheData::now);
+                let mut cache_data = CacheData::with_timestamp(lib_key, ts);
+                cache_data.playlist_timestamp = state.playlist_cache_timestamp.unwrap_or_else(CacheData::now);
 
                 // Core library data
                 cache_data.artists = state.artists.clone();
@@ -286,15 +290,40 @@ pub async fn dispatch(
         }
         Action::LoadAlbumArt(batch) => {
             let artwork_cache = crate::plex::ArtworkCache::default();
+            let warm_threshold = crate::plex::constants::CACHE_VERY_STALE_THRESHOLD_SECS;
 
             for (key, thumb_path) in batch {
                 if state.album_art_pending.contains(&key) {
                     continue;
                 }
 
-                // Check disk cache first (72-hour TTL, matching library cache)
-                if let Some(data) = artwork_cache.load(&key, 72 * 60 * 60) {
-                    state.album_art_cache.insert(key, data);
+                // Check disk cache with warm support (no TTL deletion, serve stale entries)
+                if let Some((data, is_warm)) = artwork_cache.load_warm(&key, warm_threshold) {
+                    state.album_art_cache.insert(key.clone(), data);
+
+                    // If warm (>= 32 days), re-fetch in background to update the cache file
+                    if is_warm {
+                        let event_tx = event_tx.clone();
+                        let client = client.clone();
+                        let bg_key = key;
+                        let bg_thumb = thumb_path;
+                        tokio::spawn(async move {
+                            match client.fetch_artwork(&bg_thumb, 300).await {
+                                Ok(data) => {
+                                    let cache = crate::plex::ArtworkCache::default();
+                                    cache.save(&bg_key, &data);
+                                    // Send updated art to UI
+                                    let _ = event_tx.send(Event::AlbumArtLoaded {
+                                        key: bg_key,
+                                        data,
+                                    }).await;
+                                }
+                                Err(e) => {
+                                    tracing::debug!("Warm artwork re-fetch failed for {}: {}", bg_key, e);
+                                }
+                            }
+                        });
+                    }
                     continue;
                 }
 

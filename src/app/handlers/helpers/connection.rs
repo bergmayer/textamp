@@ -2,14 +2,19 @@
 
 /// Find the first working server connection by testing ALL connections in PARALLEL.
 /// Priority: local non-relay > non-relay > relay
+///
+/// Always injects localhost candidates (127.0.0.1, localhost) to discover
+/// same-machine connections even when Plex doesn't advertise them.
 pub async fn find_working_connection(
     server: &crate::api::models::PlexServer,
     token: &str,
     client_identifier: &str,
 ) -> Option<String> {
     use futures::future::join_all;
+    use std::collections::HashSet;
 
-    let mut prioritized: Vec<(usize, &str)> = Vec::new();
+    let mut prioritized: Vec<(usize, String)> = Vec::new();
+    let mut seen_uris: HashSet<String> = HashSet::new();
 
     for conn in &server.connections {
         let priority = if conn.local && !conn.relay {
@@ -19,7 +24,32 @@ pub async fn find_working_connection(
         } else {
             2
         };
-        prioritized.push((priority, conn.uri.as_str()));
+        if seen_uris.insert(conn.uri.clone()) {
+            prioritized.push((priority, conn.uri.clone()));
+        }
+    }
+
+    // Inject localhost candidates (priority 0 = local)
+    // Extract unique ports from existing connections, default to 32400
+    let mut ports: HashSet<u16> = HashSet::new();
+    ports.insert(32400);
+    for conn in &server.connections {
+        if let Some(port_str) = conn.uri.rsplit(':').next() {
+            if let Ok(port) = port_str.parse::<u16>() {
+                ports.insert(port);
+            }
+        }
+    }
+
+    for port in &ports {
+        for host in &["127.0.0.1", "localhost"] {
+            for scheme in &["http", "https"] {
+                let uri = format!("{}://{}:{}", scheme, host, port);
+                if seen_uris.insert(uri.clone()) {
+                    prioritized.push((0, uri));
+                }
+            }
+        }
     }
 
     if prioritized.is_empty() {
@@ -29,11 +59,9 @@ pub async fn find_working_connection(
 
     let token_str = token.to_string();
     let client_id = client_identifier.to_string();
-    let futures = prioritized.iter().map(|(priority, uri)| {
-        let uri = uri.to_string();
+    let futures = prioritized.into_iter().map(|(prio, uri)| {
         let token = token_str.clone();
         let client_id = client_id.clone();
-        let prio = *priority;
         async move {
             match crate::plex::test_connection(&uri, &token, &client_id).await {
                 Ok(()) => {

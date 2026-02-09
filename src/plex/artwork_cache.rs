@@ -52,6 +52,77 @@ impl ArtworkCache {
         std::fs::read(&path).ok()
     }
 
+    /// Load with warm cache support. Returns (data, is_warm) where is_warm
+    /// means the entry is older than `warm_threshold_secs` (e.g. 32 days).
+    /// Unlike `load()`, this never deletes expired entries — they're served
+    /// as warm cache and should be re-fetched in background by the caller.
+    pub fn load_warm(&self, key: &str, warm_threshold_secs: u64) -> Option<(Vec<u8>, bool)> {
+        let path = self.cache_path(key);
+        if !path.exists() {
+            return None;
+        }
+
+        let is_warm = if let Ok(metadata) = std::fs::metadata(&path) {
+            if let Ok(modified) = metadata.modified() {
+                if let Ok(age) = SystemTime::now().duration_since(modified) {
+                    age.as_secs() >= warm_threshold_secs
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        std::fs::read(&path).ok().map(|data| (data, is_warm))
+    }
+
+    /// Get cache statistics: (file_count, total_bytes).
+    pub fn stats(&self) -> (usize, u64) {
+        if !self.cache_dir.exists() {
+            return (0, 0);
+        }
+
+        let mut count = 0usize;
+        let mut total_bytes = 0u64;
+
+        if let Ok(entries) = std::fs::read_dir(&self.cache_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() && path.extension().map_or(false, |e| e == "bin") {
+                    if let Ok(metadata) = entry.metadata() {
+                        count += 1;
+                        total_bytes += metadata.len();
+                    }
+                }
+            }
+        }
+
+        (count, total_bytes)
+    }
+
+    /// Clear all cached artwork files. Returns the number of files removed.
+    pub fn clear_all(&self) -> usize {
+        if !self.cache_dir.exists() {
+            return 0;
+        }
+
+        let mut removed = 0;
+        if let Ok(entries) = std::fs::read_dir(&self.cache_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() && path.extension().map_or(false, |e| e == "bin") {
+                    if std::fs::remove_file(&path).is_ok() {
+                        removed += 1;
+                    }
+                }
+            }
+        }
+        removed
+    }
+
     /// Save artwork bytes to cache. Uses atomic write via temp file.
     pub fn save(&self, key: &str, data: &[u8]) -> bool {
         // Ensure directory exists

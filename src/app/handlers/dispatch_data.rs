@@ -65,9 +65,6 @@ pub async fn dispatch(
 
                             // Start background API refresh
                             helpers::preload_all_library_data(event_tx, lib_key, &lib_title, client);
-
-                            // Start subfolder pre-caching (root folders loaded from cache)
-                            helpers::maybe_start_subfolder_preload(event_tx, state, client);
                         }
                     }
                 }
@@ -440,6 +437,12 @@ pub async fn dispatch(
 /// Load cached library data into state for instant startup.
 /// Mirrors the LibraryCacheLoaded event handler logic.
 fn load_from_cache(state: &mut AppState, cached: CacheData, lib_key: &str, lib_title: &str) {
+    // Track cache age for display in settings
+    state.cache_timestamp = Some(cached.timestamp);
+    state.playlist_cache_timestamp = Some(
+        if cached.playlist_timestamp > 0 { cached.playlist_timestamp } else { cached.timestamp }
+    );
+
     // Core library data - IMPORTANT: Always re-sort after loading from cache
     if !cached.artists.is_empty() {
         state.artists = cached.artists;

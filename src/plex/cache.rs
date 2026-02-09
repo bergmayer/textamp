@@ -12,10 +12,11 @@
 //! - **Lazy caching**: Only cached when navigated to (not preloaded)
 //! - **No auto-refresh**: Stale subfolders are NOT automatically refreshed
 //! - **Manual refresh**: F5 refreshes the currently focused subfolder
-//! - **32-day deletion**: Very stale entries are deleted (not refreshed)
+//! - **Warm cache (32+ days)**: Entries older than 32 days are served from cache
+//!   but re-fetched in background on access
 //!
-//! This design prevents accumulation of stale folder data while still
-//! providing fast navigation for frequently-accessed folders.
+//! This design provides fast navigation for frequently-accessed folders
+//! while keeping data reasonably fresh.
 
 use super::models::{Album, Artist, FolderItem, Genre, Playlist, Station, Track};
 use serde::{Deserialize, Serialize};
@@ -28,7 +29,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 ///
 /// Each subfolder is cached individually with its own timestamp,
 /// allowing fine-grained staleness control. Subfolders older than
-/// 32 days are deleted on load (not refreshed like other caches).
+/// 32 days are served from cache but re-fetched in background on access.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CachedFolder {
     /// The folder's contents (subfolders and tracks).
@@ -59,6 +60,8 @@ pub struct CacheData {
     #[serde(default)]
     pub timestamp: u64,
     #[serde(default)]
+    pub playlist_timestamp: u64,
+    #[serde(default)]
     pub library_key: String,
 
     // Core library data
@@ -74,7 +77,7 @@ pub struct CacheData {
     pub root_folders: Vec<FolderItem>,
     /// Cached subfolder contents: folder_key -> CachedFolder with timestamp.
     /// Each entry has its own timestamp for individual staleness tracking.
-    /// Entries older than 32 days are deleted on load (not refreshed).
+    /// Entries older than 32 days are served from cache but re-fetched on access.
     #[serde(default)]
     pub folder_contents: HashMap<String, CachedFolder>,
 
@@ -106,7 +109,7 @@ pub struct CacheData {
 }
 
 impl CacheData {
-    /// Create a new cache data structure.
+    /// Create a new cache data structure with current timestamp.
     pub fn new(library_key: &str) -> Self {
         Self {
             timestamp: current_timestamp(),
@@ -115,9 +118,27 @@ impl CacheData {
         }
     }
 
+    /// Create a new cache data structure preserving an existing timestamp.
+    ///
+    /// Use this when re-saving existing data to disk so the timestamp
+    /// reflects when the data was last refreshed from the server,
+    /// not when the cache file was last written.
+    pub fn with_timestamp(library_key: &str, timestamp: u64) -> Self {
+        Self {
+            timestamp,
+            library_key: library_key.to_string(),
+            ..Default::default()
+        }
+    }
+
     /// Update the timestamp to now.
     pub fn touch(&mut self) {
         self.timestamp = current_timestamp();
+    }
+
+    /// Get the current Unix timestamp (public for use by event handlers).
+    pub fn now() -> u64 {
+        current_timestamp()
     }
 }
 

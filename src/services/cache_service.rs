@@ -11,13 +11,12 @@
 //! # Subfolder Caching
 //!
 //! Subfolders have different caching behavior than other library data:
-//! - **Lazy caching**: Only cached when navigated to (not preloaded)
+//! - **Lazy caching**: Only cached when navigated to (not preloaded on startup)
 //! - **No auto-refresh**: Stale subfolders are NOT automatically refreshed
 //! - **Manual refresh**: F5 refreshes the currently focused subfolder
-//! - **32-day deletion**: Very stale entries are DELETED on cache load
-//!
-//! This prevents accumulation of outdated folder data that may point
-//! to moved/deleted files.
+//! - **Warm cache (32+ days)**: Very stale entries are served from cache but
+//!   re-fetched in background when accessed ("warm cache" behavior)
+//! - **Manual crawl**: Users can start a subfolder crawl from Settings > Libraries
 
 use crate::plex::{CacheData, CachedFolder, LibraryCache};
 use crate::plex::constants::CACHE_VERY_STALE_THRESHOLD_SECS;
@@ -197,19 +196,15 @@ impl CacheService {
 
     /// Load cache data for a library, filtering out very stale subfolders.
     ///
-    /// Note: As of the incremental refresh change, stale entries are no longer
-    /// deleted on load. They are kept as a warm cache and re-fetched by the
-    /// subfolder preload crawl. This function is retained for manual cleanup.
+    /// Note: Stale entries are no longer deleted on load. They are kept as a
+    /// warm cache and re-fetched in background when accessed. This function
+    /// is retained for explicit manual cleanup only.
     pub fn load_with_subfolder_filtering(library_key: &str) -> Option<(CacheData, usize)> {
         let cache = LibraryCache::new()?;
-        let mut data = cache.load(library_key)?;
+        let data = cache.load(library_key)?;
 
-        let removed = Self::filter_stale_subfolders_default(&mut data.folder_contents);
-        if removed > 0 {
-            tracing::info!("Removed {} very stale subfolder cache entries", removed);
-        }
-
-        Some((data, removed))
+        // No longer delete stale entries on load — serve as warm cache
+        Some((data, 0))
     }
 
     /// Determine which root folder keys need re-fetching.

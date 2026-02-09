@@ -17,14 +17,16 @@ The app was also inspired by other great terminal / text mode music players, suc
 
 Library data (artists, albums, playlists, genres, stations) is cached to disk per-library. On startup, cached data loads immediately so you can browse without waiting for your Plex server. Fresh data is fetched in the background and merged automatically.
 
-- **72-hour refresh**: Cache older than 72 hours triggers a background refresh when you navigate to that view. 
-- **32-day refresh**: All very stale data is automatically refreshed when idle (2+ minutes), regardless if it's a view that has been accessed recently.
+- **72-hour refresh**: Cache older than 72 hours triggers a background refresh when you navigate to that view.
+- **32-day warm cache**: Entries older than 32 days are served immediately from cache but re-fetched in the background when accessed. This applies to both subfolder and artwork caches.
 - **Manual refresh**: `F5` forces a refresh of the current view
 - **Per-library**: Each library has its own cache, preserved when switching
 
-Subfolder caches (Folders view) work differently: root-level subfolders are pre-cached in the background on startup, with rate limiting to avoid overloading the server. The crawl resumes where it left off on restart. Deeper levels (sub-subfolders) are still fetched lazily when you navigate into them. The refresh schedule is the same: subfolders older than 72 hours refresh in the background, and very stale entries (32+ days) are incrementally re-fetched while the old data remains available as a warm cache. Cache progress is visible in Settings (F2) > Libraries. Press `F5` to refresh any folder that seems outdated.
+Subfolder caches (Folders view) are cached lazily when you navigate into them. They are never auto-refreshed or preloaded on startup. At 32+ days, stale entries are served from cache as a "warm cache" and re-fetched in background on access. For smaller libraries where a full crawl is useful, use Settings (F2) > Libraries > Start Subfolder Crawl. Cache progress is visible in Settings (F2) > Libraries. Press `F5` to refresh any folder that seems outdated.
 
-To clear all cached data: Settings (F2) > Account > Clear Cache & Reload.
+Album artwork is cached to disk. Like subfolders, artwork is never auto-refreshed; at 32+ days, stale images are served immediately and re-fetched in background.
+
+Cache clearing is granular: Settings (F2) > Libraries provides separate options for clearing the library cache, artwork cache, and subfolder cache independently.
 
 
 ### Keyboard Navigation
@@ -42,6 +44,7 @@ Press `/` to activate a real-time filter on the current column. Type to narrow r
 ### Radio Shortcuts
 
 `Ctrl+Alt+L` starts Library Radio instantly. `Ctrl+Alt+R` starts Random Album Radio. `Alt+R` on any selection creates a sonic radio — sonic track radio for similar tracks, sonic album radio for similar albums, sonic artist radio for an artist and similar artists.
+
 ### Library Switching
 
 `Ctrl+Alt+S` opens a quick picker to switch between Plex libraries. The switch is instant — cached data for the new library loads immediately while a background refresh runs.
@@ -69,7 +72,7 @@ For preference and config file locations, textamp checks for XDG environment var
 ### Categories (Ctrl+key)
 | Key | Action |
 |-----|--------|
-| `Ctrl+A` | Artists (cycles: Artists → Album Artists → Albums) |
+| `Ctrl+A` | Artists (cycles: Artists → Albums) |
 | `Ctrl+P` | Playlists (cycles: All → Stations → Recently Added → Recently Played) |
 | `Ctrl+G` | Genres (cycles: Genres → Artist Genres → Album Genres → Moods → Styles → Stations) |
 | `Ctrl+O` | Folders |
@@ -86,21 +89,24 @@ For preference and config file locations, textamp checks for XDG environment var
 | Key | Action |
 |-----|--------|
 | `Ctrl+F` | Search popup (floating dialog) |
-| `Ctrl+S` | Save queue as playlist (in Now Playing) |
 | `Alt+R` | Sonic radio from selection |
 | `Alt+Q` | Add selection to queue (track or album) |
 | `Alt+S` | Shuffle view / queue |
 | `Alt+M` | Similar albums/tracks |
+| `Alt+B` | Show Album (navigate to track's album) |
+| `Alt+G` | Go to Artist (navigate to track's artist) |
 | `Alt+A` | Sonic Adventure (see below) |
+| `Alt+W` | Save queue/radio as playlist |
+| `Alt+C` | Toggle cover art view (album grid with artwork) |
 | `Ctrl+Alt+L` | Library Radio (station based on your library) |
 | `Ctrl+Alt+R` | Random Album Radio (shuffled albums) |
 | `Ctrl+Alt+S` | Quick library switcher |
 
 
 ### Navigation Flow
-- **Artists** (`Ctrl+A`): Press again to cycle between Artists, Album Artists, and Albums views
+- **Artists** (`Ctrl+A`): Press again to cycle between Artists and Albums views
 - **Playlists** (`Ctrl+P`): Press again to cycle between All Playlists, Stations, Recently Added, and Recently Played albums
-- **Genres** (`Ctrl+G`): Press again to cycle between Genres, Plex Genres, and Moods
+- **Genres** (`Ctrl+G`): Press again to cycle between Genres, Artist Genres, Album Genres, Moods, Styles, and Stations
 - **Folders** (`Ctrl+O`): Miller columns navigation (3 columns visible)
 
 ### Genres and Moods
@@ -187,12 +193,12 @@ Play history is automatically synced to your Plex server, so tracks you play in 
 | Key | Action |
 |-----|--------|
 | `Space` | Play/Pause |
-| `Ctrl+←` | Previous track |
-| `Ctrl+→` | Next track |
+| `<` | Previous track |
+| `>` | Next track |
 | `Shift+←` | Seek backward 10 seconds |
 | `Shift+→` | Seek forward 10 seconds |
-| `Ctrl+↑` | Volume up |
-| `Ctrl+↓` | Volume down |
+| `Ctrl+Shift+↑` | Volume up |
+| `Ctrl+Shift+↓` | Volume down |
 
 ### General
 | Key | Action |

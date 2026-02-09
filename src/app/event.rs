@@ -31,6 +31,12 @@ pub enum Event {
 
     // API response events
     LibrariesLoaded(Vec<Library>),
+    /// Libraries loaded from another server (for multi-server support).
+    ServerLibrariesLoaded {
+        server_identifier: String,
+        server_name: String,
+        libraries: Vec<Library>,
+    },
     ArtistsLoaded(Vec<Artist>),
     AlbumsLoaded(Vec<Album>),
     TracksLoaded(Vec<Track>),
@@ -84,6 +90,16 @@ pub enum Event {
         library_key: String,
         entries: Vec<(String, crate::plex::CachedFolder)>,
         done: bool,
+    },
+    /// Background subfolder warm-cache re-fetch completed.
+    SubfolderRefreshed {
+        folder_key: String,
+        cached_folder: crate::plex::CachedFolder,
+    },
+    /// Artwork cache stats computed in background.
+    ArtworkCacheStats {
+        count: usize,
+        total_bytes: u64,
     },
 
     // Background data preloading (all events include library_key for race condition safety)

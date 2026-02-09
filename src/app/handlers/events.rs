@@ -47,7 +47,7 @@ pub fn handle_app_event(
                 }
             }
 
-            state.available_servers = servers;
+            state.available_servers = servers.clone();
             state.connected_server_url = Some(server_url.clone());
             state.connection = ConnectionState::Connected { username: username.clone(), has_plex_pass };
             state.settings_state.discovering_servers = false;
@@ -55,10 +55,70 @@ pub fn handle_app_event(
             state.settings_state.password_input.clear(); // Never keep password in memory
             state.view = View::Browse;
 
-            // Prune artwork cache on startup (72-hour TTL, 500 MB max)
+            // Track which server we're connected to
+            if let Some(server) = servers.iter().find(|s| {
+                s.connections.iter().any(|c| c.uri == server_url)
+            }) {
+                state.active_server_id = Some(server.client_identifier.clone());
+            }
+
+            // Prune artwork cache by size only (no TTL — warm cache serves stale entries)
             let artwork_cache = crate::plex::ArtworkCache::default();
-            artwork_cache.prune_expired(72 * 60 * 60);
             artwork_cache.prune_to_size(500 * 1024 * 1024);
+
+            // Compute artwork cache stats in background
+            {
+                let event_tx = event_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let cache = crate::plex::ArtworkCache::default();
+                    let (count, total_bytes) = cache.stats();
+                    let rt = tokio::runtime::Handle::current();
+                    rt.block_on(async {
+                        let _ = event_tx.send(Event::ArtworkCacheStats { count, total_bytes }).await;
+                    });
+                });
+            }
+
+            // Fetch libraries from other servers in background (for multi-server support)
+            if servers.len() > 1 {
+                let token_str = client.token().unwrap_or("").to_string();
+                let client_id = client.client_identifier().to_string();
+                let active_server_id = state.active_server_id.clone();
+
+                for server in servers.iter() {
+                    // Skip the server we're already connected to
+                    if Some(&server.client_identifier) == active_server_id.as_ref() {
+                        continue;
+                    }
+
+                    let server_clone = server.clone();
+                    let token = token_str.clone();
+                    let cid = client_id.clone();
+                    let tx = event_tx.clone();
+
+                    tokio::spawn(async move {
+                        // Find a working connection to this server
+                        if let Some(url) = helpers::find_working_connection(&server_clone, &token, &cid).await {
+                            let other_client = crate::api::PlexClient::new_with_url(&url, Some(&token), &cid);
+                            match other_client.get_libraries().await {
+                                Ok(libs) => {
+                                    let music_libs: Vec<_> = libs.into_iter().filter(|l| l.is_music()).collect();
+                                    if !music_libs.is_empty() {
+                                        let _ = tx.send(Event::ServerLibrariesLoaded {
+                                            server_identifier: server_clone.client_identifier.clone(),
+                                            server_name: server_clone.name.clone(),
+                                            libraries: music_libs,
+                                        }).await;
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::debug!("Failed to load libraries from {}: {}", server_clone.name, e);
+                                }
+                            }
+                        }
+                    });
+                }
+            }
 
             vec![Action::LoadInitialData]
         }
@@ -78,6 +138,13 @@ pub fn handle_app_event(
             tracing::info!("Server connection succeeded: {} at {}", server_name, url);
             client.set_server(url.clone());
             state.connected_server_url = Some(url.clone());
+
+            // Update active server tracking
+            if let Some(server) = state.available_servers.iter().find(|s| {
+                s.connections.iter().any(|c| c.uri == url) || s.name == server_name
+            }) {
+                state.active_server_id = Some(server.client_identifier.clone());
+            }
 
             // Persist the updated URL so future startups use the working URL
             if let Some(server) = state.available_servers.iter().find(|s| {
@@ -161,8 +228,10 @@ pub fn handle_app_event(
                 });
             } else {
                 // Multiple servers - let user choose
+                state.view = View::Auth;
                 state.auth_state.step = AuthStep::ServerSelect;
                 state.auth_state.server_index = 0;
+                state.settings_state.discovering_servers = false;
                 // Store token temporarily for when server is selected
                 state.settings_state.username_input = username;
                 // Note: We need to pass the token through - store in a temp location
@@ -181,10 +250,37 @@ pub fn handle_app_event(
             state.auth_state.password_input.clear();
             vec![]
         }
+        Event::ServerLibrariesLoaded { server_identifier, server_name, libraries } => {
+            tracing::info!("Loaded {} music libraries from server {}", libraries.len(), server_name);
+            // Add/update entry for this server
+            if let Some(entry) = state.all_server_libraries.iter_mut()
+                .find(|(id, _, _)| *id == server_identifier)
+            {
+                entry.2 = libraries;
+            } else {
+                state.all_server_libraries.push((server_identifier, server_name, libraries));
+            }
+            vec![]
+        }
         Event::LibrariesLoaded(libs) => {
             tracing::info!("LibrariesLoaded: received {} libraries", libs.len());
             state.libraries = libs.into_iter().filter(|l| l.is_music()).collect();
             tracing::info!("After filtering: {} music libraries", state.libraries.len());
+
+            // Update all_server_libraries for the current server
+            if let Some(ref server_id) = state.active_server_id {
+                let server_name = state.available_servers.iter()
+                    .find(|s| &s.client_identifier == server_id)
+                    .map(|s| s.name.clone())
+                    .unwrap_or_else(|| "Unknown".to_string());
+                if let Some(entry) = state.all_server_libraries.iter_mut()
+                    .find(|(id, _, _)| id == server_id)
+                {
+                    entry.2 = state.libraries.clone();
+                } else {
+                    state.all_server_libraries.push((server_id.clone(), server_name, state.libraries.clone()));
+                }
+            }
 
             if state.libraries.is_empty() {
                 tracing::warn!("No music libraries found after filtering!");
@@ -557,11 +653,8 @@ pub fn handle_app_event(
             // Only set if folders weren't already loaded (user might have navigated there)
             if state.folder_state.is_none() {
                 state.folder_state = Some(folder_state);
-                state.cache_dirty = true;
                 tracing::debug!("Folders preloaded and ready");
             }
-            // Start subfolder pre-caching now that root folders are available
-            helpers::maybe_start_subfolder_preload(event_tx, state, client);
             vec![]
         }
         Event::SubfoldersPreloaded { library_key, entries, done } => {
@@ -583,6 +676,29 @@ pub fn handle_app_event(
             }
             vec![]
         }
+        Event::SubfolderRefreshed { folder_key, cached_folder } => {
+            // Background warm-cache re-fetch completed — update cache and refresh UI
+            state.folder_contents_cache.insert(folder_key.clone(), cached_folder.clone());
+            state.cache_dirty = true;
+            tracing::debug!("Warm subfolder re-fetched: {} ({} items)", folder_key, cached_folder.items.len());
+
+            // Update the currently displayed column if it matches
+            if let Some(ref mut folder_state) = state.folder_state {
+                for col in folder_state.columns.iter_mut() {
+                    if col.key.as_ref() == Some(&folder_key) {
+                        let old_selected = col.selected_index;
+                        col.items = cached_folder.items;
+                        col.selected_index = old_selected.min(col.items.len().saturating_sub(1));
+                        break;
+                    }
+                }
+            }
+            vec![]
+        }
+        Event::ArtworkCacheStats { count, total_bytes } => {
+            state.artwork_cache_stats = Some((count, total_bytes));
+            vec![]
+        }
         Event::ArtistsPreloaded { library_key, mut artists } => {
             // Ignore if this is for a different library (race condition from library switch)
             if state.active_library.as_ref() != Some(&library_key) {
@@ -594,7 +710,6 @@ pub fn handle_app_event(
                 let count = artists.len();
                 state.artists = artists;
                 state.artists_total = count as u32;
-                state.cache_dirty = true;
                 tracing::debug!("Artists preloaded: {} items", count);
                 // Update Miller columns (preserves drill-down state)
                 if !state.artists.is_empty() {
@@ -615,7 +730,6 @@ pub fn handle_app_event(
                 let count = albums.len();
                 state.albums = albums;
                 state.albums_total = count as u32;
-                state.cache_dirty = true;
                 tracing::debug!("Albums preloaded: {} items", count);
             }
             vec![]
@@ -649,7 +763,6 @@ pub fn handle_app_event(
                 }
 
                 state.playlists = playlists;
-                state.cache_dirty = true;
                 tracing::debug!("Playlists preloaded: {} items", count);
                 // Update Miller columns
                 if !state.playlists.is_empty() {
@@ -671,7 +784,6 @@ pub fn handle_app_event(
             if state.genres.is_empty() && !state.genres_loading {
                 let count = genres.len();
                 state.genres = genres;
-                state.cache_dirty = true;
                 tracing::debug!("Genres preloaded: {} items", count);
                 if state.genre_content_type == crate::app::state::GenreContentType::Genres {
                     let items = crate::app::state::BrowseItem::from_genres(&state.genres);
@@ -689,7 +801,6 @@ pub fn handle_app_event(
             if state.artist_genres.is_empty() && !state.artist_genres_loading {
                 let count = genres.len();
                 state.artist_genres = genres;
-                state.cache_dirty = true;
                 tracing::debug!("Artist genres preloaded: {} items", count);
                 if state.genre_content_type == crate::app::state::GenreContentType::ArtistGenres {
                     let items = crate::app::state::BrowseItem::from_genres(&state.artist_genres);
@@ -707,7 +818,6 @@ pub fn handle_app_event(
             if state.album_genres.is_empty() && !state.album_genres_loading {
                 let count = genres.len();
                 state.album_genres = genres;
-                state.cache_dirty = true;
                 tracing::debug!("Album genres preloaded: {} items", count);
                 if state.genre_content_type == crate::app::state::GenreContentType::AlbumGenres {
                     let items = crate::app::state::BrowseItem::from_genres(&state.album_genres);
@@ -725,7 +835,6 @@ pub fn handle_app_event(
             if state.moods.is_empty() && !state.moods_loading {
                 let count = moods.len();
                 state.moods = moods;
-                state.cache_dirty = true;
                 tracing::debug!("Moods preloaded: {} items", count);
                 if state.genre_content_type == crate::app::state::GenreContentType::Moods {
                     let items = crate::app::state::BrowseItem::from_genres(&state.moods);
@@ -743,7 +852,6 @@ pub fn handle_app_event(
             if state.styles.is_empty() && !state.styles_loading {
                 let count = styles.len();
                 state.styles = styles;
-                state.cache_dirty = true;
                 tracing::debug!("Styles preloaded: {} items", count);
                 if state.genre_content_type == crate::app::state::GenreContentType::Styles {
                     let items = crate::app::state::BrowseItem::from_genres(&state.styles);
@@ -761,7 +869,6 @@ pub fn handle_app_event(
             if state.stations.is_empty() && !state.stations_loading {
                 let count = stations.len();
                 state.stations = stations.clone();
-                state.cache_dirty = true;
                 tracing::debug!("Stations preloaded: {} items", count);
                 // Rebuild station Miller columns
                 state.station_nav.columns.clear();
@@ -783,7 +890,6 @@ pub fn handle_app_event(
             if state.recently_added_albums.is_empty() && !state.recently_added_loading {
                 let count = albums.len();
                 state.recently_added_albums = albums;
-                state.cache_dirty = true;
                 tracing::debug!("Recently added albums preloaded: {} items", count);
             }
             vec![]
@@ -797,7 +903,6 @@ pub fn handle_app_event(
             if state.recently_played_albums.is_empty() && !state.recently_played_loading {
                 let count = albums.len();
                 state.recently_played_albums = albums;
-                state.cache_dirty = true;
                 tracing::debug!("Recently played albums preloaded: {} items", count);
             }
             vec![]
@@ -960,6 +1065,12 @@ pub fn handle_app_event(
             tracing::info!("Library switch: loaded from cache: {} artists, {} albums, {} folders",
                 cached.artists.len(), cached.albums.len(), cached.root_folders.len());
 
+            // Track cache age for display in settings
+            state.cache_timestamp = Some(cached.timestamp);
+            state.playlist_cache_timestamp = Some(
+                if cached.playlist_timestamp > 0 { cached.playlist_timestamp } else { cached.timestamp }
+            );
+
             // Find library name for folder root column
             let lib_name = state.libraries.iter()
                 .find(|l| l.key == library_key)
@@ -1062,9 +1173,6 @@ pub fn handle_app_event(
                 state.playlist_tracks_cache = cached.playlist_tracks;
             }
 
-            // Start subfolder pre-caching if root folders are available from cache
-            helpers::maybe_start_subfolder_preload(event_tx, state, client);
-
             vec![]
         }
         Event::LibraryCacheLoadFailed { library_key } => {
@@ -1082,6 +1190,13 @@ pub fn handle_app_event(
         Event::CacheRefreshCompleted { category, changed } => {
             state.background_refresh_in_progress.remove(&category);
             state.cache_dirty = true;
+            // Data was refreshed from the server — update the appropriate timestamp group
+            let now = crate::cache::CacheData::now();
+            if category.is_playlist_group() {
+                state.playlist_cache_timestamp = Some(now);
+            } else {
+                state.cache_timestamp = Some(now);
+            }
 
             // Clear the "Refreshing X..." status message if it matches this category
             let refresh_msg = format!("Refreshing {}...", category.display_name());

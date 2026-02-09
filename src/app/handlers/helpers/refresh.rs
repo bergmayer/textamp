@@ -162,7 +162,12 @@ pub fn is_category_very_stale(category: crate::app::state::RefreshCategory, stat
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
 
-            let age = now.saturating_sub(data.timestamp);
+            let relevant_timestamp = if category.is_playlist_group() {
+                if data.playlist_timestamp > 0 { data.playlist_timestamp } else { data.timestamp }
+            } else {
+                data.timestamp
+            };
+            let age = now.saturating_sub(relevant_timestamp);
             let very_stale_threshold = crate::plex::VERY_STALE_CACHE_SECS;
 
             let has_data = match category {

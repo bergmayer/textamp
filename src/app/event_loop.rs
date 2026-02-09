@@ -427,7 +427,10 @@ impl EventLoop {
             // Settings, auth, adventure
             Logout | AuthSignIn | AuthSelectServer | OpenSettings | SaveCredentials
             | SettingsSelect | SettingsSignIn | SettingsDiscoverServers
-            | SelectServer(_) | SelectLibrary(_) | SaveSettings | ClearCache
+            | SelectServer(_) | SelectLibrary(_) | SelectLibraryOnServer(_, _)
+            | SaveSettings | ClearCache
+            | ClearLibraryCache | ClearArtworkCache | ClearSubfolderCache
+            | StartSubfolderCrawl | StopSubfolderCrawl
             | StartAdventure | SetAdventureStart(_) | SetAdventureEnd(_)
             | SetAdventureLength(_) | CancelAdventure | AdventureComplete(_)
             | AdventureError(_) => {
