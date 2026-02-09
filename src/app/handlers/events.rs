@@ -53,7 +53,10 @@ pub fn handle_app_event(
             state.settings_state.discovering_servers = false;
             state.settings_state.username_input = username;
             state.settings_state.password_input.clear(); // Never keep password in memory
-            state.view = View::Browse;
+            state.settings_state.signing_in = false;
+            if state.view != View::Settings {
+                state.view = View::Browse;
+            }
 
             // Track which server we're connected to
             if let Some(server) = servers.iter().find(|s| {

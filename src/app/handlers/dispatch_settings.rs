@@ -41,10 +41,16 @@ pub async fn dispatch(
                 }
             }
 
-            // Reset connection state (keep libraries/servers/URL for display)
+            // Reset connection and display state
             state.connection = ConnectionState::Disconnected;
+            state.active_library = None;
+            state.libraries.clear();
+            state.available_servers.clear();
+            state.connected_server_url = None;
+            state.active_server_id = None;
+            state.artwork_cache_stats = None;
 
-            // Clear browse data (not needed for display)
+            // Clear browse data
             state.artists.clear();
             state.albums.clear();
             state.playlists.clear();
@@ -74,7 +80,7 @@ pub async fn dispatch(
             state.station_nav.focused_column = 0;
             state.list_state.reset();
 
-            // Clear session/runtime state (keep display state like connected_server_url, libraries, artwork_cache_stats)
+            // Clear session/runtime state
             state.cache_timestamp = None;
             state.playlist_cache_timestamp = None;
             state.background_refresh_in_progress.clear();
@@ -206,6 +212,7 @@ pub async fn dispatch(
             state.view = View::Settings;
             state.settings_state.section = SettingsSection::Account;
             state.settings_state.item_index = 0;
+            state.settings_state.signing_in = false;
 
             // Get username from connection state first (most reliable), then StoredAuth, then config
             state.settings_state.username_input = match &state.connection {

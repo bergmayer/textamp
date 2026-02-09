@@ -1539,14 +1539,11 @@ fn settings_visual_row_to_item(visual_row: usize, state: &AppState) -> Option<us
             } else {
                 // Row 0: "Not signed in"
                 // Row 1: blank
-                // If libraries: "Music libraries:" header, lib items, "(not signed in)", blank
-                let lib_count = state.libraries.len();
-                let signin_row = if lib_count > 0 {
-                    2 + 1 + lib_count + 1 + 1 // blank + header + libs + "(not signed in)" + blank
-                } else {
-                    2 // just "Not signed in" + blank
-                };
-                if visual_row == signin_row {
+                // Row 2: "Music libraries:" header
+                // Row 3: "(signed out)"
+                // Row 4: blank
+                // Row 5: Sign In → item 0
+                if visual_row == 5 {
                     Some(0) // Sign In
                 } else {
                     None
