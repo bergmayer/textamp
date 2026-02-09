@@ -503,6 +503,11 @@ pub async fn dispatch(
                 state.playlist_tracks_cache.clear();
                 state.list_state.reset();
 
+                // Clear cache timestamps (old library's values must not leak to new library)
+                state.cache_timestamp = None;
+                state.playlist_cache_timestamp = None;
+                state.cache_dirty = false;
+
                 // Clear Miller column navigation states
                 state.artist_nav = crate::app::state::BrowseNavigationState::new();
                 state.genre_nav = crate::app::state::BrowseNavigationState::new();
@@ -601,6 +606,9 @@ pub async fn dispatch(
                     state.subfolder_preload_active = false;
                     state.playlist_tracks_cache.clear();
                     state.list_state.reset();
+                    state.cache_timestamp = None;
+                    state.playlist_cache_timestamp = None;
+                    state.cache_dirty = false;
                     state.artist_nav = crate::app::state::BrowseNavigationState::new();
                     state.genre_nav = crate::app::state::BrowseNavigationState::new();
                     state.playlist_nav = crate::app::state::BrowseNavigationState::new();
