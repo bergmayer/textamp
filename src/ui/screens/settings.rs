@@ -168,28 +168,6 @@ fn render_account_content(frame: &mut Frame, state: &AppState, area: Rect) {
             )));
         }
 
-        // Help text
-        lines.push(Line::from(""));
-        let selected_idx = state.settings_state.item_index;
-        let help_text = if !is_focused {
-            "Enter: select"
-        } else if selected_idx < lib_count {
-            "Enter: switch to library"
-        } else {
-            match selected_idx - lib_count {
-                0 => "Clears cached library data and reloads from server",
-                1 => "Clears artwork image cache from disk",
-                2 => "Clears cached subfolder contents",
-                3 => if state.subfolder_preload_active {
-                    "Stops the active subfolder crawl"
-                } else {
-                    "Crawls folder contents (2 levels deep) in background"
-                },
-                4 => "Signs out and clears all cached data",
-                _ => "Enter: select",
-            }
-        };
-        lines.push(Line::from(Span::styled(help_text, Style::default().fg(t.colors.fg_muted))));
     } else {
         // Sign In button (item 0)
         let is_signin_selected = is_focused && state.settings_state.item_index == 0;
@@ -198,12 +176,6 @@ fn render_account_content(frame: &mut Frame, state: &AppState, area: Rect) {
         lines.push(Line::from(Span::styled(
             format!("{}Sign In", signin_prefix),
             signin_style,
-        )));
-
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "Enter: start sign-in",
-            Style::default().fg(t.colors.fg_muted),
         )));
     }
 
