@@ -453,6 +453,7 @@ pub struct AppState {
     pub libraries: Vec<Library>,
     pub active_library: Option<String>,
     pub available_servers: Vec<PlexServer>,
+    pub connected_server_url: Option<String>,
 
     // Authentication flow state
     pub auth_state: AuthState,
@@ -918,6 +919,7 @@ impl AppState {
             libraries: Vec::new(),
             active_library: None,
             available_servers: Vec::new(),
+            connected_server_url: None,
             auth_state: AuthState::default(),
             is_fresh_login: false,
             view: View::Auth,

@@ -306,6 +306,70 @@ fn render_libraries_content(frame: &mut Frame, state: &AppState, area: Rect) {
     let mut lines = vec![];
     let is_focused = state.settings_state.focus == SettingsFocus::Content;
 
+    // Server connection info
+    if let Some(ref url) = state.connected_server_url {
+        lines.push(Line::from(Span::styled(
+            "Server:",
+            Style::default().fg(t.colors.fg_accent),
+        )));
+        lines.push(Line::from(""));
+
+        // Find server name from available_servers
+        let server_name = state.available_servers.iter()
+            .find(|s| s.connections.iter().any(|c| c.uri == *url))
+            .map(|s| s.name.as_str());
+        if let Some(name) = server_name {
+            lines.push(Line::from(Span::styled(
+                format!("  Name: {}", name),
+                Style::default().fg(t.colors.fg_muted),
+            )));
+        }
+
+        // Parse and display address info (scheme://host:port)
+        let secure = url.starts_with("https://");
+        let without_scheme = url.trim_start_matches("https://").trim_start_matches("http://");
+        let (host, port) = if let Some(colon) = without_scheme.rfind(':') {
+            (&without_scheme[..colon], Some(&without_scheme[colon + 1..]))
+        } else {
+            (without_scheme, None)
+        };
+        lines.push(Line::from(Span::styled(
+            format!("  Address: {}", host),
+            Style::default().fg(t.colors.fg_muted),
+        )));
+        if let Some(port) = port {
+            lines.push(Line::from(Span::styled(
+                format!("  Port: {}", port),
+                Style::default().fg(t.colors.fg_muted),
+            )));
+        }
+        lines.push(Line::from(Span::styled(
+            format!("  Secure: {}", if secure { "yes" } else { "no" }),
+            Style::default().fg(t.colors.fg_muted),
+        )));
+
+        // Check if this is a local connection
+        if let Some(server) = state.available_servers.iter()
+            .find(|s| s.connections.iter().any(|c| c.uri == *url))
+        {
+            if let Some(conn) = server.connections.iter().find(|c| c.uri == *url) {
+                let conn_type = if conn.relay {
+                    "relay"
+                } else if conn.local {
+                    "local"
+                } else {
+                    "remote"
+                };
+                lines.push(Line::from(Span::styled(
+                    format!("  Connection: {}", conn_type),
+                    Style::default().fg(t.colors.fg_muted),
+                )));
+            }
+        }
+
+        lines.push(Line::from(""));
+    }
+
     lines.push(Line::from(Span::styled(
         "Music libraries:",
         Style::default().fg(t.colors.fg_accent),

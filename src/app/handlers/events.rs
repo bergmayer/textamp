@@ -48,6 +48,7 @@ pub fn handle_app_event(
             }
 
             state.available_servers = servers;
+            state.connected_server_url = Some(server_url.clone());
             state.connection = ConnectionState::Connected { username: username.clone(), has_plex_pass };
             state.settings_state.discovering_servers = false;
             state.settings_state.username_input = username;
@@ -76,6 +77,7 @@ pub fn handle_app_event(
         Event::ServerConnectionSucceeded { server_name, url } => {
             tracing::info!("Server connection succeeded: {} at {}", server_name, url);
             client.set_server(url.clone());
+            state.connected_server_url = Some(url.clone());
 
             // Persist the updated URL so future startups use the working URL
             if let Some(server) = state.available_servers.iter().find(|s| {
