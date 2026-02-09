@@ -2,6 +2,7 @@
 //!
 //! These models represent the response from folder-based browsing endpoints.
 
+use crate::miller::{MillerColumn, MillerState};
 use serde::{Deserialize, Serialize};
 
 /// Response from /library/sections/{id}/folder endpoint.
@@ -262,18 +263,52 @@ impl FolderColumn {
     }
 }
 
+impl MillerColumn for FolderColumn {
+    fn item_count(&self) -> usize {
+        self.items.len()
+    }
+    fn selected_index(&self) -> usize {
+        self.selected_index
+    }
+    fn set_selected_index(&mut self, idx: usize) {
+        self.selected_index = idx;
+    }
+}
+
 /// Navigation state for folder browsing (Miller columns style).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+///
+/// Wraps `MillerState<FolderColumn>` with an additional `library_key` field.
+/// Uses `Deref`/`DerefMut` so all `MillerState` methods are accessible directly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FolderNavigationState {
     /// Which library this folder state belongs to (for cache validation)
     #[serde(default)]
     pub library_key: String,
-    /// Columns from left to right (root is first)
-    pub columns: Vec<FolderColumn>,
-    /// Which column currently has focus (0-indexed)
-    pub focused_column: usize,
-    /// Loading indicator
-    pub loading: bool,
+    /// Inner Miller column state.
+    #[serde(flatten)]
+    pub inner: MillerState<FolderColumn>,
+}
+
+impl Default for FolderNavigationState {
+    fn default() -> Self {
+        Self {
+            library_key: String::new(),
+            inner: MillerState::default(),
+        }
+    }
+}
+
+impl std::ops::Deref for FolderNavigationState {
+    type Target = MillerState<FolderColumn>;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl std::ops::DerefMut for FolderNavigationState {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
 }
 
 impl FolderNavigationState {
@@ -290,14 +325,16 @@ impl FolderNavigationState {
         }
     }
 
-    /// Get the focused column.
-    pub fn focused(&self) -> Option<&FolderColumn> {
-        self.columns.get(self.focused_column)
-    }
-
-    /// Get the focused column mutably.
-    pub fn focused_mut(&mut self) -> Option<&mut FolderColumn> {
-        self.columns.get_mut(self.focused_column)
+    /// Create a folder navigation state with a root column.
+    pub fn with_root(library_key: String, root_column: FolderColumn) -> Self {
+        Self {
+            library_key,
+            inner: MillerState {
+                columns: vec![root_column],
+                focused_column: 0,
+                loading: false,
+            },
+        }
     }
 
     /// Get the selected item in the focused column.
@@ -305,71 +342,14 @@ impl FolderNavigationState {
         self.focused().and_then(|c| c.selected_item())
     }
 
-    /// Check if we can go left (focus previous column).
-    pub fn can_go_left(&self) -> bool {
-        self.focused_column > 0
-    }
-
-    /// Check if focus is at root column.
-    pub fn is_at_root(&self) -> bool {
-        self.focused_column == 0
-    }
-
-    /// Move focus left.
-    pub fn focus_left(&mut self) {
-        if self.focused_column > 0 {
-            self.focused_column -= 1;
-        }
-    }
-
-    /// Move focus right (if there's a column to the right).
-    pub fn focus_right(&mut self) -> bool {
-        if self.focused_column + 1 < self.columns.len() {
-            self.focused_column += 1;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Add a new column to the right, removing any columns after current focus.
-    pub fn push_column(&mut self, column: FolderColumn) {
-        // Remove columns to the right of focus
-        self.truncate_right_columns();
-        // Add new column
-        self.columns.push(column);
-        // Move focus to new column
-        self.focused_column = self.columns.len() - 1;
-    }
-
-    /// Clear columns to the right of the focused column.
-    /// Call this when selection changes to prevent stale column data.
-    pub fn truncate_right_columns(&mut self) {
-        self.columns.truncate(self.focused_column + 1);
-    }
-
     /// Get the current folder's key (focused column's key).
     pub fn current_folder_key(&self) -> Option<&str> {
         self.focused().and_then(|c| c.key.as_deref())
     }
 
-    /// Navigate up in current column.
-    pub fn move_up(&mut self) {
-        if let Some(col) = self.focused_mut() {
-            if col.selected_index > 0 {
-                col.selected_index -= 1;
-            }
-        }
-    }
-
-    /// Navigate down in current column.
-    pub fn move_down(&mut self) {
-        if let Some(col) = self.focused_mut() {
-            let max = col.items.len().saturating_sub(1);
-            if col.selected_index < max {
-                col.selected_index += 1;
-            }
-        }
+    /// Backward-compatible alias for `truncate_right()`.
+    pub fn truncate_right_columns(&mut self) {
+        self.truncate_right();
     }
 
     /// Get the number of visible columns (for layout).

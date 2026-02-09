@@ -485,7 +485,7 @@ pub async fn dispatch(
                                 col.shuffle();
                             }
                         }
-                        folder_state.columns.truncate(folder_state.focused_column + 1);
+                        folder_state.truncate_right();
                     }
                 }
             }

@@ -938,16 +938,14 @@ mod tests {
         state.list_filter.column = 0;
 
         // Simulate 3 columns (root + 2 drill-downs), focused on column 2
-        state.folder_state = Some(FolderNavigationState {
-            library_key: "lib1".into(),
-            columns: vec![
-                make_folder_column("root"),
-                make_folder_column("sub1"),
-                make_folder_column("sub2"),
-            ],
-            focused_column: 2,
-            loading: false,
-        });
+        let mut fs = FolderNavigationState::for_library("lib1".into());
+        fs.columns = vec![
+            make_folder_column("root"),
+            make_folder_column("sub1"),
+            make_folder_column("sub2"),
+        ];
+        fs.focused_column = 2;
+        state.folder_state = Some(fs);
 
         truncate_filter_right_columns(&mut state);
 
@@ -986,16 +984,14 @@ mod tests {
         state.list_filter.category = BrowseCategory::Folders;
         state.list_filter.column = 1; // filter on second column
 
-        state.folder_state = Some(FolderNavigationState {
-            library_key: "lib1".into(),
-            columns: vec![
-                make_folder_column("root"),
-                make_folder_column("sub1"),
-                make_folder_column("sub2"),
-            ],
-            focused_column: 2,
-            loading: false,
-        });
+        let mut fs = FolderNavigationState::for_library("lib1".into());
+        fs.columns = vec![
+            make_folder_column("root"),
+            make_folder_column("sub1"),
+            make_folder_column("sub2"),
+        ];
+        fs.focused_column = 2;
+        state.folder_state = Some(fs);
 
         truncate_filter_right_columns(&mut state);
 

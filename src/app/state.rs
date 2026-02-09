@@ -4,6 +4,7 @@
 //! UI modeled after musikcube: Browse (left: categories, right: tracks), Queue, Search, etc.
 
 use crate::api::models::{Album, Artist, Genre, Library, Playlist, PlexServer, Station, Track, SearchResults};
+use crate::miller::{MillerColumn, MillerState};
 use crate::plex::CachedFolder;
 use crate::services::{FolderNavigationState, WaveformData};
 use crate::ui::theme::ThemeName;
@@ -352,22 +353,23 @@ impl BrowseColumn {
     }
 }
 
-/// Navigation state for Miller column browsing.
-#[derive(Debug, Clone, Default)]
-pub struct BrowseNavigationState {
-    /// Columns from left to right
-    pub columns: Vec<BrowseColumn>,
-    /// Which column currently has focus (0-indexed)
-    pub focused_column: usize,
-    /// Loading indicator
-    pub loading: bool,
+impl MillerColumn for BrowseColumn {
+    fn item_count(&self) -> usize {
+        self.items.len()
+    }
+    fn selected_index(&self) -> usize {
+        self.selected_index
+    }
+    fn set_selected_index(&mut self, idx: usize) {
+        self.selected_index = idx;
+    }
 }
 
-impl BrowseNavigationState {
-    pub fn new() -> Self {
-        Self::default()
-    }
+/// Navigation state for Miller column browsing.
+pub type BrowseNavigationState = MillerState<BrowseColumn>;
 
+/// Type-specific methods for browse navigation.
+impl MillerState<BrowseColumn> {
     /// Initialize with a root column.
     pub fn with_root(title: impl Into<String>, items: Vec<BrowseItem>) -> Self {
         Self {
@@ -377,89 +379,9 @@ impl BrowseNavigationState {
         }
     }
 
-    /// Get the focused column.
-    pub fn focused(&self) -> Option<&BrowseColumn> {
-        self.columns.get(self.focused_column)
-    }
-
-    /// Get the focused column mutably.
-    pub fn focused_mut(&mut self) -> Option<&mut BrowseColumn> {
-        self.columns.get_mut(self.focused_column)
-    }
-
     /// Get the selected item in the focused column.
     pub fn selected_item(&self) -> Option<&BrowseItem> {
         self.focused().and_then(|c| c.selected_item())
-    }
-
-    /// Check if we can go left (focus previous column).
-    pub fn can_go_left(&self) -> bool {
-        self.focused_column > 0
-    }
-
-    /// Move focus left.
-    pub fn focus_left(&mut self) {
-        if self.focused_column > 0 {
-            self.focused_column -= 1;
-        }
-    }
-
-    /// Move focus right (if there's a column to the right).
-    pub fn focus_right(&mut self) -> bool {
-        if self.focused_column + 1 < self.columns.len() {
-            self.focused_column += 1;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Add a new column to the right, removing any columns after current focus.
-    pub fn push_column(&mut self, column: BrowseColumn) {
-        // Remove columns to the right of focus
-        self.columns.truncate(self.focused_column + 1);
-        // Add new column
-        self.columns.push(column);
-        // Move focus to new column
-        self.focused_column = self.columns.len() - 1;
-    }
-
-    /// Clear columns to the right of the focused column.
-    pub fn truncate_right(&mut self) {
-        self.columns.truncate(self.focused_column + 1);
-    }
-
-    /// Navigate up in current column.
-    pub fn move_up(&mut self) {
-        if let Some(col) = self.focused_mut() {
-            if col.selected_index > 0 {
-                col.selected_index -= 1;
-            }
-        }
-    }
-
-    /// Navigate down in current column.
-    pub fn move_down(&mut self) {
-        if let Some(col) = self.focused_mut() {
-            let max = col.items.len().saturating_sub(1);
-            if col.selected_index < max {
-                col.selected_index += 1;
-            }
-        }
-    }
-
-    /// Move to a specific index in the focused column.
-    pub fn move_to(&mut self, index: usize) {
-        if let Some(col) = self.focused_mut() {
-            if index < col.items.len() {
-                col.selected_index = index;
-            }
-        }
-    }
-
-    /// Get the number of columns.
-    pub fn column_count(&self) -> usize {
-        self.columns.len()
     }
 
     /// Reset to a single root column.
@@ -483,11 +405,6 @@ impl BrowseNavigationState {
             self.focused_column = 0;
         }
         self.loading = false;
-    }
-
-    /// Check if empty (no columns).
-    pub fn is_empty(&self) -> bool {
-        self.columns.is_empty()
     }
 }
 
@@ -917,79 +834,26 @@ impl StationColumn {
     }
 }
 
-/// Station navigation state for hierarchical stations (Miller columns style).
-#[derive(Debug, Clone, Default)]
-pub struct StationNavigationState {
-    /// Columns from left to right (root is first)
-    pub columns: Vec<StationColumn>,
-    /// Which column currently has focus (0-indexed)
-    pub focused_column: usize,
-    /// Loading indicator
-    pub loading: bool,
+impl MillerColumn for StationColumn {
+    fn item_count(&self) -> usize {
+        self.stations.len()
+    }
+    fn selected_index(&self) -> usize {
+        self.selected_index
+    }
+    fn set_selected_index(&mut self, idx: usize) {
+        self.selected_index = idx;
+    }
 }
 
-impl StationNavigationState {
-    /// Create a new empty station navigation state.
-    pub fn new() -> Self {
-        Self::default()
-    }
+/// Station navigation state for hierarchical stations (Miller columns style).
+pub type StationNavigationState = MillerState<StationColumn>;
 
-    /// Get the focused column.
-    pub fn focused(&self) -> Option<&StationColumn> {
-        self.columns.get(self.focused_column)
-    }
-
-    /// Get the focused column mutably.
-    pub fn focused_mut(&mut self) -> Option<&mut StationColumn> {
-        self.columns.get_mut(self.focused_column)
-    }
-
+/// Type-specific methods for station navigation.
+impl MillerState<StationColumn> {
     /// Get the selected station in the focused column.
     pub fn selected_station(&self) -> Option<&Station> {
         self.focused().and_then(|c| c.selected_station())
-    }
-
-    /// Check if we're at the root column.
-    pub fn is_at_root(&self) -> bool {
-        self.focused_column == 0
-    }
-
-    /// Check if we can go left (focus previous column).
-    pub fn can_go_left(&self) -> bool {
-        self.focused_column > 0
-    }
-
-    /// Move focus left.
-    pub fn focus_left(&mut self) {
-        if self.focused_column > 0 {
-            self.focused_column -= 1;
-        }
-    }
-
-    /// Move focus right (if there's a column to the right).
-    pub fn focus_right(&mut self) -> bool {
-        if self.focused_column + 1 < self.columns.len() {
-            self.focused_column += 1;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Add a new column to the right, removing any columns after current focus.
-    pub fn push_column(&mut self, column: StationColumn) {
-        // Remove columns to the right of focus
-        self.truncate_right_columns();
-        // Add new column
-        self.columns.push(column);
-        // Move focus to new column
-        self.focused_column = self.columns.len() - 1;
-    }
-
-    /// Clear columns to the right of the focused column.
-    /// Call this when selection changes to prevent stale column data.
-    pub fn truncate_right_columns(&mut self) {
-        self.columns.truncate(self.focused_column + 1);
     }
 
     /// Get the current title (focused column's title).
@@ -997,28 +861,9 @@ impl StationNavigationState {
         self.focused().map(|c| c.title.as_str()).unwrap_or("Stations")
     }
 
-    /// Navigate up in current column.
-    pub fn move_up(&mut self) {
-        if let Some(col) = self.focused_mut() {
-            if col.selected_index > 0 {
-                col.selected_index -= 1;
-            }
-        }
-    }
-
-    /// Navigate down in current column.
-    pub fn move_down(&mut self) {
-        if let Some(col) = self.focused_mut() {
-            let max = col.stations.len().saturating_sub(1);
-            if col.selected_index < max {
-                col.selected_index += 1;
-            }
-        }
-    }
-
-    /// Get the number of columns.
-    pub fn column_count(&self) -> usize {
-        self.columns.len()
+    /// Backward-compatible alias for `truncate_right()`.
+    pub fn truncate_right_columns(&mut self) {
+        self.truncate_right();
     }
 }
 

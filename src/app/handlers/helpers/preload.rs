@@ -103,12 +103,7 @@ pub fn preload_data(event_tx: &mpsc::Sender<Event>, preload_type: PreloadType, l
                 if let Ok(response) = client.get_library_folders(lib_key_ref).await {
                     let items = FolderService::from_response(&response);
                     let root_column = FolderColumn::new(None, lib_title, items);
-                    let folder_state = FolderNavigationState {
-                        library_key: lib_key.clone(),
-                        columns: vec![root_column],
-                        focused_column: 0,
-                        loading: false,
-                    };
+                    let folder_state = FolderNavigationState::with_root(lib_key.clone(), root_column);
                     tracing::debug!("Folders preloaded successfully");
                     let _ = event_tx.send(Event::FoldersPreloaded { library_key: lib_key, folder_state }).await;
                 }

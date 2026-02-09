@@ -70,6 +70,9 @@ pub async fn dispatch(
                 cache_data.recently_added_albums = state.recently_added_albums.clone();
                 cache_data.recently_played_albums = state.recently_played_albums.clone();
 
+                // Playlist tracks
+                cache_data.playlist_tracks = state.playlist_tracks_cache.clone();
+
                 if let Some(cache) = LibraryCache::new() {
                     if cache.save(&cache_data) {
                         tracing::info!("Cache saved on quit");
@@ -232,7 +235,7 @@ pub async fn dispatch(
             }
 
             if state.album_art_view {
-                // Collect album keys/thumbs from the current navigation that need loading
+                // Load art only for visible items in the focused column
                 let nav = match state.browse_category {
                     crate::app::state::BrowseCategory::Artists => &state.artist_nav,
                     crate::app::state::BrowseCategory::Genres => &state.genre_nav,
@@ -240,32 +243,44 @@ pub async fn dispatch(
                     _ => return Ok(vec![]),
                 };
 
-                let mut to_load: Vec<(String, String)> = Vec::new();
-                for col in &nav.columns {
-                    for item in &col.items {
-                        if to_load.len() >= 4 { break; }
-                        match item {
-                            crate::app::state::BrowseItem::Album { key, thumb: Some(thumb), .. } => {
-                                if !state.album_art_cache.contains_key(key)
-                                    && !state.album_art_pending.contains(key)
-                                {
-                                    to_load.push((key.clone(), thumb.clone()));
+                if let Some(col) = nav.focused() {
+                    let total_items = col.items.len();
+                    if total_items > 0 {
+                        let inner_height = state.terminal_height.saturating_sub(4) as usize;
+                        let target_visible = 3usize.max(total_items.min(5));
+                        let row_height = if target_visible > 0 { (inner_height / target_visible).max(3) } else { 3 };
+                        let visible_rows = if row_height > 0 { (inner_height / row_height).max(1) } else { 1 };
+                        let scroll_offset = crate::services::NavigationService::calc_scroll_offset(
+                            col.selected_index, visible_rows, total_items,
+                        );
+                        let end = (scroll_offset + visible_rows).min(total_items);
+
+                        let mut to_load: Vec<(String, String)> = Vec::new();
+                        for item in &col.items[scroll_offset..end] {
+                            if to_load.len() >= 4 { break; }
+                            match item {
+                                crate::app::state::BrowseItem::Album { key, thumb: Some(thumb), .. } => {
+                                    if !state.album_art_cache.contains_key(key)
+                                        && !state.album_art_pending.contains(key)
+                                    {
+                                        to_load.push((key.clone(), thumb.clone()));
+                                    }
                                 }
-                            }
-                            crate::app::state::BrowseItem::AllTracks { artist_key, thumb: Some(thumb), .. } => {
-                                if !state.album_art_cache.contains_key(artist_key)
-                                    && !state.album_art_pending.contains(artist_key)
-                                {
-                                    to_load.push((artist_key.clone(), thumb.clone()));
+                                crate::app::state::BrowseItem::AllTracks { artist_key, thumb: Some(thumb), .. } => {
+                                    if !state.album_art_cache.contains_key(artist_key)
+                                        && !state.album_art_pending.contains(artist_key)
+                                    {
+                                        to_load.push((artist_key.clone(), thumb.clone()));
+                                    }
                                 }
+                                _ => {}
                             }
-                            _ => {}
+                        }
+
+                        if !to_load.is_empty() {
+                            return Ok(vec![Action::LoadAlbumArt(to_load)]);
                         }
                     }
-                }
-
-                if !to_load.is_empty() {
-                    return Ok(vec![Action::LoadAlbumArt(to_load)]);
                 }
             }
         }

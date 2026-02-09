@@ -369,12 +369,7 @@ pub fn spawn_category_refresh(
                         let items = FolderService::from_response(&response);
                         let new_count = items.len();
                         let root_column = FolderColumn::new(None, "Music".to_string(), items);
-                        let folder_state = FolderNavigationState {
-                            library_key: lib_key.clone(),
-                            columns: vec![root_column],
-                            focused_column: 0,
-                            loading: false,
-                        };
+                        let folder_state = FolderNavigationState::with_root(lib_key.clone(), root_column);
                         let _ = event_tx.send(Event::FoldersPreloaded { library_key: lib_key.clone(), folder_state }).await;
                         new_count != old_count
                     }

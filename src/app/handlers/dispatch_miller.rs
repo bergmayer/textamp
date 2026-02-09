@@ -10,6 +10,32 @@ use tokio::sync::mpsc;
 
 use super::helpers;
 
+/// Collect all album art (key, thumb) pairs from a column that aren't already cached or pending.
+fn collect_art_to_load(
+    col: Option<&BrowseColumn>,
+    cache: &std::collections::HashMap<String, Vec<u8>>,
+    pending: &std::collections::HashSet<String>,
+) -> Vec<(String, String)> {
+    let Some(col) = col else { return vec![] };
+    let mut to_load = Vec::new();
+    for item in &col.items {
+        match item {
+            BrowseItem::Album { key, thumb: Some(thumb), .. } => {
+                if !cache.contains_key(key) && !pending.contains(key) {
+                    to_load.push((key.clone(), thumb.clone()));
+                }
+            }
+            BrowseItem::AllTracks { artist_key, thumb: Some(thumb), .. } => {
+                if !cache.contains_key(artist_key) && !pending.contains(artist_key) {
+                    to_load.push((artist_key.clone(), thumb.clone()));
+                }
+            }
+            _ => {}
+        }
+    }
+    to_load
+}
+
 /// Dispatch Miller column actions. Returns follow-up actions.
 pub async fn dispatch(
     event_tx: &mpsc::Sender<Event>,
@@ -47,6 +73,13 @@ pub async fn dispatch(
                     let col = BrowseColumn::new(title, items);
                     state.artist_nav.push_column(col);
 
+                    // Preload all album art for the newly pushed column
+                    let art_batch = if state.album_art_view {
+                        collect_art_to_load(state.artist_nav.columns.last(), &state.album_art_cache, &state.album_art_pending)
+                    } else {
+                        vec![]
+                    };
+
                     // Auto-select album and drill into tracks if pending_album_key is set (Alt+B)
                     if let Some(album_key) = state.pending_album_key.take() {
                         if let Some(col) = state.artist_nav.columns.last_mut() {
@@ -57,9 +90,18 @@ pub async fn dispatch(
                                 if let Some(BrowseItem::Album { title, .. }) = col.items.get(idx) {
                                     state.selected_album_title = title.clone();
                                 }
-                                return Ok(vec![Action::LoadAlbumTracksForMiller { album_key }]);
+                                let mut actions = vec![Action::LoadAlbumTracksForMiller { album_key }];
+                                if !art_batch.is_empty() {
+                                    actions.push(Action::LoadAlbumArt(art_batch));
+                                }
+                                return Ok(actions);
                             }
                         }
+                    }
+
+                    if !art_batch.is_empty() {
+                        state.artist_nav.loading = false;
+                        return Ok(vec![Action::LoadAlbumArt(art_batch)]);
                     }
                 }
                 Err(e) => {
@@ -157,6 +199,15 @@ pub async fn dispatch(
                         let items = BrowseItem::from_albums(&albums);
                         let col = BrowseColumn::new("albums", items);
                         state.genre_nav.push_column(col);
+
+                        // Preload all album art for the newly pushed column
+                        if state.album_art_view {
+                            let art_batch = collect_art_to_load(state.genre_nav.columns.last(), &state.album_art_cache, &state.album_art_pending);
+                            if !art_batch.is_empty() {
+                                state.genre_nav.loading = false;
+                                return Ok(vec![Action::LoadAlbumArt(art_batch)]);
+                            }
+                        }
                     }
                     Err(e) => {
                         state.set_error(format!("Failed to load albums: {}", e));

@@ -33,12 +33,7 @@ pub async fn dispatch(
                             .unwrap_or_else(|| "Root".to_string());
 
                         let root_column = FolderColumn::new(None, lib_title, items);
-                        state.folder_state = Some(FolderNavigationState {
-                            library_key: lib_key.clone(),
-                            columns: vec![root_column],
-                            focused_column: 0,
-                            loading: false,
-                        });
+                        state.folder_state = Some(FolderNavigationState::with_root(lib_key.clone(), root_column));
                     }
                     Err(e) => {
                         state.set_error(format!("Failed to load folders: {}", e));

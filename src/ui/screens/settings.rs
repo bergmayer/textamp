@@ -527,6 +527,23 @@ fn render_interface_content(frame: &mut Frame, state: &AppState, area: Rect) {
         Style::default().fg(t.colors.fg_muted),
     )));
 
+    // Graphics protocol info
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Graphics:",
+        Style::default().fg(t.colors.fg_accent),
+    )));
+    lines.push(Line::from(""));
+    let protocol = crate::ui::screens::now_playing::artwork_protocol_name();
+    lines.push(Line::from(Span::styled(
+        format!("  Protocol: {}", protocol),
+        Style::default().fg(t.colors.fg_muted),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!("  Terminal: {}x{}", state.terminal_width, state.terminal_height),
+        Style::default().fg(t.colors.fg_muted),
+    )));
+
     let paragraph = Paragraph::new(lines);
     frame.render_widget(paragraph, area);
 }
@@ -553,12 +570,6 @@ fn render_about_content(frame: &mut Frame, area: Rect) {
     )));
     lines.push(Line::from(Span::styled(
         "License: MIT",
-        Style::default().fg(t.colors.fg_primary),
-    )));
-    lines.push(Line::from(""));
-    let protocol = crate::ui::screens::now_playing::artwork_protocol_name();
-    lines.push(Line::from(Span::styled(
-        format!("Graphics: {}", protocol),
         Style::default().fg(t.colors.fg_primary),
     )));
     lines.push(Line::from(""));

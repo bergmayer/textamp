@@ -878,7 +878,7 @@ pub fn handle_app_event(
                 }
             }
 
-            // Album art loading: if cover art view is active, load missing artwork
+            // Album art loading: lazy-load only for visible items in the focused column
             // Limit concurrent in-flight requests to avoid overwhelming the Plex transcoder
             if state.album_art_view && state.view == crate::app::state::View::Browse
                 && state.album_art_pending.len() < 4
@@ -889,33 +889,45 @@ pub fn handle_app_event(
                     crate::app::state::BrowseCategory::Playlists => &state.playlist_nav,
                     _ => &state.artist_nav, // won't match albums anyway
                 };
-                let max_batch = 4usize.saturating_sub(state.album_art_pending.len());
-                let mut to_load: Vec<(String, String)> = Vec::new();
-                for col in &nav.columns {
-                    for item in &col.items {
-                        match item {
-                            crate::app::state::BrowseItem::Album { key, thumb: Some(thumb), .. } => {
-                                if !state.album_art_cache.contains_key(key)
-                                    && !state.album_art_pending.contains(key)
-                                    && to_load.len() < max_batch
-                                {
-                                    to_load.push((key.clone(), thumb.clone()));
+                if let Some(col) = nav.focused() {
+                    let total_items = col.items.len();
+                    if total_items > 0 {
+                        // Compute visible range using same formula as render_album_art_grid
+                        let inner_height = state.terminal_height.saturating_sub(4) as usize;
+                        let target_visible = 3usize.max((total_items).min(5));
+                        let row_height = if target_visible > 0 { (inner_height / target_visible).max(3) } else { 3 };
+                        let visible_rows = if row_height > 0 { (inner_height / row_height).max(1) } else { 1 };
+                        let scroll_offset = crate::services::NavigationService::calc_scroll_offset(
+                            col.selected_index, visible_rows, total_items,
+                        );
+                        let end = (scroll_offset + visible_rows).min(total_items);
+
+                        let max_batch = 4usize.saturating_sub(state.album_art_pending.len());
+                        let mut to_load: Vec<(String, String)> = Vec::new();
+                        for item in &col.items[scroll_offset..end] {
+                            if to_load.len() >= max_batch { break; }
+                            match item {
+                                BrowseItem::Album { key, thumb: Some(thumb), .. } => {
+                                    if !state.album_art_cache.contains_key(key)
+                                        && !state.album_art_pending.contains(key)
+                                    {
+                                        to_load.push((key.clone(), thumb.clone()));
+                                    }
                                 }
-                            }
-                            crate::app::state::BrowseItem::AllTracks { artist_key, thumb: Some(thumb), .. } => {
-                                if !state.album_art_cache.contains_key(artist_key)
-                                    && !state.album_art_pending.contains(artist_key)
-                                    && to_load.len() < max_batch
-                                {
-                                    to_load.push((artist_key.clone(), thumb.clone()));
+                                BrowseItem::AllTracks { artist_key, thumb: Some(thumb), .. } => {
+                                    if !state.album_art_cache.contains_key(artist_key)
+                                        && !state.album_art_pending.contains(artist_key)
+                                    {
+                                        to_load.push((artist_key.clone(), thumb.clone()));
+                                    }
                                 }
+                                _ => {}
                             }
-                            _ => {}
+                        }
+                        if !to_load.is_empty() {
+                            return vec![Action::LoadAlbumArt(to_load)];
                         }
                     }
-                }
-                if !to_load.is_empty() {
-                    return vec![Action::LoadAlbumArt(to_load)];
                 }
             }
 
@@ -975,12 +987,7 @@ pub fn handle_app_event(
             if !cached.root_folders.is_empty() {
                 use crate::services::{FolderColumn, FolderNavigationState};
                 let root_column = FolderColumn::new(None, lib_name, cached.root_folders);
-                state.folder_state = Some(FolderNavigationState {
-                    library_key: library_key.clone(),
-                    columns: vec![root_column],
-                    focused_column: 0,
-                    loading: false,
-                });
+                state.folder_state = Some(FolderNavigationState::with_root(library_key.clone(), root_column));
             }
             if !cached.folder_contents.is_empty() {
                 state.folder_contents_cache = cached.folder_contents;

@@ -5,6 +5,7 @@
 pub mod app;
 pub mod audio;
 pub mod config;
+pub mod miller;
 pub mod plex;
 pub mod services;
 pub mod ui;
