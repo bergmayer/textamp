@@ -194,6 +194,8 @@ pub fn maybe_start_subfolder_preload(
     tokio::spawn(async move {
         use crate::plex::CachedFolder;
         use crate::services::FolderService;
+        use tokio::sync::Semaphore;
+        use std::sync::Arc;
 
         // Let other preloads finish first
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
@@ -203,38 +205,58 @@ pub fn maybe_start_subfolder_preload(
             return;
         }
 
-        let client = crate::api::PlexClient::new_with_url(&server_url, token.as_deref(), &client_id);
+        // Concurrency pool: up to 4 parallel requests to avoid overwhelming the server
+        let semaphore = Arc::new(Semaphore::new(4));
+        let client = Arc::new(crate::api::PlexClient::new_with_url(&server_url, token.as_deref(), &client_id));
+        let cancel = Arc::new(cancel);
+
+        // Spawn all fetch tasks, gated by the semaphore
+        let mut handles = Vec::with_capacity(keys_to_fetch.len());
+        for folder_key in keys_to_fetch {
+            let sem = semaphore.clone();
+            let client = client.clone();
+            let cancel = cancel.clone();
+
+            handles.push(tokio::spawn(async move {
+                let _permit = sem.acquire().await.unwrap();
+                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    return None;
+                }
+                match client.get_folder_contents(&folder_key).await {
+                    Ok(response) => {
+                        let items = FolderService::from_response(&response);
+                        Some((folder_key, CachedFolder::new(items)))
+                    }
+                    Err(e) => {
+                        tracing::warn!("Subfolder preload failed for {}: {}", folder_key, e);
+                        None
+                    }
+                }
+            }));
+        }
+
+        // Collect results as they complete, sending batches to the UI
         let mut batch: Vec<(String, CachedFolder)> = Vec::new();
         let mut fetched = 0u64;
 
-        for folder_key in &keys_to_fetch {
+        for handle in handles {
             if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                 tracing::info!("Subfolder preload cancelled after {} fetches", fetched);
                 return;
             }
+            if let Ok(Some(entry)) = handle.await {
+                batch.push(entry);
+                fetched += 1;
 
-            // Rate limit
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-            match client.get_folder_contents(folder_key).await {
-                Ok(response) => {
-                    let items = FolderService::from_response(&response);
-                    batch.push((folder_key.clone(), CachedFolder::new(items)));
-                    fetched += 1;
+                // Send batch every 10 entries for responsive UI updates
+                if batch.len() >= 10 {
+                    tracing::debug!("Subfolder preload batch: {} fetched so far (of {} to fetch)", fetched, total_to_fetch);
+                    let _ = event_tx.send(Event::SubfoldersPreloaded {
+                        library_key: lib_key.clone(),
+                        entries: std::mem::take(&mut batch),
+                        done: false,
+                    }).await;
                 }
-                Err(e) => {
-                    tracing::warn!("Subfolder preload failed for {}: {}", folder_key, e);
-                }
-            }
-
-            // Send batch every 10 entries (small batches for responsive UI updates)
-            if batch.len() >= 10 {
-                tracing::debug!("Subfolder preload batch: {} fetched so far (of {} to fetch)", fetched, total_to_fetch);
-                let _ = event_tx.send(Event::SubfoldersPreloaded {
-                    library_key: lib_key.clone(),
-                    entries: std::mem::take(&mut batch),
-                    done: false,
-                }).await;
             }
         }
 

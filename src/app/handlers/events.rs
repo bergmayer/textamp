@@ -1252,10 +1252,14 @@ pub fn handle_app_event(
                 state.list_filter.loading = false;
                 state.list_filter.selected = 0;
                 state.list_filter.results = Some(results);
-                // Update the column's selected_index to the first match
-                if let Some(ref results) = state.list_filter.results {
-                    if let Some(&first_idx) = results.matched_indices.first() {
-                        super::key_input::update_filter_column_selection(state, first_idx);
+                // Only update column selection if user is still on the filter column.
+                // If they've drilled deeper (e.g., into subfolders), preserve their
+                // current navigation — changing the selection would jump them away.
+                if super::dispatch_search::is_on_filter_column(state) {
+                    if let Some(ref results) = state.list_filter.results {
+                        if let Some(&first_idx) = results.matched_indices.first() {
+                            super::key_input::update_filter_column_selection(state, first_idx);
+                        }
                     }
                 }
             }

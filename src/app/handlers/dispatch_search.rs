@@ -350,7 +350,7 @@ async fn execute_list_filter(
 }
 
 /// Check if the currently focused column is the filter's target column.
-fn is_on_filter_column(state: &AppState) -> bool {
+pub(super) fn is_on_filter_column(state: &AppState) -> bool {
     let filter_col = state.list_filter.column;
     match state.list_filter.category {
         BrowseCategory::Artists => state.artist_nav.focused_column == filter_col,
