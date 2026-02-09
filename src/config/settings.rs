@@ -136,6 +136,10 @@ pub struct UiConfig {
 
     #[serde(default = "default_theme")]
     pub theme: String,
+
+    /// Persist cover art view mode across sessions (Alt+C toggle).
+    #[serde(default)]
+    pub cover_art_view: bool,
 }
 
 impl Default for UiConfig {
@@ -144,6 +148,7 @@ impl Default for UiConfig {
             show_album_art: default_show_album_art(),
             album_art_size: default_album_art_size(),
             theme: default_theme(),
+            cover_art_view: false,
         }
     }
 }

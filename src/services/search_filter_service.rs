@@ -99,7 +99,8 @@ impl SearchFilterService {
 
     /// Filter albums by query.
     ///
-    /// If `api_results` is provided, uses those. Otherwise filters `local_albums`.
+    /// If `api_results` is provided, uses those supplemented with local year matches.
+    /// Otherwise filters `local_albums` by title or year.
     pub fn filter_albums(
         query: &str,
         api_results: Option<&SearchResults>,
@@ -108,22 +109,33 @@ impl SearchFilterService {
         let query_lower = query.to_lowercase();
 
         if let Some(results) = api_results {
-            results
+            let mut items: Vec<FilteredItem> = results
                 .albums
                 .iter()
-                .map(|a| {
-                    let artist = a.artist_name();
-                    FilteredItem::new(format!("{} - {}", a.title, artist), &a.rating_key)
-                })
-                .collect()
+                .map(|a| FilteredItem::new(Self::format_album(a), &a.rating_key))
+                .collect();
+
+            // Supplement with local albums matching by year (Plex API doesn't search by year)
+            let existing_keys: std::collections::HashSet<&str> =
+                results.albums.iter().map(|a| a.rating_key.as_str()).collect();
+            for a in local_albums {
+                if !existing_keys.contains(a.rating_key.as_str())
+                    && Self::album_year_matches(a, &query_lower)
+                {
+                    items.push(FilteredItem::new(Self::format_album(a), &a.rating_key));
+                }
+            }
+
+            items
         } else {
             local_albums
                 .iter()
-                .filter(|a| query.is_empty() || a.title.to_lowercase().contains(&query_lower))
-                .map(|a| {
-                    let artist = a.artist_name();
-                    FilteredItem::new(format!("{} - {}", a.title, artist), &a.rating_key)
+                .filter(|a| {
+                    query.is_empty()
+                        || a.title.to_lowercase().contains(&query_lower)
+                        || Self::album_year_matches(a, &query_lower)
                 })
+                .map(|a| FilteredItem::new(Self::format_album(a), &a.rating_key))
                 .collect()
         }
     }
@@ -224,11 +236,22 @@ impl SearchFilterService {
         let query_lower = query.to_lowercase();
 
         if let Some(results) = api_results {
-            results.albums.len()
+            // Count API results + local year matches (deduplicated)
+            let existing_keys: std::collections::HashSet<&str> =
+                results.albums.iter().map(|a| a.rating_key.as_str()).collect();
+            let year_matches = local_albums.iter()
+                .filter(|a| !existing_keys.contains(a.rating_key.as_str())
+                    && Self::album_year_matches(a, &query_lower))
+                .count();
+            results.albums.len() + year_matches
         } else {
             local_albums
                 .iter()
-                .filter(|a| query.is_empty() || a.title.to_lowercase().contains(&query_lower))
+                .filter(|a| {
+                    query.is_empty()
+                        || a.title.to_lowercase().contains(&query_lower)
+                        || Self::album_year_matches(a, &query_lower)
+                })
                 .count()
         }
     }
@@ -269,6 +292,25 @@ impl SearchFilterService {
             .iter()
             .filter(|g| query.is_empty() || g.title.to_lowercase().contains(&query_lower))
             .count()
+    }
+
+    /// Format an album for display: "Title (Year) - Artist" or "Title - Artist" if no year.
+    fn format_album(album: &Album) -> String {
+        let artist = album.artist_name();
+        if let Some(year) = album.year {
+            format!("{} ({}) - {}", album.title, year, artist)
+        } else {
+            format!("{} - {}", album.title, artist)
+        }
+    }
+
+    /// Check if an album's year matches the query string.
+    fn album_year_matches(album: &Album, query_lower: &str) -> bool {
+        if let Some(year) = album.year {
+            year.to_string().contains(query_lower)
+        } else {
+            false
+        }
     }
 }
 

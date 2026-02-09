@@ -53,6 +53,12 @@ pub fn handle_app_event(
             state.settings_state.username_input = username;
             state.settings_state.password_input.clear(); // Never keep password in memory
             state.view = View::Browse;
+
+            // Prune artwork cache on startup (72-hour TTL, 500 MB max)
+            let artwork_cache = crate::plex::ArtworkCache::default();
+            artwork_cache.prune_expired(72 * 60 * 60);
+            artwork_cache.prune_to_size(500 * 1024 * 1024);
+
             vec![Action::LoadInitialData]
         }
         Event::ServersDiscovered(servers) => {
@@ -370,6 +376,26 @@ pub fn handle_app_event(
         Event::GlobalSearchCompleted { version, results } => {
             // Only apply results if version matches (not stale)
             if version == state.global_search_version {
+                let mut results = results;
+
+                // Supplement with local albums matching by year (Plex API doesn't search by year)
+                let query_lower = state.search_query.to_lowercase();
+                if !query_lower.is_empty() {
+                    let existing_keys: std::collections::HashSet<String> =
+                        results.albums.iter().map(|a| a.rating_key.clone()).collect();
+                    let year_matches: Vec<_> = state.albums.iter()
+                        .filter(|a| {
+                            !existing_keys.contains(&a.rating_key)
+                                && a.year.map(|y| y.to_string().contains(&query_lower)).unwrap_or(false)
+                        })
+                        .cloned()
+                        .collect();
+                    if !year_matches.is_empty() {
+                        tracing::info!("Global search: adding {} year-matched albums", year_matches.len());
+                        results.albums.extend(year_matches);
+                    }
+                }
+
                 tracing::info!(
                     "Global search completed: {} artists, {} albums, {} tracks, {} playlists",
                     results.artists.len(),
@@ -511,6 +537,15 @@ pub fn handle_app_event(
             state.artwork_loading = false;
             vec![]
         }
+        Event::AlbumArtLoaded { key, data } => {
+            state.album_art_pending.remove(&key);
+            state.album_art_cache.insert(key, data);
+            vec![]
+        }
+        Event::AlbumArtFailed { key } => {
+            state.album_art_pending.remove(&key);
+            vec![]
+        }
         Event::FoldersPreloaded { library_key, folder_state } => {
             // Ignore if this is for a different library (race condition from library switch)
             if state.active_library.as_ref() != Some(&library_key) {
@@ -522,6 +557,27 @@ pub fn handle_app_event(
                 state.folder_state = Some(folder_state);
                 state.cache_dirty = true;
                 tracing::debug!("Folders preloaded and ready");
+            }
+            // Start subfolder pre-caching now that root folders are available
+            helpers::maybe_start_subfolder_preload(event_tx, state, client);
+            vec![]
+        }
+        Event::SubfoldersPreloaded { library_key, entries, done } => {
+            // Ignore if this is for a different library (race condition from library switch)
+            if state.active_library.as_ref() != Some(&library_key) {
+                tracing::debug!("Ignoring stale subfolder preload for library {}", library_key);
+                return vec![];
+            }
+            // Merge entries into cache
+            if !entries.is_empty() {
+                for (key, cached_folder) in entries {
+                    state.folder_contents_cache.insert(key, cached_folder);
+                }
+                state.cache_dirty = true;
+            }
+            if done {
+                state.subfolder_preload_active = false;
+                tracing::info!("Subfolder preload finished, {} total cached subfolders", state.folder_contents_cache.len());
             }
             vec![]
         }
@@ -745,6 +801,18 @@ pub fn handle_app_event(
             vec![]
         }
         Event::Tick => {
+            // Clear expired modifier bars
+            if let Some(deadline) = state.alt_bar_until {
+                if std::time::Instant::now() >= deadline {
+                    state.alt_bar_until = None;
+                }
+            }
+            if let Some(deadline) = state.ctrl_alt_bar_until {
+                if std::time::Instant::now() >= deadline {
+                    state.ctrl_alt_bar_until = None;
+                }
+            }
+
             // Clear expired toasts (5 second display)
             if let Some(show_time) = state.toast_show_time {
                 if show_time.elapsed() > Duration::from_secs(5) {
@@ -807,6 +875,47 @@ pub fn handle_app_event(
                         }
                     }
                     MarqueePhase::Inactive => {}
+                }
+            }
+
+            // Album art loading: if cover art view is active, load missing artwork
+            // Limit concurrent in-flight requests to avoid overwhelming the Plex transcoder
+            if state.album_art_view && state.view == crate::app::state::View::Browse
+                && state.album_art_pending.len() < 4
+            {
+                let nav = match state.browse_category {
+                    crate::app::state::BrowseCategory::Artists => &state.artist_nav,
+                    crate::app::state::BrowseCategory::Genres => &state.genre_nav,
+                    crate::app::state::BrowseCategory::Playlists => &state.playlist_nav,
+                    _ => &state.artist_nav, // won't match albums anyway
+                };
+                let max_batch = 4usize.saturating_sub(state.album_art_pending.len());
+                let mut to_load: Vec<(String, String)> = Vec::new();
+                for col in &nav.columns {
+                    for item in &col.items {
+                        match item {
+                            crate::app::state::BrowseItem::Album { key, thumb: Some(thumb), .. } => {
+                                if !state.album_art_cache.contains_key(key)
+                                    && !state.album_art_pending.contains(key)
+                                    && to_load.len() < max_batch
+                                {
+                                    to_load.push((key.clone(), thumb.clone()));
+                                }
+                            }
+                            crate::app::state::BrowseItem::AllTracks { artist_key, thumb: Some(thumb), .. } => {
+                                if !state.album_art_cache.contains_key(artist_key)
+                                    && !state.album_art_pending.contains(artist_key)
+                                    && to_load.len() < max_batch
+                                {
+                                    to_load.push((artist_key.clone(), thumb.clone()));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                if !to_load.is_empty() {
+                    return vec![Action::LoadAlbumArt(to_load)];
                 }
             }
 
@@ -875,11 +984,8 @@ pub fn handle_app_event(
             }
             if !cached.folder_contents.is_empty() {
                 state.folder_contents_cache = cached.folder_contents;
-                let removed = crate::services::CacheService::filter_stale_subfolders_default(&mut state.folder_contents_cache);
-                if removed > 0 {
-                    tracing::info!("Library switch: removed {} very stale subfolder caches", removed);
-                    state.cache_dirty = true;
-                }
+                // Stale entries are kept as a warm cache; the subfolder preload
+                // crawl will re-fetch and overwrite them incrementally.
                 tracing::debug!("Library switch: loaded {} cached subfolders", state.folder_contents_cache.len());
             } else {
                 state.folder_contents_cache.clear();
@@ -946,6 +1052,9 @@ pub fn handle_app_event(
             if !cached.playlist_tracks.is_empty() {
                 state.playlist_tracks_cache = cached.playlist_tracks;
             }
+
+            // Start subfolder pre-caching if root folders are available from cache
+            helpers::maybe_start_subfolder_preload(event_tx, state, client);
 
             vec![]
         }
@@ -1141,7 +1250,14 @@ pub fn handle_app_event(
             // Only apply if this is the most recent filter version
             if version == state.list_filter.version {
                 state.list_filter.loading = false;
+                state.list_filter.selected = 0;
                 state.list_filter.results = Some(results);
+                // Update the column's selected_index to the first match
+                if let Some(ref results) = state.list_filter.results {
+                    if let Some(&first_idx) = results.matched_indices.first() {
+                        super::key_input::update_filter_column_selection(state, first_idx);
+                    }
+                }
             }
             vec![]
         }

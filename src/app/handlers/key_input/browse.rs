@@ -55,9 +55,14 @@ pub(super) fn handle_browse_keys(key: event::KeyEvent, state: &mut AppState) -> 
             KeyCode::Backspace => {
                 return vec![Action::DeleteListFilterChar];
             }
-            // Up/Down/Enter only intercept when focused on filter column
+            // Up/Down/Enter navigate filtered results
             KeyCode::Up if focused_on_filter_column => {
                 return vec![Action::FilteredListUp];
+            }
+            KeyCode::Up if !focused_on_filter_column => {
+                // Move focus back to the filter column so user can navigate results
+                truncate_filter_right_columns(state);
+                return vec![];
             }
             KeyCode::Down if focused_on_filter_column => {
                 return vec![Action::FilteredListDown];
@@ -128,11 +133,6 @@ pub(super) fn handle_browse_keys(key: event::KeyEvent, state: &mut AppState) -> 
             return handle_station_browse_keys(key, state);
         }
         return handle_genre_browse_keys(key, state);
-    }
-
-    // Ctrl+R = Create station from current selection (Browse-specific)
-    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r') {
-        return super::create_station_from_context(state);
     }
 
     match key.code {
@@ -568,7 +568,7 @@ pub(super) fn handle_artist_browse_keys(key: event::KeyEvent, state: &mut AppSta
                     state.selected_album_title = title;
                     vec![Action::LoadAlbumTracksForMiller { album_key: key }]
                 }
-                BrowseItem::AllTracks { artist_key, artist_name } => {
+                BrowseItem::AllTracks { artist_key, artist_name, .. } => {
                     state.selected_album_title = format!("All tracks by {}", artist_name);
                     vec![Action::LoadArtistAllTracksForMiller { artist_key }]
                 }
@@ -818,6 +818,44 @@ pub fn update_filter_column_selection(state: &mut AppState, item_idx: usize) {
     }
 }
 
+/// Truncate columns to the right of the filter's target column and move focus there.
+/// Call this when the filter query or selection changes to remove stale drill-down columns.
+pub fn truncate_filter_right_columns(state: &mut AppState) {
+    use crate::app::state::GenreContentType;
+    let column = state.list_filter.column;
+
+    match state.list_filter.category {
+        BrowseCategory::Artists => {
+            state.artist_nav.columns.truncate(column + 1);
+            state.artist_nav.focused_column = column;
+        }
+        BrowseCategory::Playlists => {
+            if state.playlists_mode == crate::app::state::PlaylistsMode::Stations {
+                state.station_nav.columns.truncate(column + 1);
+                state.station_nav.focused_column = column;
+            } else {
+                state.playlist_nav.columns.truncate(column + 1);
+                state.playlist_nav.focused_column = column;
+            }
+        }
+        BrowseCategory::Genres => {
+            if state.genre_content_type == GenreContentType::Stations {
+                state.station_nav.columns.truncate(column + 1);
+                state.station_nav.focused_column = column;
+            } else {
+                state.genre_nav.columns.truncate(column + 1);
+                state.genre_nav.focused_column = column;
+            }
+        }
+        BrowseCategory::Folders => {
+            if let Some(ref mut fs) = state.folder_state {
+                fs.columns.truncate(column + 1);
+                fs.focused_column = column;
+            }
+        }
+    }
+}
+
 /// Get the drill-down actions for the selected filtered item.
 /// This simulates pressing Enter on the selected item to drill into it.
 pub fn get_filter_drilldown_actions(state: &mut AppState) -> Vec<Action> {
@@ -873,5 +911,115 @@ pub fn get_filter_drilldown_actions(state: &mut AppState) -> Vec<Action> {
                 state,
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::state::{AppState, BrowseCategory, BrowseColumn, BrowseItem, BrowseNavigationState};
+    use crate::services::{FolderColumn, FolderNavigationState};
+
+    fn make_browse_column(title: &str) -> BrowseColumn {
+        BrowseColumn::new(title, vec![
+            BrowseItem::Artist { key: "1".into(), title: "A".into() },
+        ])
+    }
+
+    fn make_folder_column(title: &str) -> FolderColumn {
+        FolderColumn::new(None, title.into(), vec![])
+    }
+
+    #[test]
+    fn test_truncate_folders_removes_right_columns() {
+        let mut state = AppState::new();
+        state.list_filter.active = true;
+        state.list_filter.category = BrowseCategory::Folders;
+        state.list_filter.column = 0;
+
+        // Simulate 3 columns (root + 2 drill-downs), focused on column 2
+        state.folder_state = Some(FolderNavigationState {
+            library_key: "lib1".into(),
+            columns: vec![
+                make_folder_column("root"),
+                make_folder_column("sub1"),
+                make_folder_column("sub2"),
+            ],
+            focused_column: 2,
+            loading: false,
+        });
+
+        truncate_filter_right_columns(&mut state);
+
+        let fs = state.folder_state.as_ref().unwrap();
+        assert_eq!(fs.columns.len(), 1, "should keep only the filter column");
+        assert_eq!(fs.focused_column, 0, "focus should move to filter column");
+    }
+
+    #[test]
+    fn test_truncate_artists_removes_right_columns() {
+        let mut state = AppState::new();
+        state.list_filter.active = true;
+        state.list_filter.category = BrowseCategory::Artists;
+        state.list_filter.column = 0;
+
+        state.artist_nav = BrowseNavigationState {
+            columns: vec![
+                make_browse_column("artists"),
+                make_browse_column("albums"),
+                make_browse_column("tracks"),
+            ],
+            focused_column: 2,
+            loading: false,
+        };
+
+        truncate_filter_right_columns(&mut state);
+
+        assert_eq!(state.artist_nav.columns.len(), 1);
+        assert_eq!(state.artist_nav.focused_column, 0);
+    }
+
+    #[test]
+    fn test_truncate_preserves_filter_column() {
+        let mut state = AppState::new();
+        state.list_filter.active = true;
+        state.list_filter.category = BrowseCategory::Folders;
+        state.list_filter.column = 1; // filter on second column
+
+        state.folder_state = Some(FolderNavigationState {
+            library_key: "lib1".into(),
+            columns: vec![
+                make_folder_column("root"),
+                make_folder_column("sub1"),
+                make_folder_column("sub2"),
+            ],
+            focused_column: 2,
+            loading: false,
+        });
+
+        truncate_filter_right_columns(&mut state);
+
+        let fs = state.folder_state.as_ref().unwrap();
+        assert_eq!(fs.columns.len(), 2, "should keep root + filter column");
+        assert_eq!(fs.focused_column, 1, "focus should move to filter column");
+    }
+
+    #[test]
+    fn test_truncate_noop_when_no_right_columns() {
+        let mut state = AppState::new();
+        state.list_filter.active = true;
+        state.list_filter.category = BrowseCategory::Artists;
+        state.list_filter.column = 0;
+
+        state.artist_nav = BrowseNavigationState {
+            columns: vec![make_browse_column("artists")],
+            focused_column: 0,
+            loading: false,
+        };
+
+        truncate_filter_right_columns(&mut state);
+
+        assert_eq!(state.artist_nav.columns.len(), 1);
+        assert_eq!(state.artist_nav.focused_column, 0);
     }
 }

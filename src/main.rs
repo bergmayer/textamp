@@ -655,6 +655,7 @@ async fn run_tui_mode() -> Result<()> {
 
     // Detect terminal graphics capabilities (must happen before event reader starts)
     if let Ok(picker) = ratatui_image::picker::Picker::from_query_stdio() {
+        textamp::ui::artwork::init_grid_renderer(picker.clone());
         textamp::ui::screens::now_playing::init_artwork_renderer(picker);
     }
 

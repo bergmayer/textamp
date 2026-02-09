@@ -28,7 +28,7 @@ pub use playback::{
     get_upcoming_tracks, play_current_track, play_track, report_playback_progress_to_plex,
     report_playback_stop_to_plex,
 };
-pub use preload::{preload_all_library_data, preload_data};
+pub use preload::{maybe_start_subfolder_preload, preload_all_library_data, preload_data};
 pub use refresh::{
     is_viewing_category, maybe_refresh_very_stale,
     refresh_current_view, spawn_category_refresh,

@@ -168,6 +168,7 @@ pub enum BrowseItem {
         title: String,
         artist: String,
         year: Option<u16>,
+        thumb: Option<String>,
     },
     Track {
         key: String,
@@ -188,6 +189,7 @@ pub enum BrowseItem {
     AllTracks {
         artist_key: String,
         artist_name: String,
+        thumb: Option<String>,
     },
 }
 
@@ -234,6 +236,7 @@ impl BrowseItem {
             title: a.title.clone(),
             artist: a.parent_title.clone().unwrap_or_default(),
             year: a.year,
+            thumb: a.thumb.clone(),
         }).collect()
     }
 
@@ -637,8 +640,10 @@ pub struct AppState {
     // Input dialog state (for playlist naming, etc.)
     pub input_dialog: Option<InputDialog>,
 
-    // Alt key state for command mode
-    pub alt_held: bool,
+    // Modifier bar display: shows Alt or Ctrl+Alt bar until this deadline.
+    // Set on any Alt+key / Ctrl+Alt+key press; cleared on non-modifier keypress or timeout.
+    pub alt_bar_until: Option<std::time::Instant>,
+    pub ctrl_alt_bar_until: Option<std::time::Instant>,
 
     // Unified search/filter tab
     pub search_tab: SearchTab,
@@ -660,6 +665,10 @@ pub struct AppState {
     /// Entries older than 32 days are deleted on cache load (not refreshed).
     /// Subfolders are only cached when navigated to (lazy caching).
     pub folder_contents_cache: HashMap<String, CachedFolder>,
+    /// Whether a subfolder preload crawl is currently active.
+    pub subfolder_preload_active: bool,
+    /// Cancel flag for the subfolder preload task (set on library switch).
+    pub subfolder_preload_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 
     // Miller column navigation for browse categories
     pub artist_nav: BrowseNavigationState,
@@ -738,6 +747,20 @@ pub struct AppState {
 
     // Library switch loading state
     pub library_loading: bool,
+
+    // Album art cover view mode (Alt+C toggle in browse)
+    pub album_art_view: bool,
+    pub album_art_cache: HashMap<String, Vec<u8>>,
+    pub album_art_pending: std::collections::HashSet<String>,
+    /// Scroll cooldown for cover art mode (prevents trackpad momentum).
+    pub art_scroll_cooldown: Option<std::time::Instant>,
+    /// Pinned scroll offset after mouse click to prevent viewport jumping.
+    /// (col_idx, scroll_offset) — renderer uses this instead of calc_scroll_offset.
+    pub browse_scroll_pin: Option<(usize, usize)>,
+    /// When the scroll pin was set by a click.  Scroll events within 400ms
+    /// of this timestamp are ignored to prevent trackpad inertia from
+    /// clearing the pin and re-centering the viewport.
+    pub browse_click_time: Option<std::time::Instant>,
 }
 
 /// Playback mode - determines behavior (finite queue vs continuous radio).
@@ -1116,7 +1139,8 @@ impl AppState {
             status_message: None,
             status_show_time: None,
             input_dialog: None,
-            alt_held: false,
+            alt_bar_until: None,
+            ctrl_alt_bar_until: None,
             search_tab: SearchTab::default(),
             terminal_width: 80,
             terminal_height: 24,
@@ -1124,6 +1148,8 @@ impl AppState {
             settings_state: SettingsState::default(),
             folder_state: None,
             folder_contents_cache: HashMap::new(),
+            subfolder_preload_active: false,
+            subfolder_preload_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             artist_nav: BrowseNavigationState::new(),
             genre_nav: BrowseNavigationState::new(),
             playlist_nav: BrowseNavigationState::new(),
@@ -1160,6 +1186,12 @@ impl AppState {
             library_picker_index: 0,
             marquee: std::cell::RefCell::new(MarqueeState::default()),
             library_loading: false,
+            album_art_view: false,
+            album_art_cache: HashMap::new(),
+            album_art_pending: std::collections::HashSet::new(),
+            art_scroll_cooldown: None,
+            browse_scroll_pin: None,
+            browse_click_time: None,
         }
     }
 
@@ -1558,7 +1590,6 @@ impl SearchTab {
         &[
             SearchTab::Global,
             SearchTab::Artists,
-            SearchTab::AlbumArtists,
             SearchTab::Albums,
             SearchTab::Playlists,
             SearchTab::Tracks,
@@ -1569,8 +1600,7 @@ impl SearchTab {
     pub fn name(&self) -> &'static str {
         match self {
             SearchTab::Global => "All",
-            SearchTab::Artists => "Artists",
-            SearchTab::AlbumArtists => "Album Artists",
+            SearchTab::Artists | SearchTab::AlbumArtists => "Artists",
             SearchTab::Albums => "Albums",
             SearchTab::Playlists => "Playlists",
             SearchTab::Tracks => "Tracks",
@@ -1581,8 +1611,7 @@ impl SearchTab {
     pub fn next(&self) -> Self {
         match self {
             SearchTab::Global => SearchTab::Artists,
-            SearchTab::Artists => SearchTab::AlbumArtists,
-            SearchTab::AlbumArtists => SearchTab::Albums,
+            SearchTab::Artists | SearchTab::AlbumArtists => SearchTab::Albums,
             SearchTab::Albums => SearchTab::Playlists,
             SearchTab::Playlists => SearchTab::Tracks,
             SearchTab::Tracks => SearchTab::Genres,
@@ -1593,9 +1622,8 @@ impl SearchTab {
     pub fn prev(&self) -> Self {
         match self {
             SearchTab::Global => SearchTab::Genres,
-            SearchTab::Artists => SearchTab::Global,
-            SearchTab::AlbumArtists => SearchTab::Artists,
-            SearchTab::Albums => SearchTab::AlbumArtists,
+            SearchTab::Artists | SearchTab::AlbumArtists => SearchTab::Global,
+            SearchTab::Albums => SearchTab::Artists,
             SearchTab::Playlists => SearchTab::Albums,
             SearchTab::Tracks => SearchTab::Playlists,
             SearchTab::Genres => SearchTab::Tracks,
@@ -1651,28 +1679,28 @@ pub enum ArtistViewMode {
 }
 
 impl ArtistViewMode {
-    /// Cycle to the next mode (Artist → Album Artist → Album → Artist).
+    /// Cycle to the next mode (Artist → Album → Artist).
     pub fn next(&self) -> Self {
         match self {
-            ArtistViewMode::Artist => ArtistViewMode::AlbumArtist,
+            ArtistViewMode::Artist => ArtistViewMode::Album,
             ArtistViewMode::AlbumArtist => ArtistViewMode::Album,
             ArtistViewMode::Album => ArtistViewMode::Artist,
         }
     }
 
-    /// Cycle to the previous mode (Artist ← Album Artist ← Album ← Artist).
+    /// Cycle to the previous mode (Artist ← Album ← Artist).
     pub fn prev(&self) -> Self {
         match self {
             ArtistViewMode::Artist => ArtistViewMode::Album,
             ArtistViewMode::AlbumArtist => ArtistViewMode::Artist,
-            ArtistViewMode::Album => ArtistViewMode::AlbumArtist,
+            ArtistViewMode::Album => ArtistViewMode::Artist,
         }
     }
 
     pub fn name(&self) -> &'static str {
         match self {
             ArtistViewMode::Artist => "artists",
-            ArtistViewMode::AlbumArtist => "album artists",
+            ArtistViewMode::AlbumArtist => "artists",
             ArtistViewMode::Album => "albums",
         }
     }
@@ -1787,6 +1815,8 @@ pub struct PlaybackState {
     pub duration_ms: u64,
     pub volume: f32,
     pub muted: bool,
+    /// When the current track transitioned to Playing (for grace period on TrackEnded detection).
+    pub playback_started_at: Option<std::time::Instant>,
 }
 
 impl Default for PlaybackState {
@@ -1797,6 +1827,7 @@ impl Default for PlaybackState {
             duration_ms: 0,
             volume: 0.8,
             muted: false,
+            playback_started_at: None,
         }
     }
 }

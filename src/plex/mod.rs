@@ -32,6 +32,7 @@
 //! └─────────────┘      └─────────────┘       └─────────────┘
 //! ```
 
+mod artwork_cache;
 mod auth;
 mod cache;
 mod client;
@@ -40,6 +41,7 @@ mod error;
 pub mod models;
 mod waveform;
 
+pub use artwork_cache::ArtworkCache;
 pub use auth::{PlexAuth, PlexClientInfo, ServerInfo, StoredAuth};
 pub use cache::{CacheData, CachedFolder, LibraryCache};
 pub use client::{PlexClient, test_connection};

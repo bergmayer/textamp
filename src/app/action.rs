@@ -167,6 +167,9 @@ pub enum Action {
 
     // Artwork
     LoadArtwork,
+    ToggleAlbumArtView,
+    /// Load album art for a batch of albums: Vec<(rating_key, thumb_path)>
+    LoadAlbumArt(Vec<(String, String)>),
 
     // Waveform (for Seekbar visualizer)
     LoadWaveform,

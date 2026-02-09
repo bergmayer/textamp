@@ -343,8 +343,133 @@ fn render_libraries_content(frame: &mut Frame, state: &AppState, area: Rect) {
         Style::default().fg(t.colors.fg_muted),
     )));
 
+    // Cache status section (for active library)
+    if state.active_library.is_some() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Cache status:",
+            Style::default().fg(t.colors.fg_accent),
+        )));
+        lines.push(Line::from(""));
+
+        // Item counts
+        let counts = [
+            ("Artists", state.artists.len()),
+            ("Albums", state.albums.len()),
+            ("Playlists", state.playlists.len()),
+            ("Genres", state.genres.len()),
+            ("Moods", state.moods.len()),
+            ("Styles", state.styles.len()),
+            ("Stations", state.stations.len()),
+        ];
+        let count_parts: Vec<String> = counts.iter()
+            .filter(|(_, n)| *n > 0)
+            .map(|(label, n)| format!("{} {}", n, label.to_lowercase()))
+            .collect();
+        if !count_parts.is_empty() {
+            lines.push(Line::from(Span::styled(
+                format!("  Items: {}", count_parts.join(", ")),
+                Style::default().fg(t.colors.fg_muted),
+            )));
+        }
+
+        // Root folders count
+        let root_folder_count = state.folder_state.as_ref()
+            .and_then(|fs| fs.columns.first())
+            .map(|col| col.items.iter()
+                .filter(|item| item.item_type == crate::services::FolderItemType::Folder)
+                .count())
+            .unwrap_or(0);
+
+        if root_folder_count > 0 {
+            lines.push(Line::from(Span::styled(
+                format!("  Root folders: {}", root_folder_count),
+                Style::default().fg(t.colors.fg_muted),
+            )));
+        }
+
+        // Subfolder cache status
+        let cached_subfolders = state.folder_contents_cache.len();
+        if root_folder_count > 0 || cached_subfolders > 0 {
+            // Count stale entries (> 32 days old)
+            let now_ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let stale_threshold = crate::plex::constants::CACHE_VERY_STALE_THRESHOLD_SECS;
+            let stale_count = state.folder_contents_cache.values()
+                .filter(|c| now_ts.saturating_sub(c.timestamp) >= stale_threshold)
+                .count();
+            let fresh_count = cached_subfolders - stale_count;
+
+            let status_text = if state.subfolder_preload_active {
+                if stale_count > 0 {
+                    format!("  Subfolder cache: refreshing... {} fresh, {} stale", fresh_count, stale_count)
+                } else {
+                    format!("  Subfolder cache: crawling... {} cached", cached_subfolders)
+                }
+            } else if cached_subfolders > 0 {
+                if stale_count > 0 {
+                    format!("  Subfolder cache: {} fresh, {} stale", fresh_count, stale_count)
+                } else {
+                    format!("  Subfolder cache: {} subfolders cached", cached_subfolders)
+                }
+            } else {
+                "  Subfolder cache: empty".to_string()
+            };
+            lines.push(Line::from(Span::styled(
+                status_text,
+                Style::default().fg(t.colors.fg_muted),
+            )));
+        }
+
+        // Playlist tracks cached
+        let cached_playlist_count = state.playlist_tracks_cache.len();
+        if cached_playlist_count > 0 {
+            lines.push(Line::from(Span::styled(
+                format!("  Playlist tracks: {} playlists cached", cached_playlist_count),
+                Style::default().fg(t.colors.fg_muted),
+            )));
+        }
+
+        // Cache save status
+        let elapsed = state.last_cache_save.elapsed();
+        let age_text = format_duration(elapsed);
+        let dirty_marker = if state.cache_dirty { " (unsaved changes)" } else { "" };
+        lines.push(Line::from(Span::styled(
+            format!("  Last saved: {} ago{}", age_text, dirty_marker),
+            Style::default().fg(t.colors.fg_muted),
+        )));
+
+        // Background refresh status
+        if !state.background_refresh_in_progress.is_empty() {
+            let categories: Vec<_> = state.background_refresh_in_progress
+                .iter()
+                .map(|c| c.display_name())
+                .collect();
+            lines.push(Line::from(Span::styled(
+                format!("  Refreshing: {}", categories.join(", ")),
+                Style::default().fg(t.colors.fg_accent),
+            )));
+        }
+    }
+
     let paragraph = Paragraph::new(lines);
     frame.render_widget(paragraph, area);
+}
+
+/// Format a Duration as a human-readable string (e.g. "5m", "2h", "3d").
+fn format_duration(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86400)
+    }
 }
 
 fn render_playback_content(frame: &mut Frame, state: &AppState, area: Rect) {

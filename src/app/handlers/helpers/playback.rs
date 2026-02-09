@@ -287,6 +287,7 @@ pub async fn play_current_track(
             match audio.play_data(cached_data) {
                 Ok(()) => {
                     state.playback.status = PlayStatus::Playing;
+                    state.playback.playback_started_at = Some(std::time::Instant::now());
                     report_playback_to_plex(event_tx, &track, state.plex_session_id.clone(), client);
                     state.last_progress_report = Some(std::time::Instant::now());
                     update_local_recently_played(state, &track);

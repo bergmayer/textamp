@@ -389,7 +389,10 @@ fn render_folder_view(
                     } else {
                         selected_idx
                     };
-                    let scroll_offset = NavigationService::calc_scroll_offset(display_selected_idx, visible_height, total_items);
+                    let scroll_offset = match state.browse_scroll_pin {
+                        Some((pin_col, pinned)) if pin_col == col_idx => pinned,
+                        _ => NavigationService::calc_scroll_offset(display_selected_idx, visible_height, total_items),
+                    };
 
                     // Only create ListItems for visible range
                     let visible_items: Vec<ListItem> = items_to_show.into_iter()
@@ -583,7 +586,17 @@ fn render_browse_miller_columns(
             let empty = Paragraph::new("(empty)")
                 .style(Style::default().fg(t.colors.fg_muted));
             frame.render_widget(empty, inner);
-        } else {
+            continue;
+        }
+
+        // Check if this column has albums and cover art view is active
+        let has_albums = col.items.iter().any(|item| matches!(item, BrowseItem::Album { .. }));
+        if state.album_art_view && has_albums {
+            render_album_art_grid(frame, state, col, is_focused, inner, col_area, col_idx);
+            continue;
+        }
+
+        {
             // Calculate visible range for lazy loading
             let visible_height = inner.height as usize;
             let selected_idx = col.selected_index;
@@ -625,7 +638,10 @@ fn render_browse_miller_columns(
                 } else {
                     selected_idx
                 };
-                let scroll_offset = NavigationService::calc_scroll_offset(display_selected_idx, visible_height, total_display_items);
+                let scroll_offset = match state.browse_scroll_pin {
+                    Some((pin_col, pinned)) if pin_col == col_idx => pinned,
+                    _ => NavigationService::calc_scroll_offset(display_selected_idx, visible_height, total_display_items),
+                };
 
                 let visible_items: Vec<ListItem> = items_to_show.into_iter()
                     .skip(scroll_offset)
@@ -645,8 +661,19 @@ fn render_browse_miller_columns(
 
                         // Full text (before truncation)
                         let full_text = match item {
-                            BrowseItem::Album { title, artist, .. } => {
-                                format!("{} - {}", title, artist)
+                            BrowseItem::Album { title, artist, year, .. } => {
+                                let name = if title.is_empty() {
+                                    artist.clone()
+                                } else if artist.is_empty() {
+                                    title.clone()
+                                } else {
+                                    format!("{} - {}", title, artist)
+                                };
+                                if let Some(y) = year {
+                                    format!("{} ({})", name, y)
+                                } else {
+                                    name
+                                }
                             }
                             BrowseItem::Track { title, track_number, .. } => {
                                 if let Some(num) = track_number {
@@ -710,6 +737,191 @@ fn render_browse_miller_columns(
                 }
             }
         }
+    }
+}
+
+/// Render album art list for a column in cover art view mode.
+/// Each row: artwork thumbnail on the left, title/artist text on the right.
+fn render_album_art_grid(
+    frame: &mut Frame,
+    state: &AppState,
+    col: &crate::app::state::BrowseColumn,
+    is_focused: bool,
+    inner: Rect,
+    col_area: Rect,
+    col_idx: usize,
+) {
+    use crate::app::state::BrowseItem;
+    use crate::util::truncate_middle;
+    let t = theme();
+
+    // Each list row: artwork on left, text on right
+    // Size rows to fill available vertical space with at least 3 visible items.
+    // Row height is derived from panel height, then art_width from row_height.
+    let target_visible = 3u16.max((col.items.len() as u16).min(5));
+    let row_height = (inner.height / target_visible).max(3);
+    // Art width: 2x row_height (terminal chars are ~2:1 aspect), capped at half column width
+    let max_art = inner.width / 2;
+    let art_width = (row_height * 2).min(max_art).max(6);
+
+    if row_height == 0 {
+        return;
+    }
+
+    let visible_rows = (inner.height / row_height).max(1) as usize;
+    let total_items = col.items.len();
+    let selected_idx = col.selected_index;
+
+    // Standard scroll offset (1 item per row), with pin support for mouse clicks
+    let scroll_offset = match state.browse_scroll_pin {
+        Some((pin_col, pinned)) if pin_col == col_idx => pinned,
+        _ => NavigationService::calc_scroll_offset(selected_idx, visible_rows, total_items),
+    };
+
+    for vis_row in 0..visible_rows {
+        let item_idx = scroll_offset + vis_row;
+        if item_idx >= total_items {
+            break;
+        }
+
+        let row_y = inner.y + (vis_row as u16 * row_height);
+        if row_y + row_height > inner.y + inner.height {
+            break;
+        }
+
+        let item = &col.items[item_idx];
+        let is_selected = item_idx == selected_idx;
+
+        // Artwork area (left side)
+        let image_area = Rect {
+            x: inner.x,
+            y: row_y,
+            width: art_width,
+            height: row_height,
+        };
+
+        // Text area (right side)
+        let text_x = inner.x + art_width + 1;
+        let text_width = inner.width.saturating_sub(art_width + 1);
+
+        // Selection highlight background across the full row
+        if is_selected {
+            let row_area = Rect {
+                x: inner.x,
+                y: row_y,
+                width: inner.width,
+                height: row_height,
+            };
+            let bg_style = if is_focused {
+                Style::default().bg(t.colors.selection_bar_bg)
+            } else {
+                Style::default().bg(t.colors.selection_bar_bg)
+            };
+            frame.render_widget(Block::default().style(bg_style), row_area);
+        }
+
+        // Render album/artist art image or placeholder
+        let mut rendered_image = false;
+        let art_key = match item {
+            BrowseItem::Album { key, .. } => Some(key.as_str()),
+            BrowseItem::AllTracks { artist_key, .. } => Some(artist_key.as_str()),
+            _ => None,
+        };
+        if let Some(key) = art_key {
+            if let Some(data) = state.album_art_cache.get(key) {
+                rendered_image = super::artwork::render_grid_image(frame, image_area, key, data);
+            }
+        }
+
+        if !rendered_image {
+            // Placeholder: centered initials in art area
+            let initials: String = item.title()
+                .split_whitespace()
+                .filter_map(|w| w.chars().next())
+                .take(3)
+                .collect();
+            let placeholder_text = if state.album_art_pending.contains(item.key()) {
+                "...".to_string()
+            } else if initials.is_empty() {
+                "?".to_string()
+            } else {
+                initials
+            };
+
+            let text_y = image_area.y + image_area.height / 2;
+            let text_x_p = image_area.x + (image_area.width.saturating_sub(placeholder_text.len() as u16)) / 2;
+            if text_y < image_area.y + image_area.height {
+                frame.render_widget(
+                    Paragraph::new(placeholder_text).style(Style::default().fg(t.colors.fg_muted)),
+                    Rect { x: text_x_p, y: text_y, width: image_area.width, height: 1 },
+                );
+            }
+        }
+
+        // Text content to the right of artwork
+        if text_width > 2 {
+            let max_text = text_width.saturating_sub(1) as usize;
+
+            // Title (line 1, vertically centered in row)
+            // Use album title, falling back to artist if title is empty
+            let display_title = if let BrowseItem::Album { title, artist, .. } = item {
+                if title.is_empty() { artist.as_str() } else { title.as_str() }
+            } else {
+                item.title()
+            };
+            let title_text = truncate_middle(display_title, max_text);
+            let title_y = row_y + (row_height / 2).saturating_sub(1);
+            let title_style = if is_selected {
+                Style::default().fg(t.colors.selection_text)
+            } else {
+                Style::default().fg(t.colors.fg_primary)
+            };
+            frame.render_widget(
+                Paragraph::new(title_text).style(title_style),
+                Rect { x: text_x, y: title_y, width: text_width, height: 1 },
+            );
+
+            // Artist and year (line 2)
+            if let BrowseItem::Album { title, artist, year, .. } = item {
+                // Show artist on line 2 (or title if title was empty and artist was shown on line 1)
+                let sub_name = if title.is_empty() { "" } else { artist.as_str() };
+                let subtitle = if let Some(y) = year {
+                    if sub_name.is_empty() {
+                        format!("({})", y)
+                    } else {
+                        truncate_middle(&format!("{} ({})", sub_name, y), max_text)
+                    }
+                } else if sub_name.is_empty() {
+                    String::new()
+                } else {
+                    truncate_middle(sub_name, max_text)
+                };
+                let sub_style = if is_selected {
+                    Style::default().fg(t.colors.fg_muted)
+                } else {
+                    Style::default().fg(t.colors.fg_muted)
+                };
+                frame.render_widget(
+                    Paragraph::new(subtitle).style(sub_style),
+                    Rect { x: text_x, y: title_y + 1, width: text_width, height: 1 },
+                );
+            }
+        }
+    }
+
+    // Position indicator
+    if total_items > visible_rows {
+        let footer = format!("{}/{}", selected_idx + 1, total_items);
+        let footer_area = Rect::new(
+            col_area.x + col_area.width.saturating_sub(footer.len() as u16 + 2),
+            col_area.y + col_area.height - 1,
+            footer.len() as u16 + 1,
+            1,
+        );
+        frame.render_widget(
+            Paragraph::new(footer).style(Style::default().fg(t.colors.fg_muted)),
+            footer_area,
+        );
     }
 }
 /// Render Station view with Miller columns navigation
@@ -870,7 +1082,10 @@ fn render_station_view(
                 } else {
                     selected_idx
                 };
-                let scroll_offset = NavigationService::calc_scroll_offset(display_selected_idx, visible_height, total_items);
+                let scroll_offset = match state.browse_scroll_pin {
+                    Some((pin_col, pinned)) if pin_col == col_idx => pinned,
+                    _ => NavigationService::calc_scroll_offset(display_selected_idx, visible_height, total_items),
+                };
 
                 // Only create ListItems for visible range
                 let visible_items: Vec<ListItem> = items_to_show.into_iter()
@@ -949,24 +1164,6 @@ fn render_shortcuts(frame: &mut Frame, state: &AppState, area: Rect) {
         return;
     }
 
-    // Define all shortcuts - consistent across all views
-    // Format: (key, label, is_current_view_or_category)
-    // Labels change based on current mode within each category
-    let artists_label = state.artist_view_mode.name();
-    let playlists_label = state.playlists_mode.name();
-    let genres_label = state.genre_content_type.name();
-    let now_playing_label = state.now_playing_mode.name();
-
-    let shortcuts: Vec<(&str, &str, bool)> = vec![
-        ("^A", artists_label, state.view == View::Browse && state.browse_category == BrowseCategory::Artists),
-        ("^P", playlists_label, state.view == View::Browse && state.browse_category == BrowseCategory::Playlists),
-        ("^G", genres_label, state.view == View::Browse && state.browse_category == BrowseCategory::Genres),
-        ("^O", "folders", state.view == View::Browse && state.browse_category == BrowseCategory::Folders),
-        ("^N", now_playing_label, state.view == View::NowPlaying),
-        ("F1", "help", state.view == View::Help),
-        ("F2", "settings", state.view == View::Settings),
-    ];
-
     // Library name indicator (left-aligned, under transport time)
     if let Some(lib_name) = state.active_library.as_ref()
         .and_then(|key| state.libraries.iter().find(|l| &l.key == key))
@@ -980,22 +1177,24 @@ fn render_shortcuts(frame: &mut Frame, state: &AppState, area: Rect) {
         frame.render_widget(lib_label, area);
     }
 
-    // Build spans with highlighting for current view
+    // Three bar modes based on held modifier keys
     let mut spans: Vec<Span> = Vec::new();
 
-    for (i, (key, label, is_current)) in shortcuts.iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::styled("|", Style::default().fg(t.colors.fg_muted).bg(t.colors.bg_secondary)));
-        }
+    let show_ctrl_alt_bar = state.ctrl_alt_bar_until.is_some();
+    let show_alt_bar = state.alt_bar_until.is_some();
 
-        if *is_current {
-            // Highlighted: use accent color for both key and label
-            spans.push(Span::styled(
-                format!(" {} {} ", key, label),
-                Style::default().fg(t.colors.fg_accent).bg(t.colors.bg_secondary).add_modifier(ratatui::style::Modifier::BOLD),
-            ));
-        } else {
-            // Normal: key in shortcut_key color, label in shortcut_text color
+    if show_ctrl_alt_bar {
+        // Ctrl+Alt bar: global station shortcuts
+        let shortcuts: Vec<(&str, &str)> = vec![
+            ("^⌥L", "library radio"),
+            ("^⌥R", "random album"),
+            ("^⌥S", "switch library"),
+        ];
+
+        for (i, (key, label)) in shortcuts.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::styled("|", Style::default().fg(t.colors.fg_muted).bg(t.colors.bg_secondary)));
+            }
             spans.push(Span::styled(
                 format!(" {} ", key),
                 Style::default().fg(t.colors.shortcut_key).bg(t.colors.bg_secondary),
@@ -1004,6 +1203,70 @@ fn render_shortcuts(frame: &mut Frame, state: &AppState, area: Rect) {
                 format!("{} ", label),
                 Style::default().fg(t.colors.shortcut_text).bg(t.colors.bg_secondary),
             ));
+        }
+    } else if show_alt_bar {
+        // Alt bar: contextual command shortcuts (only available commands shown)
+        let alt_cmds = crate::app::available_alt_commands(state);
+
+        if alt_cmds.is_empty() {
+            spans.push(Span::styled(
+                " no commands available ",
+                Style::default().fg(t.colors.fg_muted).bg(t.colors.bg_secondary),
+            ));
+        } else {
+            for (i, cmd) in alt_cmds.iter().enumerate() {
+                if i > 0 {
+                    spans.push(Span::styled("|", Style::default().fg(t.colors.fg_muted).bg(t.colors.bg_secondary)));
+                }
+                let key_str = format!(" ⌥{} ", cmd.key.to_ascii_uppercase());
+                spans.push(Span::styled(
+                    key_str,
+                    Style::default().fg(t.colors.shortcut_key).bg(t.colors.bg_secondary),
+                ));
+                spans.push(Span::styled(
+                    format!("{} ", cmd.label),
+                    Style::default().fg(t.colors.shortcut_text).bg(t.colors.bg_secondary),
+                ));
+            }
+        }
+    } else {
+        // Default: navigation shortcuts
+        let artists_label = state.artist_view_mode.name();
+        let playlists_label = state.playlists_mode.name();
+        let genres_label = state.genre_content_type.name();
+        let now_playing_label = state.now_playing_mode.name();
+
+        let shortcuts: Vec<(&str, &str, bool)> = vec![
+            ("^A", artists_label, state.view == View::Browse && state.browse_category == BrowseCategory::Artists),
+            ("^P", playlists_label, state.view == View::Browse && state.browse_category == BrowseCategory::Playlists),
+            ("^G", genres_label, state.view == View::Browse && state.browse_category == BrowseCategory::Genres),
+            ("^O", "folders", state.view == View::Browse && state.browse_category == BrowseCategory::Folders),
+            ("^N", now_playing_label, state.view == View::NowPlaying),
+            ("^F", "search", state.search_popup_active),
+            ("F1", "help", state.view == View::Help),
+            ("F2", "settings", state.view == View::Settings),
+        ];
+
+        for (i, (key, label, is_current)) in shortcuts.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::styled("|", Style::default().fg(t.colors.fg_muted).bg(t.colors.bg_secondary)));
+            }
+
+            if *is_current {
+                spans.push(Span::styled(
+                    format!(" {} {} ", key, label),
+                    Style::default().fg(t.colors.fg_accent).bg(t.colors.bg_secondary).add_modifier(ratatui::style::Modifier::BOLD),
+                ));
+            } else {
+                spans.push(Span::styled(
+                    format!(" {} ", key),
+                    Style::default().fg(t.colors.shortcut_key).bg(t.colors.bg_secondary),
+                ));
+                spans.push(Span::styled(
+                    format!("{} ", label),
+                    Style::default().fg(t.colors.shortcut_text).bg(t.colors.bg_secondary),
+                ));
+            }
         }
     }
 

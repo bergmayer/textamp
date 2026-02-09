@@ -197,8 +197,9 @@ impl CacheService {
 
     /// Load cache data for a library, filtering out very stale subfolders.
     ///
-    /// This is the recommended way to load cache data as it automatically
-    /// removes subfolder entries older than 32 days.
+    /// Note: As of the incremental refresh change, stale entries are no longer
+    /// deleted on load. They are kept as a warm cache and re-fetched by the
+    /// subfolder preload crawl. This function is retained for manual cleanup.
     pub fn load_with_subfolder_filtering(library_key: &str) -> Option<(CacheData, usize)> {
         let cache = LibraryCache::new()?;
         let mut data = cache.load(library_key)?;
@@ -209,6 +210,31 @@ impl CacheService {
         }
 
         Some((data, removed))
+    }
+
+    /// Determine which root folder keys need re-fetching.
+    ///
+    /// Returns keys that are either missing from the cache or stale (older than
+    /// `stale_threshold_secs`). Fresh entries are skipped.
+    pub fn keys_needing_refresh(
+        root_folder_keys: &[String],
+        folder_contents: &HashMap<String, CachedFolder>,
+        stale_threshold_secs: u64,
+    ) -> Vec<String> {
+        let now = current_timestamp();
+        root_folder_keys
+            .iter()
+            .filter(|key| {
+                match folder_contents.get(key.as_str()) {
+                    Some(cached) => {
+                        // Stale: older than threshold
+                        now.saturating_sub(cached.timestamp) >= stale_threshold_secs
+                    }
+                    None => true, // Missing: always needs fetch
+                }
+            })
+            .cloned()
+            .collect()
     }
 }
 
@@ -347,5 +373,79 @@ mod tests {
         assert!(folder_contents.contains_key("fresh"));
         assert!(folder_contents.contains_key("old"));
         assert!(!folder_contents.contains_key("very_stale"));
+    }
+
+    #[test]
+    fn test_keys_needing_refresh() {
+        let now = current_timestamp();
+        let one_day = 24 * 60 * 60;
+        let threshold = 32 * one_day;
+
+        let mut folder_contents = HashMap::new();
+
+        // Fresh entry (1 day old) — should NOT need refresh
+        folder_contents.insert(
+            "fresh_key".to_string(),
+            CachedFolder {
+                items: vec![],
+                timestamp: now - one_day,
+            },
+        );
+
+        // Stale entry (40 days old) — should need refresh
+        folder_contents.insert(
+            "stale_key".to_string(),
+            CachedFolder {
+                items: vec![],
+                timestamp: now - (40 * one_day),
+            },
+        );
+
+        let root_keys = vec![
+            "fresh_key".to_string(),
+            "stale_key".to_string(),
+            "missing_key".to_string(),
+        ];
+
+        let needs_refresh = CacheService::keys_needing_refresh(&root_keys, &folder_contents, threshold);
+
+        // stale_key and missing_key need refresh, fresh_key does not
+        assert_eq!(needs_refresh.len(), 2);
+        assert!(needs_refresh.contains(&"stale_key".to_string()));
+        assert!(needs_refresh.contains(&"missing_key".to_string()));
+        assert!(!needs_refresh.contains(&"fresh_key".to_string()));
+    }
+
+    #[test]
+    fn test_keys_needing_refresh_all_fresh() {
+        let now = current_timestamp();
+        let one_day = 24 * 60 * 60;
+        let threshold = 32 * one_day;
+
+        let mut folder_contents = HashMap::new();
+        folder_contents.insert(
+            "a".to_string(),
+            CachedFolder { items: vec![], timestamp: now - one_day },
+        );
+        folder_contents.insert(
+            "b".to_string(),
+            CachedFolder { items: vec![], timestamp: now - (10 * one_day) },
+        );
+
+        let root_keys = vec!["a".to_string(), "b".to_string()];
+        let needs_refresh = CacheService::keys_needing_refresh(&root_keys, &folder_contents, threshold);
+
+        assert!(needs_refresh.is_empty());
+    }
+
+    #[test]
+    fn test_keys_needing_refresh_all_missing() {
+        let folder_contents = HashMap::new();
+        let root_keys = vec!["x".to_string(), "y".to_string()];
+        let threshold = 32 * 24 * 60 * 60;
+
+        let needs_refresh = CacheService::keys_needing_refresh(&root_keys, &folder_contents, threshold);
+
+        assert_eq!(needs_refresh.len(), 2);
     }
 }

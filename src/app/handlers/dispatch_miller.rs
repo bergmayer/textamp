@@ -30,10 +30,14 @@ pub async fn dispatch(
 
             match client.get_artist_albums(&artist_key).await {
                 Ok(albums) => {
-                    // Create "All Tracks" entry first
+                    // Create "All Tracks" entry first, with artist thumb for artwork
+                    let artist_thumb = state.artists.iter()
+                        .find(|a| a.rating_key == artist_key)
+                        .and_then(|a| a.thumb.clone());
                     let all_tracks = BrowseItem::AllTracks {
                         artist_key: artist_key.clone(),
                         artist_name: state.selected_artist_name.clone(),
+                        thumb: artist_thumb,
                     };
                     // Then add albums
                     let mut items = vec![all_tracks];
@@ -42,6 +46,21 @@ pub async fn dispatch(
                     let title = state.selected_artist_name.clone();
                     let col = BrowseColumn::new(title, items);
                     state.artist_nav.push_column(col);
+
+                    // Auto-select album and drill into tracks if pending_album_key is set (Alt+B)
+                    if let Some(album_key) = state.pending_album_key.take() {
+                        if let Some(col) = state.artist_nav.columns.last_mut() {
+                            if let Some(idx) = col.items.iter().position(|item| {
+                                matches!(item, BrowseItem::Album { key, .. } if *key == album_key)
+                            }) {
+                                col.selected_index = idx;
+                                if let Some(BrowseItem::Album { title, .. }) = col.items.get(idx) {
+                                    state.selected_album_title = title.clone();
+                                }
+                                return Ok(vec![Action::LoadAlbumTracksForMiller { album_key }]);
+                            }
+                        }
+                    }
                 }
                 Err(e) => {
                     state.set_error(format!("Failed to load albums: {}", e));

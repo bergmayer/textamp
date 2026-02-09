@@ -3,6 +3,9 @@
 //! Displays album art in terminals that support graphics protocols
 //! (Kitty, iTerm2, Sixel) or falls back to halfblocks.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+
 use ratatui::prelude::*;
 use ratatui_image::{picker::Picker, protocol::StatefulProtocol, StatefulImage};
 
@@ -106,4 +109,60 @@ impl ArtworkRenderer {
     pub fn current_thumb(&self) -> Option<&str> {
         self.current_thumb.as_deref()
     }
+}
+
+// ============================================================================
+// Album Art Grid — shared Picker and per-album protocol cache
+// ============================================================================
+
+thread_local! {
+    static GRID_PICKER: RefCell<Option<Picker>> = RefCell::new(None);
+    static GRID_PROTOCOLS: RefCell<HashMap<String, StatefulProtocol>> = RefCell::new(HashMap::new());
+}
+
+/// Initialize the grid renderer with a Picker clone.
+/// Call once at startup alongside the main artwork renderer init.
+pub fn init_grid_renderer(picker: Picker) {
+    GRID_PICKER.with(|p| *p.borrow_mut() = Some(picker));
+}
+
+/// Render an album cover image to the given area.
+/// Uses a thread-local protocol cache keyed by album rating_key.
+/// Returns true if an image was rendered.
+pub fn render_grid_image(frame: &mut Frame, area: Rect, key: &str, data: &[u8]) -> bool {
+    // Ensure protocol is cached
+    let has_protocol = GRID_PROTOCOLS.with(|protos| protos.borrow().contains_key(key));
+
+    if !has_protocol {
+        let created = GRID_PICKER.with(|picker_cell| {
+            let mut picker_ref = picker_cell.borrow_mut();
+            let Some(picker) = picker_ref.as_mut() else { return false; };
+            let Ok(img) = image::load_from_memory(data) else { return false; };
+            let protocol = picker.new_resize_protocol(img);
+            GRID_PROTOCOLS.with(|protos| {
+                protos.borrow_mut().insert(key.to_string(), protocol);
+            });
+            true
+        });
+        if !created {
+            return false;
+        }
+    }
+
+    // Render from cache
+    GRID_PROTOCOLS.with(|protos| {
+        let mut map = protos.borrow_mut();
+        if let Some(protocol) = map.get_mut(key) {
+            let image = StatefulImage::new();
+            frame.render_stateful_widget(image, area, protocol);
+            true
+        } else {
+            false
+        }
+    })
+}
+
+/// Clear the grid protocol cache (e.g. on library switch).
+pub fn clear_grid_cache() {
+    GRID_PROTOCOLS.with(|protos| protos.borrow_mut().clear());
 }

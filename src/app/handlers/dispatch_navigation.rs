@@ -19,6 +19,19 @@ pub async fn dispatch(
 ) -> Result<Vec<Action>> {
     let mut follow_ups = vec![];
 
+    // Deactivate inline filter on any view/category change
+    let deactivates_filter = matches!(
+        action,
+        Action::SetView(_) | Action::NextView | Action::PrevView | Action::SetCategory(_)
+    );
+    if deactivates_filter && state.list_filter.active {
+        state.list_filter.active = false;
+        state.list_filter.query.clear();
+        state.list_filter.results = None;
+        state.list_filter.loading = false;
+        state.list_filter.selected = 0;
+    }
+
     match action {
         Action::SetView(view) => {
             state.view = view;

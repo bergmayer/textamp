@@ -63,6 +63,8 @@ pub async fn dispatch(
             state.genre_albums.clear();
             state.folder_state = None;
             state.folder_contents_cache.clear();
+            state.subfolder_preload_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            state.subfolder_preload_active = false;
             state.available_servers.clear();
 
             // Clear playback state
@@ -446,6 +448,8 @@ pub async fn dispatch(
                 state.selected_album_tracks.clear();
                 state.folder_state = None;
                 state.folder_contents_cache.clear();
+                state.subfolder_preload_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                state.subfolder_preload_active = false;
                 state.playlist_tracks_cache.clear();
                 state.list_state.reset();
 
@@ -545,6 +549,8 @@ pub async fn dispatch(
                         state.playlists.clear();
                         state.folder_state = None;
                         state.folder_contents_cache.clear();
+                        state.subfolder_preload_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                        state.subfolder_preload_active = false;
                         state.playlist_tracks_cache.clear();
 
                         // Reload from API

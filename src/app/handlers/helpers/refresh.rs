@@ -32,7 +32,7 @@ pub fn refresh_current_view(state: &mut AppState) -> Vec<Action> {
         View::Browse => match state.browse_category {
             BrowseCategory::Artists => match state.artist_view_mode {
                 ArtistViewMode::Artist => Some(RefreshCategory::Artists),
-                ArtistViewMode::AlbumArtist => Some(RefreshCategory::AlbumArtists),
+                ArtistViewMode::AlbumArtist => Some(RefreshCategory::Artists),
                 ArtistViewMode::Album => Some(RefreshCategory::Albums),
             },
             BrowseCategory::Playlists => match state.playlists_mode {

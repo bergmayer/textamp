@@ -9,7 +9,7 @@ use crate::api::PlexClient;
 use crate::api::models::{Album, Track};
 use crate::cache::{CacheData, LibraryCache};
 use crate::config::Config;
-use crate::services::{CacheService, FolderColumn, FolderNavigationState};
+use crate::services::{FolderColumn, FolderNavigationState};
 
 use anyhow::Result;
 use tokio::sync::mpsc;
@@ -65,6 +65,9 @@ pub async fn dispatch(
 
                             // Start background API refresh
                             helpers::preload_all_library_data(event_tx, lib_key, &lib_title, client);
+
+                            // Start subfolder pre-caching (root folders loaded from cache)
+                            helpers::maybe_start_subfolder_preload(event_tx, state, client);
                         }
                     }
                 }
@@ -468,11 +471,8 @@ fn load_from_cache(state: &mut AppState, cached: CacheData, lib_key: &str, lib_t
     }
     if !cached.folder_contents.is_empty() {
         state.folder_contents_cache = cached.folder_contents;
-        let removed = CacheService::filter_stale_subfolders_default(&mut state.folder_contents_cache);
-        if removed > 0 {
-            tracing::info!("Startup: removed {} very stale subfolder caches", removed);
-            state.cache_dirty = true;
-        }
+        // Stale entries are kept as a warm cache; the subfolder preload
+        // crawl will re-fetch and overwrite them incrementally.
     } else {
         state.folder_contents_cache.clear();
     }

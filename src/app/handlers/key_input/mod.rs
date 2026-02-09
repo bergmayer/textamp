@@ -14,13 +14,16 @@ mod similar;
 mod settings;
 
 // Re-export public items used by other handler modules.
-pub use browse::{update_filter_column_selection, get_filter_drilldown_actions};
+pub use browse::{update_filter_column_selection, get_filter_drilldown_actions, truncate_filter_right_columns};
+pub use self::alt_commands::{AltCommand, available_alt_commands};
+
+mod alt_commands;
 
 use crossterm::event::{self, KeyCode, KeyModifiers};
 
 use crate::app::Action;
 use crate::app::state::{
-    BrowseCategory, Focus, PlaybackMode, RightPanelMode, View,
+    BrowseCategory, BrowseItem, BrowseNavigationState, Focus, PlaybackMode, RightPanelMode, View,
 };
 use crate::app::AppState;
 use crate::api::models::Track;
@@ -28,8 +31,45 @@ use super::helpers;
 
 /// Handle keyboard input (CUA-style with Ctrl shortcuts).
 pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::config::Config) -> Vec<Action> {
-    // Track Alt key state for bottom bar display
-    state.alt_held = key.modifiers.contains(KeyModifiers::ALT);
+    // Clear mouse scroll pin on keyboard input, EXCEPT for drill-down/back keys
+    // (Enter, Right, Left, Backspace, Esc) which should preserve the pinned
+    // scroll position so the viewport doesn't re-center during column changes.
+    let preserve_pin = matches!(key.code,
+        KeyCode::Enter | KeyCode::Right | KeyCode::Left | KeyCode::Backspace | KeyCode::Esc
+    ) && !key.modifiers.contains(KeyModifiers::SHIFT)
+      && !key.modifiers.contains(KeyModifiers::CONTROL);
+    if !preserve_pin {
+        state.browse_scroll_pin = None;
+    }
+    state.browse_click_time = None;
+
+    // Track modifier bar display.
+    // Alt+/ (or Alt+?) cycles: off → Alt bar → Ctrl+Alt bar → off
+    // Any non-Alt key immediately dismisses both bars.
+    let has_alt = key.modifiers.contains(KeyModifiers::ALT);
+    let is_help_key = matches!(key.code, KeyCode::Char('?') | KeyCode::Char('/'));
+    let bar_duration = std::time::Duration::from_secs(4);
+
+    if is_help_key && has_alt {
+        // Alt+/ or Alt+? — cycle: off → alt bar → ctrl+alt bar → off
+        if state.ctrl_alt_bar_until.is_some() {
+            // Ctrl+Alt bar showing → dismiss both
+            state.ctrl_alt_bar_until = None;
+            state.alt_bar_until = None;
+        } else if state.alt_bar_until.is_some() {
+            // Alt bar showing → switch to ctrl+alt bar
+            state.alt_bar_until = None;
+            state.ctrl_alt_bar_until = Some(std::time::Instant::now() + bar_duration);
+        } else {
+            // Nothing showing → show alt bar
+            state.alt_bar_until = Some(std::time::Instant::now() + bar_duration);
+        }
+        return vec![];
+    } else if !has_alt {
+        // Non-Alt key: dismiss both bars immediately
+        state.alt_bar_until = None;
+        state.ctrl_alt_bar_until = None;
+    }
 
     // Clear error on any key
     if state.last_error.is_some() {
@@ -149,15 +189,6 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
             }
             return vec![Action::SetView(View::NowPlaying)];
         }
-        (KeyModifiers::CONTROL, KeyCode::Char('s')) => {
-            // Ctrl+S = Save queue/radio as playlist (in Now Playing with tracks)
-            if state.view == View::NowPlaying {
-                let has_tracks = !state.queue.is_empty() || !state.radio.tracks.is_empty();
-                if has_tracks {
-                    return vec![Action::PromptSavePlaylist];
-                }
-            }
-        }
         (KeyModifiers::CONTROL, KeyCode::Char('a')) => {
             // Ctrl+A = Artists category, or cycle view mode if already there
             if state.view == View::Browse && state.browse_category == BrowseCategory::Artists {
@@ -223,13 +254,10 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
             return helpers::refresh_current_view(state);
         }
 
-        // Playback controls with Ctrl
-        (KeyModifiers::CONTROL, KeyCode::Char(' ')) |
+        // Playback controls
         (_, KeyCode::Char(' ')) if state.view != View::Search && !state.list_filter.active && !state.search_popup_active => {
             return vec![Action::TogglePlayPause];
         }
-        (KeyModifiers::CONTROL, KeyCode::Left) => return vec![Action::Previous],
-        (KeyModifiers::CONTROL, KeyCode::Right) => return vec![Action::Next],
         // < and > for prev/next track (crossterm reports these with NONE modifiers, not SHIFT)
         (_, KeyCode::Char('<')) if state.view != View::Search && !state.list_filter.active && !state.search_popup_active => {
             return vec![Action::Previous];
@@ -237,36 +265,32 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
         (_, KeyCode::Char('>')) if state.view != View::Search && !state.list_filter.active && !state.search_popup_active => {
             return vec![Action::Next];
         }
-        (KeyModifiers::CONTROL, KeyCode::Up) => return vec![Action::VolumeUp],
-        (KeyModifiers::CONTROL, KeyCode::Down) => return vec![Action::VolumeDown],
+        (mods, KeyCode::Up) if mods == KeyModifiers::CONTROL | KeyModifiers::SHIFT => return vec![Action::VolumeUp],
+        (mods, KeyCode::Down) if mods == KeyModifiers::CONTROL | KeyModifiers::SHIFT => return vec![Action::VolumeDown],
         // Shift+Left/Right for seeking (10 second skip)
         (KeyModifiers::SHIFT, KeyCode::Left) => return vec![Action::SeekRelative(-10000)],
         (KeyModifiers::SHIFT, KeyCode::Right) => return vec![Action::SeekRelative(10000)],
 
-        // Alt key commands (global)
-        (KeyModifiers::ALT, KeyCode::Char('r')) => {
-            // Alt+R = Sonic radio from current selection
-            return create_station_from_context(state);
-        }
-        (KeyModifiers::ALT, KeyCode::Char('q')) => {
-            // Alt+Q = Queue selection (enqueue)
-            return vec![Action::EnqueueSelection];
-        }
-        (KeyModifiers::ALT, KeyCode::Char('s')) => {
-            // Alt+S = Shuffle: browse view or queue/radio depending on context
-            if state.view == View::Browse {
-                return vec![Action::ToggleBrowseShuffle];
-            } else if !state.queue.is_empty() || !state.radio.tracks.is_empty() {
-                return vec![Action::ToggleQueueShuffle];
+        // Alt key commands (global) — gated by availability check
+        (KeyModifiers::ALT, KeyCode::Char(c)) if alt_commands::is_alt_command_available(state, c) => {
+            match c {
+                'r' => return create_station_from_context(state),
+                'q' => return vec![Action::EnqueueSelection],
+                's' => {
+                    if state.view == View::Browse {
+                        return vec![Action::ToggleBrowseShuffle];
+                    } else {
+                        return vec![Action::ToggleQueueShuffle];
+                    }
+                }
+                'm' => return get_similar_action(state),
+                'a' => return handle_adventure_key(state),
+                'b' => return navigate_to_album(state),
+                'g' => return navigate_to_artist(state),
+                'w' => return vec![Action::PromptSavePlaylist],
+                'c' => return vec![Action::ToggleAlbumArtView],
+                _ => {}
             }
-        }
-        (KeyModifiers::ALT, KeyCode::Char('m')) => {
-            // Alt+M = More like this (similar albums/tracks)
-            return get_similar_action(state);
-        }
-        (KeyModifiers::ALT, KeyCode::Char('a')) => {
-            // Alt+A = Sonic Adventure
-            return handle_adventure_key(state);
         }
         // Ctrl+Alt shortcuts
         (mods, KeyCode::Char('l')) if mods == KeyModifiers::CONTROL | KeyModifiers::ALT => {
@@ -662,6 +686,231 @@ fn handle_adventure_key(state: &mut AppState) -> Vec<Action> {
     }
 
     vec![]
+}
+
+/// Navigate to the album of the currently selected track (Alt+B).
+/// Switches to Browse/Artists, finds the artist, loads albums, and auto-selects the album.
+fn navigate_to_album(state: &mut AppState) -> Vec<Action> {
+    // Try Miller column context first, then now-playing track fallback
+    let (album_key, artist_key, album_title, artist_name) =
+        if let Some(ctx) = get_miller_album_context(state) {
+            ctx
+        } else if let Some(track) = get_selected_track(state)
+            .or_else(|| state.current_track().cloned())
+        {
+            let ak = match &track.parent_rating_key { Some(k) => k.clone(), None => return vec![] };
+            let rk = match &track.grandparent_rating_key { Some(k) => k.clone(), None => return vec![] };
+            (ak, rk, track.album_name().to_string(), track.artist_name().to_string())
+        } else {
+            return vec![];
+        };
+
+    // Navigate to the artist in Miller columns, with pending album auto-select
+    state.pending_album_key = Some(album_key);
+    state.selected_album_title = album_title;
+    state.selected_artist_name = artist_name;
+    state.view = View::Browse;
+    state.browse_category = BrowseCategory::Artists;
+
+    // Select the artist in the Miller column
+    if let Some(idx) = state.artist_nav.columns.first()
+        .and_then(|col| col.items.iter().position(|item| matches!(item, BrowseItem::Artist { key, .. } if *key == artist_key)))
+    {
+        if let Some(col) = state.artist_nav.columns.first_mut() {
+            col.selected_index = idx;
+        }
+        state.artist_nav.focused_column = 0;
+        state.artist_nav.truncate_right();
+    }
+    // Also update old state for backward compatibility
+    if let Some(idx) = state.artists.iter().position(|a| a.rating_key == artist_key) {
+        state.list_state.artists_index = idx;
+    }
+
+    vec![Action::LoadArtistAlbumsForMiller { artist_key }]
+}
+
+/// Navigate to the artist of the currently selected track or album (Alt+G).
+/// Switches to Browse/Artists and loads the artist's album list.
+fn navigate_to_artist(state: &mut AppState) -> Vec<Action> {
+    // Try Miller column context first, then old context, then now-playing fallback
+    let (artist_key, artist_name) =
+        if let Some(ctx) = get_miller_artist_context(state) {
+            ctx
+        } else if let Some(key) = get_artist_key_from_context(state) {
+            let name = state.artists.iter()
+                .find(|a| a.rating_key == key)
+                .map(|a| a.title.clone())
+                .unwrap_or_default();
+            (key, name)
+        } else if let Some(track) = state.current_track().cloned() {
+            if let Some(key) = track.grandparent_rating_key.clone() {
+                (key, track.artist_name().to_string())
+            } else {
+                return vec![];
+            }
+        } else {
+            return vec![];
+        };
+
+    state.view = View::Browse;
+    state.browse_category = BrowseCategory::Artists;
+    state.selected_artist_name = artist_name;
+    state.pending_album_key = None;
+    state.selected_album_title.clear();
+
+    // Select the artist in the Miller column
+    if let Some(idx) = state.artist_nav.columns.first()
+        .and_then(|col| col.items.iter().position(|item| matches!(item, BrowseItem::Artist { key, .. } if *key == artist_key)))
+    {
+        if let Some(col) = state.artist_nav.columns.first_mut() {
+            col.selected_index = idx;
+        }
+        state.artist_nav.focused_column = 0;
+        state.artist_nav.truncate_right();
+    }
+    // Also update old state for backward compatibility
+    if let Some(idx) = state.artists.iter().position(|a| a.rating_key == artist_key) {
+        state.list_state.artists_index = idx;
+    }
+
+    vec![Action::LoadArtistAlbumsForMiller { artist_key }]
+}
+
+/// Extract the artist rating key from the current context.
+/// Works from tracks (grandparent_rating_key) and albums (parent_rating_key).
+fn get_artist_key_from_context(state: &AppState) -> Option<String> {
+    // Try track first
+    if let Some(track) = get_selected_track(state) {
+        return track.grandparent_rating_key.clone();
+    }
+
+    // Try album context
+    match state.view {
+        View::Browse => {
+            match state.right_panel_mode {
+                RightPanelMode::ArtistAlbums => {
+                    let album_idx = state.list_state.right_albums_index.saturating_sub(1);
+                    if state.list_state.right_albums_index > 0 {
+                        if let Some(album) = state.selected_artist_albums.get(album_idx) {
+                            return album.parent_rating_key.clone();
+                        }
+                    }
+                    // Index 0 is "All Tracks" - use the current artist
+                    state.artists.get(state.list_state.artists_index)
+                        .map(|a| a.rating_key.clone())
+                }
+                RightPanelMode::CategoryAlbums => {
+                    state.genre_albums.get(state.genre_albums_index)
+                        .and_then(|a| a.parent_rating_key.clone())
+                }
+                _ => None,
+            }
+        }
+        View::Similar => {
+            if let Some(album) = state.similar_albums.get(state.list_state.similar_index) {
+                return album.parent_rating_key.clone();
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Extract album context from Miller columns: (album_key, artist_key, album_title, artist_name).
+/// Works when a Track or Album is selected in the artist/genre/playlist navigation.
+fn get_miller_album_context(state: &AppState) -> Option<(String, String, String, String)> {
+    if state.view != View::Browse {
+        return None;
+    }
+
+    let nav = match state.browse_category {
+        BrowseCategory::Artists => &state.artist_nav,
+        BrowseCategory::Genres => &state.genre_nav,
+        BrowseCategory::Playlists => &state.playlist_nav,
+        _ => return None,
+    };
+
+    let focused = nav.focused_column;
+    let selected_item = nav.columns.get(focused)
+        .and_then(|c| c.items.get(c.selected_index))?;
+
+    match selected_item {
+        BrowseItem::Track { .. } => {
+            // Track selected: album is in parent column, artist in grandparent
+            let album = (focused > 0).then(|| nav.columns.get(focused - 1)).flatten()
+                .and_then(|c| c.items.get(c.selected_index));
+            let (album_key, album_title) = match album {
+                Some(BrowseItem::Album { key, title, .. }) => (key.clone(), title.clone()),
+                _ => return None,
+            };
+            // Try to find artist from column hierarchy
+            let artist_key = find_artist_key_in_nav(nav);
+            let artist_name = find_artist_name_in_nav(nav, state);
+            let artist_key = artist_key?;
+            Some((album_key, artist_key, album_title, artist_name))
+        }
+        BrowseItem::Album { key, title, artist, .. } => {
+            // Album selected: artist is in parent column
+            let artist_key = find_artist_key_in_nav(nav);
+            let artist_key = artist_key?;
+            let artist_name = artist.clone();
+            Some((key.clone(), artist_key, title.clone(), artist_name))
+        }
+        _ => None,
+    }
+}
+
+/// Extract artist context from Miller columns: (artist_key, artist_name).
+fn get_miller_artist_context(state: &AppState) -> Option<(String, String)> {
+    if state.view != View::Browse {
+        return None;
+    }
+
+    let nav = match state.browse_category {
+        BrowseCategory::Artists => &state.artist_nav,
+        BrowseCategory::Genres => &state.genre_nav,
+        BrowseCategory::Playlists => &state.playlist_nav,
+        _ => return None,
+    };
+
+    let focused = nav.focused_column;
+    let selected_item = nav.columns.get(focused)
+        .and_then(|c| c.items.get(c.selected_index))?;
+
+    match selected_item {
+        BrowseItem::Track { .. } | BrowseItem::Album { .. } | BrowseItem::AllTracks { .. } => {
+            let key = find_artist_key_in_nav(nav)?;
+            let name = find_artist_name_in_nav(nav, state);
+            Some((key, name))
+        }
+        BrowseItem::Artist { key, title } => {
+            Some((key.clone(), title.clone()))
+        }
+        _ => None,
+    }
+}
+
+/// Find artist key by walking up the Miller column hierarchy.
+fn find_artist_key_in_nav(nav: &BrowseNavigationState) -> Option<String> {
+    for col in &nav.columns {
+        if let Some(item) = col.items.get(col.selected_index) {
+            if let BrowseItem::Artist { key, .. } = item {
+                return Some(key.clone());
+            }
+        }
+    }
+    None
+}
+
+/// Find artist name from Miller columns or state.
+fn find_artist_name_in_nav(nav: &BrowseNavigationState, state: &AppState) -> String {
+    for col in &nav.columns {
+        if let Some(BrowseItem::Artist { title, .. }) = col.items.get(col.selected_index) {
+            return title.clone();
+        }
+    }
+    state.selected_artist_name.clone()
 }
 
 /// Get the currently selected/highlighted track based on context.

@@ -1,6 +1,6 @@
 //! Filter screen (musikcube-style).
 //!
-//! Unified search/filter with tabs: All | Artists | Album Artists | Albums | Playlists | Tracks | Genres
+//! Unified search/filter with tabs: All | Artists | Albums | Playlists | Tracks | Genres
 
 use crate::app::state::{SearchSection, SearchTab};
 use crate::app::AppState;
@@ -55,12 +55,11 @@ fn render_tabs(frame: &mut Frame, state: &AppState, area: Rect) {
     let titles: Vec<&str> = SearchTab::all().iter().map(|t| t.name()).collect();
     let selected_idx = match state.search_tab {
         SearchTab::Global => 0,
-        SearchTab::Artists => 1,
-        SearchTab::AlbumArtists => 2,
-        SearchTab::Albums => 3,
-        SearchTab::Playlists => 4,
-        SearchTab::Tracks => 5,
-        SearchTab::Genres => 6,
+        SearchTab::Artists | SearchTab::AlbumArtists => 1,
+        SearchTab::Albums => 2,
+        SearchTab::Playlists => 3,
+        SearchTab::Tracks => 4,
+        SearchTab::Genres => 5,
     };
 
     let tabs = Tabs::new(titles)
@@ -206,7 +205,14 @@ fn render_global_results(frame: &mut Frame, state: &AppState, area: Rect) {
     render_global_section(
         frame, &columns[1], "Albums", is_active, selected_idx,
         &results.albums,
-        |a| format!("{} - {}", a.title, a.artist_name()),
+        |a| {
+            let artist = a.artist_name();
+            if let Some(year) = a.year {
+                format!("{} ({}) - {}", a.title, year, artist)
+            } else {
+                format!("{} - {}", a.title, artist)
+            }
+        },
         &t,
     );
 
@@ -299,7 +305,7 @@ fn get_filtered_items(state: &AppState) -> Vec<(String, String)> {
             SearchFilterService::filter_artists(query, api_results, &state.artists)
         }
         SearchTab::AlbumArtists => {
-            SearchFilterService::filter_album_artists(query, &state.albums)
+            SearchFilterService::filter_artists(query, api_results, &state.artists)
         }
         SearchTab::Albums => {
             SearchFilterService::filter_albums(query, api_results, &state.albums)

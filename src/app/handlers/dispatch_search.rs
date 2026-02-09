@@ -149,6 +149,8 @@ pub async fn dispatch(
                         super::key_input::update_filter_column_selection(state, item_idx);
                     }
                 }
+                // Clear stale drill-down columns from previous selection
+                super::key_input::truncate_filter_right_columns(state);
             }
         }
         Action::FilteredListDown => {
@@ -159,6 +161,8 @@ pub async fn dispatch(
                     if let Some(&item_idx) = results.matched_indices.get(state.list_filter.selected) {
                         super::key_input::update_filter_column_selection(state, item_idx);
                     }
+                    // Clear stale drill-down columns from previous selection
+                    super::key_input::truncate_filter_right_columns(state);
                 }
             }
         }
@@ -178,11 +182,17 @@ pub async fn dispatch(
         }
         Action::AppendListFilterChar(c) => {
             state.list_filter.query.push(c);
+            state.list_filter.selected = 0;
+            // Clear stale drill-down columns from previous selection
+            super::key_input::truncate_filter_right_columns(state);
             // Trigger filter execution
             execute_list_filter(event_tx, state).await?;
         }
         Action::DeleteListFilterChar => {
             state.list_filter.query.pop();
+            state.list_filter.selected = 0;
+            // Clear stale drill-down columns from previous selection
+            super::key_input::truncate_filter_right_columns(state);
             if state.list_filter.query.is_empty() {
                 state.list_filter.results = None;
                 state.list_filter.loading = false;
@@ -201,6 +211,14 @@ pub async fn dispatch(
 
         // Search popup actions
         Action::OpenSearchPopup => {
+            // Deactivate inline filter when opening search popup
+            if state.list_filter.active {
+                state.list_filter.active = false;
+                state.list_filter.query.clear();
+                state.list_filter.results = None;
+                state.list_filter.loading = false;
+                state.list_filter.selected = 0;
+            }
             state.search_popup_active = true;
             // Clear previous search when opening
             state.search_query.clear();

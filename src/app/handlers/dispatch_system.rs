@@ -222,6 +222,92 @@ pub async fn dispatch(
                 }
             }
         }
+        Action::ToggleAlbumArtView => {
+            state.album_art_view = !state.album_art_view;
+
+            // Persist cover art view preference
+            config.ui.cover_art_view = state.album_art_view;
+            if let Err(e) = crate::config::save_config(config) {
+                tracing::warn!("Failed to save cover art view preference: {}", e);
+            }
+
+            if state.album_art_view {
+                // Collect album keys/thumbs from the current navigation that need loading
+                let nav = match state.browse_category {
+                    crate::app::state::BrowseCategory::Artists => &state.artist_nav,
+                    crate::app::state::BrowseCategory::Genres => &state.genre_nav,
+                    crate::app::state::BrowseCategory::Playlists => &state.playlist_nav,
+                    _ => return Ok(vec![]),
+                };
+
+                let mut to_load: Vec<(String, String)> = Vec::new();
+                for col in &nav.columns {
+                    for item in &col.items {
+                        if to_load.len() >= 4 { break; }
+                        match item {
+                            crate::app::state::BrowseItem::Album { key, thumb: Some(thumb), .. } => {
+                                if !state.album_art_cache.contains_key(key)
+                                    && !state.album_art_pending.contains(key)
+                                {
+                                    to_load.push((key.clone(), thumb.clone()));
+                                }
+                            }
+                            crate::app::state::BrowseItem::AllTracks { artist_key, thumb: Some(thumb), .. } => {
+                                if !state.album_art_cache.contains_key(artist_key)
+                                    && !state.album_art_pending.contains(artist_key)
+                                {
+                                    to_load.push((artist_key.clone(), thumb.clone()));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
+                if !to_load.is_empty() {
+                    return Ok(vec![Action::LoadAlbumArt(to_load)]);
+                }
+            }
+        }
+        Action::LoadAlbumArt(batch) => {
+            let artwork_cache = crate::plex::ArtworkCache::default();
+
+            for (key, thumb_path) in batch {
+                if state.album_art_pending.contains(&key) {
+                    continue;
+                }
+
+                // Check disk cache first (72-hour TTL, matching library cache)
+                if let Some(data) = artwork_cache.load(&key, 72 * 60 * 60) {
+                    state.album_art_cache.insert(key, data);
+                    continue;
+                }
+
+                state.album_art_pending.insert(key.clone());
+
+                let event_tx = event_tx.clone();
+                let client = client.clone();
+
+                tokio::spawn(async move {
+                    match client.fetch_artwork(&thumb_path, 300).await {
+                        Ok(data) => {
+                            // Save to disk cache
+                            let cache = crate::plex::ArtworkCache::default();
+                            cache.save(&key, &data);
+
+                            let _ = event_tx.send(Event::AlbumArtLoaded {
+                                key,
+                                data,
+                            }).await;
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to load album art for {}: {}", key, e);
+                            let _ = event_tx.send(Event::AlbumArtFailed { key }).await;
+                        }
+                    }
+                });
+            }
+        }
         _ => unreachable!("dispatch_system called with non-system action: {:?}", action),
     }
     Ok(vec![])

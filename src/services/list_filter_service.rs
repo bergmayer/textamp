@@ -71,13 +71,68 @@ where
     }
 }
 
-/// Wrapper for filtering BrowseItem lists.
+/// Filter BrowseItem lists with year matching for albums.
+///
+/// For Album items, also matches the year field against the query.
+/// Year matches are placed in the lowest priority bucket so title matches come first.
 pub fn filter_browse_items(
     items: &[crate::app::state::BrowseItem],
     query: &str,
     max_results: usize,
 ) -> ListFilterResults {
-    filter_with_priority(items, query, |item| item.title(), max_results)
+    use crate::app::state::BrowseItem;
+
+    if query.is_empty() {
+        return ListFilterResults::default();
+    }
+
+    let query_lower = query.to_lowercase();
+    let short_query = query.len() < 2;
+
+    let mut priority1: Vec<usize> = Vec::new(); // Starts with
+    let mut priority2: Vec<usize> = Vec::new(); // Word starts with
+    let mut priority3: Vec<usize> = Vec::new(); // Contains
+    let mut priority4: Vec<usize> = Vec::new(); // Year match
+
+    for (idx, item) in items.iter().enumerate() {
+        let title = item.title().to_lowercase();
+
+        if title.starts_with(&query_lower) {
+            priority1.push(idx);
+        } else if !short_query {
+            if title.split_whitespace().any(|w| w.starts_with(&query_lower)) {
+                priority2.push(idx);
+            } else if title.contains(&query_lower) {
+                priority3.push(idx);
+            } else if let BrowseItem::Album { year: Some(year), .. } = item {
+                if year.to_string().contains(&query_lower) {
+                    priority4.push(idx);
+                }
+            }
+        } else {
+            // Short query: check year match for single-char digits too
+            if let BrowseItem::Album { year: Some(year), .. } = item {
+                if year.to_string().contains(&query_lower) {
+                    priority4.push(idx);
+                }
+            }
+        }
+    }
+
+    let mut matched_indices = priority1;
+    matched_indices.extend(priority2);
+    matched_indices.extend(priority3);
+    matched_indices.extend(priority4);
+
+    let total_matches = matched_indices.len();
+    let has_more = matched_indices.len() > max_results;
+    matched_indices.truncate(max_results);
+
+    ListFilterResults {
+        matched_indices,
+        total_matches,
+        has_more,
+    }
 }
 
 /// Wrapper for filtering folder items.

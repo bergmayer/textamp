@@ -73,8 +73,18 @@ pub enum Event {
     ArtworkLoaded { thumb_path: String, data: Vec<u8> },
     ArtworkFailed { thumb_path: String },
 
+    // Album art grid loading (for cover art view)
+    AlbumArtLoaded { key: String, data: Vec<u8> },
+    AlbumArtFailed { key: String },
+
     // Folder preloading (background)
     FoldersPreloaded { library_key: String, folder_state: crate::services::FolderNavigationState },
+    /// Background subfolder pre-caching completed a batch.
+    SubfoldersPreloaded {
+        library_key: String,
+        entries: Vec<(String, crate::plex::CachedFolder)>,
+        done: bool,
+    },
 
     // Background data preloading (all events include library_key for race condition safety)
     ArtistsPreloaded { library_key: String, artists: Vec<Artist> },

@@ -41,7 +41,7 @@ NAVIGATION
   /               Activate inline filter (type to filter list)
 
 CATEGORIES (Ctrl+key - works from any view)
-  Ctrl+A          Artists (cycles: artists/album artists/albums)
+  Ctrl+A          Artists (cycles: artists/albums)
   Ctrl+P          Playlists (cycles: all/stations/recently added/recently played)
   Ctrl+G          Genres (cycles: genres/artist/album/moods/styles/stations)
   Ctrl+O          Folders
@@ -51,9 +51,8 @@ VIEWS
   F1 / ?          This help screen
   F2              Settings
 
-COMMANDS
+COMMANDS (Alt+/ to see, press again for stations)
   Ctrl+F          Search popup (floating dialog)
-  Ctrl+S          Save queue as playlist (Now Playing)
   Alt+R           Sonic radio from selection
                   Track: similar individual tracks
                   Album: similar albums played in order
@@ -63,14 +62,19 @@ COMMANDS
                   Album: adds all tracks from album
   Alt+S           Shuffle view / queue
   Alt+M           Show similar albums/tracks
+  Alt+B           Show Album (navigate to track's album)
+  Alt+G           Go to Artist (navigate to track's artist)
   Alt+A           Sonic Adventure (see below)
+  Alt+W           Save queue/radio as playlist
+  Alt+C           Toggle cover art view (album grid with artwork)
+
+STATIONS (Alt+/ twice to see available stations)
   Ctrl+Alt+L      Library Radio (station based on your library)
   Ctrl+Alt+R      Random Album Radio (shuffled albums)
   Ctrl+Alt+S      Quick library switcher
 
 SEARCH POPUP (Ctrl+F)
-  Tabs: Artists | Album Artists | Albums |
-        Playlists | Tracks | Genres
+  Tabs: Artists | Albums | Playlists | Tracks | Genres
   Tab / Shift+Tab Switch between tabs
 
 INLINE FILTER (/ key)
@@ -79,9 +83,9 @@ INLINE FILTER (/ key)
 
 PLAYBACK
   Space           Play / Pause
-  < / Ctrl+Left    Previous track
-  > / Ctrl+Right   Next track
-  Ctrl+Up/Down    Volume up/down
+  <               Previous track
+  >               Next track
+  Ctrl+Shift+Up/Dn Volume up/down
   Shift+Left      Seek backward 10 seconds
   Shift+Right     Seek forward 10 seconds
   Play history syncs to Plex server
@@ -90,7 +94,7 @@ NOW PLAYING (Ctrl+N)
   Ctrl+N cycles:  Queue -> Now Playing
   Queue mode      Current queue or radio tracks
                   Del to remove from queue
-                  Ctrl+S to save as playlist
+                  Alt+W to save as playlist
   Now Playing     Album art, track info, waveform seekbar
 
 SONIC RADIO (Alt+R on selection)

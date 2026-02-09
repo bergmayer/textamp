@@ -174,6 +174,7 @@ pub async fn dispatch(
             match audio.start_pending_playback() {
                 Ok(()) => {
                     state.playback.status = PlayStatus::Playing;
+                    state.playback.playback_started_at = Some(std::time::Instant::now());
                     state.consecutive_playback_errors = 0;
                 }
                 Err(e) => {

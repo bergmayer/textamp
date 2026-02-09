@@ -104,6 +104,9 @@ impl EventLoop {
         state.theme = crate::ui::theme::ThemeName::from_config(&self.config.ui.theme);
         crate::ui::theme::set_theme(state.theme);
 
+        // Restore cover art view preference
+        state.album_art_view = self.config.ui.cover_art_view;
+
         // Start authentication in background
         self.start_auth_task(state);
 
@@ -133,8 +136,14 @@ impl EventLoop {
                         if state.playback.status == PlayStatus::Playing {
                             state.playback.position_ms += tick_rate.as_millis() as u64;
 
-                            // Detect track end: audio backend reports sink empty
-                            if audio.is_finished() {
+                            // Detect track end: audio backend reports sink empty.
+                            // Grace period: ignore is_finished() for the first second after
+                            // playback starts to avoid spurious TrackEnded during cold-start
+                            // (sink initialization, network buffering, decoder warmup).
+                            let playing_long_enough = state.playback.playback_started_at
+                                .map(|t| t.elapsed() >= Duration::from_secs(1))
+                                .unwrap_or(false);
+                            if playing_long_enough && audio.is_finished() {
                                 let _ = tick_event_tx.send(Event::TrackEnded).await;
                             }
                         }
@@ -334,7 +343,8 @@ impl EventLoop {
         let follow_ups = match action {
             // System
             Quit | ShowError(_) | ClearError | SetStatus(_) | ClearStatus
-            | RefreshCategory(_) | CycleTheme | LoadArtwork | LoadWaveform => {
+            | RefreshCategory(_) | CycleTheme | LoadArtwork | LoadWaveform
+            | ToggleAlbumArtView | LoadAlbumArt(_) => {
                 handlers::dispatch_system::dispatch(&self.event_tx, &mut self.config, action, state, client).await?
             }
 

@@ -2,54 +2,34 @@
 
 A keyboard-driven terminal-based client for Plex Music.
 
-I use Plex to listen to my music collection but while Plexamp (the offical music client) is pretty good on mobile, I have never liked it on the desktop. This app is designed to offer super-fast navigation of a large music library, and to make my some of my favorite Plex music features (Random Album Radio, Library Radio, Sonic Adventure and Sonic Similarity) available in a fast, keyboard-driven interface (there's mouse support, too), and to add a few new features, such as viewing your artists in a shuffled order, to enable more serendipity and to help surface music that might otherwise be overlooked.  Additionally, in addition to my main music libray, I have two other audio libraries, one for spoken word, and one for unofficial releases, live recordings, and so forth--a.k.a., bootlegs.  For these libraries, folder-based navigation works better than metadata organization: many files are not tagged properly, and there are often many variations of the same album (different pressings, unofficial remixes) that challenge traditional metadata categories. So, the app is designed to also be fast at navigating the underlying folder structure of libraries, for this kind of content, and to support fast switching between libraries.  To ensure good performance, the app aggressively caches library data and pre-fetches songs in the play queue. 
+I use Plex to listen to my music collection but while Plexamp (the offical music client) is pretty good on mobile, I have never liked it on the desktop. This app is designed to offer super-fast navigation of a large music library, and to make my some of my favorite Plex music features (Random Album Radio, Library Radio, Sonic Adventure and Sonic Similarity) available in a fast, keyboard-driven interface with mouse support). It also adds a few new features, such as viewing your artists in a shuffled order, to enable more serendipity and to help surface music that might otherwise be overlooked.  
 
-The main interface paradigm is "Miller columns," which is the same as "column view" in macOS Finder, and close to how iTunes worked before it got all crudded up (with the exception that tracks themselves are in a column in textamp).
+Additionally, in addition to my main music libray, I have two other audio libraries, one for spoken word, and one for unofficial releases, live recordings, and so forth--a.k.a., bootlegs.  For these libraries, folder-based navigation works better than metadata organization: many files are not tagged properly, and there are often many variations of the same album (different pressings, unofficial remixes) that challenge traditional metadata categories. So, the app is designed to also be fast at navigating the underlying folder structure of libraries, for this kind of content, and to support fast switching between libraries.  To ensure good performance, the app aggressively caches library data and pre-fetches songs in the play queue. 
+
+The main interface paradigm is "Miller columns," which is the same as "column view" in macOS Finder, and close to how iTunes worked before it got all crudded up (with the exception that tracks themselves are in a column in textamp, not in a separate pane).
+
+Some limitations are due to Plex:  for example, it does not distinguish Artist from Album Artist fields, or support the Composer field, etc.
 
 The app was also inspired by other great terminal / text mode music players, such as cmus and Cubic Player (which is the inspiration for the logo and exit message).
 
-## Features
-
-- **Keyboard-driven**: CUA-style navigation with Ctrl+key and Alt+key shortcuts
-- **Hierarchical browsing**: Artist → Albums → Tracks navigation
-- **Library views**: Artists, Playlists, Genres, Folders, and Stations
-- **Sonic similarity**: Discover similar albums (context-aware)
-- **Plexamp Stations**: Library Radio, Deep Cuts, Time Travel, On This Day, Mood, Decade Radio
-- **Sonic Radio**: Generate radio from any track, album, or artist using sonic similarity
-- **Sonic Adventure**: Create a sonic bridge between two tracks
-- **Album artwork**: Displays cover art in supported terminals (Kitty, iTerm2, Sixel)
-- **Search & Filter**: Global search and tabbed filtering (Artists, Album Artists, Albums, Playlists, Tracks, Genres)
-- **Folder browsing**: Miller columns view (like macOS Finder)
-- **Settings screen**: Account, libraries, playback, and themes
-- **Fast startup**: Library data cached to disk for instant display, refreshes in background
-- **High-quality playback**: Direct streaming without transcoding
-
-## Speed
-
-textamp is designed to feel instant. Every interaction — browsing, searching, switching libraries, jumping to a letter — should happen without perceptible delay.
 
 ### Caching
 
-Library data (artists, albums, playlists, genres, stations) is cached to disk per-library. On startup, cached data loads immediately so you can browse without waiting for your Plex server. Fresh data is fetched in the background and merged automatically — a toast notification appears if anything changed.
+Library data (artists, albums, playlists, genres, stations) is cached to disk per-library. On startup, cached data loads immediately so you can browse without waiting for your Plex server. Fresh data is fetched in the background and merged automatically.
 
-- **72-hour refresh**: Cache older than 72 hours triggers a background refresh
-- **32-day refresh**: Very stale data is automatically refreshed when idle (2+ minutes)
+- **72-hour refresh**: Cache older than 72 hours triggers a background refresh when you navigate to that view. 
+- **32-day refresh**: All very stale data is automatically refreshed when idle (2+ minutes), regardless if it's a view that has been accessed recently.
 - **Manual refresh**: `F5` forces a refresh of the current view
 - **Per-library**: Each library has its own cache, preserved when switching
-- **Auto-save**: Cache saves periodically while idle and on quit
-- **Track not found**: If playback fails with a 404, you'll be prompted to refresh
 
-Subfolder caches (Folders view) work differently: they're loaded lazily when you navigate into them, and very stale entries (32+ days) are deleted rather than refreshed. Press `F5` to refresh any folder that seems outdated.
+Subfolder caches (Folders view) work differently: root-level subfolders are pre-cached in the background on startup, with rate limiting to avoid overloading the server. The crawl resumes where it left off on restart. Deeper levels (sub-subfolders) are still fetched lazily when you navigate into them. The refresh schedule is the same: subfolders older than 72 hours refresh in the background, and very stale entries (32+ days) are incrementally re-fetched while the old data remains available as a warm cache. Cache progress is visible in Settings (F2) > Libraries. Press `F5` to refresh any folder that seems outdated.
 
 To clear all cached data: Settings (F2) > Account > Clear Cache & Reload.
 
-### Miller Columns
-
-Artists, Genres, Playlists, Folders, and Stations all use Miller columns — the three-pane column view pioneered by macOS Finder. Selecting an item in the left column shows its children in the next column to the right. This lets you drill through Artist → Albums → Tracks (or Genre → Albums → Tracks, etc.) without loading new screens, keeping your place in each column as you navigate.
 
 ### Keyboard Navigation
 
-Every view is navigable without a mouse. `Tab`/`Shift+Tab` moves between categories. `Shift+↓`/`Shift+↑` cycles modes within a category (e.g., Artists → Album Artists → Albums). Arrow keys, `Enter`, and `Backspace` navigate the Miller columns. `Page Up`/`Page Down`, `Home`/`End` work everywhere.
+Every view is navigable without a mouse. `Tab`/`Shift+Tab` moves between categories. `Shift+↓`/`Shift+↑` cycles modes within a category (e.g., Artists → Album Artists → Albums). Arrow keys, `Enter`, and `Backspace` navigate the Miller columns. `Page Up`/`Page Down`, `Home`/`End` work everywhere. But most items are clickable too.
 
 ### Alphabetic Jump
 
@@ -59,104 +39,16 @@ Press any letter `A-Z` to jump to the first item starting with that letter. Pres
 
 Press `/` to activate a real-time filter on the current column. Type to narrow results instantly. The filter stays active as you drill down, so you can filter artists, select one, then browse their albums without losing the filter.
 
-### Search Popup
-
-`Ctrl+F` opens a floating search dialog with tabs for Artists, Album Artists, Albums, Playlists, Tracks, and Genres. Selecting a result plays it without closing search, so you can keep searching.
-
 ### Radio Shortcuts
 
-`Ctrl+Alt+L` starts Library Radio instantly. `Ctrl+Alt+R` starts Random Album Radio. `Alt+R` on any selection creates a sonic radio — sonic track radio for similar tracks, sonic album radio for similar albums, sonic artist radio for an artist and similar artists. No menus, no confirmation dialogs.
-
+`Ctrl+Alt+L` starts Library Radio instantly. `Ctrl+Alt+R` starts Random Album Radio. `Alt+R` on any selection creates a sonic radio — sonic track radio for similar tracks, sonic album radio for similar albums, sonic artist radio for an artist and similar artists.
 ### Library Switching
 
 `Ctrl+Alt+S` opens a quick picker to switch between Plex libraries. The switch is instant — cached data for the new library loads immediately while a background refresh runs.
 
-## Installation
-
-### From Source
-
-```bash
-git clone https://github.com/bergmayer/textamp
-cd textamp
-cargo build --release
-```
-
-The binary will be at `target/release/textamp`.
-
-### Dependencies
-
-On Linux, you need ALSA development libraries:
-
-```bash
-# Debian/Ubuntu
-sudo apt install libasound2-dev
-
-# Fedora
-sudo dnf install alsa-lib-devel
-
-# Arch
-sudo pacman -S alsa-lib
-```
-
 ## File Locations
 
-textamp checks for XDG environment variables first, then falls back to platform defaults. This allows power users to override locations if desired.
-
-### Configuration & Data
-
-| File | XDG Override | Linux Default | macOS Default |
-|------|--------------|---------------|---------------|
-| Config | `$XDG_CONFIG_HOME/textamp/config.yaml` | `~/.config/textamp/config.yaml` | `~/Library/Application Support/textamp/config.yaml` |
-| Auth token | `$XDG_DATA_HOME/textamp/auth.yaml` | `~/.local/share/textamp/auth.yaml` | `~/Library/Application Support/textamp/auth.yaml` |
-| Log | `$XDG_STATE_HOME/textamp/textamp.log` | `~/.local/state/textamp/textamp.log` | `~/Library/Application Support/textamp/textamp.log` |
-
-### Cache
-
-| File | XDG Override | Linux Default | macOS Default |
-|------|--------------|---------------|---------------|
-| Library cache | `$XDG_CACHE_HOME/textamp/` | `~/.cache/textamp/` | `~/Library/Caches/textamp/` |
-| Waveforms | `$XDG_CACHE_HOME/textamp/waveforms/` | `~/.cache/textamp/waveforms/` | `~/Library/Caches/textamp/waveforms/` |
-
-The library cache stores artist, album, playlist, and genre data for fast startup (refreshes in background). Waveform data is cached for the audio visualizer.
-
-## Configuration
-
-Configuration is optional. On first run, textamp will prompt you to sign in with your Plex account. Your auth token and selected server are stored in `auth.yaml` (not the config file).
-
-Example `config.yaml`:
-
-```yaml
-general:
-  log_level: "info"
-
-playback:
-  default_volume: 0.8
-  gapless: true
-  buffer_size_kb: 1024
-
-ui:
-  theme: "dark"  # Options: dark, solarized-dark, solarized-light, borland
-  show_album_art: true
-  album_art_size: 40
-
-libraries:
-  default_library: "1"  # Library key to open on startup
-```
-
-Advanced users can also set `plex.server_url` and `plex.token` in config to override the stored auth, but this is not recommended for normal use.
-
-### Themes
-
-textamp includes four built-in themes:
-
-| Theme | Description |
-|-------|-------------|
-| `dark` | Default Plexamp-inspired dark theme |
-| `solarized-dark` | Solarized Dark with blue accents |
-| `solarized-light` | Solarized Light with magenta accents |
-| `borland` | Classic Borland/Turbo Pascal style (blue background, cyan selection) |
-
-Change themes in Settings (F2) > Interface, or set in config file.
+For preference and config file locations, textamp checks for XDG environment variables first, then falls back to platform defaults.
 
 ## Keyboard Shortcuts
 
@@ -204,9 +96,6 @@ Change themes in Settings (F2) > Interface, or set in config file.
 | `Ctrl+Alt+R` | Random Album Radio (shuffled albums) |
 | `Ctrl+Alt+S` | Quick library switcher |
 
-### Search / Filter (Ctrl+F)
-
-The unified search screen has tabs for different content types: Artists, Album Artists, Albums, Playlists, Tracks, and Genres. Use `Tab`/`Shift+Tab` to switch tabs. Selecting a track or album plays it while staying in search.
 
 ### Navigation Flow
 - **Artists** (`Ctrl+A`): Press again to cycle between Artists, Album Artists, and Albums views
@@ -214,23 +103,15 @@ The unified search screen has tabs for different content types: Artists, Album A
 - **Genres** (`Ctrl+G`): Press again to cycle between Genres, Plex Genres, and Moods
 - **Folders** (`Ctrl+O`): Miller columns navigation (3 columns visible)
 
-Drill-down paths:
-- Artists/Album Artists: Artist → Albums → Tracks
-- Albums: Album → Tracks
-- Genres/Moods: Genre → Albums → Tracks
-- Playlists: Playlist → Tracks
-
 ### Genres and Moods
 The Genres view (`Ctrl+G`) provides three content types that you cycle through by pressing `Ctrl+G` again:
 - **Genres**: Actual genre tags from your music files (e.g., "Abstract Improvisation", "Post-Punk")
 - **Plex Genres**: Plex's standardized genre categories (e.g., "Rock", "Jazz", "Classical")
 - **Moods**: Plexamp-style mood tags (e.g., "Energetic", "Melancholic")
 
-Select a genre/mood to see albums, then drill into tracks. The view remembers your mode when you navigate away and back.
-
 ### Queue vs Radio
 
-textamp distinguishes between two playback modes:
+textamp distinguishes between different playback modes:
 
 **Queue** (`Ctrl+N`) - A finite, user-controlled playlist:
 - Play an album or playlist to populate the queue
@@ -287,10 +168,6 @@ Access stations by cycling `Ctrl+G` (Genres → ... → Stations) or `Ctrl+P` (P
 - **Decade Radio** — Browse decades (1950s, 1960s, ...). Select one to hear music from that era. Like Style, decade metadata is album-level — the station picks random albums from the chosen decade and plays their tracks.
 
 All stations prefer Plex's PlayQueue API for server-curated track selection, falling back to direct library queries if the server doesn't support it. Stations do not use sonic similarity — that's used by Sonic Radio (Alt+R), Similar (Alt+M), and Sonic Adventure (Alt+A). Some station features may require Plex Pass.
-
-### Folders (Ctrl+O)
-
-Miller columns style navigation (like macOS Finder). `♪` icon shows the currently playing track.
 
 ### Now Playing (Ctrl+N)
 

@@ -199,12 +199,18 @@ fn render_with_filter(frame: &mut Frame, state: &AppState, area: Rect) {
     // Build left content (full playback info)
     let left_text = build_left_content(state);
 
-    // Build filter box with cursor - minimum 20 chars wide for comfortable typing
+    // Build filter box with blinking cursor - minimum 20 chars wide for comfortable typing
     let min_filter_width: usize = 24;
+    let cursor_visible = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|d| (d.as_millis() / 500) % 2 == 0)
+        .unwrap_or(true);
     let query_display = if state.list_filter.loading {
         format!("{}...", state.list_filter.query)
-    } else {
+    } else if cursor_visible {
         format!("{}▋", state.list_filter.query)
+    } else {
+        format!("{} ", state.list_filter.query)
     };
 
     // Show match count if we have results
