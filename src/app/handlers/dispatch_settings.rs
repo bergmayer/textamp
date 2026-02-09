@@ -819,11 +819,26 @@ pub async fn dispatch(
             state.set_status(format!("Cleared {} subfolder cache entries", count));
         }
         Action::StartSubfolderCrawl => {
-            helpers::maybe_start_subfolder_preload(event_tx, state, client);
-            if state.subfolder_preload_active {
-                state.set_status("Subfolder crawl started".to_string());
-            } else {
-                state.set_status("No subfolders to crawl (no root folders loaded)".to_string());
+            use crate::app::handlers::helpers::SubfolderPreloadResult;
+            match helpers::maybe_start_subfolder_preload(event_tx, state, client) {
+                SubfolderPreloadResult::Started => {
+                    state.set_status("Subfolder crawl started".to_string());
+                }
+                SubfolderPreloadResult::AlreadyActive => {
+                    state.set_status("Subfolder crawl already running".to_string());
+                }
+                SubfolderPreloadResult::AllCached { count } => {
+                    state.set_status(format!("All {} folder listings already cached and fresh", count));
+                }
+                SubfolderPreloadResult::NoRootFolders => {
+                    state.set_status("No root folders loaded yet".to_string());
+                }
+                SubfolderPreloadResult::NoSubfolders => {
+                    state.set_status("No subfolders to crawl (root has only tracks)".to_string());
+                }
+                SubfolderPreloadResult::NoLibrary => {
+                    state.set_status("No library selected".to_string());
+                }
             }
         }
         Action::StopSubfolderCrawl => {

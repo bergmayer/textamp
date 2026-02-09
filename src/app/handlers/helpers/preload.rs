@@ -119,25 +119,45 @@ pub fn preload_data(event_tx: &mpsc::Sender<Event>, preload_type: PreloadType, l
 /// (< 32 days old). Stale entries are re-fetched incrementally — the old data stays
 /// available as a warm cache until overwritten by fresh results.
 /// Rate-limited to ~50ms between requests to avoid overloading the server.
+/// Result of attempting to start a subfolder preload.
+pub enum SubfolderPreloadResult {
+    /// Crawl started successfully
+    Started,
+    /// Already running
+    AlreadyActive,
+    /// No active library selected
+    NoLibrary,
+    /// Root folders not loaded yet
+    NoRootFolders,
+    /// Root has no subfolders (only tracks)
+    NoSubfolders,
+    /// All subfolders already cached and fresh
+    AllCached { count: usize },
+}
+
 pub fn maybe_start_subfolder_preload(
     event_tx: &mpsc::Sender<Event>,
     state: &mut crate::app::AppState,
     client: &PlexClient,
-) {
+) -> SubfolderPreloadResult {
     use crate::plex::constants::CACHE_VERY_STALE_THRESHOLD_SECS;
 
     // Guard: already active
     if state.subfolder_preload_active {
-        return;
+        return SubfolderPreloadResult::AlreadyActive;
     }
 
     // Guard: no active library
-    let Some(lib_key) = state.active_library.clone() else { return };
+    let Some(lib_key) = state.active_library.clone() else {
+        return SubfolderPreloadResult::NoLibrary;
+    };
 
     // Guard: no root folders loaded yet
-    let Some(ref folder_state) = state.folder_state else { return };
+    let Some(ref folder_state) = state.folder_state else {
+        return SubfolderPreloadResult::NoRootFolders;
+    };
     if folder_state.columns.is_empty() {
-        return;
+        return SubfolderPreloadResult::NoRootFolders;
     }
 
     // Extract root folder keys (only folders, not tracks)
@@ -149,20 +169,48 @@ pub fn maybe_start_subfolder_preload(
         .collect();
 
     if root_folder_keys.is_empty() {
-        return;
+        return SubfolderPreloadResult::NoSubfolders;
     }
 
-    // Determine which keys need fetching (missing or stale > 32 days)
-    let keys_to_fetch = crate::services::CacheService::keys_needing_refresh(
+    // Determine which root folder keys need fetching (missing or stale > 32 days)
+    let root_keys_to_fetch = crate::services::CacheService::keys_needing_refresh(
         &root_folder_keys,
         &state.folder_contents_cache,
         CACHE_VERY_STALE_THRESHOLD_SECS,
     );
 
-    if keys_to_fetch.is_empty() {
-        tracing::debug!("All {} root subfolders cached and fresh, skipping preload", root_folder_keys.len());
-        return;
+    // Also collect subfolder keys from already-cached root folders (one level deeper)
+    let mut child_folder_keys: Vec<String> = Vec::new();
+    for root_key in &root_folder_keys {
+        if let Some(cached) = state.folder_contents_cache.get(root_key.as_str()) {
+            for item in &cached.items {
+                if item.is_folder() {
+                    child_folder_keys.push(item.key.clone());
+                }
+            }
+        }
     }
+
+    let child_keys_to_fetch = if child_folder_keys.is_empty() {
+        Vec::new()
+    } else {
+        crate::services::CacheService::keys_needing_refresh(
+            &child_folder_keys,
+            &state.folder_contents_cache,
+            CACHE_VERY_STALE_THRESHOLD_SECS,
+        )
+    };
+
+    if root_keys_to_fetch.is_empty() && child_keys_to_fetch.is_empty() {
+        let total = root_folder_keys.len() + child_folder_keys.len();
+        tracing::debug!("All {} folder listings cached and fresh ({} root, {} child), skipping preload",
+            total, root_folder_keys.len(), child_folder_keys.len());
+        return SubfolderPreloadResult::AllCached { count: total };
+    }
+
+    // Combine both levels into one fetch list
+    let mut keys_to_fetch = root_keys_to_fetch;
+    keys_to_fetch.extend(child_keys_to_fetch);
 
     let uncached_count = keys_to_fetch.iter()
         .filter(|k| !state.folder_contents_cache.contains_key(k.as_str()))
@@ -178,7 +226,9 @@ pub fn maybe_start_subfolder_preload(
     state.subfolder_preload_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
 
     let cancel = state.subfolder_preload_cancel.clone();
-    let Some(server_url) = client.server_url() else { return };
+    let Some(server_url) = client.server_url() else {
+        return SubfolderPreloadResult::NoLibrary;
+    };
     let server_url = server_url.to_string();
     let token = client.token().map(|s| s.to_string());
     let client_id = client.client_identifier().to_string();
@@ -230,9 +280,11 @@ pub fn maybe_start_subfolder_preload(
             }));
         }
 
-        // Collect results as they complete, sending batches to the UI
+        // Collect results as they complete, sending batches to the UI.
+        // Track newly-fetched results to discover child folders for a second pass.
         let mut batch: Vec<(String, CachedFolder)> = Vec::new();
         let mut fetched = 0u64;
+        let mut newly_fetched: Vec<(String, CachedFolder)> = Vec::new();
 
         for handle in handles {
             if cancel.load(std::sync::atomic::Ordering::Relaxed) {
@@ -240,6 +292,7 @@ pub fn maybe_start_subfolder_preload(
                 return;
             }
             if let Ok(Some(entry)) = handle.await {
+                newly_fetched.push(entry.clone());
                 batch.push(entry);
                 fetched += 1;
 
@@ -255,14 +308,83 @@ pub fn maybe_start_subfolder_preload(
             }
         }
 
+        // Send intermediate batch
+        if !batch.is_empty() {
+            let _ = event_tx.send(Event::SubfoldersPreloaded {
+                library_key: lib_key.clone(),
+                entries: std::mem::take(&mut batch),
+                done: false,
+            }).await;
+        }
+
+        // Second pass: discover child folder keys from newly-fetched results
+        // and fetch those too (one level deeper than root)
+        let mut child_keys: Vec<String> = Vec::new();
+        for (_, cached_folder) in &newly_fetched {
+            for item in &cached_folder.items {
+                if item.is_folder() {
+                    child_keys.push(item.key.clone());
+                }
+            }
+        }
+
+        if !child_keys.is_empty() && !cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            tracing::info!("Second pass: {} child folders discovered from newly-fetched results", child_keys.len());
+
+            let mut child_handles = Vec::with_capacity(child_keys.len());
+            for folder_key in child_keys {
+                let sem = semaphore.clone();
+                let client = client.clone();
+                let cancel = cancel.clone();
+
+                child_handles.push(tokio::spawn(async move {
+                    let _permit = sem.acquire().await.unwrap();
+                    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                        return None;
+                    }
+                    match client.get_folder_contents(&folder_key).await {
+                        Ok(response) => {
+                            let items = FolderService::from_response(&response);
+                            Some((folder_key, CachedFolder::new(items)))
+                        }
+                        Err(e) => {
+                            tracing::warn!("Child subfolder preload failed for {}: {}", folder_key, e);
+                            None
+                        }
+                    }
+                }));
+            }
+
+            for handle in child_handles {
+                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    tracing::info!("Subfolder preload cancelled during child pass after {} total fetches", fetched);
+                    return;
+                }
+                if let Ok(Some(entry)) = handle.await {
+                    batch.push(entry);
+                    fetched += 1;
+
+                    if batch.len() >= 10 {
+                        let _ = event_tx.send(Event::SubfoldersPreloaded {
+                            library_key: lib_key.clone(),
+                            entries: std::mem::take(&mut batch),
+                            done: false,
+                        }).await;
+                    }
+                }
+            }
+        }
+
         // Send final batch (even if empty, to signal done)
-        tracing::info!("Subfolder preload complete: {} fetched of {} needed", fetched, total_to_fetch);
+        tracing::info!("Subfolder preload complete: {} total fetched", fetched);
         let _ = event_tx.send(Event::SubfoldersPreloaded {
             library_key: lib_key,
             entries: batch,
             done: true,
         }).await;
     });
+
+    SubfolderPreloadResult::Started
 }
 
 /// Preload all library data in background.

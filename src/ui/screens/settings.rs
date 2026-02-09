@@ -432,7 +432,7 @@ fn render_libraries_content(frame: &mut Frame, state: &AppState, area: Rect) {
         if state.subfolder_preload_active {
             "Stops the active subfolder crawl"
         } else {
-            "Crawls root-level subfolders in background"
+            "Crawls folder contents (2 levels deep) in background"
         }
     } else {
         "Enter: select"
@@ -484,9 +484,10 @@ fn render_libraries_content(frame: &mut Frame, state: &AppState, area: Rect) {
             )));
         }
 
-        // Subfolder cache status
-        let cached_subfolders = state.folder_contents_cache.len();
-        if root_folder_count > 0 || cached_subfolders > 0 {
+        // Subfolder cache status — count how many folder listings are cached
+        // (each entry = we know the contents of that folder)
+        let cached_listings = state.folder_contents_cache.len();
+        if root_folder_count > 0 || cached_listings > 0 {
             // Count stale entries (> 32 days old)
             let now_ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -496,22 +497,22 @@ fn render_libraries_content(frame: &mut Frame, state: &AppState, area: Rect) {
             let stale_count = state.folder_contents_cache.values()
                 .filter(|c| now_ts.saturating_sub(c.timestamp) >= stale_threshold)
                 .count();
-            let fresh_count = cached_subfolders - stale_count;
+            let fresh_count = cached_listings - stale_count;
 
             let status_text = if state.subfolder_preload_active {
                 if stale_count > 0 {
-                    format!("  Subfolder cache: refreshing... {} fresh, {} stale", fresh_count, stale_count)
+                    format!("  Folder listings cached: refreshing... {} fresh, {} stale", fresh_count, stale_count)
                 } else {
-                    format!("  Subfolder cache: crawling... {} cached", cached_subfolders)
+                    format!("  Folder listings cached: crawling... {}", cached_listings)
                 }
-            } else if cached_subfolders > 0 {
+            } else if cached_listings > 0 {
                 if stale_count > 0 {
-                    format!("  Subfolder cache: {} fresh, {} stale", fresh_count, stale_count)
+                    format!("  Folder listings cached: {} fresh, {} stale (of {} root folders)", fresh_count, stale_count, root_folder_count)
                 } else {
-                    format!("  Subfolder cache: {} subfolders cached", cached_subfolders)
+                    format!("  Folder listings cached: {} (of {} root folders)", cached_listings, root_folder_count)
                 }
             } else {
-                "  Subfolder cache: empty".to_string()
+                "  Folder listings cached: none".to_string()
             };
             lines.push(Line::from(Span::styled(
                 status_text,
