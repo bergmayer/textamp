@@ -591,8 +591,10 @@ fn render_browse_miller_columns(
 
         // Check if this column has albums and cover art view is active
         let has_albums = col.items.iter().any(|item| matches!(item, BrowseItem::Album { .. }));
+        let is_filter_column = filter_column == Some(col_idx);
         if state.album_art_view && has_albums {
-            render_album_art_grid(frame, state, col, is_focused, inner, col_area, col_idx);
+            let col_filter = if is_filter_column { filter_results } else { None };
+            render_album_art_grid(frame, state, col, is_focused, inner, col_area, col_idx, col_filter);
             continue;
         }
 
@@ -605,7 +607,6 @@ fn render_browse_miller_columns(
             let max_text_width = inner.width.saturating_sub(4) as usize;
 
             // When filter is active on this column, only show filtered items
-            let is_filter_column = filter_column == Some(col_idx);
             let (items_to_show, total_display_items, filter_active_on_col): (Vec<(usize, &BrowseItem)>, usize, bool) =
                 if is_filter_column && filter_results.is_some() {
                     let results = filter_results.unwrap();
@@ -750,15 +751,36 @@ fn render_album_art_grid(
     inner: Rect,
     col_area: Rect,
     col_idx: usize,
+    filter_results: Option<&crate::app::state::ListFilterResults>,
 ) {
     use crate::app::state::BrowseItem;
     use crate::util::truncate_middle;
     let t = theme();
 
+    // Build the list of items to display (filtered or full)
+    let items_with_indices: Vec<(usize, &BrowseItem)> = if let Some(results) = filter_results {
+        if results.matched_indices.is_empty() {
+            let empty = Paragraph::new("no matches")
+                .style(Style::default().fg(t.colors.fg_muted));
+            frame.render_widget(empty, inner);
+            return;
+        }
+        results.matched_indices.iter()
+            .filter_map(|&idx| col.items.get(idx).map(|item| (idx, item)))
+            .collect()
+    } else {
+        col.items.iter().enumerate().collect()
+    };
+
+    let total_items = items_with_indices.len();
+    if total_items == 0 {
+        return;
+    }
+
     // Each list row: artwork on left, text on right
     // Size rows to fill available vertical space with at least 3 visible items.
     // Row height is derived from panel height, then art_width from row_height.
-    let target_visible = 3u16.max((col.items.len() as u16).min(5));
+    let target_visible = 3u16.max((total_items as u16).min(5));
     let row_height = (inner.height / target_visible).max(3);
     // Art width: 2x row_height (terminal chars are ~2:1 aspect), capped at half column width
     let max_art = inner.width / 2;
@@ -769,18 +791,24 @@ fn render_album_art_grid(
     }
 
     let visible_rows = (inner.height / row_height).max(1) as usize;
-    let total_items = col.items.len();
     let selected_idx = col.selected_index;
+
+    // Convert selected_idx to display position within the (possibly filtered) list
+    let display_selected = if filter_results.is_some() {
+        items_with_indices.iter().position(|(idx, _)| *idx == selected_idx).unwrap_or(0)
+    } else {
+        selected_idx
+    };
 
     // Standard scroll offset (1 item per row), with pin support for mouse clicks
     let scroll_offset = match state.browse_scroll_pin {
         Some((pin_col, pinned)) if pin_col == col_idx => pinned,
-        _ => NavigationService::calc_scroll_offset(selected_idx, visible_rows, total_items),
+        _ => NavigationService::calc_scroll_offset(display_selected, visible_rows, total_items),
     };
 
     for vis_row in 0..visible_rows {
-        let item_idx = scroll_offset + vis_row;
-        if item_idx >= total_items {
+        let display_idx = scroll_offset + vis_row;
+        if display_idx >= total_items {
             break;
         }
 
@@ -789,8 +817,8 @@ fn render_album_art_grid(
             break;
         }
 
-        let item = &col.items[item_idx];
-        let is_selected = item_idx == selected_idx;
+        let (orig_idx, item) = items_with_indices[display_idx];
+        let is_selected = orig_idx == selected_idx;
 
         // Artwork area (left side)
         let image_area = Rect {
@@ -911,7 +939,7 @@ fn render_album_art_grid(
 
     // Position indicator
     if total_items > visible_rows {
-        let footer = format!("{}/{}", selected_idx + 1, total_items);
+        let footer = format!("{}/{}", display_selected + 1, total_items);
         let footer_area = Rect::new(
             col_area.x + col_area.width.saturating_sub(footer.len() as u16 + 2),
             col_area.y + col_area.height - 1,

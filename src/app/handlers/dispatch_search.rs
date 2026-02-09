@@ -183,20 +183,30 @@ pub async fn dispatch(
         Action::AppendListFilterChar(c) => {
             state.list_filter.query.push(c);
             state.list_filter.selected = 0;
-            // Clear stale drill-down columns from previous selection
-            super::key_input::truncate_filter_right_columns(state);
+            // Only truncate drill-down columns if user is still on the filter column.
+            // If they've drilled deeper (e.g., into albums), preserve their navigation.
+            if is_on_filter_column(state) {
+                super::key_input::truncate_filter_right_columns(state);
+            }
             // Trigger filter execution
             execute_list_filter(event_tx, state).await?;
         }
         Action::DeleteListFilterChar => {
             state.list_filter.query.pop();
-            state.list_filter.selected = 0;
-            // Clear stale drill-down columns from previous selection
-            super::key_input::truncate_filter_right_columns(state);
             if state.list_filter.query.is_empty() {
+                // Query fully cleared: deactivate filter, preserve current navigation
+                state.list_filter.active = false;
                 state.list_filter.results = None;
                 state.list_filter.loading = false;
+                state.list_filter.selected = 0;
+            } else if is_on_filter_column(state) {
+                // Still on filter column: truncate drill-down and re-filter
+                state.list_filter.selected = 0;
+                super::key_input::truncate_filter_right_columns(state);
+                execute_list_filter(event_tx, state).await?;
             } else {
+                // Drilled deeper: keep navigation, just update filter results
+                state.list_filter.selected = 0;
                 execute_list_filter(event_tx, state).await?;
             }
         }
@@ -337,4 +347,31 @@ async fn execute_list_filter(
     }
 
     Ok(())
+}
+
+/// Check if the currently focused column is the filter's target column.
+fn is_on_filter_column(state: &AppState) -> bool {
+    let filter_col = state.list_filter.column;
+    match state.list_filter.category {
+        BrowseCategory::Artists => state.artist_nav.focused_column == filter_col,
+        BrowseCategory::Playlists => {
+            if state.playlists_mode == crate::app::state::PlaylistsMode::Stations {
+                state.station_nav.focused_column == filter_col
+            } else {
+                state.playlist_nav.focused_column == filter_col
+            }
+        }
+        BrowseCategory::Genres => {
+            if state.genre_content_type == GenreContentType::Stations {
+                state.station_nav.focused_column == filter_col
+            } else {
+                state.genre_nav.focused_column == filter_col
+            }
+        }
+        BrowseCategory::Folders => {
+            state.folder_state.as_ref()
+                .map(|fs| fs.focused_column == filter_col)
+                .unwrap_or(true)
+        }
+    }
 }
