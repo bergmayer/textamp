@@ -3,7 +3,7 @@
 //! EnqueueSelection, PromptSavePlaylist, SaveQueueAsPlaylist.
 
 use crate::app::{Action, AppState, Event};
-use crate::app::state::{PlayStatus, PlaybackMode, QueueSortMode, RightPanelMode, SimilarMode, View};
+use crate::app::state::{BrowseCategory, BrowseItem, PlayStatus, PlaybackMode, QueueSortMode, RightPanelMode, SimilarMode, View};
 use crate::api::PlexClient;
 use crate::api::models::Track;
 use crate::audio::AudioPlayer;
@@ -215,6 +215,25 @@ pub async fn dispatch(
             // Check if we should enqueue an album instead of tracks
             let album_to_enqueue: Option<(String, String)> = match state.view {
                 View::Browse => {
+                    // Check Miller columns first — selected album in any browse category
+                    let miller_album = {
+                        let nav = match state.browse_category {
+                            BrowseCategory::Artists => Some(&state.artist_nav),
+                            BrowseCategory::Genres => Some(&state.genre_nav),
+                            BrowseCategory::Playlists => Some(&state.playlist_nav),
+                            _ => None,
+                        };
+                        nav.and_then(|n| n.selected_item()).and_then(|item| {
+                            if let BrowseItem::Album { key, title, .. } = item {
+                                Some((key.clone(), title.clone()))
+                            } else {
+                                None
+                            }
+                        })
+                    };
+                    if miller_album.is_some() {
+                        miller_album
+                    } else {
                     match state.focus {
                         crate::app::state::Focus::Left => {
                             // Check if we're in albums mode or have albums selected
@@ -255,6 +274,7 @@ pub async fn dispatch(
                             }
                         }
                     }
+                    } // else (no Miller album)
                 }
                 View::Similar => {
                     match state.similar_mode {

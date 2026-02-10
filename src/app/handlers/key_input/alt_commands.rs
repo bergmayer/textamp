@@ -135,6 +135,20 @@ fn has_track_context(state: &AppState) -> bool {
 fn has_album_context(state: &AppState) -> bool {
     match state.view {
         View::Browse => {
+            // Check Miller columns first
+            let nav = match state.browse_category {
+                BrowseCategory::Artists => Some(&state.artist_nav),
+                BrowseCategory::Genres => Some(&state.genre_nav),
+                BrowseCategory::Playlists => Some(&state.playlist_nav),
+                _ => None,
+            };
+            if nav.and_then(|n| n.selected_item())
+                .map(|i| matches!(i, BrowseItem::Album { .. }))
+                .unwrap_or(false)
+            {
+                return true;
+            }
+            // Fall back to legacy right panel mode
             match state.right_panel_mode {
                 RightPanelMode::ArtistAlbums => {
                     // Index 0 is "All Tracks", 1+ are albums
