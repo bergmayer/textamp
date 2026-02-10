@@ -150,11 +150,17 @@ fn render_account_content(frame: &mut Frame, state: &AppState, area: Rect) {
         } else {
             "Start Subfolder Crawl"
         };
+        let keep_cache_label = if state.keep_folder_cache {
+            "Keep Folder Cache: On"
+        } else {
+            "Keep Folder Cache: Off"
+        };
         let action_items = [
             "Clear Library Cache & Reload",
             "Clear Artwork Cache",
             "Clear Subfolder Cache",
             crawl_label,
+            keep_cache_label,
             "Sign Out",
         ];
         for (i, label) in action_items.iter().enumerate() {

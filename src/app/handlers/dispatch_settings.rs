@@ -312,7 +312,8 @@ pub async fn dispatch(
                                         follow_ups.push(Action::StartSubfolderCrawl);
                                     }
                                 }
-                                4 => follow_ups.push(Action::Logout),
+                                4 => follow_ups.push(Action::ToggleKeepFolderCache),
+                                5 => follow_ups.push(Action::Logout),
                                 _ => {}
                             }
                         }
@@ -482,6 +483,10 @@ pub async fn dispatch(
             // Switch to the selected library
             if state.active_library.as_ref() != Some(&lib_key) {
                 state.active_library = Some(lib_key.clone());
+                state.keep_folder_cache = config.libraries.per_library
+                    .get(lib_key.as_str())
+                    .map(|s| s.keep_folder_cache)
+                    .unwrap_or(false);
 
                 // Clear all current data and UI state
                 state.artists.clear();
@@ -668,6 +673,10 @@ pub async fn dispatch(
                     // Update server tracking
                     state.active_server_id = Some(server_id);
                     state.active_library = Some(lib_key.clone());
+                    state.keep_folder_cache = config.libraries.per_library
+                        .get(lib_key.as_str())
+                        .map(|s| s.keep_folder_cache)
+                        .unwrap_or(false);
 
                     // Persist the new server info
                     let server_info = crate::plex::ServerInfo {
@@ -838,6 +847,21 @@ pub async fn dispatch(
             state.subfolder_preload_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
             state.subfolder_preload_active = false;
             state.set_status("Subfolder crawl stopped".to_string());
+        }
+        Action::ToggleKeepFolderCache => {
+            if let Some(lib_key) = state.active_library.clone() {
+                state.keep_folder_cache = !state.keep_folder_cache;
+                let entry = config.libraries.per_library.entry(lib_key).or_default();
+                entry.keep_folder_cache = state.keep_folder_cache;
+                if let Err(e) = crate::config::save_config(config) {
+                    tracing::warn!("Failed to save keep_folder_cache preference: {}", e);
+                }
+                state.set_status(if state.keep_folder_cache {
+                    "Subfolder cache: keep indefinitely".to_string()
+                } else {
+                    "Subfolder cache: purge after 32 days".to_string()
+                });
+            }
         }
 
         // Sonic Adventure actions

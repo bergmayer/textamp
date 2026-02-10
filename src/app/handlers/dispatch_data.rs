@@ -50,6 +50,10 @@ pub async fn dispatch(
             // If we have a saved library key, load from cache immediately (no network)
             if let Some(ref lib_key) = saved_key {
                 state.active_library = Some(lib_key.clone());
+                state.keep_folder_cache = config.libraries.per_library
+                    .get(lib_key.as_str())
+                    .map(|s| s.keep_folder_cache)
+                    .unwrap_or(false);
 
                 if let Some(cache) = LibraryCache::new() {
                     if let Some(cached) = cache.load(lib_key) {

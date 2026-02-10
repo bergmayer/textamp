@@ -64,8 +64,15 @@ pub async fn dispatch(
                             lib_key, folder_state.library_key);
                     }
                 }
-                // Save cached subfolder contents
-                cache_data.folder_contents = state.folder_contents_cache.clone();
+                // Save cached subfolder contents (keep all if keep_folder_cache, else purge > 32 days)
+                cache_data.folder_contents = if state.keep_folder_cache {
+                    state.folder_contents_cache.clone()
+                } else {
+                    state.folder_contents_cache.iter()
+                        .filter(|(_, cached)| !cached.is_older_than(crate::plex::constants::CACHE_VERY_STALE_THRESHOLD_SECS))
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect()
+                };
 
                 // Genre/mood/style data
                 cache_data.genres = state.genres.clone();
@@ -79,6 +86,14 @@ pub async fn dispatch(
 
                 // Recent content
                 cache_data.recently_added_albums = state.recently_added_albums.clone();
+
+                // Save non-smart playlist tracks to disk cache
+                for (key, cached) in &state.playlist_tracks_cache {
+                    let is_smart = state.playlists.iter().any(|p| p.rating_key == *key && p.smart);
+                    if !is_smart {
+                        cache_data.playlist_tracks.insert(key.clone(), cached.clone());
+                    }
+                }
 
                 if let Some(cache) = LibraryCache::new() {
                     if cache.save(&cache_data) {

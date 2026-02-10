@@ -5,7 +5,7 @@
 
 use crate::api::models::{Album, Artist, Genre, Library, Playlist, PlexServer, Station, Track, SearchResults};
 use crate::miller::{MillerColumn, MillerState};
-use crate::plex::CachedFolder;
+use crate::plex::{CachedFolder, CachedPlaylistTracks};
 use crate::services::{FolderNavigationState, WaveformData};
 use crate::ui::theme::ThemeName;
 use std::collections::HashMap;
@@ -631,14 +631,16 @@ pub struct AppState {
     pub subfolder_preload_active: bool,
     /// Cancel flag for the subfolder preload task (set on library switch).
     pub subfolder_preload_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Whether to keep subfolder cache entries indefinitely (per-library setting).
+    pub keep_folder_cache: bool,
 
     // Miller column navigation for browse categories
     pub artist_nav: BrowseNavigationState,
     pub genre_nav: BrowseNavigationState,
     pub playlist_nav: BrowseNavigationState,
 
-    // In-memory playlist tracks cache (playlist_key -> tracks)
-    pub playlist_tracks_cache: HashMap<String, Vec<Track>>,
+    // Playlist tracks cache (playlist_key -> cached tracks with timestamp)
+    pub playlist_tracks_cache: HashMap<String, CachedPlaylistTracks>,
 
     // Artwork state
     pub artwork_thumb: Option<String>,
@@ -1047,6 +1049,7 @@ impl AppState {
             folder_contents_cache: HashMap::new(),
             subfolder_preload_active: false,
             subfolder_preload_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            keep_folder_cache: false,
             artist_nav: BrowseNavigationState::new(),
             genre_nav: BrowseNavigationState::new(),
             playlist_nav: BrowseNavigationState::new(),

@@ -18,7 +18,7 @@
 //! This design provides fast navigation for frequently-accessed folders
 //! while keeping data reasonably fresh.
 
-use super::models::{Album, Artist, FolderItem, Genre, Playlist, Station};
+use super::models::{Album, Artist, FolderItem, Genre, Playlist, Station, Track};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -67,6 +67,29 @@ impl CachedFolder {
     }
 }
 
+/// Cached playlist tracks with timestamp for staleness tracking.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachedPlaylistTracks {
+    pub tracks: Vec<Track>,
+    pub timestamp: u64,
+}
+
+impl CachedPlaylistTracks {
+    /// Create a new cached playlist tracks entry with current timestamp.
+    pub fn new(tracks: Vec<Track>) -> Self {
+        Self {
+            tracks,
+            timestamp: current_timestamp(),
+        }
+    }
+
+    /// Check if this cache entry is older than the given threshold (in seconds).
+    pub fn is_older_than(&self, threshold_secs: u64) -> bool {
+        let now = current_timestamp();
+        now.saturating_sub(self.timestamp) > threshold_secs
+    }
+}
+
 /// Cache data structure with timestamp.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CacheData {
@@ -105,6 +128,10 @@ pub struct CacheData {
     pub moods: Vec<Genre>,
     #[serde(default)]
     pub styles: Vec<Genre>,
+
+    // Playlist tracks (per-playlist, excludes smart playlists)
+    #[serde(default)]
+    pub playlist_tracks: HashMap<String, CachedPlaylistTracks>,
 
     // Stations
     #[serde(default)]
@@ -192,11 +219,12 @@ impl LibraryCache {
                 match serde_json::from_str::<CacheData>(&contents) {
                     Ok(data) => {
                         tracing::info!(
-                            "Loaded cache: {} artists, {} albums, {} root folders, {} cached subfolders",
+                            "Loaded cache: {} artists, {} albums, {} root folders, {} cached subfolders, {} playlist track lists",
                             data.artists.len(),
                             data.albums.len(),
                             data.root_folders.len(),
-                            data.folder_contents.len()
+                            data.folder_contents.len(),
+                            data.playlist_tracks.len()
                         );
                         Some(data)
                     }

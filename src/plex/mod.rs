@@ -43,7 +43,7 @@ mod waveform;
 
 pub use artwork_cache::ArtworkCache;
 pub use auth::{PlexAuth, PlexClientInfo, ServerInfo, StoredAuth};
-pub use cache::{CacheData, CachedFolder, LibraryCache};
+pub use cache::{CacheData, CachedFolder, CachedPlaylistTracks, LibraryCache};
 pub use client::{PlexClient, test_connection};
 pub use error::ApiError;
 pub use waveform::{WaveformCache, WaveformData, WaveformError, generate_waveform};

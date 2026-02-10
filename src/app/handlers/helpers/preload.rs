@@ -134,6 +134,7 @@ pub fn maybe_start_subfolder_preload(
     client: &PlexClient,
 ) -> SubfolderPreloadResult {
     use crate::plex::constants::CACHE_STALE_THRESHOLD_SECS;
+    use std::collections::HashSet;
 
     // Guard: already active
     if state.subfolder_preload_active {
@@ -165,43 +166,34 @@ pub fn maybe_start_subfolder_preload(
         return SubfolderPreloadResult::NoSubfolders;
     }
 
-    // Determine which root folder keys need fetching (missing or stale > 72h)
+    // BFS through cache to collect ALL known child folder keys at any depth
+    let all_cached_child_keys = collect_cached_child_keys(&root_folder_keys, &state.folder_contents_cache);
+
+    // Determine which keys need fetching (missing or stale > 72h)
     let root_keys_to_fetch = crate::services::CacheService::keys_needing_refresh(
         &root_folder_keys,
         &state.folder_contents_cache,
         CACHE_STALE_THRESHOLD_SECS,
     );
 
-    // Also collect subfolder keys from already-cached root folders (one level deeper)
-    let mut child_folder_keys: Vec<String> = Vec::new();
-    for root_key in &root_folder_keys {
-        if let Some(cached) = state.folder_contents_cache.get(root_key.as_str()) {
-            for item in &cached.items {
-                if item.is_folder() {
-                    child_folder_keys.push(item.key.clone());
-                }
-            }
-        }
-    }
-
-    let child_keys_to_fetch = if child_folder_keys.is_empty() {
+    let child_keys_to_fetch = if all_cached_child_keys.is_empty() {
         Vec::new()
     } else {
         crate::services::CacheService::keys_needing_refresh(
-            &child_folder_keys,
+            &all_cached_child_keys,
             &state.folder_contents_cache,
             CACHE_STALE_THRESHOLD_SECS,
         )
     };
 
     if root_keys_to_fetch.is_empty() && child_keys_to_fetch.is_empty() {
-        let total = root_folder_keys.len() + child_folder_keys.len();
-        tracing::debug!("All {} folder listings cached and fresh ({} root, {} child), skipping preload",
-            total, root_folder_keys.len(), child_folder_keys.len());
+        let total = root_folder_keys.len() + all_cached_child_keys.len();
+        tracing::debug!("All {} folder listings cached and fresh ({} root, {} descendant), skipping preload",
+            total, root_folder_keys.len(), all_cached_child_keys.len());
         return SubfolderPreloadResult::AllCached { count: total };
     }
 
-    // Combine both levels into one fetch list
+    // Combine into initial fetch list
     let mut keys_to_fetch = root_keys_to_fetch;
     keys_to_fetch.extend(child_keys_to_fetch);
 
@@ -210,8 +202,9 @@ pub fn maybe_start_subfolder_preload(
         .count();
     let stale_count = keys_to_fetch.len() - uncached_count;
     tracing::info!(
-        "Starting subfolder preload: {} uncached, {} stale, {} fresh (of {} total root folders)",
-        uncached_count, stale_count, root_folder_keys.len() - keys_to_fetch.len(), root_folder_keys.len()
+        "Starting subfolder preload: {} to fetch ({} uncached, {} stale), {} already fresh",
+        keys_to_fetch.len(), uncached_count, stale_count,
+        root_folder_keys.len() + all_cached_child_keys.len() - keys_to_fetch.len()
     );
 
     // Set active and reset cancel flag
@@ -227,8 +220,6 @@ pub fn maybe_start_subfolder_preload(
     let client_id = client.client_identifier().to_string();
     let event_tx = event_tx.clone();
 
-    let total_to_fetch = keys_to_fetch.len();
-
     tokio::spawn(async move {
         use crate::plex::CachedFolder;
         use crate::services::FolderService;
@@ -243,95 +234,33 @@ pub fn maybe_start_subfolder_preload(
             return;
         }
 
-        // Concurrency pool: up to 4 parallel requests to avoid overwhelming the server
         let semaphore = Arc::new(Semaphore::new(4));
         let client = Arc::new(crate::api::PlexClient::new_with_url(&server_url, token.as_deref(), &client_id));
         let cancel = Arc::new(cancel);
 
-        // Spawn all fetch tasks, gated by the semaphore
-        let mut handles = Vec::with_capacity(keys_to_fetch.len());
-        for folder_key in keys_to_fetch {
-            let sem = semaphore.clone();
-            let client = client.clone();
-            let cancel = cancel.clone();
-
-            handles.push(tokio::spawn(async move {
-                let _permit = sem.acquire().await.unwrap();
-                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                    return None;
-                }
-                match client.get_folder_contents(&folder_key).await {
-                    Ok(response) => {
-                        let items = FolderService::from_response(&response);
-                        let folder_path = FolderService::folder_path(&response);
-                        Some((folder_key, CachedFolder::with_path(items, folder_path)))
-                    }
-                    Err(e) => {
-                        tracing::warn!("Subfolder preload failed for {}: {}", folder_key, e);
-                        None
-                    }
-                }
-            }));
-        }
-
-        // Collect results as they complete, sending batches to the UI.
-        // Track newly-fetched results to discover child folders for a second pass.
+        // Track all keys we've ever queued for fetching (cycle prevention)
+        let mut all_fetched_keys: HashSet<String> = keys_to_fetch.iter().cloned().collect();
+        let mut current_keys = keys_to_fetch;
         let mut batch: Vec<(String, CachedFolder)> = Vec::new();
-        let mut fetched = 0u64;
-        let mut newly_fetched: Vec<(String, CachedFolder)> = Vec::new();
+        let mut total_fetched = 0u64;
+        let mut depth = 0u32;
 
-        for handle in handles {
-            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                tracing::info!("Subfolder preload cancelled after {} fetches", fetched);
-                return;
+        // Iterative crawl: fetch current level, discover children, repeat
+        loop {
+            if current_keys.is_empty() || cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
             }
-            if let Ok(Some(entry)) = handle.await {
-                newly_fetched.push(entry.clone());
-                batch.push(entry);
-                fetched += 1;
 
-                // Send batch every 10 entries for responsive UI updates
-                if batch.len() >= 10 {
-                    tracing::debug!("Subfolder preload batch: {} fetched so far (of {} to fetch)", fetched, total_to_fetch);
-                    let _ = event_tx.send(Event::SubfoldersPreloaded {
-                        library_key: lib_key.clone(),
-                        entries: std::mem::take(&mut batch),
-                        done: false,
-                    }).await;
-                }
-            }
-        }
+            tracing::info!("Subfolder crawl depth {}: {} keys to fetch", depth, current_keys.len());
 
-        // Send intermediate batch
-        if !batch.is_empty() {
-            let _ = event_tx.send(Event::SubfoldersPreloaded {
-                library_key: lib_key.clone(),
-                entries: std::mem::take(&mut batch),
-                done: false,
-            }).await;
-        }
-
-        // Second pass: discover child folder keys from newly-fetched results
-        // and fetch those too (one level deeper than root)
-        let mut child_keys: Vec<String> = Vec::new();
-        for (_, cached_folder) in &newly_fetched {
-            for item in &cached_folder.items {
-                if item.is_folder() {
-                    child_keys.push(item.key.clone());
-                }
-            }
-        }
-
-        if !child_keys.is_empty() && !cancel.load(std::sync::atomic::Ordering::Relaxed) {
-            tracing::info!("Second pass: {} child folders discovered from newly-fetched results", child_keys.len());
-
-            let mut child_handles = Vec::with_capacity(child_keys.len());
-            for folder_key in child_keys {
+            // Spawn concurrent fetches for this level
+            let mut handles = Vec::with_capacity(current_keys.len());
+            for folder_key in current_keys {
                 let sem = semaphore.clone();
                 let client = client.clone();
                 let cancel = cancel.clone();
 
-                child_handles.push(tokio::spawn(async move {
+                handles.push(tokio::spawn(async move {
                     let _permit = sem.acquire().await.unwrap();
                     if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                         return None;
@@ -343,23 +272,35 @@ pub fn maybe_start_subfolder_preload(
                             Some((folder_key, CachedFolder::with_path(items, folder_path)))
                         }
                         Err(e) => {
-                            tracing::warn!("Child subfolder preload failed for {}: {}", folder_key, e);
+                            tracing::warn!("Subfolder preload failed for {}: {}", folder_key, e);
                             None
                         }
                     }
                 }));
             }
 
-            for handle in child_handles {
+            // Collect results and discover child folder keys
+            let mut next_keys: Vec<String> = Vec::new();
+
+            for handle in handles {
                 if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                    tracing::info!("Subfolder preload cancelled during child pass after {} total fetches", fetched);
+                    tracing::info!("Subfolder preload cancelled at depth {} after {} total fetches", depth, total_fetched);
                     return;
                 }
                 if let Ok(Some(entry)) = handle.await {
-                    batch.push(entry);
-                    fetched += 1;
+                    // Discover child folder keys from this result
+                    for item in &entry.1.items {
+                        if item.is_folder() && all_fetched_keys.insert(item.key.clone()) {
+                            next_keys.push(item.key.clone());
+                        }
+                    }
 
+                    batch.push(entry);
+                    total_fetched += 1;
+
+                    // Send batch every 10 entries for responsive UI updates
                     if batch.len() >= 10 {
+                        tracing::debug!("Subfolder preload batch: {} fetched so far", total_fetched);
                         let _ = event_tx.send(Event::SubfoldersPreloaded {
                             library_key: lib_key.clone(),
                             entries: std::mem::take(&mut batch),
@@ -368,10 +309,26 @@ pub fn maybe_start_subfolder_preload(
                     }
                 }
             }
+
+            // Send remaining batch from this level
+            if !batch.is_empty() {
+                let _ = event_tx.send(Event::SubfoldersPreloaded {
+                    library_key: lib_key.clone(),
+                    entries: std::mem::take(&mut batch),
+                    done: false,
+                }).await;
+            }
+
+            if next_keys.is_empty() {
+                break;
+            }
+
+            current_keys = next_keys;
+            depth += 1;
         }
 
-        // Send final batch (even if empty, to signal done)
-        tracing::info!("Subfolder preload complete: {} total fetched", fetched);
+        // Send final event to signal done
+        tracing::info!("Subfolder preload complete: {} total fetched across {} depth levels", total_fetched, depth + 1);
         let _ = event_tx.send(Event::SubfoldersPreloaded {
             library_key: lib_key,
             entries: batch,
@@ -380,6 +337,35 @@ pub fn maybe_start_subfolder_preload(
     });
 
     SubfolderPreloadResult::Started
+}
+
+/// BFS through cached folder contents to collect all known child folder keys.
+fn collect_cached_child_keys(
+    parent_keys: &[String],
+    cache: &std::collections::HashMap<String, crate::plex::CachedFolder>,
+) -> Vec<String> {
+    use std::collections::HashSet;
+
+    let mut all_keys = Vec::new();
+    let mut frontier = parent_keys.to_vec();
+    let mut visited: HashSet<String> = parent_keys.iter().cloned().collect();
+
+    while !frontier.is_empty() {
+        let mut next = Vec::new();
+        for key in &frontier {
+            if let Some(cached) = cache.get(key.as_str()) {
+                for item in &cached.items {
+                    if item.is_folder() && visited.insert(item.key.clone()) {
+                        all_keys.push(item.key.clone());
+                        next.push(item.key.clone());
+                    }
+                }
+            }
+        }
+        frontier = next;
+    }
+
+    all_keys
 }
 
 /// Preload all library data in background.

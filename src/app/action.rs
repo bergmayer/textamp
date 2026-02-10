@@ -122,6 +122,7 @@ pub enum Action {
     ClearSubfolderCache,    // Clear subfolder cache entries
     StartSubfolderCrawl,    // Manual subfolder crawl for current library
     StopSubfolderCrawl,     // Cancel active subfolder crawl
+    ToggleKeepFolderCache,  // Toggle per-library keep_folder_cache setting
 
     // Folder navigation
     LoadFolderRoot,

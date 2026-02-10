@@ -5,7 +5,7 @@
 mod settings;
 mod xdg;
 
-pub use settings::{Config, GeneralConfig, LibrariesConfig, PlaybackConfig, PlexConfig, UiConfig};
+pub use settings::{Config, GeneralConfig, LibrariesConfig, LibrarySettings, PlaybackConfig, PlexConfig, UiConfig};
 pub use xdg::XdgPaths;
 
 use anyhow::{anyhow, Result};

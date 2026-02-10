@@ -356,9 +356,17 @@ pub fn handle_app_event(
             vec![]
         }
         Event::PlaylistsLoaded(playlists) => {
-            // Preload tracks for playlists not already cached (single task, sequential)
+            // Preload tracks for playlists that need fetching:
+            // - Smart playlists: always re-fetch (they auto-update)
+            // - Regular playlists: re-fetch if not cached or stale (>72h)
             let uncached_keys: Vec<String> = playlists.iter()
-                .filter(|p| !state.playlist_tracks_cache.contains_key(&p.rating_key))
+                .filter(|p| {
+                    if p.smart { return true; }
+                    match state.playlist_tracks_cache.get(&p.rating_key) {
+                        Some(cached) => cached.is_older_than(crate::plex::constants::CACHE_STALE_THRESHOLD_SECS),
+                        None => true,
+                    }
+                })
                 .map(|p| p.rating_key.clone())
                 .collect();
             if !uncached_keys.is_empty() {
@@ -796,9 +804,17 @@ pub fn handle_app_event(
             if state.playlists.is_empty() || !state.playlists_loading {
                 let count = playlists.len();
 
-                // Preload tracks for playlists not already cached (single task, sequential)
+                // Preload tracks for playlists that need fetching:
+                // - Smart playlists: always re-fetch (they auto-update)
+                // - Regular playlists: re-fetch if not cached or stale (>72h)
                 let uncached_keys: Vec<String> = playlists.iter()
-                    .filter(|p| !state.playlist_tracks_cache.contains_key(&p.rating_key))
+                    .filter(|p| {
+                        if p.smart { return true; }
+                        match state.playlist_tracks_cache.get(&p.rating_key) {
+                            Some(cached) => cached.is_older_than(crate::plex::constants::CACHE_STALE_THRESHOLD_SECS),
+                            None => true,
+                        }
+                    })
                     .map(|p| p.rating_key.clone())
                     .collect();
                 if !uncached_keys.is_empty() {
@@ -1118,6 +1134,10 @@ pub fn handle_app_event(
                 let items = BrowseItem::from_playlists(&state.playlists);
                 state.playlist_nav.reset("playlists", items);
             }
+            if !cached.playlist_tracks.is_empty() {
+                state.playlist_tracks_cache = cached.playlist_tracks;
+                tracing::debug!("Loaded {} cached playlist track lists", state.playlist_tracks_cache.len());
+            }
 
             // Folders
             if !cached.root_folders.is_empty() {
@@ -1356,8 +1376,8 @@ pub fn handle_app_event(
         // Playlist tracks loaded (non-blocking)
         Event::PlaylistTracksForMillerLoaded { playlist_key, tracks } => {
             state.playlist_nav.loading = false;
-            // Keep in-memory cache for background preloading reference
-            state.playlist_tracks_cache.insert(playlist_key, tracks.clone());
+            state.playlist_tracks_cache.insert(playlist_key, crate::plex::CachedPlaylistTracks::new(tracks.clone()));
+            state.cache_dirty = true;
             let items = crate::app::state::BrowseItem::from_tracks(&tracks);
             let col = crate::app::state::BrowseColumn::new_with_tracks("tracks", items, tracks);
             state.playlist_nav.push_column(col);
@@ -1369,10 +1389,11 @@ pub fn handle_app_event(
             vec![]
         }
 
-        // Playlist tracks preloaded in background (in-memory only, no UI change)
+        // Playlist tracks preloaded in background
         Event::PlaylistTracksPreloaded { playlist_key, tracks } => {
             if !tracks.is_empty() {
-                state.playlist_tracks_cache.insert(playlist_key, tracks);
+                state.playlist_tracks_cache.insert(playlist_key, crate::plex::CachedPlaylistTracks::new(tracks));
+                state.cache_dirty = true;
             }
             vec![]
         }

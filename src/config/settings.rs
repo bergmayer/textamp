@@ -1,6 +1,7 @@
 //! Configuration structures.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Root configuration structure.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,7 +30,15 @@ impl Default for Config {
     }
 }
 
-/// Per-library settings.
+/// Per-library settings (indexed by library key).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LibrarySettings {
+    /// Keep subfolder cache entries indefinitely (don't purge at 32 days).
+    #[serde(default)]
+    pub keep_folder_cache: bool,
+}
+
+/// Libraries configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LibrariesConfig {
     /// Default library to open on startup (by key)
@@ -39,6 +48,10 @@ pub struct LibrariesConfig {
     /// Selected server identifier (for multi-server setups)
     #[serde(default)]
     pub selected_server: Option<String>,
+
+    /// Per-library settings keyed by library key
+    #[serde(default)]
+    pub per_library: HashMap<String, LibrarySettings>,
 }
 
 /// Plex server configuration.

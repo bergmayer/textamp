@@ -55,7 +55,15 @@ pub fn maybe_save_cache_async(event_tx: &mpsc::Sender<Event>, state: &mut AppSta
                 lib_key, folder_state.library_key);
         }
     }
-    cache_data.folder_contents = state.folder_contents_cache.clone();
+    // Keep all subfolder entries if keep_folder_cache, else purge > 32 days
+    cache_data.folder_contents = if state.keep_folder_cache {
+        state.folder_contents_cache.clone()
+    } else {
+        state.folder_contents_cache.iter()
+            .filter(|(_, cached)| !cached.is_older_than(crate::plex::constants::CACHE_VERY_STALE_THRESHOLD_SECS))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    };
     cache_data.genres = state.genres.clone();
     cache_data.artist_genres = state.artist_genres.clone();
     cache_data.album_genres = state.album_genres.clone();
@@ -63,6 +71,14 @@ pub fn maybe_save_cache_async(event_tx: &mpsc::Sender<Event>, state: &mut AppSta
     cache_data.styles = state.styles.clone();
     cache_data.stations = state.stations.clone();
     cache_data.recently_added_albums = state.recently_added_albums.clone();
+
+    // Save non-smart playlist tracks to disk cache
+    for (key, cached) in &state.playlist_tracks_cache {
+        let is_smart = state.playlists.iter().any(|p| p.rating_key == *key && p.smart);
+        if !is_smart {
+            cache_data.playlist_tracks.insert(key.clone(), cached.clone());
+        }
+    }
 
     let event_tx = event_tx.clone();
     tokio::spawn(async move {

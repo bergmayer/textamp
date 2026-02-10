@@ -442,7 +442,7 @@ impl EventLoop {
             | SelectServer(_) | SelectLibrary(_) | SelectLibraryOnServer(_, _)
             | SaveSettings | ClearCache
             | ClearLibraryCache | ClearArtworkCache | ClearSubfolderCache
-            | StartSubfolderCrawl | StopSubfolderCrawl
+            | StartSubfolderCrawl | StopSubfolderCrawl | ToggleKeepFolderCache
             | StartAdventure | SetAdventureStart(_) | SetAdventureEnd(_)
             | SetAdventureLength(_) | CancelAdventure | AdventureComplete(_)
             | AdventureError(_) => {
