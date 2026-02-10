@@ -75,10 +75,7 @@ pub fn handle_app_event(
                 tokio::task::spawn_blocking(move || {
                     let cache = crate::plex::ArtworkCache::default();
                     let (count, total_bytes) = cache.stats();
-                    let rt = tokio::runtime::Handle::current();
-                    rt.block_on(async {
-                        let _ = event_tx.send(Event::ArtworkCacheStats { count, total_bytes }).await;
-                    });
+                    let _ = event_tx.blocking_send(Event::ArtworkCacheStats { count, total_bytes });
                 });
             }
 

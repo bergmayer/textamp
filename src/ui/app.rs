@@ -383,8 +383,7 @@ fn render_folder_view(
                 // Check if filter is active on this column
                 let is_filter_column = filter_column == Some(col_idx);
                 let (items_to_show, total_items, filter_active_on_col): (Vec<(usize, &crate::services::FolderItem)>, usize, bool) =
-                    if is_filter_column && filter_results.is_some() {
-                        let results = filter_results.unwrap();
+                    if let Some(results) = filter_results.filter(|_| is_filter_column) {
                         if results.matched_indices.is_empty() {
                             (vec![], 0, true)
                         } else {
@@ -406,8 +405,8 @@ fn render_folder_view(
                     frame.render_widget(empty, inner);
                 } else {
                     // Calculate scroll offset based on display items
-                    let display_selected_idx = if filter_active_on_col {
-                        filter_results.unwrap().matched_indices.iter()
+                    let display_selected_idx = if let Some(results) = filter_results.filter(|_| filter_active_on_col) {
+                        results.matched_indices.iter()
                             .position(|&idx| idx == selected_idx)
                             .unwrap_or(0)
                     } else {
@@ -640,8 +639,7 @@ fn render_browse_miller_columns(
 
             // When filter is active on this column, only show filtered items
             let (items_to_show, total_display_items, filter_active_on_col): (Vec<(usize, &BrowseItem)>, usize, bool) =
-                if is_filter_column && filter_results.is_some() {
-                    let results = filter_results.unwrap();
+                if let Some(results) = filter_results.filter(|_| is_filter_column) {
                     if results.matched_indices.is_empty() {
                         (vec![], 0, true)
                     } else {
@@ -663,9 +661,8 @@ fn render_browse_miller_columns(
                 frame.render_widget(empty, inner);
             } else {
                 // Calculate scroll offset based on display items
-                let display_selected_idx = if filter_active_on_col {
-                    // Find the position of selected_idx in filtered results
-                    filter_results.unwrap().matched_indices.iter()
+                let display_selected_idx = if let Some(results) = filter_results.filter(|_| filter_active_on_col) {
+                    results.matched_indices.iter()
                         .position(|&idx| idx == selected_idx)
                         .unwrap_or(0)
                 } else {
@@ -1193,8 +1190,7 @@ fn render_station_view(
             // Check if filter is active on this column
             let is_filter_column = filter_column == Some(col_idx);
             let (items_to_show, total_items, filter_active_on_col): (Vec<(usize, &crate::api::models::Station)>, usize, bool) =
-                if is_filter_column && filter_results.is_some() {
-                    let results = filter_results.unwrap();
+                if let Some(results) = filter_results.filter(|_| is_filter_column) {
                     if results.matched_indices.is_empty() {
                         (vec![], 0, true)
                     } else {
@@ -1216,8 +1212,8 @@ fn render_station_view(
                 frame.render_widget(empty, inner);
             } else {
                 // Calculate scroll offset based on display items
-                let display_selected_idx = if filter_active_on_col {
-                    filter_results.unwrap().matched_indices.iter()
+                let display_selected_idx = if let Some(results) = filter_results.filter(|_| filter_active_on_col) {
+                    results.matched_indices.iter()
                         .position(|&idx| idx == selected_idx)
                         .unwrap_or(0)
                 } else {

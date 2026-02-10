@@ -554,21 +554,16 @@ pub async fn dispatch(
                 let bg_lib_key = lib_key.clone();
                 tokio::task::spawn_blocking(move || {
                     let result = LibraryCache::new().and_then(|cache| cache.load(&bg_lib_key));
-                    let rt = tokio::runtime::Handle::current();
                     match result {
                         Some(cached) => {
-                            rt.block_on(async {
-                                let _ = tx.send(Event::LibraryCacheLoaded {
-                                    library_key: bg_lib_key,
-                                    cached: Box::new(cached),
-                                }).await;
+                            let _ = tx.blocking_send(Event::LibraryCacheLoaded {
+                                library_key: bg_lib_key,
+                                cached: Box::new(cached),
                             });
                         }
                         None => {
-                            rt.block_on(async {
-                                let _ = tx.send(Event::LibraryCacheLoadFailed {
-                                    library_key: bg_lib_key,
-                                }).await;
+                            let _ = tx.blocking_send(Event::LibraryCacheLoadFailed {
+                                library_key: bg_lib_key,
                             });
                         }
                     }
