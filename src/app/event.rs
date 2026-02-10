@@ -144,6 +144,9 @@ pub enum Event {
     AlbumRadioTracksLoaded { tracks: Vec<Track> },
     AlbumRadioLoadFailed { error: String },
 
+    // Track radio similar tracks (background)
+    TrackRadioSimilarLoaded { tracks: Vec<Track>, title: String },
+
     // Radio track fetching (background)
     RadioTracksLoaded { tracks: Vec<Track>, time_travel_index: Option<usize> },
 

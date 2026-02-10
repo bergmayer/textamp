@@ -175,7 +175,8 @@ pub async fn dispatch(
                 Ok(true) => {
                     state.playback.status = PlayStatus::Playing;
                     state.playback.playback_started_at = Some(std::time::Instant::now());
-                    state.consecutive_playback_errors = 0;
+                    // Don't reset consecutive_playback_errors here — wait for sustained
+                    // playback (5s) to confirm the track is actually playing successfully.
                 }
                 Ok(false) => {
                     // No pending data — stale BufferingEnd event, ignore

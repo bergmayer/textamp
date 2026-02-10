@@ -1133,12 +1133,13 @@ fn handle_now_playing_down(click_row: u16, click_col: u16, state: &mut AppState)
 
             // Track list starts after artwork
             if click_col >= artwork_width {
-                // Visual row (accounting for border)
+                // Visual row (accounting for border + 2-row layout per item)
                 let visual_row = click_row.saturating_sub(1) as usize;
+                let item_row = visual_row / 2;
 
-                // Calculate visible height
+                // Calculate visible item count (2 rows per item)
                 let content_height = state.terminal_height.saturating_sub(5) as usize;
-                let visible_height = content_height;
+                let visible_item_count = content_height / 2;
 
                 // Combined list: play_history + queue tracks
                 let history_len = state.play_history.len();
@@ -1149,9 +1150,12 @@ fn handle_now_playing_down(click_row: u16, click_col: u16, state: &mut AppState)
                 };
                 let total_len = history_len + tracks_len;
 
+                // Match the renderer's scroll offset calculation:
+                // display_selected = history_len + queue_index
                 let selected = state.list_state.queue_index;
-                let scroll_offset = helpers::calc_scroll_offset(selected, visible_height, total_len);
-                let actual_idx = visual_row + scroll_offset;
+                let display_selected = history_len + selected;
+                let scroll_offset = helpers::calc_scroll_offset(display_selected, visible_item_count, total_len);
+                let actual_idx = item_row + scroll_offset;
 
                 if actual_idx < total_len {
                     let current = state.list_state.queue_index;

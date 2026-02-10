@@ -22,8 +22,6 @@ pub async fn dispatch(
 ) -> Result<Vec<Action>> {
     match action {
         Action::StartTrackRadio { track_key, title } => {
-            use rand::seq::SliceRandom;
-
             // Report stop for currently playing track before starting radio
             // continuing=true because we're starting new content
             if let Some(current) = state.current_track().cloned() {
@@ -67,39 +65,29 @@ pub async fn dispatch(
                 helpers::play_current_track(event_tx, state, client, audio).await;
             }
 
-            // Fetch similar tracks
-            match client.get_similar_tracks(&track_key, 50).await {
-                Ok(mut tracks) => {
-                    // Shuffle to break up album blocks and add diversity
-                    let mut rng = rand::rng();
-                    tracks.shuffle(&mut rng);
-
-                    // Filter out seed track and duplicates
-                    let new_tracks: Vec<_> = tracks.into_iter()
-                        .filter(|t| !state.radio_state.history.contains(&t.rating_key))
-                        .take(25)
-                        .collect();
-
-                    if !new_tracks.is_empty() {
-                        // Add to history to avoid repeats
-                        for track in &new_tracks {
-                            state.radio_state.history.push(track.rating_key.clone());
-                        }
-
-                        // Extend queue with shuffled similar tracks
-                        state.queue.extend(new_tracks.clone());
-
-                        state.set_status(format!("Sonic radio: {} ({} tracks)", title, state.queue.len()));
-                    } else if state.queue.is_empty() {
-                        state.set_error("No similar tracks found".to_string());
+            // Fetch similar tracks in background (non-blocking)
+            let tx = event_tx.clone();
+            let client_clone = client.clone();
+            let tk = track_key.clone();
+            let radio_title = title.clone();
+            tokio::spawn(async move {
+                match client_clone.get_similar_tracks(&tk, 50).await {
+                    Ok(tracks) => {
+                        let _ = tx.send(Event::TrackRadioSimilarLoaded {
+                            tracks,
+                            title: radio_title,
+                        }).await;
                     }
-                    state.radio_state.fetching = false;
+                    Err(e) => {
+                        tracing::warn!("Failed to fetch similar tracks: {}", e);
+                        // Send empty result so UI can clear fetching state
+                        let _ = tx.send(Event::TrackRadioSimilarLoaded {
+                            tracks: vec![],
+                            title: radio_title,
+                        }).await;
+                    }
                 }
-                Err(e) => {
-                    state.set_error(format!("Failed to fetch similar tracks: {}", e));
-                    state.radio_state.fetching = false;
-                }
-            }
+            });
         }
         Action::StartAlbumRadio { album_key, title } => {
             // Report stop for currently playing track before starting radio
@@ -131,21 +119,31 @@ pub async fn dispatch(
                 }
             }
 
-            // Then fetch similar albums
-            match client.get_similar_albums(&album_key, 10).await {
-                Ok(albums) => {
-                    for album in albums {
-                        if let Ok(tracks) = client.get_album_tracks(&album.rating_key).await {
-                            state.queue.extend(tracks);
+            // Fetch similar albums + their tracks in background (non-blocking)
+            let tx = event_tx.clone();
+            let client_clone = client.clone();
+            let ak = album_key.clone();
+            tokio::spawn(async move {
+                match client_clone.get_similar_albums(&ak, 10).await {
+                    Ok(albums) => {
+                        let mut all_tracks = Vec::new();
+                        for album in albums {
+                            if let Ok(tracks) = client_clone.get_album_tracks(&album.rating_key).await {
+                                all_tracks.extend(tracks);
+                            }
                         }
+                        let _ = tx.send(Event::AlbumRadioTracksLoaded {
+                            tracks: all_tracks,
+                        }).await;
                     }
-                    state.radio_state.fetching = false;
+                    Err(e) => {
+                        tracing::warn!("Failed to fetch similar albums: {}", e);
+                        let _ = tx.send(Event::AlbumRadioTracksLoaded {
+                            tracks: vec![],
+                        }).await;
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!("Failed to fetch similar albums: {}", e);
-                    state.radio_state.fetching = false;
-                }
-            }
+            });
         }
         Action::StartArtistRadio { artist_key, title } => {
             // Report stop for currently playing track before starting radio

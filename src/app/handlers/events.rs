@@ -639,7 +639,8 @@ pub fn handle_app_event(
             vec![]
         }
         Event::BufferingEnd => {
-            state.consecutive_playback_errors = 0;
+            // Don't reset consecutive_playback_errors here — wait for sustained
+            // playback (5s) to confirm the track is actually playing successfully.
             vec![Action::StartPendingPlayback]
         }
         Event::PositionUpdate(pos) => {
@@ -1329,6 +1330,32 @@ pub fn handle_app_event(
             state.radio_state.fetching = false;
             tracing::warn!("{}", error);
             // Don't show error to user - seed album is already playing
+            vec![]
+        }
+        Event::TrackRadioSimilarLoaded { mut tracks, title } => {
+            use rand::seq::SliceRandom;
+
+            state.radio_state.fetching = false;
+
+            // Shuffle to break up album blocks and add diversity
+            let mut rng = rand::rng();
+            tracks.shuffle(&mut rng);
+
+            // Filter out tracks already in history
+            let new_tracks: Vec<_> = tracks.into_iter()
+                .filter(|t| !state.radio_state.history.contains(&t.rating_key))
+                .take(25)
+                .collect();
+
+            if !new_tracks.is_empty() {
+                for track in &new_tracks {
+                    state.radio_state.history.push(track.rating_key.clone());
+                }
+                state.queue.extend(new_tracks);
+                state.set_status(format!("Sonic radio: {} ({} tracks)", title, state.queue.len()));
+            } else if state.queue.is_empty() {
+                state.set_error("No similar tracks found".to_string());
+            }
             vec![]
         }
 

@@ -146,6 +146,16 @@ impl EventLoop {
                                 last_playback_started = state.playback.playback_started_at;
                             }
 
+                            // Deferred error counter reset: only clear after 5s of
+                            // sustained playback, confirming the track is truly playing
+                            if state.consecutive_playback_errors > 0 {
+                                if let Some(started) = state.playback.playback_started_at {
+                                    if started.elapsed() >= Duration::from_secs(5) {
+                                        state.consecutive_playback_errors = 0;
+                                    }
+                                }
+                            }
+
                             // Detect track end: audio backend reports sink empty.
                             // Grace period: ignore is_finished() for the first second after
                             // playback starts to avoid spurious TrackEnded during cold-start
@@ -156,7 +166,31 @@ impl EventLoop {
                                 .unwrap_or(false);
                             if playing_long_enough && audio.is_finished() && !track_ended_sent {
                                 track_ended_sent = true;
-                                let _ = tick_event_tx.send(Event::TrackEnded).await;
+
+                                // Duration-based guard: verify the track actually played
+                                // its expected duration before treating as natural end
+                                let actual_pos_ms = audio.position()
+                                    .map(|d| d.as_millis() as u64)
+                                    .unwrap_or(state.playback.position_ms);
+                                let expected_ms = state.playback.duration_ms;
+
+                                // Natural completion: no known duration, played >=90%,
+                                // or within 5s of end
+                                let completed_normally = expected_ms == 0
+                                    || actual_pos_ms >= expected_ms * 90 / 100
+                                    || (expected_ms > 5000 && actual_pos_ms >= expected_ms.saturating_sub(5000));
+
+                                if completed_normally {
+                                    let _ = tick_event_tx.send(Event::TrackEnded).await;
+                                } else {
+                                    tracing::warn!(
+                                        "Premature track end detected: played {}ms of {}ms expected",
+                                        actual_pos_ms, expected_ms
+                                    );
+                                    let _ = tick_event_tx.send(Event::PlaybackError(
+                                        "Track ended prematurely".to_string()
+                                    )).await;
+                                }
                             }
                         }
 
