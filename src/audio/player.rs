@@ -152,16 +152,19 @@ impl AudioPlayer {
     ///
     /// Called when `BufferingEnd` event is received, indicating the streaming
     /// buffer has enough data for format detection and playback start.
-    /// Safe to call when no pending playback exists (no-op).
-    pub fn start_pending_playback(&mut self) -> Result<()> {
+    /// Returns `Ok(true)` if playback started, `Ok(false)` if no pending data
+    /// (e.g., stale BufferingEnd event after audio was stopped).
+    pub fn start_pending_playback(&mut self) -> Result<bool> {
         let pending = self.pending_playback.lock().unwrap().take();
         if let Some((buffer, byte_len_hint)) = pending {
             let reader = BlockingReader::new(&buffer);
             self.backend.play_streaming(reader, byte_len_hint)
                 .map_err(|e| anyhow!("Decode error: {}", e))?;
             self._stream_buffer = Some(buffer);
+            Ok(true)
+        } else {
+            Ok(false)
         }
-        Ok(())
     }
 
     /// Play audio from raw bytes.

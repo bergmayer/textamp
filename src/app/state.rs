@@ -119,6 +119,38 @@ impl MarqueeState {
         let text_width = UnicodeWidthStr::width(self.full_text.as_str());
         text_width.saturating_sub(self.display_width)
     }
+
+    /// Advance the marquee animation by one tick.
+    pub fn tick(&mut self) {
+        match self.phase {
+            MarqueePhase::Waiting => {
+                if self.phase_start.elapsed() >= std::time::Duration::from_secs(4) {
+                    self.phase = MarqueePhase::Scrolling;
+                    self.phase_start = std::time::Instant::now();
+                    self.last_scroll = std::time::Instant::now();
+                }
+            }
+            MarqueePhase::Scrolling => {
+                if self.last_scroll.elapsed() >= std::time::Duration::from_millis(150) {
+                    self.scroll_offset += 1;
+                    self.last_scroll = std::time::Instant::now();
+                    let max = self.max_scroll();
+                    if self.scroll_offset >= max {
+                        self.phase = MarqueePhase::PausedAtEnd;
+                        self.phase_start = std::time::Instant::now();
+                    }
+                }
+            }
+            MarqueePhase::PausedAtEnd => {
+                if self.phase_start.elapsed() >= std::time::Duration::from_secs(2) {
+                    self.scroll_offset = 0;
+                    self.phase = MarqueePhase::Waiting;
+                    self.phase_start = std::time::Instant::now();
+                }
+            }
+            MarqueePhase::Inactive => {}
+        }
+    }
 }
 
 /// Notification type - determines display behavior.
@@ -174,6 +206,9 @@ pub enum BrowseItem {
     Track {
         key: String,
         title: String,
+        artist_name: Option<String>,
+        album_name: Option<String>,
+        year: Option<u16>,
         duration_ms: u64,
         track_number: Option<u32>,
     },
@@ -246,6 +281,9 @@ impl BrowseItem {
         tracks.iter().map(|t| BrowseItem::Track {
             key: t.rating_key.clone(),
             title: t.title.clone(),
+            artist_name: t.grandparent_title.clone(),
+            album_name: t.parent_title.clone(),
+            year: t.year.or(t.parent_year),
             duration_ms: t.duration_ms(),
             track_number: t.index,
         }).collect()
@@ -631,19 +669,15 @@ pub struct AppState {
 
     // Now Playing view mode (Queue vs Now Playing)
     pub now_playing_mode: NowPlayingMode,
-    pub recently_played_albums: Vec<Album>,
-    pub recently_played_loading: bool,
 
-    // Playlists view mode (All vs Stations vs Recently Added vs Recently Played)
+    // Playlists view mode (All vs Stations vs Recently Added)
     pub playlists_mode: PlaylistsMode,
     pub recently_added_albums: Vec<Album>,
     pub recently_added_loading: bool,
 
     // Cache management
-    /// Timestamp (Unix epoch secs) when core library data was last refreshed from server.
-    pub cache_timestamp: Option<u64>,
-    /// Timestamp (Unix epoch secs) when playlist/dynamic data was last refreshed from server.
-    pub playlist_cache_timestamp: Option<u64>,
+    /// Per-category timestamps (Unix epoch secs) for when each category was last refreshed.
+    pub category_timestamps: HashMap<RefreshCategory, u64>,
     pub cache_dirty: bool,
     pub last_input_time: std::time::Instant,
     pub last_cache_save: std::time::Instant,
@@ -672,6 +706,8 @@ pub struct AppState {
 
     // Marquee scroll animation state (RefCell for interior mutability during render)
     pub marquee: std::cell::RefCell<MarqueeState>,
+    /// Second marquee for subtitle row (2-row track display in playlists)
+    pub marquee_subtitle: std::cell::RefCell<MarqueeState>,
 
     // Library switch loading state
     pub library_loading: bool,
@@ -1027,13 +1063,10 @@ impl AppState {
             theme: ThemeName::default(),
             adventure: AdventureState::default(),
             now_playing_mode: NowPlayingMode::default(),
-            recently_played_albums: Vec::new(),
-            recently_played_loading: false,
             playlists_mode: PlaylistsMode::default(),
             recently_added_albums: Vec::new(),
             recently_added_loading: false,
-            cache_timestamp: None,
-            playlist_cache_timestamp: None,
+            category_timestamps: HashMap::new(),
             cache_dirty: false,
             last_input_time: std::time::Instant::now(),
             last_cache_save: std::time::Instant::now(),
@@ -1048,6 +1081,7 @@ impl AppState {
             library_picker_active: false,
             library_picker_index: 0,
             marquee: std::cell::RefCell::new(MarqueeState::default()),
+            marquee_subtitle: std::cell::RefCell::new(MarqueeState::default()),
             library_loading: false,
             album_art_view: false,
             album_art_cache: HashMap::new(),
@@ -1196,7 +1230,6 @@ impl AppState {
                     PlaylistsMode::All => self.playlists.len(),
                     PlaylistsMode::Stations => 0, // Handled via station_nav
                     PlaylistsMode::RecentlyAdded => self.recently_added_albums.len(),
-                    PlaylistsMode::RecentlyPlayed => self.recently_played_albums.len(),
                 }
             }
             BrowseCategory::Genres => {
@@ -1281,7 +1314,6 @@ impl AppState {
                         self.recently_added_albums.get(self.list_state.playlists_index)
                             .map(|a| a.rating_key.clone())
                     }
-                    PlaylistsMode::RecentlyPlayed => None, // Handled via playlist_nav
                 }
             }
             BrowseCategory::Genres => self.current_genre_list().get(self.genres_index)
@@ -1317,7 +1349,6 @@ impl AppState {
                         self.recently_added_albums.get(self.list_state.playlists_index)
                             .map(|a| a.title.clone())
                     }
-                    PlaylistsMode::RecentlyPlayed => None, // Handled via playlist_nav
                 }
             }
             BrowseCategory::Genres => self.current_genre_list().get(self.genres_index)
@@ -1419,8 +1450,6 @@ pub enum PlaylistsMode {
     Stations,
     /// Show recently added albums
     RecentlyAdded,
-    /// Show recently played albums
-    RecentlyPlayed,
 }
 
 impl PlaylistsMode {
@@ -1428,17 +1457,15 @@ impl PlaylistsMode {
         match self {
             PlaylistsMode::All => PlaylistsMode::Stations,
             PlaylistsMode::Stations => PlaylistsMode::RecentlyAdded,
-            PlaylistsMode::RecentlyAdded => PlaylistsMode::RecentlyPlayed,
-            PlaylistsMode::RecentlyPlayed => PlaylistsMode::All,
+            PlaylistsMode::RecentlyAdded => PlaylistsMode::All,
         }
     }
 
     pub fn prev(&self) -> Self {
         match self {
-            PlaylistsMode::All => PlaylistsMode::RecentlyPlayed,
+            PlaylistsMode::All => PlaylistsMode::RecentlyAdded,
             PlaylistsMode::Stations => PlaylistsMode::All,
             PlaylistsMode::RecentlyAdded => PlaylistsMode::Stations,
-            PlaylistsMode::RecentlyPlayed => PlaylistsMode::RecentlyAdded,
         }
     }
 
@@ -1447,7 +1474,6 @@ impl PlaylistsMode {
             PlaylistsMode::All => "playlists",
             PlaylistsMode::Stations => "stations",
             PlaylistsMode::RecentlyAdded => "recently added",
-            PlaylistsMode::RecentlyPlayed => "recently played",
         }
     }
 }
@@ -1760,7 +1786,6 @@ pub struct ListStates {
     pub tracks_index: usize,
     pub queue_index: usize,
     pub similar_index: usize,
-    pub recently_played_index: usize,  // Recently played albums list
     pub search_section: SearchSection,
     pub search_item_index: usize,
 }
@@ -1897,7 +1922,6 @@ pub enum RefreshCategory {
     Moods,
     Styles,
     Stations,
-    RecentlyPlayed,
     Folders,
 }
 
@@ -1910,7 +1934,6 @@ impl RefreshCategory {
             RefreshCategory::Albums,
             RefreshCategory::Playlists,
             RefreshCategory::RecentlyAdded,
-            RefreshCategory::RecentlyPlayed,
             RefreshCategory::Genres,
             RefreshCategory::ArtistGenres,
             RefreshCategory::AlbumGenres,
@@ -1926,8 +1949,17 @@ impl RefreshCategory {
         matches!(self,
             RefreshCategory::Playlists
             | RefreshCategory::RecentlyAdded
-            | RefreshCategory::RecentlyPlayed
         )
+    }
+
+    /// Get a stable key for serializing to disk cache.
+    pub fn cache_key(&self) -> &'static str {
+        self.display_name()
+    }
+
+    /// Look up a RefreshCategory from its cache key string.
+    pub fn from_cache_key(key: &str) -> Option<Self> {
+        RefreshCategory::all().iter().find(|c| c.cache_key() == key).copied()
     }
 
     /// Get display name for status messages and toasts.
@@ -1938,7 +1970,6 @@ impl RefreshCategory {
             RefreshCategory::Albums => "Albums",
             RefreshCategory::Playlists => "Playlists",
             RefreshCategory::RecentlyAdded => "Recently Added",
-            RefreshCategory::RecentlyPlayed => "Recently Played",
             RefreshCategory::Genres => "Genres",
             RefreshCategory::ArtistGenres => "Artist Genres",
             RefreshCategory::AlbumGenres => "Album Genres",

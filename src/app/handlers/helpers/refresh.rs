@@ -3,8 +3,6 @@
 use crate::app::{Action, AppState, Event};
 use crate::app::state::{BrowseCategory, View};
 use crate::api::PlexClient;
-use crate::cache::LibraryCache;
-use std::time::Duration;
 use tokio::sync::mpsc;
 
 /// Refresh the current view's category and return actions.
@@ -39,7 +37,6 @@ pub fn refresh_current_view(state: &mut AppState) -> Vec<Action> {
                 PlaylistsMode::All => Some(RefreshCategory::Playlists),
                 PlaylistsMode::Stations => Some(RefreshCategory::Stations),
                 PlaylistsMode::RecentlyAdded => Some(RefreshCategory::RecentlyAdded),
-                PlaylistsMode::RecentlyPlayed => Some(RefreshCategory::RecentlyPlayed),
             },
             BrowseCategory::Genres => match state.genre_content_type {
                 GenreContentType::Genres => Some(RefreshCategory::Genres),
@@ -87,9 +84,6 @@ pub fn is_viewing_category(category: &crate::app::state::RefreshCategory, state:
         (BrowseCategory::Playlists, RefreshCategory::RecentlyAdded) => {
             matches!(state.playlists_mode, PlaylistsMode::RecentlyAdded)
         }
-        (BrowseCategory::Playlists, RefreshCategory::RecentlyPlayed) => {
-            matches!(state.playlists_mode, PlaylistsMode::RecentlyPlayed)
-        }
         (BrowseCategory::Playlists, RefreshCategory::Stations) => {
             matches!(state.playlists_mode, PlaylistsMode::Stations)
         }
@@ -116,79 +110,90 @@ pub fn is_viewing_category(category: &crate::app::state::RefreshCategory, state:
     }
 }
 
-/// Check for very stale cache and refresh in background when user is idle.
-pub fn maybe_refresh_very_stale(event_tx: &mpsc::Sender<Event>, state: &mut AppState, client: &PlexClient) {
+/// Map current view state to its primary RefreshCategory.
+pub fn current_view_category(state: &AppState) -> Option<crate::app::state::RefreshCategory> {
+    use crate::app::state::{RefreshCategory, ArtistViewMode, PlaylistsMode, GenreContentType};
+
+    match state.view {
+        View::Browse => match state.browse_category {
+            BrowseCategory::Artists => match state.artist_view_mode {
+                ArtistViewMode::Artist => Some(RefreshCategory::Artists),
+                ArtistViewMode::AlbumArtist => Some(RefreshCategory::Artists),
+                ArtistViewMode::Album => Some(RefreshCategory::Albums),
+            },
+            BrowseCategory::Playlists => match state.playlists_mode {
+                PlaylistsMode::All => Some(RefreshCategory::Playlists),
+                PlaylistsMode::Stations => Some(RefreshCategory::Stations),
+                PlaylistsMode::RecentlyAdded => Some(RefreshCategory::RecentlyAdded),
+            },
+            BrowseCategory::Genres => match state.genre_content_type {
+                GenreContentType::Genres => Some(RefreshCategory::Genres),
+                GenreContentType::ArtistGenres => Some(RefreshCategory::ArtistGenres),
+                GenreContentType::AlbumGenres => Some(RefreshCategory::AlbumGenres),
+                GenreContentType::Moods => Some(RefreshCategory::Moods),
+                GenreContentType::Styles => Some(RefreshCategory::Styles),
+                GenreContentType::Stations => Some(RefreshCategory::Stations),
+            },
+            BrowseCategory::Folders => Some(RefreshCategory::Folders),
+        },
+        _ => None,
+    }
+}
+
+/// Two-tier staleness check on view navigation.
+///
+/// Tier 1 (72h): The active category — refresh if >72h old or missing timestamp.
+/// Tier 2 (32d): All other categories — refresh if >32 days old (skip if no timestamp).
+pub fn check_staleness_on_view_load(
+    event_tx: &mpsc::Sender<Event>,
+    state: &mut AppState,
+    client: &PlexClient,
+    tier1_category: crate::app::state::RefreshCategory,
+) {
     use crate::app::state::RefreshCategory;
-
-    if state.last_input_time.elapsed() < Duration::from_secs(120) {
-        return;
-    }
-
-    if !state.background_refresh_in_progress.is_empty() {
-        return;
-    }
 
     let lib_key = match &state.active_library {
         Some(k) => k.clone(),
         None => return,
     };
 
-    for category in RefreshCategory::all() {
-        if is_viewing_category(category, state) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let stale_threshold = crate::plex::constants::CACHE_STALE_THRESHOLD_SECS;
+    let very_stale_threshold = crate::plex::constants::CACHE_VERY_STALE_THRESHOLD_SECS;
+
+    // Tier 1: Active category — refresh if >72h old or no timestamp
+    if !state.background_refresh_in_progress.contains(&tier1_category) {
+        let is_stale = match state.category_timestamps.get(&tier1_category) {
+            Some(&ts) => now.saturating_sub(ts) > stale_threshold,
+            None => true, // No timestamp = never refreshed
+        };
+        if is_stale {
+            tracing::info!("Tier-1 staleness refresh: {:?}", tier1_category);
+            spawn_category_refresh(event_tx, tier1_category, &lib_key, state, client);
+        }
+    }
+
+    // Tier 2: All other categories — refresh if >32 days old or no timestamp
+    for &cat in RefreshCategory::all() {
+        if cat == tier1_category {
             continue;
         }
-
-        if is_category_very_stale(*category, state) {
-            tracing::info!("Very stale background refresh: {:?}", category);
-            spawn_category_refresh(event_tx, *category, &lib_key, state, client);
-            break;
+        if state.background_refresh_in_progress.contains(&cat) {
+            continue;
+        }
+        let is_stale = match state.category_timestamps.get(&cat) {
+            Some(&ts) => now.saturating_sub(ts) > very_stale_threshold,
+            None => true, // No timestamp = never loaded, should be fetched
+        };
+        if is_stale {
+            tracing::info!("Tier-2 staleness refresh: {:?}", cat);
+            spawn_category_refresh(event_tx, cat, &lib_key, state, client);
         }
     }
-}
-
-/// Check if a category's data is very stale (32+ days old).
-pub fn is_category_very_stale(category: crate::app::state::RefreshCategory, state: &AppState) -> bool {
-    use crate::app::state::RefreshCategory;
-
-    let lib_key = match &state.active_library {
-        Some(k) => k,
-        None => return false,
-    };
-
-    if let Some(cache) = LibraryCache::new() {
-        if let Some(data) = cache.load(lib_key) {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-
-            let relevant_timestamp = if category.is_playlist_group() {
-                if data.playlist_timestamp > 0 { data.playlist_timestamp } else { data.timestamp }
-            } else {
-                data.timestamp
-            };
-            let age = now.saturating_sub(relevant_timestamp);
-            let very_stale_threshold = crate::plex::VERY_STALE_CACHE_SECS;
-
-            let has_data = match category {
-                RefreshCategory::Artists | RefreshCategory::AlbumArtists => !data.artists.is_empty(),
-                RefreshCategory::Albums => !data.albums.is_empty(),
-                RefreshCategory::Playlists => !data.playlists.is_empty(),
-                RefreshCategory::RecentlyAdded => !data.recently_added_albums.is_empty(),
-                RefreshCategory::RecentlyPlayed => !data.recently_played_albums.is_empty(),
-                RefreshCategory::Genres => !data.genres.is_empty(),
-                RefreshCategory::ArtistGenres => !data.artist_genres.is_empty(),
-                RefreshCategory::AlbumGenres => !data.album_genres.is_empty(),
-                RefreshCategory::Moods => !data.moods.is_empty(),
-                RefreshCategory::Styles => !data.styles.is_empty(),
-                RefreshCategory::Stations => !data.stations.is_empty(),
-                RefreshCategory::Folders => !data.root_folders.is_empty(),
-            };
-
-            return has_data && age > very_stale_threshold;
-        }
-    }
-    false
 }
 
 /// Spawn a background refresh task for a category.
@@ -208,7 +213,6 @@ pub fn spawn_category_refresh(
         RefreshCategory::Albums => state.albums.len(),
         RefreshCategory::Playlists => state.playlists.len(),
         RefreshCategory::RecentlyAdded => state.recently_added_albums.len(),
-        RefreshCategory::RecentlyPlayed => state.recently_played_albums.len(),
         RefreshCategory::Genres => state.genres.len(),
         RefreshCategory::ArtistGenres => state.artist_genres.len(),
         RefreshCategory::AlbumGenres => state.album_genres.len(),
@@ -272,19 +276,6 @@ pub fn spawn_category_refresh(
                     }
                     Err(e) => {
                         tracing::warn!("Failed to refresh recently added: {}", e);
-                        false
-                    }
-                }
-            }
-            RefreshCategory::RecentlyPlayed => {
-                match client.get_recently_played_albums(&lib_key, 50).await {
-                    Ok(albums) => {
-                        let new_count = albums.len();
-                        let _ = event_tx.send(Event::RecentlyPlayedPreloaded { library_key: lib_key.clone(), albums }).await;
-                        new_count != old_count
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to refresh recently played: {}", e);
                         false
                     }
                 }

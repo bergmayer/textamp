@@ -49,7 +49,15 @@ impl ArtworkCache {
             }
         }
 
-        std::fs::read(&path).ok()
+        let data = std::fs::read(&path).ok();
+        // Touch mtime on successful read so LRU pruning reflects last-accessed time
+        if data.is_some() {
+            if let Ok(file) = std::fs::File::open(&path) {
+                let times = std::fs::FileTimes::new().set_modified(SystemTime::now());
+                let _ = file.set_times(times);
+            }
+        }
+        data
     }
 
     /// Load with warm cache support. Returns (data, is_warm) where is_warm
@@ -76,7 +84,14 @@ impl ArtworkCache {
             false
         };
 
-        std::fs::read(&path).ok().map(|data| (data, is_warm))
+        std::fs::read(&path).ok().map(|data| {
+            // Touch mtime on successful read so LRU pruning reflects last-accessed time
+            if let Ok(file) = std::fs::File::open(&path) {
+                let times = std::fs::FileTimes::new().set_modified(SystemTime::now());
+                let _ = file.set_times(times);
+            }
+            (data, is_warm)
+        })
     }
 
     /// Get cache statistics: (file_count, total_bytes).

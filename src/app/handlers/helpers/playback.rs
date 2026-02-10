@@ -107,12 +107,14 @@ pub fn collect_tracks_from_column(col: &crate::app::state::BrowseColumn) -> Vec<
 
     col.items.iter()
         .filter_map(|item| {
-            if let crate::app::state::BrowseItem::Track { key, title, duration_ms, track_number } = item {
+            if let crate::app::state::BrowseItem::Track { key, title, duration_ms, track_number, .. } = item {
                 Some(Track {
                     rating_key: key.clone(),
                     title: title.clone(),
                     duration: Some(*duration_ms),
                     index: *track_number,
+                    year: None,
+                    parent_year: None,
                     parent_title: None,
                     grandparent_title: None,
                     parent_rating_key: None,
@@ -290,7 +292,6 @@ pub async fn play_current_track(
                     state.playback.playback_started_at = Some(std::time::Instant::now());
                     report_playback_to_plex(event_tx, &track, state.plex_session_id.clone(), client);
                     state.last_progress_report = Some(std::time::Instant::now());
-                    update_local_recently_played(state, &track);
                     // Trigger pre-fetch for next tracks
                     let upcoming = get_upcoming_tracks(state);
                     cache::trigger_prefetch(&audio.track_cache, &upcoming, client);
@@ -321,7 +322,6 @@ pub async fn play_current_track(
             }
             report_playback_to_plex(event_tx, &track, state.plex_session_id.clone(), client);
             state.last_progress_report = Some(std::time::Instant::now());
-            update_local_recently_played(state, &track);
             // Trigger pre-fetch for next tracks
             let upcoming = get_upcoming_tracks(state);
             cache::trigger_prefetch(&audio.track_cache, &upcoming, client);
@@ -335,7 +335,6 @@ pub async fn play_current_track(
             }
             report_playback_to_plex(event_tx, &track, state.plex_session_id.clone(), client);
             state.last_progress_report = Some(std::time::Instant::now());
-            update_local_recently_played(state, &track);
             // Trigger pre-fetch for next tracks
             let upcoming = get_upcoming_tracks(state);
             cache::trigger_prefetch(&audio.track_cache, &upcoming, client);
@@ -424,20 +423,6 @@ pub fn report_playback_progress_to_plex(
 /// Generate a new Plex session ID for timeline reporting.
 pub fn generate_plex_session_id() -> String {
     uuid::Uuid::new_v4().to_string()
-}
-
-/// Update local recently played albums list when a track starts playing.
-pub fn update_local_recently_played(state: &mut AppState, track: &Track) {
-    use crate::api::models::Album;
-
-    if let Some(album) = Album::from_track(track) {
-        let album_key = album.rating_key.clone();
-        state.recently_played_albums.retain(|a| a.rating_key != album_key);
-        state.recently_played_albums.insert(0, album);
-        state.recently_played_albums.truncate(50);
-        state.cache_dirty = true;
-        tracing::debug!("Updated local recently played: {} items", state.recently_played_albums.len());
-    }
 }
 
 /// Fetch more tracks for the current radio station (non-blocking).

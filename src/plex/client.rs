@@ -330,27 +330,6 @@ impl PlexClient {
         Ok(response.media_container.metadata)
     }
 
-    /// Get recently played albums (sorted by last viewed time).
-    pub async fn get_recently_played_albums(
-        &self,
-        library_key: &str,
-        limit: u32,
-    ) -> Result<Vec<Album>, ApiError> {
-        // Use sort=lastViewedAt:desc to get albums ordered by when they were last played
-        let path = format!(
-            "{}/{}/all?type={}&sort=lastViewedAt:desc&{}={}",
-            EP_LIBRARY_SECTIONS, library_key, TYPE_ALBUM, PARAM_CONTAINER_SIZE, limit
-        );
-        let response: AlbumsResponse = self.get(&path).await?;
-        // Filter to only include albums that have actually been played (lastViewedAt > 0)
-        let played_albums: Vec<Album> = response
-            .media_container
-            .metadata
-            .into_iter()
-            .filter(|a| a.last_viewed_at.map(|t| t > 0).unwrap_or(false))
-            .collect();
-        Ok(played_albums)
-    }
 
     /// Get a specific album by rating key.
     pub async fn get_album(&self, rating_key: &str) -> Result<Album, ApiError> {
@@ -735,8 +714,10 @@ impl PlexClient {
                     parent_title: meta.parent_title,
                     grandparent_title: meta.grandparent_title,
                     index: meta.index,
-                    parent_rating_key: None,
-                    grandparent_rating_key: None,
+                    year: None,
+                    parent_year: None,
+                    parent_rating_key: meta.parent_rating_key,
+                    grandparent_rating_key: meta.grandparent_rating_key,
                     thumb: None,
                     parent_thumb: None,
                     grandparent_thumb: None,
@@ -792,8 +773,10 @@ impl PlexClient {
                     parent_title: meta.parent_title,
                     grandparent_title: meta.grandparent_title,
                     index: meta.index,
-                    parent_rating_key: None,
-                    grandparent_rating_key: None,
+                    year: None,
+                    parent_year: None,
+                    parent_rating_key: meta.parent_rating_key,
+                    grandparent_rating_key: meta.grandparent_rating_key,
                     thumb: None,
                     parent_thumb: None,
                     grandparent_thumb: None,
@@ -1803,14 +1786,21 @@ impl PlexClient {
 
     /// Mark a track as played (scrobble).
     pub async fn scrobble(&self, rating_key: &str) -> Result<(), ApiError> {
-        let path = format!("{}?key={}&identifier=com.plexapp.plugins.library", EP_SCROBBLE, rating_key);
+        let path = format!(
+            "{}?key=/library/metadata/{}&identifier=com.plexapp.plugins.library",
+            EP_SCROBBLE, rating_key
+        );
         let url = self.build_url(&path)?;
 
-        self.http
+        let response = self.http
             .get(&url)
             .headers(self.build_headers()?)
             .send()
             .await?;
+
+        if !response.status().is_success() {
+            tracing::warn!("Scrobble failed with status {} for key {}", response.status(), rating_key);
+        }
 
         Ok(())
     }

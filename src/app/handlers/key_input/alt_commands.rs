@@ -48,14 +48,17 @@ pub fn available_alt_commands(state: &AppState) -> Vec<AltCommand> {
         cmds.push(AltCommand { key: 'm', label: "similar" });
     }
 
-    // Alt+B album: need a track with album info (Miller columns, old state, or now-playing)
-    if has_track_with_album(state) || has_miller_album_context(state) || has_playing_with_album(state) {
+    // Alt+B album: need a track with album info (Miller columns, folder, old state, or now-playing)
+    if has_track_with_album(state) || has_miller_album_context(state)
+        || has_folder_track_with_album(state) || has_playing_with_album(state)
+    {
         cmds.push(AltCommand { key: 'b', label: "album" });
     }
 
-    // Alt+G artist: need a track/album with artist info (Miller columns, old state, or now-playing)
+    // Alt+G artist: need a track/album with artist info (Miller columns, folder, old state, or now-playing)
     if has_track_with_artist(state) || has_album_with_artist(state)
-        || has_miller_artist_context(state) || has_playing_with_artist(state)
+        || has_miller_artist_context(state) || has_folder_track_with_artist(state)
+        || has_playing_with_artist(state)
     {
         cmds.push(AltCommand { key: 'g', label: "artist" });
     }
@@ -65,13 +68,15 @@ pub fn available_alt_commands(state: &AppState) -> Vec<AltCommand> {
         cmds.push(AltCommand { key: 'a', label: "adventure" });
     }
 
-    // Alt+W save: has tracks in queue or radio
-    if !state.queue.is_empty() || !state.radio.tracks.is_empty() {
+    // Alt+W save: has tracks in queue or radio (only in NowPlaying view)
+    if state.view == View::NowPlaying
+        && (!state.queue.is_empty() || !state.radio.tracks.is_empty())
+    {
         cmds.push(AltCommand { key: 'w', label: "save" });
     }
 
-    // Alt+C covers: available in Browse view (toggles album art grid)
-    if state.view == View::Browse {
+    // Alt+C covers: available in Browse view except Folders (toggles album art grid)
+    if state.view == View::Browse && state.browse_category != BrowseCategory::Folders {
         let label = if state.album_art_view { "list view" } else { "covers" };
         cmds.push(AltCommand { key: 'c', label });
     }
@@ -324,6 +329,28 @@ fn has_miller_artist_context(state: &AppState) -> bool {
         Some(BrowseItem::Artist { .. }) => true,
         _ => false,
     }
+}
+
+/// Is there a selected track in folder view with album info (parent_rating_key)?
+fn has_folder_track_with_album(state: &AppState) -> bool {
+    if state.view != View::Browse || state.browse_category != BrowseCategory::Folders {
+        return false;
+    }
+    state.folder_state.as_ref()
+        .and_then(|fs| fs.selected_item())
+        .map(|item| item.is_track() && item.parent_rating_key.is_some())
+        .unwrap_or(false)
+}
+
+/// Is there a selected track in folder view with artist info (grandparent_rating_key)?
+fn has_folder_track_with_artist(state: &AppState) -> bool {
+    if state.view != View::Browse || state.browse_category != BrowseCategory::Folders {
+        return false;
+    }
+    state.folder_state.as_ref()
+        .and_then(|fs| fs.selected_item())
+        .map(|item| item.is_track() && item.grandparent_rating_key.is_some())
+        .unwrap_or(false)
 }
 
 /// Does the now-playing track have album info?

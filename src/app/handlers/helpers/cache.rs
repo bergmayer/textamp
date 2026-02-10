@@ -30,11 +30,18 @@ pub fn maybe_save_cache_async(event_tx: &mpsc::Sender<Event>, state: &mut AppSta
     state.last_cache_save = std::time::Instant::now();
 
     use crate::cache::CacheData;
-    // Preserve the existing cache timestamp so it reflects when data was last
-    // refreshed from the server, not when the cache file was last written to disk.
-    let ts = state.cache_timestamp.unwrap_or_else(CacheData::now);
-    let mut cache_data = CacheData::with_timestamp(&lib_key, ts);
-    cache_data.playlist_timestamp = state.playlist_cache_timestamp.unwrap_or_else(CacheData::now);
+    let mut cache_data = CacheData::new(&lib_key);
+    // Write per-category timestamps
+    cache_data.category_timestamps = state.category_timestamps.iter()
+        .map(|(cat, &ts)| (cat.cache_key().to_string(), ts))
+        .collect();
+    // Write legacy timestamps for backward compat
+    if let Some(&ts) = state.category_timestamps.get(&crate::app::state::RefreshCategory::Artists) {
+        cache_data.timestamp = ts;
+    }
+    if let Some(&ts) = state.category_timestamps.get(&crate::app::state::RefreshCategory::Playlists) {
+        cache_data.playlist_timestamp = ts;
+    }
     cache_data.artists = state.artists.clone();
     cache_data.albums = state.albums.clone();
     cache_data.playlists = state.playlists.clone();
@@ -56,8 +63,6 @@ pub fn maybe_save_cache_async(event_tx: &mpsc::Sender<Event>, state: &mut AppSta
     cache_data.styles = state.styles.clone();
     cache_data.stations = state.stations.clone();
     cache_data.recently_added_albums = state.recently_added_albums.clone();
-    cache_data.recently_played_albums = state.recently_played_albums.clone();
-    cache_data.playlist_tracks = state.playlist_tracks_cache.clone();
 
     let event_tx = event_tx.clone();
     tokio::spawn(async move {

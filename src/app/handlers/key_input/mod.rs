@@ -149,7 +149,7 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
     }
 
     // Handle adventure mode Esc separately
-    if state.adventure.active && !state.adventure.generating {
+    if state.adventure.active {
         if key.code == KeyCode::Esc {
             return vec![Action::CancelAdventure];
         }
@@ -187,7 +187,15 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
                 crate::app::state::GenreContentType::Styles => Action::LoadStyles,
                 crate::app::state::GenreContentType::Stations => Action::LoadStations,
             };
-            return vec![load_action, Action::SetView(View::Browse)];
+            let tier1 = match state.genre_content_type {
+                crate::app::state::GenreContentType::Genres => crate::app::state::RefreshCategory::Genres,
+                crate::app::state::GenreContentType::ArtistGenres => crate::app::state::RefreshCategory::ArtistGenres,
+                crate::app::state::GenreContentType::AlbumGenres => crate::app::state::RefreshCategory::AlbumGenres,
+                crate::app::state::GenreContentType::Moods => crate::app::state::RefreshCategory::Moods,
+                crate::app::state::GenreContentType::Styles => crate::app::state::RefreshCategory::Styles,
+                crate::app::state::GenreContentType::Stations => crate::app::state::RefreshCategory::Stations,
+            };
+            return vec![load_action, Action::SetView(View::Browse), Action::CheckStaleness(tier1)];
         }
         (KeyModifiers::CONTROL, KeyCode::Char('n')) => {
             // Ctrl+N = Now Playing, or cycle mode if already there
@@ -206,6 +214,11 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
             // Not in artists view - switch to it and reset right panel
             state.browse_category = BrowseCategory::Artists;
             reset_right_panel(state);
+            let tier1 = match state.artist_view_mode {
+                crate::app::state::ArtistViewMode::Artist |
+                crate::app::state::ArtistViewMode::AlbumArtist => crate::app::state::RefreshCategory::Artists,
+                crate::app::state::ArtistViewMode::Album => crate::app::state::RefreshCategory::Albums,
+            };
             // Only load if data not already preloaded
             let needs_load = match state.artist_view_mode {
                 crate::app::state::ArtistViewMode::Artist |
@@ -218,9 +231,9 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
                     crate::app::state::ArtistViewMode::AlbumArtist => Action::LoadArtists,
                     crate::app::state::ArtistViewMode::Album => Action::LoadAlbums,
                 };
-                return vec![load_action, Action::SetView(View::Browse)];
+                return vec![load_action, Action::SetView(View::Browse), Action::CheckStaleness(tier1)];
             }
-            return vec![Action::SetView(View::Browse)];
+            return vec![Action::SetView(View::Browse), Action::CheckStaleness(tier1)];
         }
         (KeyModifiers::CONTROL, KeyCode::Char('p')) => {
             // Ctrl+P = Playlists category, or cycle mode if already there
@@ -231,19 +244,27 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
             // Not in Playlists - switch to it and reset right panel
             state.browse_category = BrowseCategory::Playlists;
             reset_right_panel(state);
+            let mut actions = vec![Action::RefreshPlaylistsView, Action::SetView(View::Browse)];
             if state.playlists.is_empty() {
-                return vec![Action::LoadPlaylists, Action::SetView(View::Browse)];
+                actions.insert(0, Action::LoadPlaylists);
             }
-            return vec![Action::SetView(View::Browse)];
+            let tier1 = match state.playlists_mode {
+                crate::app::state::PlaylistsMode::All => crate::app::state::RefreshCategory::Playlists,
+                crate::app::state::PlaylistsMode::Stations => crate::app::state::RefreshCategory::Stations,
+                crate::app::state::PlaylistsMode::RecentlyAdded => crate::app::state::RefreshCategory::RecentlyAdded,
+            };
+            actions.push(Action::CheckStaleness(tier1));
+            return actions;
         }
         (KeyModifiers::CONTROL, KeyCode::Char('o')) => {
             // Ctrl+O = Folders category
             state.browse_category = BrowseCategory::Folders;
             reset_right_panel(state);
+            let staleness = Action::CheckStaleness(crate::app::state::RefreshCategory::Folders);
             if state.folder_state.is_none() {
-                return vec![Action::LoadFolderRoot, Action::SetView(View::Browse)];
+                return vec![Action::LoadFolderRoot, Action::SetView(View::Browse), staleness];
             }
-            return vec![Action::SetView(View::Browse)];
+            return vec![Action::SetView(View::Browse), staleness];
         }
 
         // Global function keys - work from any screen
@@ -321,6 +342,54 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
             // Ctrl+Alt+S = Quick library switcher
             if !state.libraries.is_empty() {
                 return vec![Action::OpenLibraryPicker];
+            }
+            return vec![];
+        }
+        (mods, KeyCode::Char('a')) if mods == KeyModifiers::CONTROL | KeyModifiers::ALT => {
+            // Ctrl+Alt+A = Play album of highlighted track (or now-playing track as fallback)
+            // First, try to get album key from the highlighted item in the current view
+            let album_key = match state.view {
+                View::Browse => {
+                    // Get the active nav's selected item
+                    let selected = match state.browse_category {
+                        BrowseCategory::Artists => state.artist_nav.selected_item().cloned(),
+                        BrowseCategory::Genres => state.genre_nav.selected_item().cloned(),
+                        BrowseCategory::Playlists => state.playlist_nav.selected_item().cloned(),
+                        BrowseCategory::Folders => None,
+                    };
+                    match selected {
+                        Some(BrowseItem::Album { key, .. }) => Some(key),
+                        Some(BrowseItem::Track { .. }) => {
+                            // Get full Track from the focused column's tracks vec
+                            let nav: Option<&BrowseNavigationState> = match state.browse_category {
+                                BrowseCategory::Artists => Some(&state.artist_nav),
+                                BrowseCategory::Genres => Some(&state.genre_nav),
+                                BrowseCategory::Playlists => Some(&state.playlist_nav),
+                                BrowseCategory::Folders => None,
+                            };
+                            nav.and_then(|n| n.focused())
+                               .and_then(|col| col.tracks.get(col.selected_index))
+                               .and_then(|t| t.parent_rating_key.clone())
+                        }
+                        _ => None,
+                    }
+                }
+                View::NowPlaying => {
+                    let idx = state.list_state.queue_index;
+                    let track = match state.playback_mode {
+                        PlaybackMode::Queue | PlaybackMode::None => state.queue.get(idx),
+                        PlaybackMode::Radio => state.radio.tracks.get(idx),
+                    };
+                    track.and_then(|t| t.parent_rating_key.clone())
+                }
+                _ => None,
+            };
+            // Fall back to now-playing track's album
+            let album_key = album_key.or_else(|| {
+                state.current_track().and_then(|t| t.parent_rating_key.clone())
+            });
+            if let Some(key) = album_key {
+                return vec![Action::PlayAlbum { rating_key: key }];
             }
             return vec![];
         }
@@ -720,9 +789,11 @@ fn handle_adventure_key(state: &mut AppState) -> Vec<Action> {
 /// Navigate to the album of the currently selected track (Alt+B).
 /// Switches to Browse/Artists, finds the artist, loads albums, and auto-selects the album.
 fn navigate_to_album(state: &mut AppState) -> Vec<Action> {
-    // Try Miller column context first, then now-playing track fallback
+    // Try Miller column context first, then folder context, then now-playing track fallback
     let (album_key, artist_key, album_title, artist_name) =
         if let Some(ctx) = get_miller_album_context(state) {
+            ctx
+        } else if let Some(ctx) = get_folder_album_context(state) {
             ctx
         } else if let Some(track) = get_selected_track(state)
             .or_else(|| state.current_track().cloned())
@@ -762,9 +833,11 @@ fn navigate_to_album(state: &mut AppState) -> Vec<Action> {
 /// Navigate to the artist of the currently selected track or album (Alt+G).
 /// Switches to Browse/Artists and loads the artist's album list.
 fn navigate_to_artist(state: &mut AppState) -> Vec<Action> {
-    // Try Miller column context first, then old context, then now-playing fallback
+    // Try Miller column context first, then folder context, then old context, then now-playing fallback
     let (artist_key, artist_name) =
         if let Some(ctx) = get_miller_artist_context(state) {
+            ctx
+        } else if let Some(ctx) = get_folder_artist_context(state) {
             ctx
         } else if let Some(key) = get_artist_key_from_context(state) {
             let name = state.artists.iter()
@@ -804,6 +877,35 @@ fn navigate_to_artist(state: &mut AppState) -> Vec<Action> {
     }
 
     vec![Action::LoadArtistAlbumsForMiller { artist_key }]
+}
+
+/// Get album context from the selected folder track: (album_key, artist_key, album_title, artist_name).
+fn get_folder_album_context(state: &AppState) -> Option<(String, String, String, String)> {
+    if state.view != View::Browse || state.browse_category != BrowseCategory::Folders {
+        return None;
+    }
+    let item = state.folder_state.as_ref()?.selected_item()?;
+    if !item.is_track() { return None; }
+    let album_key = item.parent_rating_key.clone()?;
+    let artist_key = item.grandparent_rating_key.clone()?;
+    // We don't have album/artist titles in FolderItem, use empty strings
+    // (navigate_to_album will look them up from the artists list)
+    Some((album_key, artist_key, String::new(), String::new()))
+}
+
+/// Get artist context from the selected folder track: (artist_key, artist_name).
+fn get_folder_artist_context(state: &AppState) -> Option<(String, String)> {
+    if state.view != View::Browse || state.browse_category != BrowseCategory::Folders {
+        return None;
+    }
+    let item = state.folder_state.as_ref()?.selected_item()?;
+    if !item.is_track() { return None; }
+    let artist_key = item.grandparent_rating_key.clone()?;
+    let artist_name = state.artists.iter()
+        .find(|a| a.rating_key == artist_key)
+        .map(|a| a.title.clone())
+        .unwrap_or_default();
+    Some((artist_key, artist_name))
 }
 
 /// Extract the artist rating key from the current context.

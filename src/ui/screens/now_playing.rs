@@ -9,7 +9,7 @@ use crate::app::AppState;
 use crate::services::NavigationService;
 use crate::ui::theme::theme;
 use crate::ui::artwork::ArtworkRenderer;
-use crate::util::{format_duration, pad_right};
+use crate::util::format_duration;
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
@@ -31,6 +31,22 @@ pub fn init_artwork_renderer(picker: Picker) {
 /// Get the name of the detected graphics protocol (for settings display).
 pub fn artwork_protocol_name() -> &'static str {
     ARTWORK_RENDERER.with(|r| r.borrow().protocol_name())
+}
+
+/// Format "Artist — Album (Year)" for queue display.
+fn format_artist_album(track: &crate::api::models::Track) -> String {
+    let year = track.year.or(track.parent_year);
+    let album_part = match (&track.parent_title, year) {
+        (Some(album), Some(y)) => format!("{} ({})", album, y),
+        (Some(album), None) => album.clone(),
+        (None, _) => String::new(),
+    };
+    match (&track.grandparent_title, album_part.is_empty()) {
+        (Some(artist), false) => format!("{} — {}", artist, album_part),
+        (Some(artist), true) => artist.clone(),
+        (None, false) => album_part,
+        (None, true) => "Unknown Artist".to_string(),
+    }
 }
 
 /// Render the unified now playing screen.
@@ -175,15 +191,10 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
     let selected_idx = state.list_state.queue_index;
     let visible_height = inner.height as usize;
 
-    // Dynamic column widths based on available space
-    // Layout: prefix(2) gap(2) title(T) gap(2) artist(A) gap(1) duration(6)
-    // Fixed overhead: 2 + 2 + 2 + 1 + 6 = 13
-    let total_width = inner.width as usize;
-    let fixed_overhead = 13;
-    let remaining = total_width.saturating_sub(fixed_overhead);
-    // Split remaining ~60% title / ~40% artist (minimum 8 each)
-    let title_width = (remaining * 6 / 10).max(8);
-    let artist_width = remaining.saturating_sub(title_width).max(8);
+    // 2-row layout: each track takes 2 rows (title + artist-album subtitle)
+    let visible_item_count = visible_height / 2;
+    let max_text_width = inner.width.saturating_sub(4) as usize;
+    let subtitle_width = (inner.width as usize).saturating_sub(7);
 
     // Build combined list: history (dimmed) + current tracks
     let history_len = state.play_history.len();
@@ -191,33 +202,31 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
 
     // Calculate scroll offset - center on selected item in current tracks
     let display_selected = history_len + selected_idx;
-    let scroll_offset = NavigationService::calc_scroll_offset(display_selected, visible_height, total_display);
+    let scroll_offset = NavigationService::calc_scroll_offset(display_selected, visible_item_count, total_display);
 
     let mut items: Vec<ListItem> = Vec::new();
 
     // Add history items (shown dimmed, above current tracks)
     for (i, track) in state.play_history.iter().enumerate() {
-        if i < scroll_offset || i >= scroll_offset + visible_height {
+        if i < scroll_offset || i >= scroll_offset + visible_item_count {
             continue;
         }
 
-        let prefix = "  ";
-        let title_str = pad_right(&track.title, title_width);
-        let artist = pad_right(&track.artist_name(), artist_width);
-        let duration = format_duration(track.duration_ms());
+        let title_display = crate::util::truncate_middle(&track.title, max_text_width);
+        let subtitle = format_artist_album(track);
+        let subtitle_display = crate::util::truncate_middle(&subtitle, subtitle_width);
 
-        let line = format!(
-            "{}  {} {} {:>6}",
-            prefix, title_str, artist, duration
-        );
-
-        items.push(ListItem::new(line).style(Style::default().fg(t.colors.fg_muted)));
+        let text = Text::from(vec![
+            Line::from(Span::styled(format!("  {}", title_display), Style::default().fg(t.colors.fg_muted))),
+            Line::from(Span::styled(format!("     {}", subtitle_display), Style::default().fg(t.colors.fg_muted))),
+        ]);
+        items.push(ListItem::new(text));
     }
 
     // Add current tracks
     for (i, track) in tracks.iter().enumerate() {
         let display_i = history_len + i;
-        if display_i < scroll_offset || display_i >= scroll_offset + visible_height {
+        if display_i < scroll_offset || display_i >= scroll_offset + visible_item_count {
             continue;
         }
 
@@ -226,43 +235,68 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
 
         let prefix = if is_current { "♪ " } else { "  " };
 
-        let (title_str, artist_str) = if is_selected && state.view == crate::app::state::View::NowPlaying {
-            // Marquee scroll for the title column of the selected track
+        // Title row: marquee if selected
+        let title_display = if is_selected && state.view == crate::app::state::View::NowPlaying {
             let marquee_key = format!("np:{}", i);
-
             let mut marquee = state.marquee.borrow_mut();
             if marquee.selection_key != marquee_key {
-                marquee.reset(marquee_key, track.title.clone(), title_width);
+                marquee.reset(marquee_key, track.title.clone(), max_text_width);
             }
-
-            let title_display = if marquee.phase == crate::app::state::MarqueePhase::Inactive {
-                pad_right(&track.title, title_width)
+            if marquee.phase == crate::app::state::MarqueePhase::Inactive {
+                crate::util::truncate_middle(&track.title, max_text_width)
             } else {
                 let text = marquee.display_text();
                 drop(marquee);
                 text
-            };
-            (title_display, pad_right(&track.artist_name(), artist_width))
+            }
         } else {
-            (pad_right(&track.title, title_width), pad_right(&track.artist_name(), artist_width))
+            crate::util::truncate_middle(&track.title, max_text_width)
         };
 
-        let duration = format_duration(track.duration_ms());
-
-        let line = format!(
-            "{}  {} {} {:>6}",
-            prefix, title_str, artist_str, duration
-        );
-
-        let style = if is_selected {
-            Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
-        } else if is_current {
-            Style::default().fg(t.colors.fg_accent).bold()
+        // Subtitle row: marquee if selected (independent)
+        let subtitle_content = format_artist_album(track);
+        let subtitle_display = if is_selected && state.view == crate::app::state::View::NowPlaying && !subtitle_content.is_empty() {
+            let sub_key = format!("np:{}:sub", i);
+            let mut sub_marquee = state.marquee_subtitle.borrow_mut();
+            if sub_marquee.selection_key != sub_key {
+                sub_marquee.reset(sub_key, subtitle_content.clone(), subtitle_width);
+            }
+            if sub_marquee.phase == crate::app::state::MarqueePhase::Inactive {
+                crate::util::truncate_middle(&subtitle_content, subtitle_width)
+            } else {
+                let text = sub_marquee.display_text();
+                drop(sub_marquee);
+                text
+            }
         } else {
-            Style::default().fg(t.colors.fg_primary)
+            crate::util::truncate_middle(&subtitle_content, subtitle_width)
         };
 
-        items.push(ListItem::new(line).style(style));
+        let (line1_fg, line2_fg, item_bg) = if is_current && !is_selected {
+            (
+                Style::default().fg(t.colors.fg_accent).bold(),
+                Style::default().fg(t.colors.fg_accent),
+                Style::default(),
+            )
+        } else if is_selected {
+            (
+                Style::default().fg(t.colors.selection_text),
+                Style::default().fg(t.colors.selection_text),
+                Style::default().bg(t.colors.selection_bar_bg),
+            )
+        } else {
+            (
+                Style::default().fg(t.colors.fg_primary),
+                Style::default().fg(t.colors.fg_muted),
+                Style::default(),
+            )
+        };
+
+        let text = Text::from(vec![
+            Line::from(Span::styled(format!("{}{}", prefix, title_display), line1_fg)),
+            Line::from(Span::styled(format!("     {}", subtitle_display), line2_fg)),
+        ]);
+        items.push(ListItem::new(text).style(item_bg));
     }
 
     let list = List::new(items);

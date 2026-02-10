@@ -61,7 +61,6 @@ pub async fn dispatch(
             state.styles.clear();
             state.stations.clear();
             state.recently_added_albums.clear();
-            state.recently_played_albums.clear();
             state.selected_artist_albums.clear();
             state.selected_album_tracks.clear();
             state.genre_albums.clear();
@@ -81,8 +80,7 @@ pub async fn dispatch(
             state.list_state.reset();
 
             // Clear session/runtime state
-            state.cache_timestamp = None;
-            state.playlist_cache_timestamp = None;
+            state.category_timestamps.clear();
             state.background_refresh_in_progress.clear();
             state.plex_session_id = None;
             state.album_art_cache.clear();
@@ -496,7 +494,6 @@ pub async fn dispatch(
                 state.styles.clear();
                 state.stations.clear();
                 state.recently_added_albums.clear();
-                state.recently_played_albums.clear();
                 state.selected_artist_albums.clear();
                 state.selected_album_tracks.clear();
                 state.folder_state = None;
@@ -507,8 +504,7 @@ pub async fn dispatch(
                 state.list_state.reset();
 
                 // Clear cache timestamps (old library's values must not leak to new library)
-                state.cache_timestamp = None;
-                state.playlist_cache_timestamp = None;
+                state.category_timestamps.clear();
                 state.cache_dirty = false;
 
                 // Clear Miller column navigation states
@@ -600,7 +596,6 @@ pub async fn dispatch(
                     state.styles.clear();
                     state.stations.clear();
                     state.recently_added_albums.clear();
-                    state.recently_played_albums.clear();
                     state.selected_artist_albums.clear();
                     state.selected_album_tracks.clear();
                     state.folder_state = None;
@@ -609,8 +604,7 @@ pub async fn dispatch(
                     state.subfolder_preload_active = false;
                     state.playlist_tracks_cache.clear();
                     state.list_state.reset();
-                    state.cache_timestamp = None;
-                    state.playlist_cache_timestamp = None;
+                    state.category_timestamps.clear();
                     state.cache_dirty = false;
                     state.artist_nav = crate::app::state::BrowseNavigationState::new();
                     state.genre_nav = crate::app::state::BrowseNavigationState::new();
@@ -717,8 +711,7 @@ pub async fn dispatch(
                         state.subfolder_preload_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
                         state.subfolder_preload_active = false;
                         state.playlist_tracks_cache.clear();
-                        state.cache_timestamp = None;
-                        state.playlist_cache_timestamp = None;
+                        state.category_timestamps.clear();
                         state.cache_dirty = true;
 
                         // Reload from API
@@ -741,7 +734,6 @@ pub async fn dispatch(
                             helpers::preload_data(event_tx, PreloadType::Styles, &lib_key, client);
                             helpers::preload_data(event_tx, PreloadType::Stations, &lib_key, client);
                             helpers::preload_data(event_tx, PreloadType::RecentlyAdded, &lib_key, client);
-                            helpers::preload_data(event_tx, PreloadType::RecentlyPlayed, &lib_key, client);
                         }
 
                         state.set_status(format!("Cleared {} cache files, reloading...", count));
@@ -773,10 +765,8 @@ pub async fn dispatch(
                         state.styles.clear();
                         state.stations.clear();
                         state.recently_added_albums.clear();
-                        state.recently_played_albums.clear();
                         state.playlist_tracks_cache.clear();
-                        state.cache_timestamp = None;
-                        state.playlist_cache_timestamp = None;
+                        state.category_timestamps.clear();
                         state.cache_dirty = true;
 
                         // Reload from API

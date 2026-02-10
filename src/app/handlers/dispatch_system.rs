@@ -35,11 +35,18 @@ pub async fn dispatch(
             if let Some(lib_key) = &state.active_library {
                 use crate::cache::CacheData;
 
-                // Preserve the existing cache timestamp so it reflects when data was last
-                // refreshed from the server, not when the file was last written to disk.
-                let ts = state.cache_timestamp.unwrap_or_else(CacheData::now);
-                let mut cache_data = CacheData::with_timestamp(lib_key, ts);
-                cache_data.playlist_timestamp = state.playlist_cache_timestamp.unwrap_or_else(CacheData::now);
+                let mut cache_data = CacheData::new(lib_key);
+                // Write per-category timestamps
+                cache_data.category_timestamps = state.category_timestamps.iter()
+                    .map(|(cat, &ts)| (cat.cache_key().to_string(), ts))
+                    .collect();
+                // Write legacy timestamps for backward compat
+                if let Some(&ts) = state.category_timestamps.get(&crate::app::state::RefreshCategory::Artists) {
+                    cache_data.timestamp = ts;
+                }
+                if let Some(&ts) = state.category_timestamps.get(&crate::app::state::RefreshCategory::Playlists) {
+                    cache_data.playlist_timestamp = ts;
+                }
 
                 // Core library data
                 cache_data.artists = state.artists.clone();
@@ -72,10 +79,6 @@ pub async fn dispatch(
 
                 // Recent content
                 cache_data.recently_added_albums = state.recently_added_albums.clone();
-                cache_data.recently_played_albums = state.recently_played_albums.clone();
-
-                // Playlist tracks
-                cache_data.playlist_tracks = state.playlist_tracks_cache.clone();
 
                 if let Some(cache) = LibraryCache::new() {
                     if cache.save(&cache_data) {
@@ -103,6 +106,9 @@ pub async fn dispatch(
                 let lib_key = lib_key.clone();
                 helpers::spawn_category_refresh(event_tx, category, &lib_key, state, client);
             }
+        }
+        Action::CheckStaleness(tier1_category) => {
+            helpers::check_staleness_on_view_load(event_tx, state, client, tier1_category);
         }
         Action::CycleTheme => {
             state.theme = state.theme.next();

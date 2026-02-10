@@ -1583,9 +1583,15 @@ fn handle_scroll(up: bool, click_row: u16, click_col: u16, state: &mut AppState)
             handle_browse_scroll(up, click_row, click_col, state);
         }
         View::NowPlaying => {
-            // Scroll queue
-            let delta: i32 = if up { -3 } else { 3 };
-            let max = state.queue.len().saturating_sub(1);
+            // Scroll queue (includes play history + current tracks)
+            let delta: i32 = if up { -1 } else { 1 };
+            let tracks_len = if state.playback_mode == PlaybackMode::Radio {
+                state.radio.tracks.len()
+            } else {
+                state.queue.len()
+            };
+            let total = state.play_history.len() + tracks_len;
+            let max = total.saturating_sub(1);
             let new_idx = (state.list_state.queue_index as i32 + delta).clamp(0, max as i32) as usize;
             state.list_state.queue_index = new_idx;
         }
@@ -1595,7 +1601,7 @@ fn handle_scroll(up: bool, click_row: u16, click_col: u16, state: &mut AppState)
         }
         View::Help => {
             // Scroll help content
-            let delta: i32 = if up { -3 } else { 3 };
+            let delta: i32 = if up { -1 } else { 1 };
             let new_scroll = (state.help_scroll as i32 + delta).max(0) as u16;
             state.help_scroll = new_scroll;
         }
@@ -1729,11 +1735,7 @@ fn handle_browse_scroll(up: bool, click_row: u16, click_col: u16, state: &mut Ap
                     state.art_scroll_cooldown = Some(now);
                 }
 
-                let delta: i32 = if is_art_scroll {
-                    if up { -1 } else { 1 }
-                } else {
-                    if up { -3 } else { 3 }
-                };
+                let delta: i32 = if up { -1 } else { 1 };
 
                 // Check if filter is active on this column
                 let filter_on_col = state.list_filter.active

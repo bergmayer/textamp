@@ -2,12 +2,12 @@
 //! LoadMoods, LoadStyles, LoadGenreAlbums, LoadArtistGenreAlbums, LoadAlbumGenreAlbums,
 //! LoadMoodAlbums, LoadStyleAlbums, CycleGenreContentType, RefreshGenreView,
 //! CycleArtistViewMode, RefreshArtistView, CycleNowPlayingMode, RefreshNowPlayingView,
-//! LoadRecentlyPlayedAlbums, CyclePlaylistsMode, RefreshPlaylistsView, LoadRecentlyAddedAlbums.
+//! CyclePlaylistsMode, RefreshPlaylistsView, LoadRecentlyAddedAlbums.
 
 use crate::app::{Action, AppState, Event};
 use crate::app::state::{
     ArtistViewMode, BrowseCategory, BrowseItem, BrowseNavigationState, Focus,
-    GenreContentType, NowPlayingMode, PlaylistsMode, RightPanelMode, StationColumn,
+    GenreContentType, NowPlayingMode, PlaylistsMode, RefreshCategory, RightPanelMode, StationColumn,
 };
 use crate::api::PlexClient;
 
@@ -227,6 +227,15 @@ pub async fn dispatch(
         Action::CycleGenreContentType => {
             state.genre_content_type = state.genre_content_type.next();
             follow_ups.push(Action::RefreshGenreView);
+            let tier1 = match state.genre_content_type {
+                GenreContentType::Genres => RefreshCategory::Genres,
+                GenreContentType::ArtistGenres => RefreshCategory::ArtistGenres,
+                GenreContentType::AlbumGenres => RefreshCategory::AlbumGenres,
+                GenreContentType::Moods => RefreshCategory::Moods,
+                GenreContentType::Styles => RefreshCategory::Styles,
+                GenreContentType::Stations => RefreshCategory::Stations,
+            };
+            follow_ups.push(Action::CheckStaleness(tier1));
         }
         Action::RefreshGenreView => {
             state.genres_index = 0;
@@ -290,6 +299,11 @@ pub async fn dispatch(
         Action::CycleArtistViewMode => {
             state.artist_view_mode = state.artist_view_mode.next();
             follow_ups.push(Action::RefreshArtistView);
+            let tier1 = match state.artist_view_mode {
+                ArtistViewMode::Artist | ArtistViewMode::AlbumArtist => RefreshCategory::Artists,
+                ArtistViewMode::Album => RefreshCategory::Albums,
+            };
+            follow_ups.push(Action::CheckStaleness(tier1));
         }
         Action::RefreshArtistView => {
             // Clear right panel state (drill-down state) but keep preloaded data
@@ -339,31 +353,15 @@ pub async fn dispatch(
                 }
             }
         }
-        Action::LoadRecentlyPlayedAlbums => {
-            if let Some(library_key) = &state.active_library {
-                state.recently_played_loading = true;
-                // Use the lastViewedAt sort approach - more reliable than hubs
-                match client.get_recently_played_albums(library_key, 50).await {
-                    Ok(albums) => {
-                        tracing::info!("Loaded {} recently played albums", albums.len());
-                        state.recently_played_albums = albums;
-                        state.recently_played_loading = false;
-                        // Reset playlist_nav if currently in RecentlyPlayed mode
-                        if state.playlists_mode == PlaylistsMode::RecentlyPlayed {
-                            let items = BrowseItem::from_albums(&state.recently_played_albums);
-                            state.playlist_nav.reset("recently played", items);
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to load recently played albums: {}", e);
-                        state.recently_played_loading = false;
-                    }
-                }
-            }
-        }
         Action::CyclePlaylistsMode => {
             state.playlists_mode = state.playlists_mode.next();
             follow_ups.push(Action::RefreshPlaylistsView);
+            let tier1 = match state.playlists_mode {
+                PlaylistsMode::All => RefreshCategory::Playlists,
+                PlaylistsMode::Stations => RefreshCategory::Stations,
+                PlaylistsMode::RecentlyAdded => RefreshCategory::RecentlyAdded,
+            };
+            follow_ups.push(Action::CheckStaleness(tier1));
         }
         Action::RefreshPlaylistsView => {
             // Load data for the current mode if needed and reset playlist_nav
@@ -392,15 +390,6 @@ pub async fn dispatch(
                     // Reset playlist_nav with recently added albums
                     let items = BrowseItem::from_albums(&state.recently_added_albums);
                     state.playlist_nav.reset("recently added", items);
-                }
-                PlaylistsMode::RecentlyPlayed => {
-                    // Recently played albums
-                    if state.recently_played_albums.is_empty() && !state.recently_played_loading {
-                        follow_ups.push(Action::LoadRecentlyPlayedAlbums);
-                    }
-                    // Reset playlist_nav with recently played albums
-                    let items = BrowseItem::from_albums(&state.recently_played_albums);
-                    state.playlist_nav.reset("recently played", items);
                 }
             }
         }

@@ -55,9 +55,6 @@ use tokio::sync::RwLock;
 /// Default cache expiration for library data (72 hours).
 const LIBRARY_CACHE_TTL_SECS: u64 = 72 * 60 * 60;
 
-/// Very stale cache threshold (32 days) - triggers background refresh when idle.
-pub const VERY_STALE_CACHE_SECS: u64 = 32 * 24 * 60 * 60;
-
 /// Default cache expiration for waveforms (7 days).
 /// User indicated they don't replay songs often, so waveforms can expire faster.
 const WAVEFORM_CACHE_TTL_SECS: u64 = 7 * 24 * 60 * 60;
@@ -395,37 +392,6 @@ impl PlexService {
             }
             Err(e) => {
                 tracing::error!("Failed to fetch recently added: {}", e);
-                Vec::new()
-            }
-        }
-    }
-
-    /// Get recently played albums with cache-first strategy.
-    pub async fn get_recently_played_cached(&self, library_key: &str, limit: u32) -> Vec<Album> {
-        // Try cache first
-        {
-            let data_lock = self.cache_data.read().await;
-            if let Some(ref data) = *data_lock {
-                if data.library_key == library_key && !data.recently_played_albums.is_empty() {
-                    return data.recently_played_albums.iter()
-                        .take(limit as usize)
-                        .cloned()
-                        .collect();
-                }
-            }
-        }
-
-        // Fallback to API
-        match self.client.get_recently_played_albums(library_key, limit).await {
-            Ok(albums) => {
-                // Update cache
-                let _ = self.update_cache(library_key, |data| {
-                    data.recently_played_albums = albums.clone();
-                }).await;
-                albums
-            }
-            Err(e) => {
-                tracing::error!("Failed to fetch recently played: {}", e);
                 Vec::new()
             }
         }

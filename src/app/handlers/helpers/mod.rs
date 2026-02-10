@@ -30,7 +30,7 @@ pub use playback::{
 };
 pub use preload::{maybe_start_subfolder_preload, preload_all_library_data, preload_data, SubfolderPreloadResult};
 pub use refresh::{
-    is_viewing_category, maybe_refresh_very_stale,
+    is_viewing_category, check_staleness_on_view_load, current_view_category,
     refresh_current_view, spawn_category_refresh,
 };
 

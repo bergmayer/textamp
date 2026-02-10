@@ -157,8 +157,9 @@ The app checks XDG environment variables first, then falls back to platform defa
 ### Cache Settings
 
 - **Library cache**: ~19MB per library
-  - TTL: 72 hours (triggers background refresh when stale)
-  - Very stale threshold: 32 days (auto-refreshes when user is idle 2+ minutes)
+  - Per-category timestamps: each of the 13 RefreshCategory variants tracks its own age
+  - Tier 1 (72h): Active category refreshed on view navigation if >72h old
+  - Tier 2 (32d): Other categories refreshed on view navigation if >32 days old
   - Manual refresh: F5 refreshes current view
   - Stores: artists, albums, playlists, genres, stations, folders
 

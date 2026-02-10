@@ -67,7 +67,7 @@ pub fn handle_app_event(
 
             // Prune artwork cache by size only (no TTL — warm cache serves stale entries)
             let artwork_cache = crate::plex::ArtworkCache::default();
-            artwork_cache.prune_to_size(500 * 1024 * 1024);
+            artwork_cache.prune_to_size(1024 * 1024 * 1024);
 
             // Compute artwork cache stats in background
             {
@@ -307,7 +307,7 @@ pub fn handle_app_event(
                     }
                 }
 
-                // If cache was loaded (artists exist), preloads are already running
+                // Cache was loaded and fresh — no API refresh needed
                 if !state.artists.is_empty() {
                     tracing::info!("Library already loaded from cache, skipping reload");
                     return vec![];
@@ -545,6 +545,21 @@ pub fn handle_app_event(
                 return vec![];
             }
 
+            // Additional guard: ignore if track was just started. The tick loop has
+            // a 1-second grace period before sending TrackEnded, so any event arriving
+            // within 1 second of playback start is stale (from a previous track).
+            let playing_long_enough = state.playback.playback_started_at
+                .map(|t| t.elapsed() >= Duration::from_secs(1))
+                .unwrap_or(false);
+            if !playing_long_enough {
+                tracing::debug!("Ignoring stale TrackEnded (track just started)");
+                return vec![];
+            }
+
+            // Immediately set Stopped to prevent any duplicate TrackEnded events
+            // (still in the channel) from triggering another Next action.
+            state.playback.status = PlayStatus::Stopped;
+
             // Report stop to Plex when track ends naturally
             // continuing=true because we're about to play the next track
             if let Some(track) = state.current_track().cloned() {
@@ -694,6 +709,41 @@ pub fn handle_app_event(
                         col.selected_index = old_selected.min(col.items.len().saturating_sub(1));
                         break;
                     }
+                }
+            }
+            vec![]
+        }
+        Event::FolderPathDiscovered { folder_key, path } => {
+            tracing::debug!("Path discovered for {}: {}", folder_key, path);
+            // Update the displayed column title
+            if let Some(ref mut folder_state) = state.folder_state {
+                for col in folder_state.columns.iter_mut() {
+                    if col.key.as_ref() == Some(&folder_key) && col.title.is_empty() {
+                        col.title = path.clone();
+                        break;
+                    }
+                }
+                // Backfill parent columns too
+                let num_cols = folder_state.columns.len();
+                for i in 1..num_cols {
+                    if folder_state.columns[i].key.as_ref() == Some(&folder_key) {
+                        // This column just got its path — backfill parent if needed
+                        let parent_path_pos = path.rfind(|c: char| c == '/' || c == '\\');
+                        if let Some(pos) = parent_path_pos {
+                            let parent_path = &path[..pos];
+                            if !parent_path.is_empty() && folder_state.columns[i - 1].title.is_empty() {
+                                folder_state.columns[i - 1].title = parent_path.to_string();
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+            // Update the cache entry's path
+            if let Some(cached) = state.folder_contents_cache.get_mut(&folder_key) {
+                if cached.path.is_none() {
+                    cached.path = Some(path);
+                    state.cache_dirty = true;
                 }
             }
             vec![]
@@ -897,19 +947,6 @@ pub fn handle_app_event(
             }
             vec![]
         }
-        Event::RecentlyPlayedPreloaded { library_key, albums } => {
-            // Ignore if this is for a different library (race condition from library switch)
-            if state.active_library.as_ref() != Some(&library_key) {
-                tracing::debug!("Ignoring stale recently played preload for library {}", library_key);
-                return vec![];
-            }
-            if state.recently_played_albums.is_empty() && !state.recently_played_loading {
-                let count = albums.len();
-                state.recently_played_albums = albums;
-                tracing::debug!("Recently played albums preloaded: {} items", count);
-            }
-            vec![]
-        }
         Event::Tick => {
             // Clear expired modifier bars
             if let Some(deadline) = state.alt_bar_until {
@@ -954,39 +991,9 @@ pub fn handle_app_event(
                 }
             }
 
-            // Marquee scroll animation
-            {
-                use crate::app::state::MarqueePhase;
-                let mut marquee = state.marquee.borrow_mut();
-                match marquee.phase {
-                    MarqueePhase::Waiting => {
-                        if marquee.phase_start.elapsed() >= Duration::from_secs(4) {
-                            marquee.phase = MarqueePhase::Scrolling;
-                            marquee.phase_start = std::time::Instant::now();
-                            marquee.last_scroll = std::time::Instant::now();
-                        }
-                    }
-                    MarqueePhase::Scrolling => {
-                        if marquee.last_scroll.elapsed() >= Duration::from_millis(150) {
-                            marquee.scroll_offset += 1;
-                            marquee.last_scroll = std::time::Instant::now();
-                            let max = marquee.max_scroll();
-                            if marquee.scroll_offset >= max {
-                                marquee.phase = MarqueePhase::PausedAtEnd;
-                                marquee.phase_start = std::time::Instant::now();
-                            }
-                        }
-                    }
-                    MarqueePhase::PausedAtEnd => {
-                        if marquee.phase_start.elapsed() >= Duration::from_secs(2) {
-                            marquee.scroll_offset = 0;
-                            marquee.phase = MarqueePhase::Waiting;
-                            marquee.phase_start = std::time::Instant::now();
-                        }
-                    }
-                    MarqueePhase::Inactive => {}
-                }
-            }
+            // Marquee scroll animation (title + subtitle)
+            state.marquee.borrow_mut().tick();
+            state.marquee_subtitle.borrow_mut().tick();
 
             // Album art loading: lazy-load only for visible items in the focused column
             // Limit concurrent in-flight requests to avoid overwhelming the Plex transcoder
@@ -1044,8 +1051,7 @@ pub fn handle_app_event(
             // Periodic cache save: save if dirty, idle for 30+ seconds, and 2+ minutes since last save
             helpers::maybe_save_cache_async(event_tx, state);
 
-            // Very stale background refresh (32 days, 2min idle)
-            helpers::maybe_refresh_very_stale(event_tx, state, client);
+            // (Per-category staleness checks are now done on view navigation, not on tick)
 
             vec![]
         }
@@ -1068,11 +1074,25 @@ pub fn handle_app_event(
             tracing::info!("Library switch: loaded from cache: {} artists, {} albums, {} folders",
                 cached.artists.len(), cached.albums.len(), cached.root_folders.len());
 
-            // Track cache age for display in settings
-            state.cache_timestamp = Some(cached.timestamp);
-            state.playlist_cache_timestamp = Some(
-                if cached.playlist_timestamp > 0 { cached.playlist_timestamp } else { cached.timestamp }
-            );
+            // Load per-category timestamps (with backward compat migration)
+            if !cached.category_timestamps.is_empty() {
+                for (key, ts) in &cached.category_timestamps {
+                    if let Some(cat) = crate::app::state::RefreshCategory::from_cache_key(key) {
+                        state.category_timestamps.insert(cat, *ts);
+                    }
+                }
+            } else {
+                // Migrate from legacy shared timestamps
+                let lib_ts = cached.timestamp;
+                let playlist_ts = if cached.playlist_timestamp > 0 { cached.playlist_timestamp } else { lib_ts };
+                if lib_ts > 0 {
+                    use crate::app::state::RefreshCategory;
+                    for cat in RefreshCategory::all() {
+                        let ts = if cat.is_playlist_group() { playlist_ts } else { lib_ts };
+                        state.category_timestamps.insert(*cat, ts);
+                    }
+                }
+            }
 
             // Find library name for folder root column
             let lib_name = state.libraries.iter()
@@ -1167,15 +1187,6 @@ pub fn handle_app_event(
             if !cached.recently_added_albums.is_empty() {
                 state.recently_added_albums = cached.recently_added_albums;
             }
-            if !cached.recently_played_albums.is_empty() {
-                state.recently_played_albums = cached.recently_played_albums;
-            }
-
-            // Playlist tracks cache
-            if !cached.playlist_tracks.is_empty() {
-                state.playlist_tracks_cache = cached.playlist_tracks;
-            }
-
             vec![]
         }
         Event::LibraryCacheLoadFailed { library_key } => {
@@ -1193,13 +1204,9 @@ pub fn handle_app_event(
         Event::CacheRefreshCompleted { category, changed } => {
             state.background_refresh_in_progress.remove(&category);
             state.cache_dirty = true;
-            // Data was refreshed from the server — update the appropriate timestamp group
+            // Data was refreshed from the server — update the per-category timestamp
             let now = crate::cache::CacheData::now();
-            if category.is_playlist_group() {
-                state.playlist_cache_timestamp = Some(now);
-            } else {
-                state.cache_timestamp = Some(now);
-            }
+            state.category_timestamps.insert(category, now);
 
             // Clear the "Refreshing X..." status message if it matches this category
             let refresh_msg = format!("Refreshing {}...", category.display_name());
@@ -1349,9 +1356,8 @@ pub fn handle_app_event(
         // Playlist tracks loaded (non-blocking)
         Event::PlaylistTracksForMillerLoaded { playlist_key, tracks } => {
             state.playlist_nav.loading = false;
-            // Cache in state
+            // Keep in-memory cache for background preloading reference
             state.playlist_tracks_cache.insert(playlist_key, tracks.clone());
-            state.cache_dirty = true;
             let items = crate::app::state::BrowseItem::from_tracks(&tracks);
             let col = crate::app::state::BrowseColumn::new_with_tracks("tracks", items, tracks);
             state.playlist_nav.push_column(col);
@@ -1363,11 +1369,10 @@ pub fn handle_app_event(
             vec![]
         }
 
-        // Playlist tracks preloaded in background (cache only, no UI change)
+        // Playlist tracks preloaded in background (in-memory only, no UI change)
         Event::PlaylistTracksPreloaded { playlist_key, tracks } => {
             if !tracks.is_empty() {
                 state.playlist_tracks_cache.insert(playlist_key, tracks);
-                state.cache_dirty = true;
             }
             vec![]
         }

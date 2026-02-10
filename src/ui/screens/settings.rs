@@ -269,34 +269,23 @@ fn render_account_content(frame: &mut Frame, state: &AppState, area: Rect) {
             lines.push(Line::from(Span::styled(folder_text, Style::default().fg(t.colors.fg_muted))));
         }
 
-        // Cache ages
-        let now_ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let mut age_parts = vec![];
-        if let Some(cache_ts) = state.cache_timestamp {
-            let age = std::time::Duration::from_secs(now_ts.saturating_sub(cache_ts));
-            age_parts.push(format!("Library data: {}", format_duration(age)));
+        // Per-category cache ages
+        if !state.category_timestamps.is_empty() {
+            let now_ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            use crate::app::state::RefreshCategory;
+            for cat in RefreshCategory::all() {
+                if let Some(&ts) = state.category_timestamps.get(cat) {
+                    let age = std::time::Duration::from_secs(now_ts.saturating_sub(ts));
+                    lines.push(Line::from(Span::styled(
+                        format!("  {:20}{} ago", cat.display_name(), format_duration(age)),
+                        Style::default().fg(t.colors.fg_muted),
+                    )));
+                }
+            }
         }
-        if let Some(playlist_ts) = state.playlist_cache_timestamp {
-            let age = std::time::Duration::from_secs(now_ts.saturating_sub(playlist_ts));
-            age_parts.push(format!("Playlist data: {}", format_duration(age)));
-        }
-        if !age_parts.is_empty() {
-            lines.push(Line::from(Span::styled(
-                format!("  {}", age_parts.join(" | ")),
-                Style::default().fg(t.colors.fg_muted),
-            )));
-        }
-
-        // Last saved
-        let elapsed = state.last_cache_save.elapsed();
-        let dirty_marker = if state.cache_dirty { " (unsaved changes)" } else { "" };
-        lines.push(Line::from(Span::styled(
-            format!("  Last saved: {} ago{}", format_duration(elapsed), dirty_marker),
-            Style::default().fg(t.colors.fg_muted),
-        )));
 
         // Background refresh
         if !state.background_refresh_in_progress.is_empty() {

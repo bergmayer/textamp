@@ -38,7 +38,6 @@ pub enum PreloadType {
     Styles,
     Stations,
     RecentlyAdded,
-    RecentlyPlayed,
     /// Folders require additional lib_title for display.
     Folders { lib_title: String },
 }
@@ -113,6 +112,11 @@ impl EventLoop {
         // Clone event_tx for tick handler (avoids borrow conflicts with self in select!)
         let tick_event_tx = self.event_tx.clone();
 
+        // Guard: only send one TrackEnded per track. Set when TrackEnded is sent,
+        // cleared when a new track starts (playback_started_at changes).
+        let mut track_ended_sent = false;
+        let mut last_playback_started: Option<Instant> = None;
+
         // Main loop
         loop {
             // Render
@@ -136,14 +140,22 @@ impl EventLoop {
                         if state.playback.status == PlayStatus::Playing {
                             state.playback.position_ms += tick_rate.as_millis() as u64;
 
+                            // Reset track_ended_sent when a new track starts
+                            if state.playback.playback_started_at != last_playback_started {
+                                track_ended_sent = false;
+                                last_playback_started = state.playback.playback_started_at;
+                            }
+
                             // Detect track end: audio backend reports sink empty.
                             // Grace period: ignore is_finished() for the first second after
                             // playback starts to avoid spurious TrackEnded during cold-start
                             // (sink initialization, network buffering, decoder warmup).
+                            // Only send once per track to prevent duplicate events.
                             let playing_long_enough = state.playback.playback_started_at
                                 .map(|t| t.elapsed() >= Duration::from_secs(1))
                                 .unwrap_or(false);
-                            if playing_long_enough && audio.is_finished() {
+                            if playing_long_enough && audio.is_finished() && !track_ended_sent {
+                                track_ended_sent = true;
                                 let _ = tick_event_tx.send(Event::TrackEnded).await;
                             }
                         }
@@ -343,7 +355,7 @@ impl EventLoop {
         let follow_ups = match action {
             // System
             Quit | ShowError(_) | ClearError | SetStatus(_) | ClearStatus
-            | RefreshCategory(_) | CycleTheme | LoadArtwork | LoadWaveform
+            | RefreshCategory(_) | CheckStaleness(_) | CycleTheme | LoadArtwork | LoadWaveform
             | ToggleAlbumArtView | LoadAlbumArt(_) => {
                 handlers::dispatch_system::dispatch(&self.event_tx, &mut self.config, action, state, client).await?
             }
@@ -383,7 +395,7 @@ impl EventLoop {
             // Queue operations
             PlayTrack(_) | PlayTrackFromCategory(_) | PlayAlbum { .. }
             | EnqueueAlbum { .. } | ClearQueue | RemoveFromQueue(_)
-            | JumpToQueueIndex(_) | PlayRecentlyPlayedAlbum(_)
+            | JumpToQueueIndex(_)
             | EnqueueSelection | PromptSavePlaylist | SaveQueueAsPlaylist(_)
             | ToggleQueueShuffle => {
                 handlers::dispatch_queue::dispatch(&self.event_tx, action, state, client, audio).await?
@@ -404,7 +416,7 @@ impl EventLoop {
             | LoadAlbumGenreAlbums | LoadMoodAlbums | LoadStyleAlbums
             | CycleGenreContentType | RefreshGenreView
             | CycleArtistViewMode | RefreshArtistView | CycleNowPlayingMode
-            | RefreshNowPlayingView | LoadRecentlyPlayedAlbums
+            | RefreshNowPlayingView
             | CyclePlaylistsMode | RefreshPlaylistsView | LoadRecentlyAddedAlbums
             | ToggleBrowseShuffle => {
                 handlers::dispatch_browse::dispatch(&self.event_tx, action, state, client).await?

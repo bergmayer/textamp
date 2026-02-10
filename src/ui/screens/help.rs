@@ -42,7 +42,7 @@ NAVIGATION
 
 CATEGORIES (Ctrl+key - works from any view)
   Ctrl+A          Artists (cycles: artists/albums)
-  Ctrl+P          Playlists (cycles: all/stations/recently added/recently played)
+  Ctrl+P          Playlists (cycles: all/stations/recently added)
   Ctrl+G          Genres (cycles: genres/artist/album/moods/styles/stations)
   Ctrl+O          Folders
 
@@ -68,7 +68,8 @@ COMMANDS (Alt+/ to see, press again for stations)
   Alt+W           Save queue/radio as playlist
   Alt+C           Toggle cover art view (album grid with artwork)
 
-STATIONS (Alt+/ twice to see available stations)
+STATIONS & SHORTCUTS (Alt+/ twice to see available shortcuts)
+  Ctrl+Alt+A      Play track album (play album of current track)
   Ctrl+Alt+L      Library Radio (station based on your library)
   Ctrl+Alt+R      Random Album Radio (shuffled albums)
   Ctrl+Alt+S      Quick library switcher
@@ -112,7 +113,7 @@ SONIC ADVENTURE (Alt+A)
   Tracks can be selected from Browse or Search (Tracks tab)
 
 PLAYLISTS (Ctrl+P)
-  Ctrl+P cycles:  All -> Stations -> Recently Added -> Recently Played
+  Ctrl+P cycles:  All -> Stations -> Recently Added
 
 GENRES (Ctrl+G)
   Ctrl+G cycles:  Genres -> Artist Genres -> Album Genres -> Moods -> Styles -> Stations

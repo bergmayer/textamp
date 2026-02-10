@@ -104,6 +104,7 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
                 current_track_key,
                 filter_results,
                 filter_column,
+                false,
                 layout.left_panel,
                 layout.right_panel,
             );
@@ -131,6 +132,7 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
                     current_track_key,
                     filter_results,
                     filter_column,
+                    true,
                     layout.left_panel,
                     layout.right_panel,
                 );
@@ -168,6 +170,7 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
                     current_track_key,
                     filter_results,
                     filter_column,
+                    false,
                     layout.left_panel,
                     layout.right_panel,
                 );
@@ -236,6 +239,22 @@ fn render_settings(frame: &mut Frame, state: &AppState) {
 }
 
 /// Render folder browsing view (Miller columns style) with lazy/windowed rendering.
+/// Truncate a path from the left, keeping the end visible.
+/// E.g. "D:\music\artist\album" with max 15 → "…\artist\album"
+fn truncate_path_left(path: &str, max_width: usize) -> String {
+    let char_count = path.chars().count();
+    if char_count <= max_width {
+        return path.to_string();
+    }
+    if max_width <= 1 {
+        return "…".to_string();
+    }
+    let keep = max_width - 1; // 1 char for "…"
+    let skip = char_count - keep;
+    let tail: String = path.chars().skip(skip).collect();
+    format!("…{}", tail)
+}
+
 fn render_folder_view(
     frame: &mut Frame,
     state: &AppState,
@@ -319,13 +338,18 @@ fn render_folder_view(
             let border_color = if is_focused { t.colors.border_focused } else { t.colors.border };
             let is_root = col_idx == 0;
 
-            // Show title for root column, or any shuffled column
+            // Show title for all columns; folder paths truncate from the left
+            let max_title_width = col_area.width.saturating_sub(4) as usize; // borders + padding
             let title = if is_root && col.is_shuffled() {
                 " folders (shuffled) ".to_string()
             } else if is_root {
                 " folders ".to_string()
             } else if col.is_shuffled() {
-                format!(" {} (shuffled) ", col.title)
+                let t = truncate_path_left(&col.title, max_title_width);
+                format!(" {} (shuffled) ", t)
+            } else if !col.title.is_empty() {
+                let t = truncate_path_left(&col.title, max_title_width);
+                format!(" {} ", t)
             } else {
                 String::new()
             };
@@ -473,6 +497,7 @@ fn render_browse_miller_columns(
     current_track_key: Option<&str>,
     filter_results: Option<&crate::app::state::ListFilterResults>,
     filter_column: Option<usize>,
+    two_row_tracks: bool,
     left_area: Rect,
     right_area: Rect,
 ) {
@@ -557,13 +582,15 @@ fn render_browse_miller_columns(
 
         let border_color = if is_focused { t.colors.border_focused } else { t.colors.border };
 
-        // Show title for root column, or any shuffled column
+        // Show title for all columns
         let title = if is_root && col.is_shuffled() {
             format!(" {} (shuffled) ", root_title)
         } else if is_root {
             format!(" {} ", root_title)
         } else if col.is_shuffled() {
             format!(" {} (shuffled) ", col.title)
+        } else if !col.title.is_empty() {
+            format!(" {} ", col.title)
         } else {
             String::new()
         };
@@ -606,6 +633,11 @@ fn render_browse_miller_columns(
             // Calculate max width for text (minus prefix and padding)
             let max_text_width = inner.width.saturating_sub(4) as usize;
 
+            // Check if this column should use 2-row track display
+            let is_two_row = two_row_tracks && col.items.first().map_or(false, |item| matches!(item, BrowseItem::Track { .. }));
+            let rows_per_item = if is_two_row { 2 } else { 1 };
+            let visible_item_count = visible_height / rows_per_item;
+
             // When filter is active on this column, only show filtered items
             let (items_to_show, total_display_items, filter_active_on_col): (Vec<(usize, &BrowseItem)>, usize, bool) =
                 if is_filter_column && filter_results.is_some() {
@@ -641,12 +673,12 @@ fn render_browse_miller_columns(
                 };
                 let scroll_offset = match state.browse_scroll_pin {
                     Some((pin_col, pinned)) if pin_col == col_idx => pinned,
-                    _ => NavigationService::calc_scroll_offset(display_selected_idx, visible_height, total_display_items),
+                    _ => NavigationService::calc_scroll_offset(display_selected_idx, visible_item_count, total_display_items),
                 };
 
                 let visible_items: Vec<ListItem> = items_to_show.into_iter()
                     .skip(scroll_offset)
-                    .take(visible_height)
+                    .take(visible_item_count)
                     .map(|(orig_idx, item)| {
                         let is_selected = orig_idx == selected_idx;
 
@@ -660,15 +692,13 @@ fn render_browse_miller_columns(
                             _ => "▸ ", // Drillable items get arrow
                         };
 
-                        // Full text (before truncation)
+                        // Full text for line 1 (before truncation)
                         let full_text = match item {
                             BrowseItem::Album { title, artist, year, .. } => {
                                 let name = if title.is_empty() {
                                     artist.clone()
-                                } else if artist.is_empty() {
-                                    title.clone()
                                 } else {
-                                    format!("{} - {}", title, artist)
+                                    title.clone()
                                 };
                                 if let Some(y) = year {
                                     format!("{} ({})", name, y)
@@ -677,8 +707,13 @@ fn render_browse_miller_columns(
                                 }
                             }
                             BrowseItem::Track { title, track_number, .. } => {
-                                if let Some(num) = track_number {
-                                    format!("{:02}. {}", num, title)
+                                // Show track numbers only in album drill-downs (1-row mode)
+                                if !is_two_row {
+                                    if let Some(num) = track_number {
+                                        format!("{:02}. {}", num, title)
+                                    } else {
+                                        title.clone()
+                                    }
                                 } else {
                                     title.clone()
                                 }
@@ -705,17 +740,95 @@ fn render_browse_miller_columns(
                             truncate_middle(&full_text, max_text_width)
                         };
 
-                        let style = if is_now_playing {
-                            Style::default().fg(t.colors.fg_accent).add_modifier(ratatui::style::Modifier::BOLD)
-                        } else if is_selected && is_focused {
-                            Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
-                        } else if is_selected {
-                            Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
-                        } else {
-                            Style::default().fg(t.colors.fg_primary)
-                        };
+                        // Build ListItem — 2-row for playlist tracks, 1-row otherwise
+                        if is_two_row {
+                            if let BrowseItem::Track { artist_name, album_name, year, .. } = item {
+                                // Subtitle content: "Artist — Album (Year)"
+                                let subtitle_content = match (artist_name.as_ref(), album_name.as_ref()) {
+                                    (Some(a), Some(b)) => {
+                                        if let Some(y) = year {
+                                            format!("{} — {} ({})", a, b, y)
+                                        } else {
+                                            format!("{} — {}", a, b)
+                                        }
+                                    }
+                                    (Some(a), None) => a.clone(),
+                                    (None, Some(b)) => {
+                                        if let Some(y) = year {
+                                            format!("{} ({})", b, y)
+                                        } else {
+                                            b.clone()
+                                        }
+                                    }
+                                    (None, None) => String::new(),
+                                };
 
-                        ListItem::new(format!("{}{}", prefix, display_text)).style(style)
+                                // Subtitle display width (5 indent + 2 padding = 7 overhead)
+                                let subtitle_width = (inner.width as usize).saturating_sub(7);
+
+                                // Marquee for subtitle row (independent of title)
+                                let subtitle_display = if is_selected && is_focused && !subtitle_content.is_empty() {
+                                    let sub_key = format!("miller:{}:{}:sub", col_idx, orig_idx);
+                                    let mut sub_marquee = state.marquee_subtitle.borrow_mut();
+                                    if sub_marquee.selection_key != sub_key {
+                                        sub_marquee.reset(sub_key, subtitle_content.clone(), subtitle_width);
+                                    }
+                                    if sub_marquee.phase == crate::app::state::MarqueePhase::Inactive {
+                                        truncate_middle(&subtitle_content, subtitle_width)
+                                    } else {
+                                        let text = sub_marquee.display_text();
+                                        drop(sub_marquee);
+                                        text
+                                    }
+                                } else {
+                                    truncate_middle(&subtitle_content, subtitle_width)
+                                };
+
+                                let (line1_fg, line2_fg, item_bg) = if is_now_playing {
+                                    (
+                                        Style::default().fg(t.colors.fg_accent).add_modifier(ratatui::style::Modifier::BOLD),
+                                        Style::default().fg(t.colors.fg_accent),
+                                        Style::default(),
+                                    )
+                                } else if is_selected {
+                                    (
+                                        Style::default().fg(t.colors.selection_text),
+                                        Style::default().fg(t.colors.selection_text),
+                                        Style::default().bg(t.colors.selection_bar_bg),
+                                    )
+                                } else {
+                                    (
+                                        Style::default().fg(t.colors.fg_primary),
+                                        Style::default().fg(t.colors.fg_muted),
+                                        Style::default(),
+                                    )
+                                };
+
+                                let text = Text::from(vec![
+                                    Line::from(Span::styled(format!("{}{}", prefix, display_text), line1_fg)),
+                                    Line::from(Span::styled(format!("     {}", subtitle_display), line2_fg)),
+                                ]);
+                                ListItem::new(text).style(item_bg)
+                            } else {
+                                // Non-track item in a two-row column (shouldn't happen but handle gracefully)
+                                let style = if is_selected {
+                                    Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
+                                } else {
+                                    Style::default().fg(t.colors.fg_primary)
+                                };
+                                ListItem::new(format!("{}{}", prefix, display_text)).style(style)
+                            }
+                        } else {
+                            let style = if is_now_playing {
+                                Style::default().fg(t.colors.fg_accent).add_modifier(ratatui::style::Modifier::BOLD)
+                            } else if is_selected {
+                                Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
+                            } else {
+                                Style::default().fg(t.colors.fg_primary)
+                            };
+
+                            ListItem::new(format!("{}{}", prefix, display_text)).style(style)
+                        }
                     })
                     .collect();
 
@@ -723,7 +836,7 @@ fn render_browse_miller_columns(
                 frame.render_widget(list, inner);
 
                 // Position indicator for long lists
-                if total_display_items > visible_height {
+                if total_display_items > visible_item_count {
                     let footer = format!("{}/{}", display_selected_idx + 1, total_display_items);
                     let footer_area = Rect::new(
                         col_area.x + col_area.width.saturating_sub(footer.len() as u16 + 2),
@@ -1224,6 +1337,7 @@ fn render_shortcuts(frame: &mut Frame, state: &AppState, area: Rect) {
     if show_ctrl_alt_bar {
         // Ctrl+Alt bar: global station shortcuts
         let shortcuts: Vec<(&str, &str)> = vec![
+            ("^⌥A", "play track album"),
             ("^⌥L", "library radio"),
             ("^⌥R", "random album"),
             ("^⌥S", "switch library"),

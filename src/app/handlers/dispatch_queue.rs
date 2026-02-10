@@ -1,5 +1,5 @@
 //! Queue dispatch handlers: PlayTrack, PlayTrackFromCategory, PlayAlbum, EnqueueAlbum,
-//! ClearQueue, RemoveFromQueue, JumpToQueueIndex, PlayRecentlyPlayedAlbum,
+//! ClearQueue, RemoveFromQueue, JumpToQueueIndex,
 //! EnqueueSelection, PromptSavePlaylist, SaveQueueAsPlaylist.
 
 use crate::app::{Action, AppState, Event};
@@ -209,13 +209,6 @@ pub async fn dispatch(
                 if let Some(track) = state.queue.get(idx).cloned() {
                     follow_ups.push(Action::PlayTrack(track));
                 }
-            }
-        }
-        Action::PlayRecentlyPlayedAlbum(idx) => {
-            // Play album from recently played list
-            if let Some(album) = state.recently_played_albums.get(idx).cloned() {
-                let rating_key = album.rating_key.clone();
-                follow_ups.push(Action::PlayAlbum { rating_key });
             }
         }
         Action::EnqueueSelection => {

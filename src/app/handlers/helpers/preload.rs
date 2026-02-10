@@ -91,13 +91,6 @@ pub fn preload_data(event_tx: &mpsc::Sender<Event>, preload_type: PreloadType, l
                     let _ = event_tx.send(Event::RecentlyAddedPreloaded { library_key: lib_key, albums: data }).await;
                 }
             }
-            PreloadType::RecentlyPlayed => {
-                tracing::debug!("Preloading recently played albums for library: {}", lib_key);
-                if let Ok(data) = client.get_recently_played_albums(lib_key_ref, 50).await {
-                    tracing::debug!("Recently played albums preloaded: {} items", data.len());
-                    let _ = event_tx.send(Event::RecentlyPlayedPreloaded { library_key: lib_key, albums: data }).await;
-                }
-            }
             PreloadType::Folders { lib_title } => {
                 tracing::debug!("Preloading folders for library: {}", lib_key);
                 if let Ok(response) = client.get_library_folders(lib_key_ref).await {
@@ -116,7 +109,7 @@ pub fn preload_data(event_tx: &mpsc::Sender<Event>, preload_type: PreloadType, l
 ///
 /// Crawls root-level folder keys and fetches their immediate contents from the Plex API,
 /// sending results back in batches. Skips folders that are already cached and fresh
-/// (< 32 days old). Stale entries are re-fetched incrementally — the old data stays
+/// (< 72h old). Stale entries are re-fetched incrementally — the old data stays
 /// available as a warm cache until overwritten by fresh results.
 /// Rate-limited to ~50ms between requests to avoid overloading the server.
 /// Result of attempting to start a subfolder preload.
@@ -140,7 +133,7 @@ pub fn maybe_start_subfolder_preload(
     state: &mut crate::app::AppState,
     client: &PlexClient,
 ) -> SubfolderPreloadResult {
-    use crate::plex::constants::CACHE_VERY_STALE_THRESHOLD_SECS;
+    use crate::plex::constants::CACHE_STALE_THRESHOLD_SECS;
 
     // Guard: already active
     if state.subfolder_preload_active {
@@ -172,11 +165,11 @@ pub fn maybe_start_subfolder_preload(
         return SubfolderPreloadResult::NoSubfolders;
     }
 
-    // Determine which root folder keys need fetching (missing or stale > 32 days)
+    // Determine which root folder keys need fetching (missing or stale > 72h)
     let root_keys_to_fetch = crate::services::CacheService::keys_needing_refresh(
         &root_folder_keys,
         &state.folder_contents_cache,
-        CACHE_VERY_STALE_THRESHOLD_SECS,
+        CACHE_STALE_THRESHOLD_SECS,
     );
 
     // Also collect subfolder keys from already-cached root folders (one level deeper)
@@ -197,7 +190,7 @@ pub fn maybe_start_subfolder_preload(
         crate::services::CacheService::keys_needing_refresh(
             &child_folder_keys,
             &state.folder_contents_cache,
-            CACHE_VERY_STALE_THRESHOLD_SECS,
+            CACHE_STALE_THRESHOLD_SECS,
         )
     };
 
@@ -270,7 +263,8 @@ pub fn maybe_start_subfolder_preload(
                 match client.get_folder_contents(&folder_key).await {
                     Ok(response) => {
                         let items = FolderService::from_response(&response);
-                        Some((folder_key, CachedFolder::new(items)))
+                        let folder_path = FolderService::folder_path(&response);
+                        Some((folder_key, CachedFolder::with_path(items, folder_path)))
                     }
                     Err(e) => {
                         tracing::warn!("Subfolder preload failed for {}: {}", folder_key, e);
@@ -345,7 +339,8 @@ pub fn maybe_start_subfolder_preload(
                     match client.get_folder_contents(&folder_key).await {
                         Ok(response) => {
                             let items = FolderService::from_response(&response);
-                            Some((folder_key, CachedFolder::new(items)))
+                            let folder_path = FolderService::folder_path(&response);
+                            Some((folder_key, CachedFolder::with_path(items, folder_path)))
                         }
                         Err(e) => {
                             tracing::warn!("Child subfolder preload failed for {}: {}", folder_key, e);
@@ -400,5 +395,4 @@ pub fn preload_all_library_data(event_tx: &mpsc::Sender<Event>, lib_key: &str, l
     preload_data(event_tx, PreloadType::Stations, lib_key, client);
     preload_data(event_tx, PreloadType::Playlists, lib_key, client);
     preload_data(event_tx, PreloadType::RecentlyAdded, lib_key, client);
-    preload_data(event_tx, PreloadType::RecentlyPlayed, lib_key, client);
 }

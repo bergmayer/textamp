@@ -86,8 +86,6 @@ pub enum Action {
     // Now Playing view mode cycling
     CycleNowPlayingMode, // Ctrl+N when already in Now Playing: cycle Queue → Recently Played
     RefreshNowPlayingView, // Refresh now playing view after mode change (shared logic)
-    LoadRecentlyPlayedAlbums,
-    PlayRecentlyPlayedAlbum(usize),  // Play album at index in recently played list
 
     // Playlists view mode cycling
     CyclePlaylistsMode, // Ctrl+P when already in Playlists: cycle All → Recently Added
@@ -189,6 +187,8 @@ pub enum Action {
     ClearStatus,
     Refresh,
     RefreshCategory(crate::app::state::RefreshCategory),
+    /// Check cache staleness on view navigation (tier-1: 72h for this category, tier-2: 32d for all others).
+    CheckStaleness(crate::app::state::RefreshCategory),
 
     // Theme
     CycleTheme,

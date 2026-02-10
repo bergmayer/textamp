@@ -81,6 +81,14 @@ pub struct FolderMetadata {
     #[serde(default)]
     pub index: Option<u32>,
 
+    /// Parent (album) rating key
+    #[serde(default)]
+    pub parent_rating_key: Option<String>,
+
+    /// Grandparent (artist) rating key
+    #[serde(default)]
+    pub grandparent_rating_key: Option<String>,
+
     /// Media information
     #[serde(default, rename = "Media")]
     pub media: Vec<FolderMedia>,
@@ -166,6 +174,15 @@ pub struct FolderItem {
     pub rating_key: Option<String>,
     /// Duration in milliseconds (for tracks)
     pub duration_ms: Option<u64>,
+    /// Filesystem path (for folders, from Plex API)
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Parent (album) rating key (for tracks)
+    #[serde(default)]
+    pub parent_rating_key: Option<String>,
+    /// Grandparent (artist) rating key (for tracks)
+    #[serde(default)]
+    pub grandparent_rating_key: Option<String>,
 }
 
 impl FolderItem {
@@ -177,17 +194,44 @@ impl FolderItem {
             item_type: FolderItemType::Folder,
             rating_key: None,
             duration_ms: None,
+            path: None,
+            parent_rating_key: None,
+            grandparent_rating_key: None,
+        }
+    }
+
+    /// Create a new folder item with filesystem path.
+    pub fn folder_with_path(key: String, title: String, path: Option<String>) -> Self {
+        Self {
+            key,
+            title,
+            item_type: FolderItemType::Folder,
+            rating_key: None,
+            duration_ms: None,
+            path,
+            parent_rating_key: None,
+            grandparent_rating_key: None,
         }
     }
 
     /// Create a new track item.
-    pub fn track(key: String, title: String, rating_key: String, duration_ms: Option<u64>) -> Self {
+    pub fn track(
+        key: String,
+        title: String,
+        rating_key: String,
+        duration_ms: Option<u64>,
+        parent_rating_key: Option<String>,
+        grandparent_rating_key: Option<String>,
+    ) -> Self {
         Self {
             key,
             title,
             item_type: FolderItemType::Track,
             rating_key: Some(rating_key),
             duration_ms,
+            path: None,
+            parent_rating_key,
+            grandparent_rating_key,
         }
     }
 

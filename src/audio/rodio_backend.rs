@@ -170,7 +170,10 @@ impl AudioBackend for RodioBackend {
     fn is_finished(&self) -> bool {
         match &self.sink {
             Some(sink) => sink.empty(),
-            None => true,
+            // No sink = nothing was playing, not "finished".
+            // Returning false prevents spurious TrackEnded when status is
+            // incorrectly set to Playing without actual audio output.
+            None => false,
         }
     }
 

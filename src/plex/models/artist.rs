@@ -69,7 +69,6 @@ impl Album {
     }
 
     /// Create an Album stub from a Track's parent info.
-    /// Used for updating recently played without fetching full album data.
     pub fn from_track(track: &Track) -> Option<Self> {
         let rating_key = track.parent_rating_key.as_ref()?;
         Some(Album {
@@ -113,6 +112,10 @@ pub struct Track {
     pub grandparent_rating_key: Option<String>,
     #[serde(default, deserialize_with = "from_str_or_num_opt")]
     pub index: Option<u32>,
+    #[serde(default, deserialize_with = "from_str_or_num_opt")]
+    pub year: Option<u16>,
+    #[serde(default, deserialize_with = "from_str_or_num_opt")]
+    pub parent_year: Option<u16>,
     #[serde(default, deserialize_with = "from_str_or_num_opt")]
     pub duration: Option<u64>,
     #[serde(default, rename = "Media")]

@@ -96,6 +96,11 @@ pub enum Event {
         folder_key: String,
         cached_folder: crate::plex::CachedFolder,
     },
+    /// Async path discovery completed for a folder column.
+    FolderPathDiscovered {
+        folder_key: String,
+        path: String,
+    },
     /// Artwork cache stats computed in background.
     ArtworkCacheStats {
         count: usize,
@@ -113,7 +118,6 @@ pub enum Event {
     StylesPreloaded { library_key: String, styles: Vec<Genre> },
     StationsPreloaded { library_key: String, stations: Vec<Station> },
     RecentlyAddedPreloaded { library_key: String, albums: Vec<Album> },
-    RecentlyPlayedPreloaded { library_key: String, albums: Vec<Album> },
 
     // Library switch (async cache load)
     LibraryCacheLoaded { library_key: String, cached: Box<crate::plex::CacheData> },

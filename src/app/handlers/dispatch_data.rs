@@ -63,8 +63,10 @@ pub async fn dispatch(
                             let lib_title = "Music".to_string();
                             load_from_cache(state, cached, lib_key, &lib_title);
 
-                            // Start background API refresh
-                            helpers::preload_all_library_data(event_tx, lib_key, &lib_title, client);
+                            // Use two-tier staleness check for the current view
+                            if let Some(tier1_cat) = helpers::current_view_category(state) {
+                                helpers::check_staleness_on_view_load(event_tx, state, client, tier1_cat);
+                            }
                         }
                     }
                 }
@@ -305,16 +307,7 @@ pub async fn dispatch(
                                 }
                                 _ => {
                                     let title = playlist_title.unwrap_or_default();
-                                    if title.contains("recently played") {
-                                        if let Some(lib_key) = &lib_key {
-                                            match client.get_recently_played_albums(lib_key, 50).await {
-                                                Ok(albums) => Ok(Either::Albums(albums, "Showing recently played albums".to_string())),
-                                                Err(e) => Err(e),
-                                            }
-                                        } else {
-                                            Err(crate::api::ApiError::NoServerSelected)
-                                        }
-                                    } else if title.contains("recently added") {
+                                    if title.contains("recently added") {
                                         if let Some(lib_key) = &lib_key {
                                             match client.get_recently_added_albums(lib_key, 50).await {
                                                 Ok(albums) => Ok(Either::Albums(albums, "Showing recently added albums".to_string())),
@@ -437,11 +430,25 @@ pub async fn dispatch(
 /// Load cached library data into state for instant startup.
 /// Mirrors the LibraryCacheLoaded event handler logic.
 fn load_from_cache(state: &mut AppState, cached: CacheData, lib_key: &str, lib_title: &str) {
-    // Track cache age for display in settings
-    state.cache_timestamp = Some(cached.timestamp);
-    state.playlist_cache_timestamp = Some(
-        if cached.playlist_timestamp > 0 { cached.playlist_timestamp } else { cached.timestamp }
-    );
+    // Load per-category timestamps (with backward compat migration)
+    if !cached.category_timestamps.is_empty() {
+        for (key, ts) in &cached.category_timestamps {
+            if let Some(cat) = crate::app::state::RefreshCategory::from_cache_key(key) {
+                state.category_timestamps.insert(cat, *ts);
+            }
+        }
+    } else {
+        // Migrate from legacy shared timestamps
+        let lib_ts = cached.timestamp;
+        let playlist_ts = if cached.playlist_timestamp > 0 { cached.playlist_timestamp } else { lib_ts };
+        if lib_ts > 0 {
+            use crate::app::state::RefreshCategory;
+            for cat in RefreshCategory::all() {
+                let ts = if cat.is_playlist_group() { playlist_ts } else { lib_ts };
+                state.category_timestamps.insert(*cat, ts);
+            }
+        }
+    }
 
     // Core library data - IMPORTANT: Always re-sort after loading from cache
     if !cached.artists.is_empty() {
@@ -527,13 +534,5 @@ fn load_from_cache(state: &mut AppState, cached: CacheData, lib_key: &str, lib_t
     // Recent content
     if !cached.recently_added_albums.is_empty() {
         state.recently_added_albums = cached.recently_added_albums;
-    }
-    if !cached.recently_played_albums.is_empty() {
-        state.recently_played_albums = cached.recently_played_albums;
-    }
-
-    // Playlist tracks cache
-    if !cached.playlist_tracks.is_empty() {
-        state.playlist_tracks_cache = cached.playlist_tracks;
     }
 }

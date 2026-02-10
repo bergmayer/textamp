@@ -12,14 +12,11 @@
 //!
 //! Subfolders have different caching behavior than other library data:
 //! - **Lazy caching**: Only cached when navigated to (not preloaded on startup)
-//! - **No auto-refresh**: Stale subfolders are NOT automatically refreshed
+//! - **Persistent**: Subfolder entries are never pruned — they persist indefinitely
 //! - **Manual refresh**: F5 refreshes the currently focused subfolder
-//! - **Warm cache (32+ days)**: Very stale entries are served from cache but
-//!   re-fetched in background when accessed ("warm cache" behavior)
 //! - **Manual crawl**: Users can start a subfolder crawl from Settings > Libraries
 
 use crate::plex::{CacheData, CachedFolder, LibraryCache};
-use crate::plex::constants::CACHE_VERY_STALE_THRESHOLD_SECS;
 use crate::plex::models::{Album, Artist, FolderItem, Genre, Playlist, Station};
 use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -94,7 +91,6 @@ pub struct CacheDataSources<'a> {
     pub styles: &'a [Genre],
     pub stations: &'a [Station],
     pub recently_added_albums: &'a [Album],
-    pub recently_played_albums: &'a [Album],
 }
 
 /// Service for cache operations.
@@ -127,7 +123,6 @@ impl CacheService {
         cache_data.styles = sources.styles.to_vec();
         cache_data.stations = sources.stations.to_vec();
         cache_data.recently_added_albums = sources.recently_added_albums.to_vec();
-        cache_data.recently_played_albums = sources.recently_played_albums.to_vec();
 
         cache_data
     }
@@ -138,43 +133,6 @@ impl CacheService {
     pub fn is_cache_stale(cache: &CacheData, ttl_secs: u64) -> bool {
         let now = current_timestamp();
         cache.timestamp + ttl_secs < now
-    }
-
-    /// Filter out very stale subfolder cache entries.
-    ///
-    /// Entries older than `very_stale_threshold_secs` (default 32 days) are removed.
-    /// This is different from other caches which get refreshed - subfolders are
-    /// deleted to prevent accumulation of stale folder data.
-    ///
-    /// Returns the number of entries that were removed.
-    pub fn filter_stale_subfolders(
-        folder_contents: &mut HashMap<String, CachedFolder>,
-        very_stale_threshold_secs: u64,
-    ) -> usize {
-        let now = current_timestamp();
-        let initial_count = folder_contents.len();
-
-        folder_contents.retain(|key, cached| {
-            let age_secs = now.saturating_sub(cached.timestamp);
-            let keep = age_secs < very_stale_threshold_secs;
-            if !keep {
-                tracing::debug!(
-                    "Removing very stale subfolder cache: {} (age: {} days)",
-                    key,
-                    age_secs / (24 * 60 * 60)
-                );
-            }
-            keep
-        });
-
-        initial_count - folder_contents.len()
-    }
-
-    /// Filter stale subfolders using the default threshold (32 days).
-    pub fn filter_stale_subfolders_default(
-        folder_contents: &mut HashMap<String, CachedFolder>,
-    ) -> usize {
-        Self::filter_stale_subfolders(folder_contents, CACHE_VERY_STALE_THRESHOLD_SECS)
     }
 
     /// Save cache data synchronously.
@@ -327,50 +285,6 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_stale_subfolders() {
-        let now = current_timestamp();
-        let one_day = 24 * 60 * 60;
-        let threshold = 32 * one_day;
-
-        let mut folder_contents = HashMap::new();
-
-        // Fresh entry (1 day old)
-        folder_contents.insert(
-            "fresh".to_string(),
-            CachedFolder {
-                items: vec![],
-                timestamp: now - one_day,
-            },
-        );
-
-        // Old but not very stale (20 days old)
-        folder_contents.insert(
-            "old".to_string(),
-            CachedFolder {
-                items: vec![],
-                timestamp: now - (20 * one_day),
-            },
-        );
-
-        // Very stale (40 days old) - should be removed
-        folder_contents.insert(
-            "very_stale".to_string(),
-            CachedFolder {
-                items: vec![],
-                timestamp: now - (40 * one_day),
-            },
-        );
-
-        let removed = CacheService::filter_stale_subfolders(&mut folder_contents, threshold);
-
-        assert_eq!(removed, 1);
-        assert_eq!(folder_contents.len(), 2);
-        assert!(folder_contents.contains_key("fresh"));
-        assert!(folder_contents.contains_key("old"));
-        assert!(!folder_contents.contains_key("very_stale"));
-    }
-
-    #[test]
     fn test_keys_needing_refresh() {
         let now = current_timestamp();
         let one_day = 24 * 60 * 60;
@@ -384,6 +298,7 @@ mod tests {
             CachedFolder {
                 items: vec![],
                 timestamp: now - one_day,
+                path: None,
             },
         );
 
@@ -393,6 +308,7 @@ mod tests {
             CachedFolder {
                 items: vec![],
                 timestamp: now - (40 * one_day),
+                path: None,
             },
         );
 
@@ -420,11 +336,11 @@ mod tests {
         let mut folder_contents = HashMap::new();
         folder_contents.insert(
             "a".to_string(),
-            CachedFolder { items: vec![], timestamp: now - one_day },
+            CachedFolder { items: vec![], timestamp: now - one_day, path: None },
         );
         folder_contents.insert(
             "b".to_string(),
-            CachedFolder { items: vec![], timestamp: now - (10 * one_day) },
+            CachedFolder { items: vec![], timestamp: now - (10 * one_day), path: None },
         );
 
         let root_keys = vec!["a".to_string(), "b".to_string()];

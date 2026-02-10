@@ -172,10 +172,14 @@ pub async fn dispatch(
         }
         Action::StartPendingPlayback => {
             match audio.start_pending_playback() {
-                Ok(()) => {
+                Ok(true) => {
                     state.playback.status = PlayStatus::Playing;
                     state.playback.playback_started_at = Some(std::time::Instant::now());
                     state.consecutive_playback_errors = 0;
+                }
+                Ok(false) => {
+                    // No pending data — stale BufferingEnd event, ignore
+                    tracing::debug!("StartPendingPlayback: no pending data (stale event?)");
                 }
                 Err(e) => {
                     // Route through PlaybackError for retry/skip logic

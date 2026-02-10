@@ -18,7 +18,7 @@
 //! This design provides fast navigation for frequently-accessed folders
 //! while keeping data reasonably fresh.
 
-use super::models::{Album, Artist, FolderItem, Genre, Playlist, Station, Track};
+use super::models::{Album, Artist, FolderItem, Genre, Playlist, Station};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -36,6 +36,9 @@ pub struct CachedFolder {
     pub items: Vec<FolderItem>,
     /// Unix timestamp when this folder was cached.
     pub timestamp: u64,
+    /// Filesystem path of this folder (for column headers).
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 impl CachedFolder {
@@ -44,6 +47,16 @@ impl CachedFolder {
         Self {
             items,
             timestamp: current_timestamp(),
+            path: None,
+        }
+    }
+
+    /// Create a new cached folder with path and current timestamp.
+    pub fn with_path(items: Vec<FolderItem>, path: Option<String>) -> Self {
+        Self {
+            items,
+            timestamp: current_timestamp(),
+            path,
         }
     }
 
@@ -100,12 +113,9 @@ pub struct CacheData {
     // Recent content (from hubs)
     #[serde(default)]
     pub recently_added_albums: Vec<Album>,
+    // Per-category refresh timestamps (category display_name -> epoch secs)
     #[serde(default)]
-    pub recently_played_albums: Vec<Album>,
-
-    // Playlist tracks cache (playlist_key -> tracks)
-    #[serde(default)]
-    pub playlist_tracks: HashMap<String, Vec<Track>>,
+    pub category_timestamps: HashMap<String, u64>,
 }
 
 impl CacheData {
