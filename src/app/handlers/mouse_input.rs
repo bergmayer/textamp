@@ -1171,7 +1171,10 @@ fn handle_now_playing_down(click_row: u16, click_col: u16, state: &mut AppState)
                                 state.now_playing_mode = crate::app::state::NowPlayingMode::NowPlaying;
                                 return vec![Action::LoadWaveform];
                             }
-                            return vec![Action::JumpToQueueIndex(queue_idx)];
+                            return match state.playback_mode {
+                                PlaybackMode::Radio => vec![Action::JumpToRadioTrack(queue_idx)],
+                                _ => vec![Action::JumpToQueueIndex(queue_idx)],
+                            };
                         }
                     }
                     state.list_state.queue_index = actual_idx;
