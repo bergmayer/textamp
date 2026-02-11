@@ -1778,6 +1778,8 @@ pub struct WaveformState {
     pub generating: bool,
     /// Error message if generation failed.
     pub error: Option<String>,
+    /// Number of silent retries attempted for current track.
+    pub retry_count: u8,
 }
 
 /// Search result section.

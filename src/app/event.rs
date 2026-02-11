@@ -134,6 +134,7 @@ pub enum Event {
     WaveformGenerated { track_key: String, data: WaveformData },
     WaveformFailed { track_key: String, error: String },
     WaveformCacheHit { track_key: String, data: WaveformData },
+    WaveformRetry(String),
 
     // Station loading (background)
     StationTracksLoaded { station_key: String, station_title: String, tracks: Vec<Track>, time_travel_decades: Vec<String> },

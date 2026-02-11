@@ -72,12 +72,16 @@ fn render_queue_mode(frame: &mut Frame, state: &AppState, area: Rect) {
     let show_artwork = state.artwork_data.is_some() && area.width > 60;
 
     if show_artwork {
+        // Match waveform view's artwork box: 40% of height, width = height * 2
+        let art_height = (area.height * 40 / 100).max(12);
+        let art_width = (art_height * 2).min(area.width * 40 / 100).max(25);
+
         // Split area into artwork (left) and track list (right)
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Length(25), // Artwork area (square-ish)
-                Constraint::Min(40),    // Track list
+                Constraint::Length(art_width),
+                Constraint::Min(40),
             ])
             .split(area);
 
@@ -339,12 +343,18 @@ fn render_visualizer_mode(frame: &mut Frame, state: &AppState, area: Rect) {
     let show_artwork = state.artwork_data.is_some() && area.width > 50;
 
     if show_artwork {
+        // Top panel takes 40% of height (min 12) for artwork + track info
+        let top_height = (area.height * 40 / 100).max(12);
+        // Artwork width matches height for square image (2:1 char aspect ratio),
+        // capped at 50% of total width
+        let art_width = (top_height * 2).min(area.width * 50 / 100).max(24);
+
         // Layout with artwork: top row has art + info, bottom has waveform
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(12), // Artwork + track info row
-                Constraint::Min(8),     // Waveform seekbar
+                Constraint::Length(top_height),
+                Constraint::Min(8),
             ])
             .split(area);
 
@@ -352,8 +362,8 @@ fn render_visualizer_mode(frame: &mut Frame, state: &AppState, area: Rect) {
         let top_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Length(24), // Artwork (square-ish)
-                Constraint::Min(30),    // Track info
+                Constraint::Length(art_width),
+                Constraint::Min(30),
             ])
             .split(chunks[0]);
 

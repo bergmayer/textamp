@@ -252,7 +252,7 @@ pub async fn play_current_track(
                         let client = crate::api::PlexClient::new_with_url(&server_url, token.as_deref(), &client_id);
                         match tokio::time::timeout(
                             std::time::Duration::from_secs(5),
-                            client.fetch_artwork(&thumb_path_owned, 300)
+                            client.fetch_artwork(&thumb_path_owned, 600)
                         ).await {
                             Ok(Ok(data)) => {
                                 let _ = event_tx.send(Event::ArtworkLoaded {
@@ -541,7 +541,7 @@ async fn play_current_track_remote(
                         let client = crate::api::PlexClient::new_with_url(&server_url, token.as_deref(), &client_id);
                         match tokio::time::timeout(
                             std::time::Duration::from_secs(5),
-                            client.fetch_artwork(&thumb_path_owned, 300)
+                            client.fetch_artwork(&thumb_path_owned, 600)
                         ).await {
                             Ok(Ok(data)) => {
                                 let _ = event_tx_clone.send(Event::ArtworkLoaded {

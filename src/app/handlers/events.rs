@@ -1251,9 +1251,23 @@ pub fn handle_app_event(
         }
         Event::WaveformFailed { track_key, error } => {
             if state.waveform.track_key.as_ref() == Some(&track_key) {
-                state.waveform.error = Some(error.clone());
-                state.waveform.generating = false;
-                tracing::warn!("Waveform generation failed for {}: {}", track_key, error);
+                if state.waveform.retry_count < 3 {
+                    // Silent retry: keep generating=true so UI shows "Generating..."
+                    state.waveform.retry_count += 1;
+                    let retry_num = state.waveform.retry_count;
+                    let tx = event_tx.clone();
+                    let tk = track_key.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_secs(2 * retry_num as u64)).await;
+                        let _ = tx.send(Event::WaveformRetry(tk)).await;
+                    });
+                    tracing::info!("Waveform retry {}/3 for {}: {}", retry_num, track_key, error);
+                } else {
+                    // Max retries exhausted — show error
+                    state.waveform.error = Some(error.clone());
+                    state.waveform.generating = false;
+                    tracing::warn!("Waveform failed after 3 retries for {}: {}", track_key, error);
+                }
             }
             vec![]
         }
@@ -1265,6 +1279,18 @@ pub fn handle_app_event(
                 tracing::debug!("Waveform loaded from cache for track: {}", track_key);
             }
             vec![]
+        }
+        Event::WaveformRetry(track_key) => {
+            // generating is still true from the failed attempt; clear it so
+            // LoadWaveform's needs_generation check passes.
+            if state.waveform.track_key.as_ref() == Some(&track_key)
+                && state.waveform.data.is_none()
+            {
+                state.waveform.generating = false;
+                vec![Action::LoadWaveform]
+            } else {
+                vec![]
+            }
         }
         Event::StationTracksLoaded { station_key, station_title, tracks, time_travel_decades } => {
             state.stations_loading = false;
