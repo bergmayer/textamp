@@ -1557,6 +1557,23 @@ fn settings_visual_row_to_item(visual_row: usize, state: &AppState) -> Option<us
                 }
             }
         }
+        SettingsSection::Output => {
+            // Row 0: "Playback output:" header
+            // Row 1: Local → item 0
+            // Row 2..N+1: Remote players → items 1..N
+            // Row N+2: blank
+            // Row N+3: Refresh Players → item N+1
+            let player_count = state.remote_players.len();
+            if visual_row == 1 {
+                Some(0) // Local
+            } else if visual_row >= 2 && visual_row < 2 + player_count {
+                Some(visual_row - 1) // Remote player (1-based)
+            } else if visual_row == 2 + player_count + 1 {
+                Some(1 + player_count) // Refresh Players
+            } else {
+                None
+            }
+        }
         SettingsSection::About => {
             // Logo lines + blank + version + description + author + url + blank + "Theme:" header
             // Theme items are selectable

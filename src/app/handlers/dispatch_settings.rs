@@ -212,6 +212,25 @@ pub async fn dispatch(
             state.settings_state.item_index = 0;
             state.settings_state.signing_in = false;
 
+            // Auto-discover remote players if connected and list is empty
+            if state.remote_players.is_empty() && !state.discovering_players {
+                if let Some(stored) = PlexAuth::load_token() {
+                    state.discovering_players = true;
+                    let event_tx_clone = event_tx.clone();
+                    tokio::spawn(async move {
+                        let auth = PlexAuth::from_stored_auth(&stored);
+                        match auth.get_players(&stored.token).await {
+                            Ok(players) => {
+                                let _ = event_tx_clone.send(Event::PlayersDiscovered(players)).await;
+                            }
+                            Err(e) => {
+                                let _ = event_tx_clone.send(Event::PlayerDiscoveryFailed(e.to_string())).await;
+                            }
+                        }
+                    });
+                }
+            }
+
             // Get username from connection state first (most reliable), then StoredAuth, then config
             state.settings_state.username_input = match &state.connection {
                 ConnectionState::Connected { username, .. } => username.clone(),
@@ -323,6 +342,34 @@ pub async fn dispatch(
                             state.settings_state.signing_in = true;
                             state.settings_state.item_index = 0;
                         }
+                    }
+                }
+                SettingsSection::Output => {
+                    let idx = state.settings_state.item_index;
+                    let refresh_idx = 1 + state.remote_players.len();
+                    if idx == 0 {
+                        // Local
+                        follow_ups.push(Action::SetOutputTarget(crate::app::state::OutputTarget::Local));
+                    } else if idx <= state.remote_players.len() {
+                        // Remote player
+                        if let Some(player) = state.remote_players.get(idx - 1) {
+                            // Get direct URI (prefer local connections)
+                            let uri = player.connections.iter().find(|c| c.local)
+                                .or_else(|| player.connections.iter().find(|c| !c.relay))
+                                .or(player.connections.first())
+                                .map(|c| c.uri.clone());
+                            tracing::info!(
+                                "Selecting remote player: {} (id={}, product={}, uri={:?})",
+                                player.name, player.client_identifier, player.product, uri
+                            );
+                            follow_ups.push(Action::SetOutputTarget(crate::app::state::OutputTarget::Remote {
+                                player_id: player.client_identifier.clone(),
+                                player_name: player.name.clone(),
+                                player_uri: uri,
+                            }));
+                        }
+                    } else if idx == refresh_idx {
+                        follow_ups.push(Action::DiscoverPlayers);
                     }
                 }
                 SettingsSection::About => {
@@ -856,6 +903,66 @@ pub async fn dispatch(
                 } else {
                     "Subfolder cache: purge after 32 days".to_string()
                 });
+            }
+        }
+
+        Action::DiscoverPlayers => {
+            if let Some(stored) = PlexAuth::load_token() {
+                state.discovering_players = true;
+                let event_tx = event_tx.clone();
+                tokio::spawn(async move {
+                    let auth = PlexAuth::from_stored_auth(&stored);
+                    match auth.get_players(&stored.token).await {
+                        Ok(players) => {
+                            let _ = event_tx.send(Event::PlayersDiscovered(players)).await;
+                        }
+                        Err(e) => {
+                            let _ = event_tx.send(Event::PlayerDiscoveryFailed(e.to_string())).await;
+                        }
+                    }
+                });
+            } else {
+                state.set_error("No authentication token available".to_string());
+            }
+        }
+        Action::SetOutputTarget(target) => {
+            use crate::app::state::OutputTarget;
+            match &target {
+                OutputTarget::Local => {
+                    // Switching back to local: stop remote playback if active
+                    if let OutputTarget::Remote { player_id, player_uri, .. } = &state.output_target {
+                        let target_id = player_id.clone();
+                        let p_uri = player_uri.clone();
+                        let token = client.token().map(|s| s.to_string()).unwrap_or_default();
+                        let client_id = client.client_identifier().to_string();
+                        let server_url = client.server_url().unwrap_or("").to_string();
+                        let machine_id = state.available_servers.first()
+                            .map(|s| s.client_identifier.clone()).unwrap_or_default();
+                        tokio::spawn(async move {
+                            let rc = crate::plex::RemotePlayerClient::new(
+                                token, client_id, target_id, server_url, machine_id, p_uri,
+                            );
+                            let _ = rc.stop().await;
+                        });
+                    }
+                    state.output_target = OutputTarget::Local;
+                    state.remote_playback = crate::app::state::RemotePlaybackState::default();
+                    // Stop playback — user must press play to resume on local
+                    state.playback.status = PlayStatus::Stopped;
+                    state.playback.position_ms = 0;
+                    state.set_status("Output: Local (press play to resume)".to_string());
+                }
+                OutputTarget::Remote { player_name, .. } => {
+                    let name = player_name.clone();
+                    // Switching to remote: stop local playback
+                    audio.stop();
+                    state.output_target = target;
+                    state.remote_playback = crate::app::state::RemotePlaybackState::default();
+                    // Stop playback — user must press play to start on remote
+                    state.playback.status = PlayStatus::Stopped;
+                    state.playback.position_ms = 0;
+                    state.set_status(format!("Output: {} (press play to resume)", name));
+                }
             }
         }
 

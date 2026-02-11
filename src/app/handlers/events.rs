@@ -1442,6 +1442,47 @@ pub fn handle_app_event(
             }
             vec![]
         }
+        // Remote player control events
+        Event::PlayersDiscovered(players) => {
+            state.discovering_players = false;
+            state.remote_players = players;
+            let count = state.remote_players.len();
+            if count > 0 {
+                state.set_status(format!("Found {} player{}", count, if count == 1 { "" } else { "s" }));
+            } else {
+                state.set_status("No remote players found".to_string());
+            }
+            vec![]
+        }
+        Event::PlayerDiscoveryFailed(err) => {
+            state.discovering_players = false;
+            state.set_error(format!("Player discovery failed: {}", err));
+            vec![]
+        }
+        Event::RemotePlayerStatus { playing, position_ms, track_key: _, finished } => {
+            state.remote_playback.last_poll = Some(std::time::Instant::now());
+
+            if let crate::app::state::OutputTarget::Remote { .. } = &state.output_target {
+                state.playback.position_ms = position_ms;
+
+                if finished {
+                    // Remote player finished the track — advance to next
+                    return vec![Action::Next];
+                }
+
+                if playing && state.playback.status != PlayStatus::Playing {
+                    state.playback.status = PlayStatus::Playing;
+                } else if !playing && !finished && state.playback.status == PlayStatus::Playing {
+                    state.playback.status = PlayStatus::Paused;
+                }
+            }
+            vec![]
+        }
+        Event::RemotePlayerError(err) => {
+            tracing::warn!("Remote player error: {}", err);
+            vec![]
+        }
+
         _ => vec![],
     }
 }

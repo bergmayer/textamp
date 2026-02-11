@@ -3,7 +3,7 @@
 //! Uses the Elm Architecture pattern with a single state struct.
 //! UI modeled after musikcube: Browse (left: categories, right: tracks), Queue, Search, etc.
 
-use crate::api::models::{Album, Artist, Genre, Library, Playlist, PlexServer, Station, Track, SearchResults};
+use crate::api::models::{Album, Artist, Genre, Library, Playlist, PlexServer, RemotePlayer, Station, Track, SearchResults};
 use crate::miller::{MillerColumn, MillerState};
 use crate::plex::{CachedFolder, CachedPlaylistTracks};
 use crate::services::{FolderNavigationState, WaveformData};
@@ -714,6 +714,12 @@ pub struct AppState {
     // Library switch loading state
     pub library_loading: bool,
 
+    // Remote player control
+    pub output_target: OutputTarget,
+    pub remote_players: Vec<RemotePlayer>,
+    pub discovering_players: bool,
+    pub remote_playback: RemotePlaybackState,
+
     // Album art cover view mode (Alt+C toggle in browse)
     pub album_art_view: bool,
     pub album_art_cache: HashMap<String, Vec<u8>>,
@@ -1086,6 +1092,10 @@ impl AppState {
             marquee: std::cell::RefCell::new(MarqueeState::default()),
             marquee_subtitle: std::cell::RefCell::new(MarqueeState::default()),
             library_loading: false,
+            output_target: OutputTarget::default(),
+            remote_players: Vec::new(),
+            discovering_players: false,
+            remote_playback: RemotePlaybackState::default(),
             album_art_view: false,
             album_art_cache: HashMap::new(),
             album_art_pending: std::collections::HashSet::new(),
@@ -1805,6 +1815,7 @@ impl ListStates {
 pub enum SettingsSection {
     #[default]
     Account,
+    Output,
     About,
 }
 
@@ -1812,6 +1823,7 @@ impl SettingsSection {
     pub fn all() -> &'static [SettingsSection] {
         &[
             SettingsSection::Account,
+            SettingsSection::Output,
             SettingsSection::About,
         ]
     }
@@ -1819,13 +1831,15 @@ impl SettingsSection {
     pub fn name(&self) -> &'static str {
         match self {
             SettingsSection::Account => "Account",
+            SettingsSection::Output => "Output",
             SettingsSection::About => "About",
         }
     }
 
     pub fn next(&self) -> Self {
         match self {
-            SettingsSection::Account => SettingsSection::About,
+            SettingsSection::Account => SettingsSection::Output,
+            SettingsSection::Output => SettingsSection::About,
             SettingsSection::About => SettingsSection::Account,
         }
     }
@@ -1833,7 +1847,8 @@ impl SettingsSection {
     pub fn prev(&self) -> Self {
         match self {
             SettingsSection::Account => SettingsSection::About,
-            SettingsSection::About => SettingsSection::Account,
+            SettingsSection::Output => SettingsSection::Account,
+            SettingsSection::About => SettingsSection::Output,
         }
     }
 }
@@ -1999,6 +2014,37 @@ pub enum ConfirmAction {
     ClearLibraryCache,
     ClearArtworkCache,
     ClearSubfolderCache,
+}
+
+/// Output target for playback — Local (default) or Remote (Plex player device).
+#[derive(Debug, Clone, Default)]
+pub enum OutputTarget {
+    #[default]
+    Local,
+    Remote {
+        player_id: String,
+        player_name: String,
+        /// Direct URI for players that advertise on the local network (e.g. "http://192.168.1.5:32500").
+        player_uri: Option<String>,
+    },
+}
+
+/// State for tracking remote player playback (polling, position interpolation).
+#[derive(Debug, Clone)]
+pub struct RemotePlaybackState {
+    /// Last time we polled the remote player for status.
+    pub last_poll: Option<std::time::Instant>,
+    /// Track key reported by the remote player (for detecting track changes).
+    pub current_track_key: Option<String>,
+}
+
+impl Default for RemotePlaybackState {
+    fn default() -> Self {
+        Self {
+            last_poll: None,
+            current_track_key: None,
+        }
+    }
 }
 
 /// Inline list filter state (/ key in browse view).

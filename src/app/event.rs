@@ -162,4 +162,15 @@ pub enum Event {
         version: u64,
         results: crate::app::state::ListFilterResults,
     },
+
+    // Remote player control
+    PlayersDiscovered(Vec<crate::plex::models::RemotePlayer>),
+    PlayerDiscoveryFailed(String),
+    RemotePlayerStatus {
+        playing: bool,
+        position_ms: u64,
+        track_key: Option<String>,
+        finished: bool,
+    },
+    RemotePlayerError(String),
 }

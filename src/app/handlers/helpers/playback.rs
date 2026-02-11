@@ -139,6 +139,12 @@ pub async fn play_current_track(
     client: &PlexClient,
     audio: &mut AudioPlayer,
 ) {
+    // Remote playback guard: when output is Remote, use remote player instead of local audio
+    if let crate::app::state::OutputTarget::Remote { ref player_id, ref player_uri, .. } = state.output_target {
+        play_current_track_remote(event_tx, state, client, player_id.clone(), player_uri.clone()).await;
+        return;
+    }
+
     if let Some(track) = state.current_track().cloned() {
         tracing::info!("Playing: {} - {}", track.artist_name(), track.title);
         tracing::info!("PlayCurrentTrack: client_identifier={}", client.client_identifier());
@@ -494,5 +500,99 @@ pub fn fetch_more_radio_tracks(event_tx: &mpsc::Sender<Event>, state: &mut AppSt
         });
     } else {
         state.radio.fetching = false;
+    }
+}
+
+/// Play the current track on a remote Plex player.
+async fn play_current_track_remote(
+    event_tx: &mpsc::Sender<Event>,
+    state: &mut AppState,
+    client: &PlexClient,
+    target_player_id: String,
+    player_uri: Option<String>,
+) {
+    use crate::app::state::PlayStatus;
+
+    if let Some(track) = state.current_track().cloned() {
+        tracing::info!("Remote: playing {} - {}", track.artist_name(), track.title);
+
+        state.playback.status = PlayStatus::Buffering;
+        state.playback.duration_ms = track.duration_ms();
+        state.playback.position_ms = 0;
+
+        // Reset waveform state for new track
+        if state.waveform.track_key.as_ref() != Some(&track.rating_key) {
+            state.waveform = crate::app::state::WaveformState::default();
+            state.waveform.track_key = Some(track.rating_key.clone());
+        }
+
+        // Load artwork for the new track (same as local)
+        if let Some(thumb_path) = track.best_thumb() {
+            if state.artwork_thumb.as_deref() != Some(thumb_path) {
+                if let Some(server_url) = client.server_url() {
+                    state.artwork_loading = true;
+                    let thumb_path_owned = thumb_path.to_string();
+                    let event_tx_clone = event_tx.clone();
+                    let server_url = server_url.to_string();
+                    let token = client.token().map(|s| s.to_string());
+                    let client_id = client.client_identifier().to_string();
+
+                    tokio::spawn(async move {
+                        let client = crate::api::PlexClient::new_with_url(&server_url, token.as_deref(), &client_id);
+                        match tokio::time::timeout(
+                            std::time::Duration::from_secs(5),
+                            client.fetch_artwork(&thumb_path_owned, 300)
+                        ).await {
+                            Ok(Ok(data)) => {
+                                let _ = event_tx_clone.send(Event::ArtworkLoaded {
+                                    thumb_path: thumb_path_owned,
+                                    data,
+                                }).await;
+                            }
+                            _ => {
+                                let _ = event_tx_clone.send(Event::ArtworkFailed {
+                                    thumb_path: thumb_path_owned,
+                                }).await;
+                            }
+                        }
+                    });
+                }
+            }
+        } else {
+            state.artwork_thumb = None;
+            state.artwork_data = None;
+            state.artwork_loading = false;
+        }
+
+        // Send playMedia to remote player via server
+        let token = client.token().map(|s| s.to_string()).unwrap_or_default();
+        let client_id = client.client_identifier().to_string();
+        let server_url = client.server_url().unwrap_or("").to_string();
+        let machine_id = state.available_servers.first()
+            .map(|s| s.client_identifier.clone()).unwrap_or_default();
+        let lib_key = state.active_library.clone().unwrap_or_default();
+        let event_tx_clone = event_tx.clone();
+
+        tokio::spawn(async move {
+            let rc = crate::plex::RemotePlayerClient::new(
+                token, client_id, target_player_id, server_url, machine_id, player_uri,
+            );
+            match rc.play_media(&track, &lib_key).await {
+                Ok(()) => {
+                    // Signal that playback started on remote device
+                }
+                Err(e) => {
+                    let _ = event_tx_clone.send(Event::RemotePlayerError(e.to_string())).await;
+                }
+            }
+        });
+
+        // Optimistically set playing status
+        state.playback.status = PlayStatus::Playing;
+        state.playback.playback_started_at = Some(std::time::Instant::now());
+
+        // Report to Plex server
+        report_playback_to_plex(event_tx, &state.current_track().cloned().unwrap(), state.plex_session_id.clone(), client);
+        state.last_progress_report = Some(std::time::Instant::now());
     }
 }

@@ -19,6 +19,11 @@ pub async fn dispatch(
     client: &mut PlexClient,
     audio: &mut AudioPlayer,
 ) -> Result<Vec<Action>> {
+    // Remote playback guard: when output is Remote, branch to remote handlers
+    if let crate::app::state::OutputTarget::Remote { ref player_id, ref player_uri, .. } = state.output_target {
+        return dispatch_remote(event_tx, action, state, client, audio, player_id.clone(), player_uri.clone()).await;
+    }
+
     match action {
         Action::TogglePlayPause => {
             match state.playback.status {
@@ -198,6 +203,214 @@ pub async fn dispatch(
             helpers::play_current_track(event_tx, state, client, audio).await;
         }
         _ => unreachable!("dispatch_playback called with non-playback action: {:?}", action),
+    }
+    Ok(vec![])
+}
+
+/// Handle playback actions when output is a remote Plex player.
+async fn dispatch_remote(
+    event_tx: &mpsc::Sender<Event>,
+    action: Action,
+    state: &mut AppState,
+    client: &mut PlexClient,
+    audio: &mut AudioPlayer,
+    target_player_id: String,
+    player_uri: Option<String>,
+) -> Result<Vec<Action>> {
+    let token = client.token().map(|s| s.to_string()).unwrap_or_default();
+    let client_id = client.client_identifier().to_string();
+    let server_url = client.server_url().unwrap_or("").to_string();
+    let machine_id = state.available_servers.first()
+        .map(|s| s.client_identifier.clone()).unwrap_or_default();
+
+    // Build remote client once — it's Clone so we can share it with spawned tasks
+    let rc = crate::plex::RemotePlayerClient::new(
+        token, client_id, target_player_id, server_url, machine_id, player_uri,
+    );
+
+    match action {
+        Action::TogglePlayPause => {
+            match state.playback.status {
+                PlayStatus::Playing => {
+                    let rc = rc.clone();
+                    let event_tx = event_tx.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = rc.pause().await {
+                            let _ = event_tx.send(Event::RemotePlayerError(e.to_string())).await;
+                        }
+                    });
+                    state.playback.status = PlayStatus::Paused;
+                }
+                PlayStatus::Paused => {
+                    let rc = rc.clone();
+                    let event_tx = event_tx.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = rc.resume().await {
+                            let _ = event_tx.send(Event::RemotePlayerError(e.to_string())).await;
+                        }
+                    });
+                    state.playback.status = PlayStatus::Playing;
+                }
+                PlayStatus::Stopped => {
+                    if state.queue_index.is_some() {
+                        helpers::play_current_track(event_tx, state, client, audio).await;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Action::Pause => {
+            let rc = rc.clone();
+            let event_tx = event_tx.clone();
+            tokio::spawn(async move {
+                if let Err(e) = rc.pause().await {
+                    let _ = event_tx.send(Event::RemotePlayerError(e.to_string())).await;
+                }
+            });
+            state.playback.status = PlayStatus::Paused;
+        }
+        Action::Play => {
+            let rc = rc.clone();
+            let event_tx = event_tx.clone();
+            tokio::spawn(async move {
+                if let Err(e) = rc.resume().await {
+                    let _ = event_tx.send(Event::RemotePlayerError(e.to_string())).await;
+                }
+            });
+            state.playback.status = PlayStatus::Playing;
+        }
+        Action::Stop => {
+            let rc = rc.clone();
+            let event_tx = event_tx.clone();
+            tokio::spawn(async move {
+                if let Err(e) = rc.stop().await {
+                    let _ = event_tx.send(Event::RemotePlayerError(e.to_string())).await;
+                }
+            });
+            state.playback.status = PlayStatus::Stopped;
+            state.playback.position_ms = 0;
+            state.plex_session_id = None;
+        }
+        Action::Next => {
+            match state.playback_mode {
+                PlaybackMode::Radio => {
+                    if let Some(idx) = state.radio.track_index {
+                        if idx + 1 < state.radio.tracks.len() {
+                            state.radio.track_index = Some(idx + 1);
+                            helpers::play_current_track(event_tx, state, client, audio).await;
+
+                            let remaining = state.radio.tracks.len().saturating_sub(idx + 1);
+                            if remaining < 5 && !state.radio.fetching {
+                                helpers::fetch_more_radio_tracks(event_tx, state, client);
+                            }
+                        } else if !state.radio.fetching {
+                            helpers::fetch_more_radio_tracks(event_tx, state, client);
+                        }
+                    }
+                }
+                PlaybackMode::Queue | PlaybackMode::None => {
+                    if let Some(idx) = state.queue_index {
+                        if idx + 1 < state.queue.len() {
+                            state.queue_index = Some(idx + 1);
+                            helpers::play_current_track(event_tx, state, client, audio).await;
+                        } else {
+                            // End of queue
+                            tokio::spawn(async move { let _ = rc.stop().await; });
+                            state.playback.status = PlayStatus::Stopped;
+                            state.plex_session_id = None;
+                        }
+                    }
+                }
+            }
+        }
+        Action::Previous => {
+            if state.playback.position_ms > 3000 {
+                state.playback.position_ms = 0;
+                helpers::play_current_track(event_tx, state, client, audio).await;
+            } else {
+                match state.playback_mode {
+                    PlaybackMode::Radio => {
+                        if let Some(idx) = state.radio.track_index {
+                            if idx > 0 {
+                                state.radio.track_index = Some(idx - 1);
+                                helpers::play_current_track(event_tx, state, client, audio).await;
+                            }
+                        }
+                    }
+                    PlaybackMode::Queue | PlaybackMode::None => {
+                        if let Some(idx) = state.queue_index {
+                            if idx > 0 {
+                                state.queue_index = Some(idx - 1);
+                                helpers::play_current_track(event_tx, state, client, audio).await;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Action::VolumeUp => {
+            state.playback.volume = (state.playback.volume + 0.05).min(1.0);
+            let volume_pct = (state.playback.volume * 100.0) as u32;
+            let rc = rc.clone();
+            let event_tx = event_tx.clone();
+            tokio::spawn(async move {
+                if let Err(e) = rc.set_volume(volume_pct).await {
+                    let _ = event_tx.send(Event::RemotePlayerError(e.to_string())).await;
+                }
+            });
+        }
+        Action::VolumeDown => {
+            state.playback.volume = (state.playback.volume - 0.05).max(0.0);
+            let volume_pct = (state.playback.volume * 100.0) as u32;
+            let rc = rc.clone();
+            let event_tx = event_tx.clone();
+            tokio::spawn(async move {
+                if let Err(e) = rc.set_volume(volume_pct).await {
+                    let _ = event_tx.send(Event::RemotePlayerError(e.to_string())).await;
+                }
+            });
+        }
+        Action::ToggleMute => {
+            state.playback.muted = !state.playback.muted;
+            let volume_pct = if state.playback.muted { 0 } else { (state.playback.volume * 100.0) as u32 };
+            let rc = rc.clone();
+            let event_tx = event_tx.clone();
+            tokio::spawn(async move {
+                if let Err(e) = rc.set_volume(volume_pct).await {
+                    let _ = event_tx.send(Event::RemotePlayerError(e.to_string())).await;
+                }
+            });
+        }
+        Action::Seek(position_ms) => {
+            state.playback.position_ms = position_ms;
+            let rc = rc.clone();
+            let event_tx = event_tx.clone();
+            tokio::spawn(async move {
+                if let Err(e) = rc.seek_to(position_ms).await {
+                    let _ = event_tx.send(Event::RemotePlayerError(e.to_string())).await;
+                }
+            });
+        }
+        Action::SeekRelative(delta_ms) => {
+            let current = state.playback.position_ms as i64;
+            let duration = state.playback.duration_ms as i64;
+            let new_pos = (current + delta_ms).clamp(0, duration) as u64;
+            state.playback.position_ms = new_pos;
+            let rc = rc.clone();
+            let event_tx = event_tx.clone();
+            tokio::spawn(async move {
+                if let Err(e) = rc.seek_to(new_pos).await {
+                    let _ = event_tx.send(Event::RemotePlayerError(e.to_string())).await;
+                }
+            });
+        }
+        Action::StartPendingPlayback => {
+            // No-op for remote — remote player handles its own buffering
+        }
+        Action::RetryCurrentTrack => {
+            helpers::play_current_track(event_tx, state, client, audio).await;
+        }
+        _ => {}
     }
     Ok(vec![])
 }

@@ -221,4 +221,8 @@ pub enum Action {
     // Library picker popup (Ctrl+Alt+S)
     OpenLibraryPicker,
     CloseLibraryPicker,
+
+    // Remote player control
+    DiscoverPlayers,
+    SetOutputTarget(crate::app::state::OutputTarget),
 }

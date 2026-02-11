@@ -39,6 +39,7 @@ mod client;
 pub mod constants;
 mod error;
 pub mod models;
+pub mod remote;
 mod waveform;
 
 pub use artwork_cache::ArtworkCache;
@@ -46,6 +47,7 @@ pub use auth::{PlexAuth, PlexClientInfo, ServerInfo, StoredAuth};
 pub use cache::{CacheData, CachedFolder, CachedPlaylistTracks, LibraryCache};
 pub use client::{PlexClient, test_connection};
 pub use error::ApiError;
+pub use remote::RemotePlayerClient;
 pub use waveform::{WaveformCache, WaveformData, WaveformError, generate_waveform};
 
 use models::{Album, Artist, Genre, Playlist, Station, Track};

@@ -340,6 +340,63 @@ impl PlexAuth {
         }
     }
 
+    /// Get available remote players (devices that provide "player" capability).
+    pub async fn get_players(&self, token: &str) -> Result<Vec<super::models::RemotePlayer>, ApiError> {
+        let url = format!("{}/api/v2/resources", PLEX_TV_URL);
+
+        let response = self
+            .http
+            .get(&url)
+            .header(HEADER_PLEX_TOKEN, token)
+            .header(HEADER_PLEX_CLIENT_ID, &self.client_info.client_identifier)
+            .header("Accept", "application/json")
+            .query(&[("includeHttps", "1"), ("includeRelay", "1")])
+            .send()
+            .await?;
+
+        let resources: Vec<ResourceResponse> = response.json().await?;
+
+        tracing::info!("Resources API returned {} devices:", resources.len());
+        for r in &resources {
+            tracing::info!(
+                "  {} (product={:?}, provides={}, presence={}, owned={}, connections={})",
+                r.name,
+                r.product,
+                r.provides,
+                r.presence,
+                r.owned,
+                r.connections.len()
+            );
+        }
+
+        let players = resources
+            .into_iter()
+            .filter(|r| {
+                let is_player = r.provides.contains("player") || r.provides.contains("client");
+                tracing::info!("  filter: {} provides={} presence={} -> pass={}", r.name, r.provides, r.presence, is_player && r.presence);
+                is_player && r.presence
+            })
+            .map(|r| super::models::RemotePlayer {
+                name: r.name,
+                client_identifier: r.client_identifier,
+                connections: r
+                    .connections
+                    .into_iter()
+                    .map(|c| super::models::ServerConnection {
+                        uri: c.uri,
+                        local: c.local,
+                        relay: c.relay,
+                    })
+                    .collect(),
+                owned: r.owned,
+                product: r.product.unwrap_or_default(),
+                platform: r.platform.unwrap_or_default(),
+            })
+            .collect();
+
+        Ok(players)
+    }
+
     /// Delete stored auth token (logout).
     pub fn delete_token() -> Result<(), std::io::Error> {
         let paths = crate::config::XdgPaths::new("textamp");
@@ -395,6 +452,12 @@ struct ResourceResponse {
     provides: String,
     #[serde(default)]
     owned: bool,
+    #[serde(default)]
+    presence: bool,
+    #[serde(default)]
+    product: Option<String>,
+    #[serde(default)]
+    platform: Option<String>,
     #[serde(default)]
     connections: Vec<ConnectionResponse>,
 }

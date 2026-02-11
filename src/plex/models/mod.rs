@@ -94,3 +94,14 @@ pub struct ServerConnection {
     #[serde(default)]
     pub relay: bool,
 }
+
+/// A remote Plex player device (Apple TV, Plexamp on phone, etc.).
+#[derive(Debug, Clone)]
+pub struct RemotePlayer {
+    pub name: String,
+    pub client_identifier: String,
+    pub connections: Vec<ServerConnection>,
+    pub owned: bool,
+    pub product: String,
+    pub platform: String,
+}

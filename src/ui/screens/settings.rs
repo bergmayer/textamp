@@ -78,6 +78,7 @@ fn render_content(frame: &mut Frame, state: &AppState, area: Rect) {
 
     match state.settings_state.section {
         SettingsSection::Account => render_account_content(frame, state, inner),
+        SettingsSection::Output => render_output_content(frame, state, inner),
         SettingsSection::About => render_about_content(frame, state, inner),
     }
 }
@@ -445,6 +446,75 @@ fn render_signin_form(frame: &mut Frame, state: &AppState, area: Rect) {
             Style::default().fg(t.colors.fg_muted),
         )));
     }
+
+    let paragraph = Paragraph::new(lines);
+    frame.render_widget(paragraph, area);
+}
+
+fn render_output_content(frame: &mut Frame, state: &AppState, area: Rect) {
+    use crate::app::state::OutputTarget;
+
+    let t = theme();
+    let is_focused = state.settings_state.focus == SettingsFocus::Content;
+    let mut lines = vec![];
+
+    lines.push(Line::from(Span::styled(
+        "Playback output:",
+        Style::default().fg(t.colors.fg_accent),
+    )));
+
+    // Item 0: Local
+    let is_local = matches!(state.output_target, OutputTarget::Local);
+    let is_selected = is_focused && state.settings_state.item_index == 0;
+    let prefix = if is_selected { "> " } else { "  " };
+    let active_marker = if is_local { " *" } else { "" };
+    let style = if is_selected { Theme::selected() } else { Style::default().fg(t.colors.fg_primary) };
+    lines.push(Line::from(Span::styled(
+        format!("{}Local{}", prefix, active_marker),
+        style,
+    )));
+
+    // Items 1..N: Remote players
+    for (i, player) in state.remote_players.iter().enumerate() {
+        let item_idx = i + 1;
+        let is_active = match &state.output_target {
+            OutputTarget::Remote { player_id, .. } => *player_id == player.client_identifier,
+            _ => false,
+        };
+        let is_selected = is_focused && item_idx == state.settings_state.item_index;
+        let prefix = if is_selected { "> " } else { "  " };
+        let active_marker = if is_active { " *" } else { "" };
+        let style = if is_selected { Theme::selected() } else { Style::default().fg(t.colors.fg_primary) };
+        lines.push(Line::from(Span::styled(
+            format!("{}{} ({}){}", prefix, player.name, player.product, active_marker),
+            style,
+        )));
+    }
+
+    // Last item: Refresh Players
+    let refresh_idx = 1 + state.remote_players.len();
+    let is_selected = is_focused && refresh_idx == state.settings_state.item_index;
+    let prefix = if is_selected { "> " } else { "  " };
+    let style = if is_selected { Theme::selected() } else { Style::default().fg(t.colors.fg_primary) };
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!("{}Refresh Players", prefix),
+        style,
+    )));
+
+    if state.discovering_players {
+        lines.push(Line::from(Span::styled(
+            "  Discovering...",
+            Style::default().fg(t.colors.fg_muted),
+        )));
+    }
+
+    // Help text
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Enter: select output | Per-session only (not saved)",
+        Style::default().fg(t.colors.fg_muted),
+    )));
 
     let paragraph = Paragraph::new(lines);
     frame.render_widget(paragraph, area);

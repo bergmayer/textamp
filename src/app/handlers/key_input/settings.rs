@@ -162,6 +162,10 @@ pub(super) fn handle_settings_keys(key: event::KeyEvent, state: &mut AppState, c
                                 0 // Sign In(0)
                             }
                         }
+                        SettingsSection::Output => {
+                            // Local(0), remote players(1..N), Refresh(N+1)
+                            1 + state.remote_players.len()
+                        }
                         SettingsSection::About => {
                             crate::ui::theme::ThemeName::all().len().saturating_sub(1)
                         }

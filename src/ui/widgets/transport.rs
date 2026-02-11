@@ -142,6 +142,11 @@ fn build_left_content(state: &AppState) -> String {
 fn build_right_content(state: &AppState) -> String {
     let mut right = String::new();
 
+    // Remote output indicator
+    if let crate::app::state::OutputTarget::Remote { ref player_name, .. } = state.output_target {
+        right.push_str(&format!("-> {} ", truncate_str(player_name, 15)));
+    }
+
     // Search/filter emoji first (left of volume, clickable to activate filter)
     right.push_str("🔍 ");
 

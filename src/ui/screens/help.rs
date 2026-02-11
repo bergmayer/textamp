@@ -122,7 +122,10 @@ FOLDERS (Ctrl+O)
   ♪ icon shows currently playing track
 
 SETTINGS (F2)
-  F2              Account, libraries, playback, themes
+  F2              Account, libraries, playback, output, themes
+  Output section  Select playback target (local or remote Plex player)
+                  Remote players: Apple TV, Plexamp on phone, etc.
+                  Audio plays on remote device; textamp acts as controller
 
 GENERAL
   F5              Refresh current view (updates cache)

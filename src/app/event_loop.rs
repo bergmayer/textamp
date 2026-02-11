@@ -138,58 +138,99 @@ impl EventLoop {
                     if last_tick.elapsed() >= tick_rate {
                         // Tick: update playback position
                         if state.playback.status == PlayStatus::Playing {
-                            state.playback.position_ms += tick_rate.as_millis() as u64;
+                            if let crate::app::state::OutputTarget::Remote { ref player_id, ref player_uri, .. } = state.output_target {
+                                // Remote mode: interpolate position between polls, poll every ~2s
+                                state.playback.position_ms += tick_rate.as_millis() as u64;
 
-                            // Reset track_ended_sent when a new track starts
-                            if state.playback.playback_started_at != last_playback_started {
-                                track_ended_sent = false;
-                                last_playback_started = state.playback.playback_started_at;
-                            }
+                                let should_poll = state.remote_playback.last_poll
+                                    .map(|t| t.elapsed() >= Duration::from_secs(2))
+                                    .unwrap_or(true);
 
-                            // Deferred error counter reset: only clear after 5s of
-                            // sustained playback, confirming the track is truly playing
-                            if state.consecutive_playback_errors > 0 {
-                                if let Some(started) = state.playback.playback_started_at {
-                                    if started.elapsed() >= Duration::from_secs(5) {
-                                        state.consecutive_playback_errors = 0;
+                                if should_poll {
+                                    state.remote_playback.last_poll = Some(Instant::now());
+                                    let target_id = player_id.clone();
+                                    let p_uri = player_uri.clone();
+                                    let token = client.token().map(|s| s.to_string()).unwrap_or_default();
+                                    let client_id = client.client_identifier().to_string();
+                                    let server_url = client.server_url().unwrap_or("").to_string();
+                                    let machine_id = state.available_servers.first()
+                                        .map(|s| s.client_identifier.clone()).unwrap_or_default();
+                                    let tx = tick_event_tx.clone();
+
+                                    tokio::spawn(async move {
+                                        let rc = crate::plex::RemotePlayerClient::new(
+                                            token, client_id, target_id, server_url, machine_id, p_uri,
+                                        );
+                                        match rc.poll_timeline().await {
+                                            Ok(status) => {
+                                                let _ = tx.send(Event::RemotePlayerStatus {
+                                                    playing: status.playing,
+                                                    position_ms: status.position_ms,
+                                                    track_key: status.track_key,
+                                                    finished: status.finished,
+                                                }).await;
+                                            }
+                                            Err(e) => {
+                                                let _ = tx.send(Event::RemotePlayerError(e.to_string())).await;
+                                            }
+                                        }
+                                    });
+                                }
+                            } else {
+                                // Local mode: existing position tracking and end detection
+                                state.playback.position_ms += tick_rate.as_millis() as u64;
+
+                                // Reset track_ended_sent when a new track starts
+                                if state.playback.playback_started_at != last_playback_started {
+                                    track_ended_sent = false;
+                                    last_playback_started = state.playback.playback_started_at;
+                                }
+
+                                // Deferred error counter reset: only clear after 5s of
+                                // sustained playback, confirming the track is truly playing
+                                if state.consecutive_playback_errors > 0 {
+                                    if let Some(started) = state.playback.playback_started_at {
+                                        if started.elapsed() >= Duration::from_secs(5) {
+                                            state.consecutive_playback_errors = 0;
+                                        }
                                     }
                                 }
-                            }
 
-                            // Detect track end: audio backend reports sink empty.
-                            // Grace period: ignore is_finished() for the first second after
-                            // playback starts to avoid spurious TrackEnded during cold-start
-                            // (sink initialization, network buffering, decoder warmup).
-                            // Only send once per track to prevent duplicate events.
-                            let playing_long_enough = state.playback.playback_started_at
-                                .map(|t| t.elapsed() >= Duration::from_secs(1))
-                                .unwrap_or(false);
-                            if playing_long_enough && audio.is_finished() && !track_ended_sent {
-                                track_ended_sent = true;
+                                // Detect track end: audio backend reports sink empty.
+                                // Grace period: ignore is_finished() for the first second after
+                                // playback starts to avoid spurious TrackEnded during cold-start
+                                // (sink initialization, network buffering, decoder warmup).
+                                // Only send once per track to prevent duplicate events.
+                                let playing_long_enough = state.playback.playback_started_at
+                                    .map(|t| t.elapsed() >= Duration::from_secs(1))
+                                    .unwrap_or(false);
+                                if playing_long_enough && audio.is_finished() && !track_ended_sent {
+                                    track_ended_sent = true;
 
-                                // Duration-based guard: verify the track actually played
-                                // its expected duration before treating as natural end
-                                let actual_pos_ms = audio.position()
-                                    .map(|d| d.as_millis() as u64)
-                                    .unwrap_or(state.playback.position_ms);
-                                let expected_ms = state.playback.duration_ms;
+                                    // Duration-based guard: verify the track actually played
+                                    // its expected duration before treating as natural end
+                                    let actual_pos_ms = audio.position()
+                                        .map(|d| d.as_millis() as u64)
+                                        .unwrap_or(state.playback.position_ms);
+                                    let expected_ms = state.playback.duration_ms;
 
-                                // Natural completion: no known duration, played >=90%,
-                                // or within 5s of end
-                                let completed_normally = expected_ms == 0
-                                    || actual_pos_ms >= expected_ms * 90 / 100
-                                    || (expected_ms > 5000 && actual_pos_ms >= expected_ms.saturating_sub(5000));
+                                    // Natural completion: no known duration, played >=90%,
+                                    // or within 5s of end
+                                    let completed_normally = expected_ms == 0
+                                        || actual_pos_ms >= expected_ms * 90 / 100
+                                        || (expected_ms > 5000 && actual_pos_ms >= expected_ms.saturating_sub(5000));
 
-                                if completed_normally {
-                                    let _ = tick_event_tx.send(Event::TrackEnded).await;
-                                } else {
-                                    tracing::warn!(
-                                        "Premature track end detected: played {}ms of {}ms expected",
-                                        actual_pos_ms, expected_ms
-                                    );
-                                    let _ = tick_event_tx.send(Event::PlaybackError(
-                                        "Track ended prematurely".to_string()
-                                    )).await;
+                                    if completed_normally {
+                                        let _ = tick_event_tx.send(Event::TrackEnded).await;
+                                    } else {
+                                        tracing::warn!(
+                                            "Premature track end detected: played {}ms of {}ms expected",
+                                            actual_pos_ms, expected_ms
+                                        );
+                                        let _ = tick_event_tx.send(Event::PlaybackError(
+                                            "Track ended prematurely".to_string()
+                                        )).await;
+                                    }
                                 }
                             }
                         }
@@ -470,13 +511,14 @@ impl EventLoop {
                 handlers::dispatch_radio::dispatch(&self.event_tx, action, state, client, audio).await?
             }
 
-            // Settings, auth, adventure
+            // Settings, auth, adventure, remote players
             Logout | AuthSignIn | AuthSelectServer | OpenSettings | SaveCredentials
             | SettingsSelect | SettingsSignIn | SettingsDiscoverServers
             | SelectServer(_) | SelectLibrary(_) | SelectLibraryOnServer(_, _)
             | SaveSettings | ClearCache
             | ClearLibraryCache | ClearArtworkCache | ClearSubfolderCache
             | StartSubfolderCrawl | StopSubfolderCrawl | ToggleKeepFolderCache
+            | DiscoverPlayers | SetOutputTarget(_)
             | StartAdventure | SetAdventureStart(_) | SetAdventureEnd(_)
             | SetAdventureLength(_) | CancelAdventure | AdventureComplete(_)
             | AdventureError(_) => {
