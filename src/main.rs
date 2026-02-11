@@ -26,7 +26,8 @@ async fn main() -> Result<()> {
     }
 
     // Normal TUI mode
-    run_tui_mode().await
+    let verbose = args.iter().any(|a| a == "--verbose" || a == "-v");
+    run_tui_mode(verbose).await
 }
 
 /// Debug mode - test API without TUI
@@ -641,12 +642,12 @@ fn print_buffer(backend: &ratatui::backend::TestBackend) {
 }
 
 /// Normal TUI mode
-async fn run_tui_mode() -> Result<()> {
+async fn run_tui_mode(verbose: bool) -> Result<()> {
     // Load configuration
     let config = config::load_config()?;
 
     // Setup logging
-    let _guard = setup_logging(&config.general.log_level);
+    let _guard = setup_logging(verbose);
 
     tracing::info!("Starting textamp v{}", env!("CARGO_PKG_VERSION"));
 

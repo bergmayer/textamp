@@ -87,9 +87,6 @@ fn default_server_url() -> String {
 /// General application settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeneralConfig {
-    #[serde(default = "default_log_level")]
-    pub log_level: String,
-
     #[serde(default)]
     pub default_library: Option<String>,
 }
@@ -97,14 +94,9 @@ pub struct GeneralConfig {
 impl Default for GeneralConfig {
     fn default() -> Self {
         Self {
-            log_level: default_log_level(),
             default_library: None,
         }
     }
-}
-
-fn default_log_level() -> String {
-    "info".to_string()
 }
 
 /// Playback settings.
