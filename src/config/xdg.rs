@@ -33,15 +33,20 @@ impl XdgPaths {
 
     /// Path to the main config file.
     pub fn config_file(&self) -> PathBuf {
-        self.config_dir.join("config.yaml")
+        self.config_dir.join("config.toml")
     }
 
     /// Path to the auth token storage.
     pub fn token_file(&self) -> PathBuf {
-        self.data_dir.join("auth.yaml")
+        self.data_dir.join("auth.toml")
     }
 
-    /// Path to the log file.
+    /// Path to the log directory (state dir).
+    pub fn log_dir(&self) -> PathBuf {
+        self.state_dir.clone()
+    }
+
+    /// Path to the log file (legacy, used for migration).
     pub fn log_file(&self) -> PathBuf {
         self.state_dir.join("textamp.log")
     }

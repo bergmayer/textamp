@@ -143,8 +143,8 @@ The app checks XDG environment variables first, then falls back to platform defa
 
 | File | XDG Override | Linux Default | macOS Default |
 |------|--------------|---------------|---------------|
-| Config | `$XDG_CONFIG_HOME/textamp/config.yaml` | `~/.config/textamp/config.yaml` | `~/Library/Application Support/textamp/config.yaml` |
-| Auth | `$XDG_DATA_HOME/textamp/auth.yaml` | `~/.local/share/textamp/auth.yaml` | `~/Library/Application Support/textamp/auth.yaml` |
+| Config | `$XDG_CONFIG_HOME/textamp/config.toml` | `~/.config/textamp/config.toml` | `~/Library/Application Support/textamp/config.toml` |
+| Auth | `$XDG_DATA_HOME/textamp/auth.toml` | `~/.local/share/textamp/auth.toml` | `~/Library/Application Support/textamp/auth.toml` |
 | Log | `$XDG_STATE_HOME/textamp/textamp.log` | `~/.local/state/textamp/textamp.log` | `~/Library/Application Support/textamp/textamp.log` |
 
 ### Cache Files

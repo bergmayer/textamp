@@ -296,10 +296,10 @@ impl PlexAuth {
             has_plex_pass: user.map(|u| u.has_plex_pass()).unwrap_or(false),
         };
 
-        let yaml = serde_yaml::to_string(&stored)
+        let toml_str = toml::to_string(&stored)
             .map_err(|e| ApiError::AuthFailed(e.to_string()))?;
 
-        std::fs::write(paths.token_file(), yaml)
+        std::fs::write(paths.token_file(), toml_str)
             .map_err(|e| ApiError::AuthFailed(e.to_string()))?;
 
         Ok(())
@@ -317,10 +317,10 @@ impl PlexAuth {
         stored.server_identifier = Some(server_info.identifier.clone());
         stored.server_name = Some(server_info.name.clone());
 
-        let yaml = serde_yaml::to_string(&stored)
+        let toml_str = toml::to_string(&stored)
             .map_err(|e| ApiError::AuthFailed(e.to_string()))?;
 
-        std::fs::write(paths.token_file(), yaml)
+        std::fs::write(paths.token_file(), toml_str)
             .map_err(|e| ApiError::AuthFailed(e.to_string()))?;
 
         tracing::info!("Persisted server info: {} ({})", server_info.name, server_info.url);
@@ -334,7 +334,7 @@ impl PlexAuth {
 
         if path.exists() {
             let contents = std::fs::read_to_string(path).ok()?;
-            serde_yaml::from_str(&contents).ok()
+            toml::from_str(&contents).ok()
         } else {
             None
         }

@@ -41,7 +41,7 @@ impl PlexClient {
     ///
     /// IMPORTANT: The client_identifier MUST match the one the token was issued for,
     /// otherwise Plex will reject requests with 400 errors. Always pass the
-    /// client_identifier from auth.yaml, not a new random one.
+    /// client_identifier from auth.toml, not a new random one.
     pub fn new_with_url(server_url: &str, token: Option<&str>, client_identifier: &str) -> Self {
         let http = Client::builder()
             .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))

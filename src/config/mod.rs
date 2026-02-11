@@ -1,6 +1,6 @@
 //! Configuration management for textamp.
 //!
-//! Handles XDG-compliant paths and YAML configuration loading.
+//! Handles XDG-compliant paths and TOML configuration loading.
 
 mod settings;
 mod xdg;
@@ -23,7 +23,7 @@ pub fn load_config() -> Result<Config> {
 
     let mut config = if config_path.exists() {
         let contents = std::fs::read_to_string(&config_path)?;
-        serde_yaml::from_str(&contents)?
+        toml::from_str(&contents)?
     } else {
         Config::default()
     };
@@ -51,11 +51,6 @@ fn validate_config(config: &mut Config) {
         config.ui.album_art_size = 40;
     }
 
-    // Log level must be valid
-    let valid_levels = ["trace", "debug", "info", "warn", "error"];
-    if !valid_levels.contains(&config.general.log_level.to_lowercase().as_str()) {
-        config.general.log_level = "info".to_string();
-    }
 }
 
 /// Get the path to the config file.
@@ -82,12 +77,12 @@ pub fn save_config(config: &Config) -> Result<()> {
     paths.ensure_dirs()?;
 
     let config_file = paths.config_file();
-    let yaml = serde_yaml::to_string(config)?;
+    let toml_str = toml::to_string(config)?;
 
     // Write to temp file in the same directory (ensures same filesystem for rename)
-    let temp_file = config_file.with_extension("yaml.tmp");
+    let temp_file = config_file.with_extension("toml.tmp");
 
-    std::fs::write(&temp_file, &yaml).map_err(|e| {
+    std::fs::write(&temp_file, &toml_str).map_err(|e| {
         anyhow!("Failed to write temp config file: {}", e)
     })?;
 
