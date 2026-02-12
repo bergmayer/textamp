@@ -119,6 +119,16 @@ impl EventLoop {
 
         // Main loop
         loop {
+            // Update remote playback position from local clock before every render
+            // (not just on tick) so the bottom bar progress stays smooth.
+            if state.playback.status == PlayStatus::Playing {
+                if let crate::app::state::OutputTarget::Remote { .. } = &state.output_target {
+                    if let Some(started) = state.playback.playback_started_at {
+                        state.playback.position_ms = started.elapsed().as_millis() as u64;
+                    }
+                }
+            }
+
             // Render
             terminal.draw(|f| ui::render(f, state))?;
 
@@ -139,13 +149,8 @@ impl EventLoop {
                         // Tick: update playback position
                         if state.playback.status == PlayStatus::Playing {
                             if let crate::app::state::OutputTarget::Remote { ref player_id, ref player_uri, .. } = state.output_target {
-                                // Remote mode: smooth position from local clock
-                                // baseline is set when playback starts or resumes;
-                                // polls are only used for state changes, not position.
-                                if let Some(started) = state.playback.playback_started_at {
-                                    state.playback.position_ms = started.elapsed().as_millis() as u64;
-                                }
-
+                                // Position is updated before every render (above the draw call).
+                                // Here we only handle polling for state transitions.
                                 let should_poll = state.remote_playback.last_poll
                                     .map(|t| t.elapsed() >= Duration::from_secs(2))
                                     .unwrap_or(true);
