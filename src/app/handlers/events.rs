@@ -1497,10 +1497,10 @@ pub fn handle_app_event(
                     return vec![Action::Next];
                 }
 
-                // Only handle state transitions (pause/resume), not position.
+                // Handle state transitions (pause/resume/stopped→playing).
                 // Position is driven purely by the local clock from playback_started_at.
-                if playing && state.playback.status == PlayStatus::Paused {
-                    // Resuming: reset start time so position continues from where we paused
+                if playing && state.playback.status != PlayStatus::Playing {
+                    // Remote resumed (from paused or stopped): recalibrate local clock
                     let pos = state.playback.position_ms;
                     state.playback.playback_started_at = Some(
                         std::time::Instant::now() - Duration::from_millis(pos)

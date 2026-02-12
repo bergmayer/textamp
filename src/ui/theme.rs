@@ -14,9 +14,9 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "lowercase")]
 pub enum ThemeName {
     #[default]
-    Dark,
     SolarizedDark,
     SolarizedLight,
+    Dark,
     Borland,
 }
 
@@ -24,9 +24,9 @@ impl ThemeName {
     /// All available themes.
     pub fn all() -> &'static [ThemeName] {
         &[
-            ThemeName::Dark,
             ThemeName::SolarizedDark,
             ThemeName::SolarizedLight,
+            ThemeName::Dark,
             ThemeName::Borland,
         ]
     }
@@ -56,18 +56,19 @@ impl ThemeName {
         match s.to_lowercase().as_str() {
             "solarized-dark" | "solarizeddark" => ThemeName::SolarizedDark,
             "solarized-light" | "solarizedlight" => ThemeName::SolarizedLight,
+            "dark" => ThemeName::Dark,
             "borland" | "retro" | "norton" => ThemeName::Borland,
-            _ => ThemeName::Dark,
+            _ => ThemeName::SolarizedDark,
         }
     }
 
     /// Cycle to the next theme.
     pub fn next(&self) -> Self {
         match self {
-            ThemeName::Dark => ThemeName::SolarizedDark,
             ThemeName::SolarizedDark => ThemeName::SolarizedLight,
-            ThemeName::SolarizedLight => ThemeName::Borland,
-            ThemeName::Borland => ThemeName::Dark,
+            ThemeName::SolarizedLight => ThemeName::Dark,
+            ThemeName::Dark => ThemeName::Borland,
+            ThemeName::Borland => ThemeName::SolarizedDark,
         }
     }
 }
@@ -300,7 +301,7 @@ pub struct Theme {
 
 impl Default for Theme {
     fn default() -> Self {
-        Self::new(ThemeName::Dark)
+        Self::new(ThemeName::SolarizedDark)
     }
 }
 

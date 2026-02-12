@@ -167,5 +167,5 @@ fn default_album_art_size() -> u16 {
 }
 
 fn default_theme() -> String {
-    "dark".to_string()
+    "solarized-dark".to_string()
 }

@@ -124,7 +124,14 @@ impl EventLoop {
             if state.playback.status == PlayStatus::Playing {
                 if let crate::app::state::OutputTarget::Remote { .. } = &state.output_target {
                     if let Some(started) = state.playback.playback_started_at {
-                        state.playback.position_ms = started.elapsed().as_millis() as u64;
+                        let pos = started.elapsed().as_millis() as u64;
+                        state.playback.position_ms = pos;
+
+                        // Detect track end locally — don't rely solely on server poll
+                        if state.playback.duration_ms > 0 && pos >= state.playback.duration_ms {
+                            let action = Action::Next;
+                            self.dispatch(action, state, client, audio).await?;
+                        }
                     }
                 }
             }
@@ -146,46 +153,50 @@ impl EventLoop {
                 }
                 _ = tokio::time::sleep(timeout) => {
                     if last_tick.elapsed() >= tick_rate {
+                        // Remote mode: poll for state transitions regardless of play/pause
+                        // (the remote player may resume after a seek while we think it's paused)
+                        if let crate::app::state::OutputTarget::Remote { ref player_id, ref player_uri, .. } = state.output_target {
+                            let should_poll = state.remote_playback.last_poll
+                                .map(|t| t.elapsed() >= Duration::from_secs(2))
+                                .unwrap_or(true);
+
+                            if should_poll {
+                                state.remote_playback.last_poll = Some(Instant::now());
+                                let target_id = player_id.clone();
+                                let p_uri = player_uri.clone();
+                                let token = client.token().map(|s| s.to_string()).unwrap_or_default();
+                                let client_id = client.client_identifier().to_string();
+                                let server_url = client.server_url().unwrap_or("").to_string();
+                                let machine_id = state.available_servers.first()
+                                    .map(|s| s.client_identifier.clone()).unwrap_or_default();
+                                let tx = tick_event_tx.clone();
+
+                                tokio::spawn(async move {
+                                    let rc = crate::plex::RemotePlayerClient::new(
+                                        token, client_id, target_id, server_url, machine_id, p_uri,
+                                    );
+                                    match rc.poll_timeline().await {
+                                        Ok(status) => {
+                                            let _ = tx.send(Event::RemotePlayerStatus {
+                                                session_found: status.session_found,
+                                                playing: status.playing,
+                                                position_ms: status.position_ms,
+                                                track_key: status.track_key,
+                                                finished: status.finished,
+                                            }).await;
+                                        }
+                                        Err(e) => {
+                                            let _ = tx.send(Event::RemotePlayerError(e.to_string())).await;
+                                        }
+                                    }
+                                });
+                            }
+                        }
+
                         // Tick: update playback position
                         if state.playback.status == PlayStatus::Playing {
-                            if let crate::app::state::OutputTarget::Remote { ref player_id, ref player_uri, .. } = state.output_target {
-                                // Position is updated before every render (above the draw call).
-                                // Here we only handle polling for state transitions.
-                                let should_poll = state.remote_playback.last_poll
-                                    .map(|t| t.elapsed() >= Duration::from_secs(2))
-                                    .unwrap_or(true);
-
-                                if should_poll {
-                                    state.remote_playback.last_poll = Some(Instant::now());
-                                    let target_id = player_id.clone();
-                                    let p_uri = player_uri.clone();
-                                    let token = client.token().map(|s| s.to_string()).unwrap_or_default();
-                                    let client_id = client.client_identifier().to_string();
-                                    let server_url = client.server_url().unwrap_or("").to_string();
-                                    let machine_id = state.available_servers.first()
-                                        .map(|s| s.client_identifier.clone()).unwrap_or_default();
-                                    let tx = tick_event_tx.clone();
-
-                                    tokio::spawn(async move {
-                                        let rc = crate::plex::RemotePlayerClient::new(
-                                            token, client_id, target_id, server_url, machine_id, p_uri,
-                                        );
-                                        match rc.poll_timeline().await {
-                                            Ok(status) => {
-                                                let _ = tx.send(Event::RemotePlayerStatus {
-                                                    session_found: status.session_found,
-                                                    playing: status.playing,
-                                                    position_ms: status.position_ms,
-                                                    track_key: status.track_key,
-                                                    finished: status.finished,
-                                                }).await;
-                                            }
-                                            Err(e) => {
-                                                let _ = tx.send(Event::RemotePlayerError(e.to_string())).await;
-                                            }
-                                        }
-                                    });
-                                }
+                            if let crate::app::state::OutputTarget::Remote { .. } = state.output_target {
+                                // Position handled before render (above). Nothing else needed here.
                             } else {
                                 // Local mode: existing position tracking and end detection
                                 state.playback.position_ms += tick_rate.as_millis() as u64;
