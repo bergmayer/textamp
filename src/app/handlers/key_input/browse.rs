@@ -556,7 +556,7 @@ pub(super) fn handle_artist_browse_keys(key: event::KeyEvent, state: &mut AppSta
         return actions;
     }
 
-    // Handle Enter/Right - drill down or play track
+    // Handle Enter/Right - drill down into containers; only Enter plays tracks
     if matches!(key.code, KeyCode::Enter | KeyCode::Right) {
         if let Some(item) = state.artist_nav.selected_item().cloned() {
             return match item {
@@ -572,7 +572,7 @@ pub(super) fn handle_artist_browse_keys(key: event::KeyEvent, state: &mut AppSta
                     state.selected_album_title = format!("All tracks by {}", artist_name);
                     vec![Action::LoadArtistAllTracksForMiller { artist_key }]
                 }
-                BrowseItem::Track { .. } => {
+                BrowseItem::Track { .. } if key.code == KeyCode::Enter => {
                     if let Some(col) = state.artist_nav.focused() {
                         let idx = col.selected_index;
                         vec![Action::PlayTrackFromMiller { column_index: state.artist_nav.focused_column, track_index: idx }]
@@ -597,7 +597,7 @@ pub(super) fn handle_genre_browse_keys(key: event::KeyEvent, state: &mut AppStat
         return actions;
     }
 
-    // Handle Enter/Right - drill into selected item or play track
+    // Handle Enter/Right - drill into containers; only Enter plays tracks
     if matches!(key.code, KeyCode::Enter | KeyCode::Right) {
         if let Some(item) = state.genre_nav.selected_item().cloned() {
             return match item {
@@ -607,7 +607,7 @@ pub(super) fn handle_genre_browse_keys(key: event::KeyEvent, state: &mut AppStat
                 BrowseItem::Album { key, .. } => {
                     vec![Action::LoadGenreTracksForMiller { album_key: key }]
                 }
-                BrowseItem::Track { .. } => {
+                BrowseItem::Track { .. } if key.code == KeyCode::Enter => {
                     if let Some(col) = state.genre_nav.focused() {
                         let idx = col.selected_index;
                         vec![Action::PlayGenreTrackFromMiller { column_index: state.genre_nav.focused_column, track_index: idx }]
@@ -632,7 +632,7 @@ pub(super) fn handle_playlist_browse_keys(key: event::KeyEvent, state: &mut AppS
         return actions;
     }
 
-    // Handle Enter/Right - drill into playlist/album or play track
+    // Handle Enter/Right - drill into containers; only Enter plays tracks
     if matches!(key.code, KeyCode::Enter | KeyCode::Right) {
         if let Some(item) = state.playlist_nav.selected_item().cloned() {
             return match item {
@@ -644,7 +644,7 @@ pub(super) fn handle_playlist_browse_keys(key: event::KeyEvent, state: &mut AppS
                     state.selected_album_title = title;
                     vec![Action::LoadAlbumTracksForPlaylistMiller { album_key: key }]
                 }
-                BrowseItem::Track { .. } => {
+                BrowseItem::Track { .. } if key.code == KeyCode::Enter => {
                     if let Some(col) = state.playlist_nav.focused() {
                         let idx = col.selected_index;
                         vec![Action::PlayPlaylistTrackFromMiller { column_index: state.playlist_nav.focused_column, track_index: idx }]

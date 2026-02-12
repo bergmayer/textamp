@@ -36,7 +36,7 @@ pub async fn dispatch(
                     state.playback.status = PlayStatus::Playing;
                 }
                 PlayStatus::Stopped => {
-                    if state.queue_index.is_some() {
+                    if state.current_track().is_some() {
                         helpers::play_current_track(event_tx, state, client, audio).await;
                     }
                 }
@@ -252,7 +252,7 @@ async fn dispatch_remote(
                     state.playback.status = PlayStatus::Playing;
                 }
                 PlayStatus::Stopped => {
-                    if state.queue_index.is_some() {
+                    if state.current_track().is_some() {
                         helpers::play_current_track(event_tx, state, client, audio).await;
                     }
                 }
@@ -383,6 +383,10 @@ async fn dispatch_remote(
         }
         Action::Seek(position_ms) => {
             state.playback.position_ms = position_ms;
+            // Recalibrate local clock so tick handler continues smoothly from the new position
+            state.playback.playback_started_at = Some(
+                std::time::Instant::now() - std::time::Duration::from_millis(position_ms)
+            );
             let rc = rc.clone();
             let event_tx = event_tx.clone();
             tokio::spawn(async move {
@@ -396,6 +400,10 @@ async fn dispatch_remote(
             let duration = state.playback.duration_ms as i64;
             let new_pos = (current + delta_ms).clamp(0, duration) as u64;
             state.playback.position_ms = new_pos;
+            // Recalibrate local clock so tick handler continues smoothly from the new position
+            state.playback.playback_started_at = Some(
+                std::time::Instant::now() - std::time::Duration::from_millis(new_pos)
+            );
             let rc = rc.clone();
             let event_tx = event_tx.clone();
             tokio::spawn(async move {

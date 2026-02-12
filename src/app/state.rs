@@ -2038,6 +2038,10 @@ pub struct RemotePlaybackState {
     pub last_poll: Option<std::time::Instant>,
     /// Track key reported by the remote player (for detecting track changes).
     pub current_track_key: Option<String>,
+    /// Position baseline from the last successful poll (ms).
+    pub baseline_position: u64,
+    /// When the baseline was set — used to interpolate smoothly between polls.
+    pub baseline_time: Option<std::time::Instant>,
 }
 
 impl Default for RemotePlaybackState {
@@ -2045,6 +2049,8 @@ impl Default for RemotePlaybackState {
         Self {
             last_poll: None,
             current_track_key: None,
+            baseline_position: 0,
+            baseline_time: None,
         }
     }
 }

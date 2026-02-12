@@ -927,6 +927,8 @@ pub async fn dispatch(
         }
         Action::SetOutputTarget(target) => {
             use crate::app::state::OutputTarget;
+            let was_playing = matches!(state.playback.status, PlayStatus::Playing | PlayStatus::Paused);
+
             match &target {
                 OutputTarget::Local => {
                     // Switching back to local: stop remote playback if active
@@ -947,21 +949,33 @@ pub async fn dispatch(
                     }
                     state.output_target = OutputTarget::Local;
                     state.remote_playback = crate::app::state::RemotePlaybackState::default();
-                    // Stop playback — user must press play to resume on local
-                    state.playback.status = PlayStatus::Stopped;
-                    state.playback.position_ms = 0;
-                    state.set_status("Output: Local (press play to resume)".to_string());
+
+                    if was_playing && state.current_track().is_some() {
+                        // Transfer playback to local
+                        helpers::play_current_track(event_tx, state, client, audio).await;
+                        state.set_status("Output: Local".to_string());
+                    } else {
+                        state.playback.status = PlayStatus::Stopped;
+                        state.playback.position_ms = 0;
+                        state.set_status("Output: Local".to_string());
+                    }
                 }
                 OutputTarget::Remote { player_name, .. } => {
                     let name = player_name.clone();
-                    // Switching to remote: stop local playback
+                    // Stop local audio
                     audio.stop();
                     state.output_target = target;
                     state.remote_playback = crate::app::state::RemotePlaybackState::default();
-                    // Stop playback — user must press play to start on remote
-                    state.playback.status = PlayStatus::Stopped;
-                    state.playback.position_ms = 0;
-                    state.set_status(format!("Output: {} (press play to resume)", name));
+
+                    if was_playing && state.current_track().is_some() {
+                        // Transfer playback to remote
+                        helpers::play_current_track(event_tx, state, client, audio).await;
+                        state.set_status(format!("Output: {}", name));
+                    } else {
+                        state.playback.status = PlayStatus::Stopped;
+                        state.playback.position_ms = 0;
+                        state.set_status(format!("Output: {}", name));
+                    }
                 }
             }
         }

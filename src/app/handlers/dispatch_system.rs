@@ -31,6 +31,27 @@ pub async fn dispatch(
                 }
             }
 
+            // Stop remote player if active
+            if let crate::app::state::OutputTarget::Remote { ref player_id, ref player_uri, .. } = state.output_target {
+                let target_id = player_id.clone();
+                let p_uri = player_uri.clone();
+                let token = client.token().map(|s| s.to_string()).unwrap_or_default();
+                let client_id = client.client_identifier().to_string();
+                let server_url = client.server_url().unwrap_or("").to_string();
+                let machine_id = state.available_servers.first()
+                    .map(|s| s.client_identifier.clone()).unwrap_or_default();
+                // Use blocking wait to ensure stop is sent before app exits
+                let rt = tokio::runtime::Handle::current();
+                rt.spawn(async move {
+                    let rc = crate::plex::RemotePlayerClient::new(
+                        token, client_id, target_id, server_url, machine_id, p_uri,
+                    );
+                    let _ = rc.stop().await;
+                });
+                // Brief pause to let the stop command send
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+
             // Save cache to disk before quitting
             if let Some(lib_key) = &state.active_library {
                 use crate::cache::CacheData;

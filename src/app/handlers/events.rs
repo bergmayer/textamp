@@ -1485,20 +1485,28 @@ pub fn handle_app_event(
             state.set_error(format!("Player discovery failed: {}", err));
             vec![]
         }
-        Event::RemotePlayerStatus { playing, position_ms, track_key: _, finished } => {
+        Event::RemotePlayerStatus { session_found, playing, position_ms: _, track_key: _, finished } => {
             state.remote_playback.last_poll = Some(std::time::Instant::now());
 
             if let crate::app::state::OutputTarget::Remote { .. } = &state.output_target {
-                state.playback.position_ms = position_ms;
+                if !session_found {
+                    return vec![];
+                }
 
                 if finished {
-                    // Remote player finished the track — advance to next
                     return vec![Action::Next];
                 }
 
-                if playing && state.playback.status != PlayStatus::Playing {
+                // Only handle state transitions (pause/resume), not position.
+                // Position is driven purely by the local clock from playback_started_at.
+                if playing && state.playback.status == PlayStatus::Paused {
+                    // Resuming: reset start time so position continues from where we paused
+                    let pos = state.playback.position_ms;
+                    state.playback.playback_started_at = Some(
+                        std::time::Instant::now() - Duration::from_millis(pos)
+                    );
                     state.playback.status = PlayStatus::Playing;
-                } else if !playing && !finished && state.playback.status == PlayStatus::Playing {
+                } else if !playing && state.playback.status == PlayStatus::Playing {
                     state.playback.status = PlayStatus::Paused;
                 }
             }

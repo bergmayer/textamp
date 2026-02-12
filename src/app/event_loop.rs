@@ -139,8 +139,12 @@ impl EventLoop {
                         // Tick: update playback position
                         if state.playback.status == PlayStatus::Playing {
                             if let crate::app::state::OutputTarget::Remote { ref player_id, ref player_uri, .. } = state.output_target {
-                                // Remote mode: interpolate position between polls, poll every ~2s
-                                state.playback.position_ms += tick_rate.as_millis() as u64;
+                                // Remote mode: smooth position from local clock
+                                // baseline is set when playback starts or resumes;
+                                // polls are only used for state changes, not position.
+                                if let Some(started) = state.playback.playback_started_at {
+                                    state.playback.position_ms = started.elapsed().as_millis() as u64;
+                                }
 
                                 let should_poll = state.remote_playback.last_poll
                                     .map(|t| t.elapsed() >= Duration::from_secs(2))
@@ -164,6 +168,7 @@ impl EventLoop {
                                         match rc.poll_timeline().await {
                                             Ok(status) => {
                                                 let _ = tx.send(Event::RemotePlayerStatus {
+                                                    session_found: status.session_found,
                                                     playing: status.playing,
                                                     position_ms: status.position_ms,
                                                     track_key: status.track_key,

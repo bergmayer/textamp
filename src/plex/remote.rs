@@ -36,6 +36,8 @@ pub struct RemotePlayerClient {
 /// Timeline status from a remote player poll.
 #[derive(Debug, Clone)]
 pub struct RemoteTimelineStatus {
+    /// Whether an active session was found for the target player.
+    pub session_found: bool,
     pub playing: bool,
     pub position_ms: u64,
     pub track_key: Option<String>,
@@ -434,10 +436,11 @@ impl RemotePlayerClient {
         } else {
             tracing::warn!("Could not parse sessions response");
             return Ok(RemoteTimelineStatus {
+                session_found: false,
                 playing: false,
                 position_ms: 0,
                 track_key: None,
-                finished: true,
+                finished: false,
             });
         };
 
@@ -446,6 +449,7 @@ impl RemotePlayerClient {
             if let Some(ref player) = session.player {
                 if player.machine_identifier == self.target_client_id {
                     return Ok(RemoteTimelineStatus {
+                        session_found: true,
                         playing: player.state == "playing",
                         position_ms: session.view_offset,
                         track_key: session.rating_key.clone(),
@@ -455,8 +459,9 @@ impl RemotePlayerClient {
             }
         }
 
-        // No active session for this player
+        // No active session for this player — keep current state
         Ok(RemoteTimelineStatus {
+            session_found: false,
             playing: false,
             position_ms: 0,
             track_key: None,

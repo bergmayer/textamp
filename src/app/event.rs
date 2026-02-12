@@ -168,6 +168,7 @@ pub enum Event {
     PlayersDiscovered(Vec<crate::plex::models::RemotePlayer>),
     PlayerDiscoveryFailed(String),
     RemotePlayerStatus {
+        session_found: bool,
         playing: bool,
         position_ms: u64,
         track_key: Option<String>,
