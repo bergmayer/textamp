@@ -316,9 +316,17 @@ pub async fn dispatch(
                                 state.queue = tracks;
                                 state.queue_index = Some(start_idx);
                                 state.playback_mode = PlaybackMode::Queue;
-                                if let Some(track) = state.queue.get(start_idx).cloned() {
-                                    helpers::play_track(event_tx, track, state, client, audio).await;
+                                if let Some(current) = state.current_track().cloned() {
+                                    helpers::report_playback_stop_to_plex(
+                                        &current, state.playback.position_ms, true,
+                                        state.plex_session_id.clone(), client,
+                                    );
                                 }
+                                state.plex_session_id = Some(helpers::generate_plex_session_id());
+                                state.queue_original.clear();
+                                state.queue_sort_mode = crate::app::state::QueueSortMode::QueueOrder;
+                                audio.track_cache.flush();
+                                helpers::play_current_track(event_tx, state, client, audio).await;
                             }
                             Err(e) => {
                                 state.set_error(format!("Failed to load folder tracks: {}", e));
@@ -354,9 +362,17 @@ pub async fn dispatch(
                                         state.queue = tracks;
                                         state.queue_index = Some(start_idx);
                                         state.playback_mode = PlaybackMode::Queue;
-                                        if let Some(track) = state.queue.get(start_idx).cloned() {
-                                            helpers::play_track(event_tx, track, state, client, audio).await;
+                                        if let Some(current) = state.current_track().cloned() {
+                                            helpers::report_playback_stop_to_plex(
+                                                &current, state.playback.position_ms, true,
+                                                state.plex_session_id.clone(), client,
+                                            );
                                         }
+                                        state.plex_session_id = Some(helpers::generate_plex_session_id());
+                                        state.queue_original.clear();
+                                        state.queue_sort_mode = crate::app::state::QueueSortMode::QueueOrder;
+                                        audio.track_cache.flush();
+                                        helpers::play_current_track(event_tx, state, client, audio).await;
                                     }
                                 }
                                 Err(e) => {
