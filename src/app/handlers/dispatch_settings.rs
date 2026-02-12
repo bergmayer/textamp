@@ -575,18 +575,42 @@ pub async fn dispatch(
                     }
                 }
 
+                // Stop remote playback if active
+                if let crate::app::state::OutputTarget::Remote { ref player_id, ref player_uri, .. } = state.output_target {
+                    let target_id = player_id.clone();
+                    let p_uri = player_uri.clone();
+                    let token = client.token().map(|s| s.to_string()).unwrap_or_default();
+                    let client_id = client.client_identifier().to_string();
+                    let server_url = client.server_url().unwrap_or("").to_string();
+                    let machine_id = state.available_servers.first()
+                        .map(|s| s.client_identifier.clone()).unwrap_or_default();
+                    tokio::spawn(async move {
+                        let rc = crate::plex::RemotePlayerClient::new(
+                            token, client_id, target_id, server_url, machine_id, p_uri,
+                        );
+                        let _ = rc.stop().await;
+                    });
+                }
+
                 // Stop playback, flush track cache, and clear queue (tracks belong to the old library)
                 audio.stop();
                 audio.track_cache.flush();
                 state.playback.status = PlayStatus::Stopped;
                 state.playback.position_ms = 0;
                 state.playback.duration_ms = 0;
+                state.playback.playback_started_at = None;
                 state.queue.clear();
                 state.queue_index = None;
                 state.queue_original.clear();
                 state.radio.clear();
                 state.playback_mode = PlaybackMode::Queue;
                 state.adventure = crate::app::state::AdventureState::default();
+
+                // Clear waveform and artwork (belong to the old library's track)
+                state.waveform = crate::app::state::WaveformState::default();
+                state.artwork_thumb = None;
+                state.artwork_data = None;
+                state.artwork_loading = false;
 
                 // Find library name for status message
                 let lib_name = state.libraries.iter()
