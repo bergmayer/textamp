@@ -10,15 +10,30 @@ use tokio::sync::mpsc;
 
 use super::helpers;
 
-/// Collect all album art (key, thumb) pairs from a column that aren't already cached or pending.
+/// Max number of album art entries to load at once to avoid blocking the event loop
+/// with synchronous disk I/O in LoadAlbumArt.
+const ART_BATCH_LIMIT: usize = 30;
+
+/// Collect album art (key, thumb) pairs from a column that aren't already cached or pending.
+/// Limited to `ART_BATCH_LIMIT` items around the column's selected_index to avoid
+/// blocking the event loop with thousands of synchronous disk reads.
 fn collect_art_to_load(
     col: Option<&BrowseColumn>,
     cache: &std::collections::HashMap<String, Vec<u8>>,
     pending: &std::collections::HashSet<String>,
 ) -> Vec<(String, String)> {
     let Some(col) = col else { return vec![] };
+    let total = col.items.len();
+    if total == 0 { return vec![]; }
+
+    // Window around selected_index
+    let half = ART_BATCH_LIMIT / 2;
+    let center = col.selected_index;
+    let start = center.saturating_sub(half);
+    let end = (center + ART_BATCH_LIMIT).min(total);
+
     let mut to_load = Vec::new();
-    for item in &col.items {
+    for item in &col.items[start..end] {
         match item {
             BrowseItem::Album { key, thumb: Some(thumb), .. } => {
                 if !cache.contains_key(key) && !pending.contains(key) {
@@ -34,6 +49,25 @@ fn collect_art_to_load(
         }
     }
     to_load
+}
+
+/// Collect art for the viewport of the focused album column.
+/// Called after scroll navigation to lazily load art for newly visible items.
+pub fn collect_viewport_art(state: &AppState) -> Vec<(String, String)> {
+    if !state.album_art_view { return vec![]; }
+
+    let nav: &crate::miller::MillerState<BrowseColumn> = match state.browse_category {
+        crate::app::state::BrowseCategory::Library => &state.artist_nav,
+        crate::app::state::BrowseCategory::Genres => &state.genre_nav,
+        _ => return vec![],
+    };
+
+    let Some(col) = nav.focused() else { return vec![] };
+    // Only bother for album columns
+    let has_albums = col.items.iter().any(|item| matches!(item, BrowseItem::Album { .. } | BrowseItem::AllTracks { .. }));
+    if !has_albums { return vec![]; }
+
+    collect_art_to_load(Some(col), &state.album_art_cache, &state.album_art_pending)
 }
 
 /// Dispatch Miller column actions. Returns follow-up actions.
@@ -122,6 +156,16 @@ pub async fn dispatch(
                     // Store full tracks for playback (includes media info)
                     let col = BrowseColumn::new_with_tracks(title, items, tracks);
                     state.artist_nav.push_column(col);
+
+                    // Auto-select track if pending from search navigation
+                    if let Some(ref tk) = state.pending_track_key {
+                        if let Some(col) = state.artist_nav.columns.last_mut() {
+                            if let Some(pos) = col.items.iter().position(|i| i.key() == tk.as_str()) {
+                                col.selected_index = pos;
+                            }
+                        }
+                        state.pending_track_key = None;
+                    }
                 }
                 Err(e) => {
                     state.set_error(format!("Failed to load tracks: {}", e));
@@ -150,6 +194,43 @@ pub async fn dispatch(
             state.artist_nav.loading = false;
         }
 
+        Action::LoadAllAlbumsForMiller => {
+            // Load all albums as a Miller column (triggered by "► All Artists" entry)
+            // Uses already-loaded state.albums; fetches async if empty.
+            if state.albums.is_empty() {
+                state.artist_nav.loading = true;
+                // Fetch in background to avoid blocking the event loop
+                let tx = event_tx.clone();
+                let client_clone = client.clone();
+                let lib_key = state.active_library.clone().unwrap_or_default();
+                tokio::spawn(async move {
+                    match client_clone.get_albums(&lib_key).await {
+                        Ok(albums) => {
+                            let _ = tx.send(Event::AllAlbumsForMillerLoaded(albums)).await;
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Event::DataLoadError(format!("Failed to load albums: {}", e))).await;
+                        }
+                    }
+                });
+                return Ok(vec![]);
+            }
+            let items = BrowseItem::from_albums(&state.albums);
+            let col = BrowseColumn::new("All Artists", items);
+            state.artist_nav.push_column(col);
+
+            // Preload album art if in art view (viewport-limited)
+            let art_batch = if state.album_art_view {
+                collect_art_to_load(state.artist_nav.columns.last(), &state.album_art_cache, &state.album_art_pending)
+            } else {
+                vec![]
+            };
+            state.artist_nav.loading = false;
+            if !art_batch.is_empty() {
+                return Ok(vec![Action::LoadAlbumArt(art_batch)]);
+            }
+        }
+
         Action::PlayTrackFromMiller { column_index, track_index } => {
             // Get tracks from the specified column and play from track_index
             if let Some(col) = state.artist_nav.columns.get(column_index) {
@@ -174,23 +255,36 @@ pub async fn dispatch(
             state.genre_nav.loading = true;
 
             if let Some(lib_key) = &state.active_library.clone() {
-                // Determine which API to call based on genre content type
-                let albums_result = match state.genre_content_type {
-                    crate::app::state::GenreContentType::ArtistGenres => {
-                        client.get_artist_genre_albums(lib_key, &genre_key).await
-                    }
-                    crate::app::state::GenreContentType::AlbumGenres => {
-                        client.get_album_genre_albums(lib_key, &genre_key).await
-                    }
-                    crate::app::state::GenreContentType::Moods => {
-                        client.get_mood_albums(lib_key, &genre_key).await
-                    }
-                    crate::app::state::GenreContentType::Styles => {
-                        client.get_style_albums(lib_key, &genre_key).await
-                    }
-                    _ => {
-                        // Default genres use file-based tags
-                        client.get_genre_albums(lib_key, &genre_key).await
+                // For "All" tab, keys are prefixed ("lib:", "art:", "alb:", "mood:", "style:").
+                // Parse the prefix to determine which API to call, or fall back to genre_content_type.
+                let albums_result = if let Some(stripped) = genre_key.strip_prefix("lib:") {
+                    client.get_genre_albums(lib_key, stripped).await
+                } else if let Some(stripped) = genre_key.strip_prefix("art:") {
+                    client.get_artist_genre_albums(lib_key, stripped).await
+                } else if let Some(stripped) = genre_key.strip_prefix("alb:") {
+                    client.get_album_genre_albums(lib_key, stripped).await
+                } else if let Some(stripped) = genre_key.strip_prefix("mood:") {
+                    client.get_mood_albums(lib_key, stripped).await
+                } else if let Some(stripped) = genre_key.strip_prefix("style:") {
+                    client.get_style_albums(lib_key, stripped).await
+                } else {
+                    // No prefix — use genre_content_type (for non-All tabs)
+                    match state.genre_content_type {
+                        crate::app::state::GenreContentType::ArtistGenres => {
+                            client.get_artist_genre_albums(lib_key, &genre_key).await
+                        }
+                        crate::app::state::GenreContentType::AlbumGenres => {
+                            client.get_album_genre_albums(lib_key, &genre_key).await
+                        }
+                        crate::app::state::GenreContentType::Moods => {
+                            client.get_mood_albums(lib_key, &genre_key).await
+                        }
+                        crate::app::state::GenreContentType::Styles => {
+                            client.get_style_albums(lib_key, &genre_key).await
+                        }
+                        _ => {
+                            client.get_genre_albums(lib_key, &genre_key).await
+                        }
                     }
                 };
 
@@ -285,25 +379,6 @@ pub async fn dispatch(
                     playlist_key: pk, error: last_err,
                 }).await;
             });
-        }
-
-        Action::LoadAlbumTracksForPlaylistMiller { album_key } => {
-            // Load tracks for album (in Recently Added mode) and add as new column in playlist_nav
-            state.playlist_nav.loading = true;
-
-            match client.get_album_tracks(&album_key).await {
-                Ok(tracks) => {
-                    let items = BrowseItem::from_tracks(&tracks);
-                    let title = state.selected_album_title.clone();
-                    // Store full tracks for playback (includes media info)
-                    let col = BrowseColumn::new_with_tracks(title, items, tracks);
-                    state.playlist_nav.push_column(col);
-                }
-                Err(e) => {
-                    state.set_error(format!("Failed to load album tracks: {}", e));
-                }
-            }
-            state.playlist_nav.loading = false;
         }
 
         Action::PlayPlaylistTrackFromMiller { column_index, track_index } => {

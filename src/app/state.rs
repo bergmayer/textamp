@@ -195,6 +195,8 @@ pub enum BrowseItem {
     Artist {
         key: String,
         title: String,
+        /// True when Textamp filled in "Unknown Artist" for an empty title.
+        is_placeholder: bool,
     },
     Album {
         key: String,
@@ -202,6 +204,8 @@ pub enum BrowseItem {
         artist: String,
         year: Option<u16>,
         thumb: Option<String>,
+        /// True when Textamp filled in "Unknown Album (...)" for an empty title.
+        is_placeholder: bool,
     },
     Track {
         key: String,
@@ -227,6 +231,8 @@ pub enum BrowseItem {
         artist_name: String,
         thumb: Option<String>,
     },
+    /// "All Artists" entry - pinned at top of artist list, drills into all albums.
+    AllArtists,
 }
 
 impl BrowseItem {
@@ -238,6 +244,7 @@ impl BrowseItem {
             BrowseItem::Genre { key, .. } => key,
             BrowseItem::Playlist { key, .. } => key,
             BrowseItem::AllTracks { artist_key, .. } => artist_key,
+            BrowseItem::AllArtists => "__all_artists__",
         }
     }
 
@@ -249,6 +256,7 @@ impl BrowseItem {
             BrowseItem::Genre { title, .. } => title,
             BrowseItem::Playlist { title, .. } => title,
             BrowseItem::AllTracks { .. } => "► All Tracks",
+            BrowseItem::AllArtists => "All Artists",
         }
     }
 
@@ -257,35 +265,73 @@ impl BrowseItem {
         !matches!(self, BrowseItem::Track { .. })
     }
 
+    /// Whether this item is a placeholder (Textamp filled in "Unknown ..." for empty metadata).
+    pub fn is_placeholder_item(&self) -> bool {
+        match self {
+            BrowseItem::Artist { is_placeholder, .. } => *is_placeholder,
+            BrowseItem::Album { is_placeholder, .. } => *is_placeholder,
+            _ => false,
+        }
+    }
+
     /// Convert a list of Artists to BrowseItems.
+    /// Placeholder items (empty title → "Unknown Artist") are sorted to the end.
     pub fn from_artists(artists: &[Artist]) -> Vec<BrowseItem> {
-        artists.iter().map(|a| BrowseItem::Artist {
-            key: a.rating_key.clone(),
-            title: a.title.clone(),
-        }).collect()
+        let mut items: Vec<BrowseItem> = artists.iter().map(|a| {
+            let is_empty = a.title.is_empty();
+            BrowseItem::Artist {
+                key: a.rating_key.clone(),
+                title: if is_empty { "Unknown Artist".to_string() } else { a.title.clone() },
+                is_placeholder: is_empty,
+            }
+        }).collect();
+        // Stable-partition: non-placeholders first, placeholders at end
+        items.sort_by_key(|item| matches!(item, BrowseItem::Artist { is_placeholder: true, .. }));
+        items
     }
 
     /// Convert a list of Albums to BrowseItems.
+    /// Placeholder items (empty title → "Unknown Album (...)") are sorted to the end.
     pub fn from_albums(albums: &[Album]) -> Vec<BrowseItem> {
-        albums.iter().map(|a| BrowseItem::Album {
-            key: a.rating_key.clone(),
-            title: a.title.clone(),
-            artist: a.parent_title.clone().unwrap_or_default(),
-            year: a.year,
-            thumb: a.thumb.clone(),
-        }).collect()
+        let mut items: Vec<BrowseItem> = albums.iter().map(|a| {
+            let is_empty = a.title.is_empty();
+            let (title, year) = if is_empty {
+                let artist = a.artist_name(); // handles empty/None → "Unknown Artist"
+                (format!("Unknown Album ({})", artist), None)
+            } else {
+                (a.title.clone(), a.year)
+            };
+            BrowseItem::Album {
+                key: a.rating_key.clone(),
+                title,
+                artist: a.artist_name().to_string(),
+                year,
+                thumb: a.thumb.clone(),
+                is_placeholder: is_empty,
+            }
+        }).collect();
+        // Stable-partition: non-placeholders first, placeholders at end
+        items.sort_by_key(|item| matches!(item, BrowseItem::Album { is_placeholder: true, .. }));
+        items
     }
 
     /// Convert a list of Tracks to BrowseItems.
     pub fn from_tracks(tracks: &[Track]) -> Vec<BrowseItem> {
-        tracks.iter().map(|t| BrowseItem::Track {
-            key: t.rating_key.clone(),
-            title: t.title.clone(),
-            artist_name: t.grandparent_title.clone(),
-            album_name: t.parent_title.clone(),
-            year: t.year.or(t.parent_year),
-            duration_ms: t.duration_ms(),
-            track_number: t.index,
+        tracks.iter().map(|t| {
+            let title = if t.title.is_empty() {
+                t.file_name().unwrap_or("Unknown Track").to_string()
+            } else {
+                t.title.clone()
+            };
+            BrowseItem::Track {
+                key: t.rating_key.clone(),
+                title,
+                artist_name: Some(t.artist_name().to_string()),
+                album_name: Some(t.album_name().to_string()),
+                year: t.year.or(t.parent_year),
+                duration_ms: t.duration_ms(),
+                track_number: t.index,
+            }
         }).collect()
     }
 
@@ -304,6 +350,13 @@ impl BrowseItem {
             title: p.title.clone(),
             track_count: p.leaf_count,
         }).collect()
+    }
+
+    /// Build artist root items: "► All Artists" pinned at index 0, then artist items.
+    pub fn artist_root_items(artists: &[Artist]) -> Vec<BrowseItem> {
+        let mut items = vec![BrowseItem::AllArtists];
+        items.extend(Self::from_artists(artists));
+        items
     }
 }
 
@@ -358,22 +411,54 @@ impl BrowseColumn {
     }
 
     /// Shuffle items (and tracks in parallel). Saves originals for restore.
+    /// Pinned items (AllArtists, AllTracks) at index 0 are excluded from shuffle.
+    /// Placeholder items (is_placeholder: true) are kept at the end.
     pub fn shuffle(&mut self) {
         use rand::seq::SliceRandom;
         // Save originals (fresh copy each time for re-shuffle)
         self.original_items = Some(self.items.clone());
         self.original_tracks = if self.tracks.is_empty() { None } else { Some(self.tracks.clone()) };
 
-        // Build index permutation and apply to both vecs
-        let mut indices: Vec<usize> = (0..self.items.len()).collect();
+        // Check if first item is pinned (AllArtists or AllTracks)
+        let pinned_start = matches!(self.items.first(), Some(BrowseItem::AllArtists) | Some(BrowseItem::AllTracks { .. }));
+        let start = if pinned_start { 1 } else { 0 };
+
+        // Find placeholder items pinned at end
+        let placeholder_start = self.items.iter().rposition(|item| !item.is_placeholder_item())
+            .map(|i| i + 1)
+            .unwrap_or(self.items.len());
+        let end = placeholder_start;
+
+        // Build index permutation for shuffleable items (exclude pinned start + placeholder tail)
+        let mut indices: Vec<usize> = (start..end).collect();
         let mut rng = rand::rng();
         indices.shuffle(&mut rng);
 
         let orig_items = self.original_items.as_ref().unwrap();
-        self.items = indices.iter().map(|&i| orig_items[i].clone()).collect();
+        let mut new_items: Vec<BrowseItem> = Vec::with_capacity(self.items.len());
+        if pinned_start {
+            new_items.push(orig_items[0].clone());
+        }
+        new_items.extend(indices.iter().map(|&i| orig_items[i].clone()));
+        // Append placeholder tail (unchanged order)
+        new_items.extend(orig_items[end..].iter().cloned());
+        self.items = new_items;
 
         if let Some(ref orig_tracks) = self.original_tracks {
-            self.tracks = indices.iter().filter_map(|&i| orig_tracks.get(i).cloned()).collect();
+            let mut new_tracks = Vec::with_capacity(orig_tracks.len());
+            if pinned_start {
+                if let Some(t) = orig_tracks.first() {
+                    new_tracks.push(t.clone());
+                }
+            }
+            new_tracks.extend(indices.iter().filter_map(|&i| orig_tracks.get(i).cloned()));
+            // Tracks don't have placeholders, but keep consistent length
+            for i in end..orig_tracks.len() {
+                if let Some(t) = orig_tracks.get(i) {
+                    new_tracks.push(t.clone());
+                }
+            }
+            self.tracks = new_tracks;
         }
 
         self.selected_index = 0;
@@ -540,6 +625,8 @@ pub struct AppState {
 
     // Artist view mode (Artist vs Album Artist)
     pub artist_view_mode: ArtistViewMode,
+    // Library sub-mode for Alt+S cycling (Normal / AllByArtist / AllShuffled)
+    pub library_sub_mode: LibrarySubMode,
 
     // Right panel content (depends on browse category and depth)
     // For Artists: first shows albums, then tracks when album selected
@@ -582,15 +669,11 @@ pub struct AppState {
     // Search
     pub search_query: String,
     pub search_results: Option<SearchResults>,
-    pub search_loading: bool,
-
-    // Filter (uses API search for large libraries)
-    pub filter_results: Option<SearchResults>,
-    pub filter_loading: bool,
-    pub pending_filter_key: Option<String>,  // Rating key from filter selection
+    pub search_track_loading: bool,  // True when tracks tab is doing async API search
+    pub search_track_version: u64,   // Debounce counter for track API searches
+    pub search_focus: SearchFocus,
     pub pending_album_key: Option<String>,   // Album to auto-select after loading artist albums
-    pub filter_search_version: u64,  // Increments on each search, used for debounce
-    pub global_search_version: u64,  // Version counter for global search debouncing
+    pub pending_track_key: Option<String>,   // Track to auto-select after loading album tracks
 
     // UI state
     pub list_state: ListStates,
@@ -672,10 +755,12 @@ pub struct AppState {
     // Now Playing view mode (Queue vs Now Playing)
     pub now_playing_mode: NowPlayingMode,
 
-    // Playlists view mode (All vs Stations vs Recently Added)
-    pub playlists_mode: PlaylistsMode,
-    pub recently_added_albums: Vec<Album>,
-    pub recently_added_loading: bool,
+    // Genre tab (All / Library / Artist / Album / Mood / Style)
+    pub genre_tab: GenreTab,
+
+    // Playlist view mode (Tracks vs TracksByAlbum)
+    pub playlist_view_mode: PlaylistViewMode,
+    pub playlist_album_groups: Vec<Vec<Track>>,
 
     // Cache management
     /// Per-category timestamps (Unix epoch secs) for when each category was last refreshed.
@@ -701,6 +786,12 @@ pub struct AppState {
 
     // Search popup state (Ctrl+F - floating dialog, not a full view)
     pub search_popup_active: bool,
+
+    // Radio launcher popup state
+    pub radio_launcher: Option<RadioLauncherState>,
+
+    // Adventure launcher popup state (Sonic Adventure from Radio section)
+    pub adventure_launcher: Option<AdventureLauncherState>,
 
     // Library picker popup state (Ctrl+Alt+S)
     pub library_picker_active: bool,
@@ -924,31 +1015,16 @@ impl MillerState<StationColumn> {
     }
 }
 
-// Sonic radio (Alt+R) - separate from station-based radio (via Ctrl+G Stations)
-// radio_state is used for sonic radio seeded from user selection.
+// Radio state for Alt+R Plex radio, separate from station-based radio (via Radio section).
+// radio_state is used for radio seeded from user selection via Plex playQueues API.
 // This is distinct from RadioPlaybackState which is for Plexamp stations.
-/// Radio mode for sonic radio (track/album/artist radio via Alt+R).
+/// Radio mode for Plex radio (Alt+R).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RadioMode {
     #[default]
     Off,
-    /// Sonic track radio - plays similar tracks based on a seed track
-    Track,
-    /// Sonic album radio - plays album then similar albums
-    Album,
-    /// Sonic artist radio - plays artist's tracks then similar
-    Artist,
-}
-
-impl RadioMode {
-    pub fn label(&self) -> &'static str {
-        match self {
-            RadioMode::Off => "",
-            RadioMode::Track => "sonic track radio",
-            RadioMode::Album => "sonic album radio",
-            RadioMode::Artist => "sonic artist radio",
-        }
-    }
+    /// Active Plex radio — seeded from a track, album, or artist
+    Active,
 }
 
 /// Sonic radio state for similarity-based playback (Alt+R).
@@ -983,7 +1059,7 @@ impl AppState {
             view: View::Auth,
             previous_view: None,
             help_scroll: 0,
-            browse_category: BrowseCategory::Artists,
+            browse_category: BrowseCategory::Library,
             focus: Focus::Left,
             artists: Vec::new(),
             artists_total: 0,
@@ -1008,6 +1084,7 @@ impl AppState {
             genre_albums: Vec::new(),
             genre_albums_index: 0,
             artist_view_mode: ArtistViewMode::default(),
+            library_sub_mode: LibrarySubMode::default(),
             right_panel_mode: RightPanelMode::Empty,
             selected_artist_albums: Vec::new(),
             selected_album_tracks: Vec::new(),
@@ -1031,13 +1108,11 @@ impl AppState {
             last_progress_report: None,
             search_query: String::new(),
             search_results: None,
-            search_loading: false,
-            filter_results: None,
-            filter_loading: false,
-            pending_filter_key: None,
+            search_track_loading: false,
+            search_track_version: 0,
+            search_focus: SearchFocus::default(),
             pending_album_key: None,
-            filter_search_version: 0,
-            global_search_version: 0,
+            pending_track_key: None,
             list_state: ListStates::default(),
             should_quit: false,
             last_error: None,
@@ -1072,9 +1147,9 @@ impl AppState {
             theme: ThemeName::default(),
             adventure: AdventureState::default(),
             now_playing_mode: NowPlayingMode::default(),
-            playlists_mode: PlaylistsMode::default(),
-            recently_added_albums: Vec::new(),
-            recently_added_loading: false,
+            genre_tab: GenreTab::default(),
+            playlist_view_mode: PlaylistViewMode::default(),
+            playlist_album_groups: Vec::new(),
             category_timestamps: HashMap::new(),
             cache_dirty: false,
             last_input_time: std::time::Instant::now(),
@@ -1087,6 +1162,8 @@ impl AppState {
             confirm_dialog: None,
             list_filter: ListFilterState::default(),
             search_popup_active: false,
+            radio_launcher: None,
+            adventure_launcher: None,
             library_picker_active: false,
             library_picker_index: 0,
             marquee: std::cell::RefCell::new(MarqueeState::default()),
@@ -1232,33 +1309,15 @@ impl AppState {
     /// Get the current category list length.
     pub fn category_len(&self) -> usize {
         match self.browse_category {
-            BrowseCategory::Artists => {
-                match self.artist_view_mode {
-                    ArtistViewMode::Artist | ArtistViewMode::AlbumArtist => self.artists.len(),
-                    ArtistViewMode::Album => self.albums.len(),
-                }
-            }
-            BrowseCategory::Playlists => {
-                match self.playlists_mode {
-                    PlaylistsMode::All => self.playlists.len(),
-                    PlaylistsMode::Stations => 0, // Handled via station_nav
-                    PlaylistsMode::RecentlyAdded => self.recently_added_albums.len(),
-                }
-            }
-            BrowseCategory::Genres => {
-                // Stations are in the genre cycle, but use station_nav for rendering
-                if self.genre_content_type == GenreContentType::Stations {
-                    0 // Handled separately via station_nav
-                } else {
-                    self.current_genre_list().len()
-                }
-            }
+            BrowseCategory::Library => self.artists.len(),
+            BrowseCategory::Playlists => self.playlists.len(),
+            BrowseCategory::Genres => self.current_genre_list().len(),
+            BrowseCategory::Radio => 0, // Handled via station_nav
             BrowseCategory::Folders => 0, // Handled separately via folder_state
         }
     }
 
     /// Get the current genre list based on content type.
-    /// Note: Returns empty vec for Stations since stations use station_nav.
     pub fn current_genre_list(&self) -> &Vec<Genre> {
         match self.genre_content_type {
             GenreContentType::Genres => &self.genres,
@@ -1266,21 +1325,16 @@ impl AppState {
             GenreContentType::AlbumGenres => &self.album_genres,
             GenreContentType::Moods => &self.moods,
             GenreContentType::Styles => &self.styles,
-            GenreContentType::Stations => &self.genres, // Stations use station_nav, not genre list
         }
     }
 
     /// Get the current category index.
     pub fn category_index(&self) -> usize {
         match self.browse_category {
-            BrowseCategory::Artists => {
-                match self.artist_view_mode {
-                    ArtistViewMode::Artist | ArtistViewMode::AlbumArtist => self.list_state.artists_index,
-                    ArtistViewMode::Album => self.list_state.albums_index,
-                }
-            }
+            BrowseCategory::Library => self.list_state.artists_index,
             BrowseCategory::Playlists => self.list_state.playlists_index,
             BrowseCategory::Genres => self.genres_index,
+            BrowseCategory::Radio => 0, // Handled via station_nav
             BrowseCategory::Folders => 0, // Handled separately via folder_state
         }
     }
@@ -1288,14 +1342,10 @@ impl AppState {
     /// Set the current category index.
     pub fn set_category_index(&mut self, idx: usize) {
         match self.browse_category {
-            BrowseCategory::Artists => {
-                match self.artist_view_mode {
-                    ArtistViewMode::Artist | ArtistViewMode::AlbumArtist => self.list_state.artists_index = idx,
-                    ArtistViewMode::Album => self.list_state.albums_index = idx,
-                }
-            }
+            BrowseCategory::Library => self.list_state.artists_index = idx,
             BrowseCategory::Playlists => self.list_state.playlists_index = idx,
             BrowseCategory::Genres => self.genres_index = idx,
+            BrowseCategory::Radio => {}, // Handled via station_nav
             BrowseCategory::Folders => {}, // Handled separately via folder_state
         }
     }
@@ -1303,34 +1353,17 @@ impl AppState {
     /// Get the selected category item's rating key.
     pub fn selected_category_key(&self) -> Option<String> {
         match self.browse_category {
-            BrowseCategory::Artists => {
-                match self.artist_view_mode {
-                    ArtistViewMode::Artist | ArtistViewMode::AlbumArtist => {
-                        self.artists.get(self.list_state.artists_index)
-                            .map(|a| a.rating_key.clone())
-                    }
-                    ArtistViewMode::Album => {
-                        self.albums.get(self.list_state.albums_index)
-                            .map(|a| a.rating_key.clone())
-                    }
-                }
+            BrowseCategory::Library => {
+                self.artists.get(self.list_state.artists_index)
+                    .map(|a| a.rating_key.clone())
             }
             BrowseCategory::Playlists => {
-                // Different sources based on playlists mode
-                match self.playlists_mode {
-                    PlaylistsMode::All => {
-                        self.playlists.get(self.list_state.playlists_index)
-                            .map(|p| p.rating_key.clone())
-                    }
-                    PlaylistsMode::Stations => None, // Handled via station_nav
-                    PlaylistsMode::RecentlyAdded => {
-                        self.recently_added_albums.get(self.list_state.playlists_index)
-                            .map(|a| a.rating_key.clone())
-                    }
-                }
+                self.playlists.get(self.list_state.playlists_index)
+                    .map(|p| p.rating_key.clone())
             }
             BrowseCategory::Genres => self.current_genre_list().get(self.genres_index)
                 .map(|g| g.effective_key().to_string()),
+            BrowseCategory::Radio => None, // Handled via station_nav
             BrowseCategory::Folders => None, // Handled separately via folder_state
         }
     }
@@ -1338,34 +1371,17 @@ impl AppState {
     /// Get the selected category item's title for display.
     pub fn selected_category_title(&self) -> Option<String> {
         match self.browse_category {
-            BrowseCategory::Artists => {
-                match self.artist_view_mode {
-                    ArtistViewMode::Artist | ArtistViewMode::AlbumArtist => {
-                        self.artists.get(self.list_state.artists_index)
-                            .map(|a| a.title.clone())
-                    }
-                    ArtistViewMode::Album => {
-                        self.albums.get(self.list_state.albums_index)
-                            .map(|a| a.title.clone())
-                    }
-                }
+            BrowseCategory::Library => {
+                self.artists.get(self.list_state.artists_index)
+                    .map(|a| a.title.clone())
             }
             BrowseCategory::Playlists => {
-                // Different sources based on playlists mode
-                match self.playlists_mode {
-                    PlaylistsMode::All => {
-                        self.playlists.get(self.list_state.playlists_index)
-                            .map(|p| p.title.clone())
-                    }
-                    PlaylistsMode::Stations => None, // Handled via station_nav
-                    PlaylistsMode::RecentlyAdded => {
-                        self.recently_added_albums.get(self.list_state.playlists_index)
-                            .map(|a| a.title.clone())
-                    }
-                }
+                self.playlists.get(self.list_state.playlists_index)
+                    .map(|p| p.title.clone())
             }
             BrowseCategory::Genres => self.current_genre_list().get(self.genres_index)
                 .map(|g| g.title.clone()),
+            BrowseCategory::Radio => None, // Handled via station_nav
             BrowseCategory::Folders => None, // Handled separately via folder_state
         }
     }
@@ -1453,40 +1469,77 @@ impl NowPlayingMode {
     }
 }
 
-/// Playlists view mode - cycles with Ctrl+P.
+/// Playlist view mode for track column display.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum PlaylistsMode {
-    /// Show all playlists
+pub enum PlaylistViewMode {
+    /// Standard track list
     #[default]
-    All,
-    /// Show radio stations
-    Stations,
-    /// Show recently added albums
-    RecentlyAdded,
+    Tracks,
+    /// Tracks grouped by album
+    TracksByAlbum,
 }
 
-impl PlaylistsMode {
+/// Genre tab for the genre category tab bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GenreTab {
+    /// Merged list of all genre types with suffixes
+    #[default]
+    All,
+    /// Library genres (actual tags from music files)
+    Library,
+    /// Artist-level genres (Plex-generated)
+    Artist,
+    /// Album-level genres (Plex-generated)
+    Album,
+    /// Moods (Plex analysis-based)
+    Mood,
+    /// Styles (Plex analysis-based)
+    Style,
+}
+
+impl GenreTab {
     pub fn next(&self) -> Self {
         match self {
-            PlaylistsMode::All => PlaylistsMode::Stations,
-            PlaylistsMode::Stations => PlaylistsMode::RecentlyAdded,
-            PlaylistsMode::RecentlyAdded => PlaylistsMode::All,
+            GenreTab::All => GenreTab::Library,
+            GenreTab::Library => GenreTab::Artist,
+            GenreTab::Artist => GenreTab::Album,
+            GenreTab::Album => GenreTab::Mood,
+            GenreTab::Mood => GenreTab::Style,
+            GenreTab::Style => GenreTab::All,
         }
     }
 
     pub fn prev(&self) -> Self {
         match self {
-            PlaylistsMode::All => PlaylistsMode::RecentlyAdded,
-            PlaylistsMode::Stations => PlaylistsMode::All,
-            PlaylistsMode::RecentlyAdded => PlaylistsMode::Stations,
+            GenreTab::All => GenreTab::Style,
+            GenreTab::Library => GenreTab::All,
+            GenreTab::Artist => GenreTab::Library,
+            GenreTab::Album => GenreTab::Artist,
+            GenreTab::Mood => GenreTab::Album,
+            GenreTab::Style => GenreTab::Mood,
         }
     }
 
     pub fn name(&self) -> &'static str {
         match self {
-            PlaylistsMode::All => "playlists",
-            PlaylistsMode::Stations => "stations",
-            PlaylistsMode::RecentlyAdded => "recently added",
+            GenreTab::All => "genres",
+            GenreTab::Library => "library genres",
+            GenreTab::Artist => "artist genres",
+            GenreTab::Album => "album genres",
+            GenreTab::Mood => "moods",
+            GenreTab::Style => "styles",
+        }
+    }
+
+    /// Convert to the underlying GenreContentType (None for All tab).
+    pub fn to_content_type(&self) -> Option<GenreContentType> {
+        match self {
+            GenreTab::All => None,
+            GenreTab::Library => Some(GenreContentType::Genres),
+            GenreTab::Artist => Some(GenreContentType::ArtistGenres),
+            GenreTab::Album => Some(GenreContentType::AlbumGenres),
+            GenreTab::Mood => Some(GenreContentType::Moods),
+            GenreTab::Style => Some(GenreContentType::Styles),
         }
     }
 }
@@ -1494,20 +1547,18 @@ impl PlaylistsMode {
 /// Search tab in unified search view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SearchTab {
-    /// Global search across all content
+    /// All results combined
     #[default]
     Global,
-    /// Filter artists
+    /// Artists only
     Artists,
-    /// Filter by album artist tag
-    AlbumArtists,
-    /// Filter albums by title
+    /// Albums only
     Albums,
-    /// Filter playlists
+    /// Playlists only
     Playlists,
-    /// Filter tracks
+    /// Tracks only (uses API search)
     Tracks,
-    /// Filter genres
+    /// Genres only
     Genres,
 }
 
@@ -1526,7 +1577,7 @@ impl SearchTab {
     pub fn name(&self) -> &'static str {
         match self {
             SearchTab::Global => "All",
-            SearchTab::Artists | SearchTab::AlbumArtists => "Artists",
+            SearchTab::Artists => "Artists",
             SearchTab::Albums => "Albums",
             SearchTab::Playlists => "Playlists",
             SearchTab::Tracks => "Tracks",
@@ -1537,7 +1588,7 @@ impl SearchTab {
     pub fn next(&self) -> Self {
         match self {
             SearchTab::Global => SearchTab::Artists,
-            SearchTab::Artists | SearchTab::AlbumArtists => SearchTab::Albums,
+            SearchTab::Artists => SearchTab::Albums,
             SearchTab::Albums => SearchTab::Playlists,
             SearchTab::Playlists => SearchTab::Tracks,
             SearchTab::Tracks => SearchTab::Genres,
@@ -1548,7 +1599,7 @@ impl SearchTab {
     pub fn prev(&self) -> Self {
         match self {
             SearchTab::Global => SearchTab::Genres,
-            SearchTab::Artists | SearchTab::AlbumArtists => SearchTab::Global,
+            SearchTab::Artists => SearchTab::Global,
             SearchTab::Albums => SearchTab::Artists,
             SearchTab::Playlists => SearchTab::Albums,
             SearchTab::Tracks => SearchTab::Playlists,
@@ -1560,79 +1611,98 @@ impl SearchTab {
 /// Browse category type (what's shown in left panel).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrowseCategory {
-    Artists,
+    Library,
     Playlists,
     Genres,
+    Radio,
     Folders,
 }
 
 impl BrowseCategory {
     pub fn all() -> &'static [BrowseCategory] {
         &[
-            BrowseCategory::Artists,
+            BrowseCategory::Library,
             BrowseCategory::Playlists,
             BrowseCategory::Genres,
+            BrowseCategory::Radio,
             BrowseCategory::Folders,
         ]
     }
 
     pub fn name(&self) -> &'static str {
         match self {
-            BrowseCategory::Artists => "artists",
+            BrowseCategory::Library => "library",
             BrowseCategory::Playlists => "playlists",
             BrowseCategory::Genres => "genres",
+            BrowseCategory::Radio => "radio",
             BrowseCategory::Folders => "folders",
         }
     }
 
     pub fn shortcut(&self) -> char {
         match self {
-            BrowseCategory::Artists => 'a',
+            BrowseCategory::Library => 'l',
             BrowseCategory::Playlists => 'p',
             BrowseCategory::Genres => 'g',
+            BrowseCategory::Radio => 'r',
             BrowseCategory::Folders => 'o',
         }
     }
 }
 
-/// Artist/Album view mode - cycles through Artist, Album Artist, and Album (by title).
+/// Library sub-mode for Alt+S cycling: Normal → All Albums (by artist) → All Albums (shuffled).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LibrarySubMode {
+    #[default]
+    Normal,        // Standard artist list with drill-down
+    AllByArtist,   // All albums sorted by artist
+    AllShuffled,   // All albums shuffled
+}
+
+impl LibrarySubMode {
+    pub fn next(&self) -> Self {
+        match self {
+            LibrarySubMode::Normal => LibrarySubMode::AllByArtist,
+            LibrarySubMode::AllByArtist => LibrarySubMode::AllShuffled,
+            LibrarySubMode::AllShuffled => LibrarySubMode::Normal,
+        }
+    }
+}
+
+/// Artist view mode - cycles between Artist and Album Artist metadata fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ArtistViewMode {
     #[default]
     Artist,
     AlbumArtist,
-    Album,
 }
 
 impl ArtistViewMode {
-    /// Cycle to the next mode (Artist → Album → Artist).
+    /// Cycle to the next mode (Artist ↔ AlbumArtist).
     pub fn next(&self) -> Self {
         match self {
-            ArtistViewMode::Artist => ArtistViewMode::Album,
-            ArtistViewMode::AlbumArtist => ArtistViewMode::Album,
-            ArtistViewMode::Album => ArtistViewMode::Artist,
+            ArtistViewMode::Artist => ArtistViewMode::AlbumArtist,
+            ArtistViewMode::AlbumArtist => ArtistViewMode::Artist,
         }
     }
 
-    /// Cycle to the previous mode (Artist ← Album ← Artist).
+    /// Cycle to the previous mode (Artist ↔ AlbumArtist).
     pub fn prev(&self) -> Self {
         match self {
-            ArtistViewMode::Artist => ArtistViewMode::Album,
+            ArtistViewMode::Artist => ArtistViewMode::AlbumArtist,
             ArtistViewMode::AlbumArtist => ArtistViewMode::Artist,
-            ArtistViewMode::Album => ArtistViewMode::Artist,
         }
     }
 
     pub fn name(&self) -> &'static str {
         match self {
             ArtistViewMode::Artist => "artists",
-            ArtistViewMode::AlbumArtist => "artists",
-            ArtistViewMode::Album => "albums",
+            ArtistViewMode::AlbumArtist => "album artists",
         }
     }
 }
 
-/// Genre content type - genres, normalized genres, moods, styles, or stations.
+/// Genre content type - genres, normalized genres, moods, or styles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GenreContentType {
     #[default]
@@ -1641,31 +1711,28 @@ pub enum GenreContentType {
     AlbumGenres,
     Moods,
     Styles,
-    Stations,
 }
 
 impl GenreContentType {
-    /// Cycle to the next content type (Genres -> Artist -> Album -> Moods -> Styles -> Stations -> Genres).
+    /// Cycle to the next content type (Genres -> Artist -> Album -> Moods -> Styles -> Genres).
     pub fn next(&self) -> Self {
         match self {
             GenreContentType::Genres => GenreContentType::ArtistGenres,
             GenreContentType::ArtistGenres => GenreContentType::AlbumGenres,
             GenreContentType::AlbumGenres => GenreContentType::Moods,
             GenreContentType::Moods => GenreContentType::Styles,
-            GenreContentType::Styles => GenreContentType::Stations,
-            GenreContentType::Stations => GenreContentType::Genres,
+            GenreContentType::Styles => GenreContentType::Genres,
         }
     }
 
-    /// Cycle to the previous content type (Genres <- Artist <- Album <- Moods <- Styles <- Stations <- Genres).
+    /// Cycle to the previous content type (Genres <- Artist <- Album <- Moods <- Styles <- Genres).
     pub fn prev(&self) -> Self {
         match self {
-            GenreContentType::Genres => GenreContentType::Stations,
+            GenreContentType::Genres => GenreContentType::Styles,
             GenreContentType::ArtistGenres => GenreContentType::Genres,
             GenreContentType::AlbumGenres => GenreContentType::ArtistGenres,
             GenreContentType::Moods => GenreContentType::AlbumGenres,
             GenreContentType::Styles => GenreContentType::Moods,
-            GenreContentType::Stations => GenreContentType::Styles,
         }
     }
 
@@ -1676,7 +1743,6 @@ impl GenreContentType {
             GenreContentType::AlbumGenres => "album genres",
             GenreContentType::Moods => "moods",
             GenreContentType::Styles => "styles",
-            GenreContentType::Stations => "stations",
         }
     }
 }
@@ -1782,13 +1848,96 @@ pub struct WaveformState {
     pub retry_count: u8,
 }
 
-/// Search result section.
+/// Search popup focus state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SearchSection {
+pub enum SearchFocus {
     #[default]
+    Input,
+    Results,
+}
+
+/// Radio launcher tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RadioLauncherTab {
+    #[default]
+    All,
     Artists,
     Albums,
     Tracks,
+}
+
+impl RadioLauncherTab {
+    pub fn all() -> &'static [RadioLauncherTab] {
+        &[RadioLauncherTab::All, RadioLauncherTab::Artists, RadioLauncherTab::Albums, RadioLauncherTab::Tracks]
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            RadioLauncherTab::All => "All",
+            RadioLauncherTab::Artists => "Artists",
+            RadioLauncherTab::Albums => "Albums",
+            RadioLauncherTab::Tracks => "Tracks",
+        }
+    }
+
+    pub fn next(&self) -> Self {
+        match self {
+            RadioLauncherTab::All => RadioLauncherTab::Artists,
+            RadioLauncherTab::Artists => RadioLauncherTab::Albums,
+            RadioLauncherTab::Albums => RadioLauncherTab::Tracks,
+            RadioLauncherTab::Tracks => RadioLauncherTab::All,
+        }
+    }
+
+    pub fn prev(&self) -> Self {
+        match self {
+            RadioLauncherTab::All => RadioLauncherTab::Tracks,
+            RadioLauncherTab::Artists => RadioLauncherTab::All,
+            RadioLauncherTab::Albums => RadioLauncherTab::Artists,
+            RadioLauncherTab::Tracks => RadioLauncherTab::Albums,
+        }
+    }
+}
+
+/// Radio launcher popup state.
+#[derive(Debug, Clone)]
+pub struct RadioLauncherState {
+    pub query: String,
+    pub results: Option<SearchResults>,
+    pub focus: SearchFocus,
+    pub tab: RadioLauncherTab,
+    pub item_index: usize,
+    pub loading: bool,
+}
+
+/// Adventure launcher step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdventureStep {
+    FindStartTrack,
+    EnterTrackCount,
+    FindEndTrack,
+}
+
+/// Drill level within the adventure launcher search.
+#[derive(Debug, Clone)]
+pub enum AdventureDrillLevel {
+    Search,
+    ArtistAlbums { artist_key: String, artist_name: String, albums: Vec<Album> },
+    AlbumTracks { album_key: String, album_title: String, artist_name: String, tracks: Vec<Track> },
+}
+
+/// Adventure launcher popup state (3-step: find start → set count → find end).
+#[derive(Debug, Clone)]
+pub struct AdventureLauncherState {
+    pub step: AdventureStep,
+    pub query: String,
+    pub results: Option<SearchResults>,
+    pub focus: SearchFocus,
+    pub item_index: usize,
+    pub loading: bool,
+    pub drill: AdventureDrillLevel,
+    pub start_track: Option<Track>,
+    pub track_count_input: String,
 }
 
 /// List selection states for different views.
@@ -1801,7 +1950,6 @@ pub struct ListStates {
     pub tracks_index: usize,
     pub queue_index: usize,
     pub similar_index: usize,
-    pub search_section: SearchSection,
     pub search_item_index: usize,
 }
 
@@ -1935,7 +2083,6 @@ pub enum RefreshCategory {
     AlbumArtists,
     Albums,
     Playlists,
-    RecentlyAdded,
     Genres,
     ArtistGenres,
     AlbumGenres,
@@ -1953,7 +2100,6 @@ impl RefreshCategory {
             RefreshCategory::AlbumArtists,
             RefreshCategory::Albums,
             RefreshCategory::Playlists,
-            RefreshCategory::RecentlyAdded,
             RefreshCategory::Genres,
             RefreshCategory::ArtistGenres,
             RefreshCategory::AlbumGenres,
@@ -1966,10 +2112,7 @@ impl RefreshCategory {
 
     /// Whether this category belongs to the playlist/dynamic timestamp group.
     pub fn is_playlist_group(&self) -> bool {
-        matches!(self,
-            RefreshCategory::Playlists
-            | RefreshCategory::RecentlyAdded
-        )
+        matches!(self, RefreshCategory::Playlists)
     }
 
     /// Get a stable key for serializing to disk cache.
@@ -1989,7 +2132,6 @@ impl RefreshCategory {
             RefreshCategory::AlbumArtists => "Album Artists",
             RefreshCategory::Albums => "Albums",
             RefreshCategory::Playlists => "Playlists",
-            RefreshCategory::RecentlyAdded => "Recently Added",
             RefreshCategory::Genres => "Genres",
             RefreshCategory::ArtistGenres => "Artist Genres",
             RefreshCategory::AlbumGenres => "Album Genres",
@@ -2080,7 +2222,7 @@ impl Default for ListFilterState {
             loading: false,
             results: None,
             selected: 0,
-            category: BrowseCategory::Artists,
+            category: BrowseCategory::Library,
             column: 0,
         }
     }

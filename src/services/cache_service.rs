@@ -90,7 +90,6 @@ pub struct CacheDataSources<'a> {
     pub moods: &'a [Genre],
     pub styles: &'a [Genre],
     pub stations: &'a [Station],
-    pub recently_added_albums: &'a [Album],
 }
 
 /// Service for cache operations.
@@ -122,7 +121,6 @@ impl CacheService {
         cache_data.moods = sources.moods.to_vec();
         cache_data.styles = sources.styles.to_vec();
         cache_data.stations = sources.stations.to_vec();
-        cache_data.recently_added_albums = sources.recently_added_albums.to_vec();
 
         cache_data
     }

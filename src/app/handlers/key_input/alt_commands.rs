@@ -35,8 +35,15 @@ pub fn available_alt_commands(state: &AppState) -> Vec<AltCommand> {
         cmds.push(AltCommand { key: 'q', label: "queue" });
     }
 
-    // Alt+S shuffle: browse view (shuffle column) or has queue/radio tracks
-    if state.view == View::Browse
+    // Alt+S shuffle: in Library browse cycles sub-mode, otherwise shuffle column/queue
+    if state.view == View::Browse && state.browse_category == BrowseCategory::Library {
+        let label = match state.library_sub_mode {
+            crate::app::state::LibrarySubMode::Normal => "all albums",
+            crate::app::state::LibrarySubMode::AllByArtist => "shuffle albums",
+            crate::app::state::LibrarySubMode::AllShuffled => "artists",
+        };
+        cmds.push(AltCommand { key: 's', label });
+    } else if state.view == View::Browse
         || !state.queue.is_empty()
         || !state.radio.tracks.is_empty()
     {
@@ -111,21 +118,12 @@ fn has_track_context(state: &AppState) -> bool {
             ) && state.list_state.tracks_index < state.selected_album_tracks.len()
         }
         View::Search => {
-            use crate::app::state::{SearchSection, SearchTab};
-            match state.search_tab {
-                SearchTab::Global => {
-                    state.list_state.search_section == SearchSection::Tracks
-                        && state.search_results.as_ref()
-                            .map(|r| !r.tracks.is_empty())
-                            .unwrap_or(false)
-                }
-                SearchTab::Tracks => {
-                    state.filter_results.as_ref()
-                        .map(|r| !r.tracks.is_empty())
-                        .unwrap_or(false)
-                }
-                _ => false,
-            }
+            // Search popup tracks: check if a track tab result is selected
+            matches!(state.search_tab,
+                crate::app::state::SearchTab::Tracks | crate::app::state::SearchTab::Global
+            ) && state.search_results.as_ref()
+                .map(|r| !r.tracks.is_empty())
+                .unwrap_or(false)
         }
         _ => false,
     }
@@ -137,7 +135,7 @@ fn has_album_context(state: &AppState) -> bool {
         View::Browse => {
             // Check Miller columns first
             let nav = match state.browse_category {
-                BrowseCategory::Artists => Some(&state.artist_nav),
+                BrowseCategory::Library => Some(&state.artist_nav),
                 BrowseCategory::Genres => Some(&state.genre_nav),
                 BrowseCategory::Playlists => Some(&state.playlist_nav),
                 _ => None,
@@ -172,7 +170,7 @@ fn has_album_context(state: &AppState) -> bool {
 fn has_artist_context(state: &AppState) -> bool {
     state.view == View::Browse
         && state.focus == Focus::Left
-        && state.browse_category == BrowseCategory::Artists
+        && state.browse_category == BrowseCategory::Library
         && !state.artists.is_empty()
 }
 
@@ -181,7 +179,7 @@ fn has_enqueue_context(state: &AppState) -> bool {
     match state.view {
         View::Browse => {
             // Left panel artist selected (enqueues all tracks)
-            if state.focus == Focus::Left && state.browse_category == BrowseCategory::Artists {
+            if state.focus == Focus::Left && state.browse_category == BrowseCategory::Library {
                 return !state.artists.is_empty();
             }
             // Right panel with albums or tracks
@@ -298,7 +296,7 @@ fn has_miller_album_context(state: &AppState) -> bool {
         return false;
     }
     let nav = match state.browse_category {
-        BrowseCategory::Artists => &state.artist_nav,
+        BrowseCategory::Library => &state.artist_nav,
         BrowseCategory::Genres => &state.genre_nav,
         BrowseCategory::Playlists => &state.playlist_nav,
         _ => return false,
@@ -324,7 +322,7 @@ fn has_miller_artist_context(state: &AppState) -> bool {
         return false;
     }
     let nav = match state.browse_category {
-        BrowseCategory::Artists => &state.artist_nav,
+        BrowseCategory::Library => &state.artist_nav,
         BrowseCategory::Genres => &state.genre_nav,
         BrowseCategory::Playlists => &state.playlist_nav,
         _ => return false,

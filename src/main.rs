@@ -360,10 +360,10 @@ async fn run_test_mode() -> Result<()> {
     }
 
     // Test sequence - comprehensive navigation testing (musikcube-style)
-    use textamp::app::state::{View, BrowseCategory, Focus, SearchSection};
+    use textamp::app::state::{View, BrowseCategory, Focus};
 
     state.view = View::Browse;
-    state.browse_category = BrowseCategory::Artists;
+    state.browse_category = BrowseCategory::Library;
     state.focus = Focus::Left;
 
     println!("\n=== Running Navigation Tests ===\n");
@@ -411,12 +411,11 @@ async fn run_test_mode() -> Result<()> {
                 results.artists.len(), results.albums.len(), results.tracks.len());
             if !results.is_empty() {
                 state.search_results = Some(results.clone());
-                state.list_state.search_section = SearchSection::Artists;
                 state.list_state.search_item_index = 0;
                 apply_key_to_state(&mut state, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
                 println!("  PASS - Search results can be navigated");
-                println!("  Current selection: section={:?}, index={}",
-                    state.list_state.search_section, state.list_state.search_item_index);
+                println!("  Current selection: index={}",
+                    state.list_state.search_item_index);
             }
         }
         Err(e) => {
@@ -447,11 +446,11 @@ async fn run_test_mode() -> Result<()> {
     println!("\n=== Rendering Tests ===\n");
 
     let test_views = vec![
-        ("Browse Artists", View::Browse, BrowseCategory::Artists),
+        ("Browse Artists", View::Browse, BrowseCategory::Library),
         ("Browse Playlists", View::Browse, BrowseCategory::Playlists),
-        ("NowPlaying", View::NowPlaying, BrowseCategory::Artists),
-        ("Search", View::Search, BrowseCategory::Artists),
-        ("Help", View::Help, BrowseCategory::Artists),
+        ("NowPlaying", View::NowPlaying, BrowseCategory::Library),
+        ("Search", View::Search, BrowseCategory::Library),
+        ("Help", View::Help, BrowseCategory::Library),
     ];
 
     for (name, view, category) in test_views {
@@ -465,7 +464,7 @@ async fn run_test_mode() -> Result<()> {
     println!("\n=== Final State Check ===\n");
 
     state.view = View::Browse;
-    state.browse_category = BrowseCategory::Artists;
+    state.browse_category = BrowseCategory::Library;
     state.focus = Focus::Left;
 
     terminal.draw(|f| ui::render(f, &state))?;
@@ -497,7 +496,7 @@ fn apply_key_to_state(state: &mut AppState, key: crossterm::event::KeyEvent) {
         View::Browse => {
             match key.code {
                 KeyCode::Char('a') => {
-                    state.browse_category = BrowseCategory::Artists;
+                    state.browse_category = BrowseCategory::Library;
                     state.focus = Focus::Left;
                 }
                 KeyCode::Char('p') => {
@@ -513,7 +512,7 @@ fn apply_key_to_state(state: &mut AppState, key: crossterm::event::KeyEvent) {
                 KeyCode::Up => {
                     if state.focus == Focus::Left {
                         match state.browse_category {
-                            BrowseCategory::Artists => {
+                            BrowseCategory::Library => {
                                 state.list_state.artists_index = state.list_state.artists_index.saturating_sub(1);
                             }
                             BrowseCategory::Playlists => {
@@ -521,6 +520,9 @@ fn apply_key_to_state(state: &mut AppState, key: crossterm::event::KeyEvent) {
                             }
                             BrowseCategory::Genres => {
                                 state.genres_index = state.genres_index.saturating_sub(1);
+                            }
+                            BrowseCategory::Radio => {
+                                // Radio handled by station navigation
                             }
                             BrowseCategory::Folders => {
                                 // Folders handled separately
@@ -533,7 +535,7 @@ fn apply_key_to_state(state: &mut AppState, key: crossterm::event::KeyEvent) {
                 KeyCode::Down => {
                     if state.focus == Focus::Left {
                         match state.browse_category {
-                            BrowseCategory::Artists => {
+                            BrowseCategory::Library => {
                                 let max = state.artists.len().saturating_sub(1);
                                 state.list_state.artists_index = (state.list_state.artists_index + 1).min(max);
                             }
@@ -544,6 +546,9 @@ fn apply_key_to_state(state: &mut AppState, key: crossterm::event::KeyEvent) {
                             BrowseCategory::Genres => {
                                 let max = state.genres.len().saturating_sub(1);
                                 state.genres_index = (state.genres_index + 1).min(max);
+                            }
+                            BrowseCategory::Radio => {
+                                // Radio handled by station navigation
                             }
                             BrowseCategory::Folders => {
                                 // Folders handled separately

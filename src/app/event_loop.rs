@@ -37,7 +37,6 @@ pub enum PreloadType {
     AlbumGenres,
     Styles,
     Stations,
-    RecentlyAdded,
     /// Folders require additional lib_title for display.
     Folders { lib_title: String },
 }
@@ -473,10 +472,9 @@ impl EventLoop {
 
             // Miller columns
             LoadArtistAlbumsForMiller { .. } | LoadAlbumTracksForMiller { .. }
-            | LoadArtistAllTracksForMiller { .. } | PlayTrackFromMiller { .. }
+            | LoadArtistAllTracksForMiller { .. } | LoadAllAlbumsForMiller | PlayTrackFromMiller { .. }
             | LoadGenreAlbumsForMiller { .. } | LoadGenreTracksForMiller { .. }
             | PlayGenreTrackFromMiller { .. } | LoadPlaylistTracksForMiller { .. }
-            | LoadAlbumTracksForPlaylistMiller { .. }
             | PlayPlaylistTrackFromMiller { .. } => {
                 handlers::dispatch_miller::dispatch(&self.event_tx, action, state, client, audio).await?
             }
@@ -498,10 +496,15 @@ impl EventLoop {
             }
 
             // Search and filter
-            ExecuteSearch | ClearSearch | ExecuteFilterSearch | SelectFilterResult
+            ExecuteLocalSearch | ClearSearch | SelectSearchResult
             | ActivateListFilter | DeactivateListFilter | FilteredListUp | FilteredListDown
             | SelectFilteredItem | AppendListFilterChar(_) | DeleteListFilterChar
             | ClearListFilter | ExecuteListFilter | OpenSearchPopup | CloseSearchPopup
+            | OpenRadioLauncher | CloseRadioLauncher | RadioLauncherSearch
+            | RadioLauncherSelectResult
+            | OpenAdventureLauncher | CloseAdventureLauncher | AdventureLauncherSearch
+            | AdventureLauncherDrillArtist { .. } | AdventureLauncherDrillAlbum { .. }
+            | AdventureLauncherSelectTrack | AdventureLauncherBack
             | OpenLibraryPicker | CloseLibraryPicker => {
                 handlers::dispatch_search::dispatch(&self.event_tx, action, state, client).await?
             }
@@ -511,9 +514,9 @@ impl EventLoop {
             | LoadMoods | LoadStyles | LoadGenreAlbums | LoadArtistGenreAlbums
             | LoadAlbumGenreAlbums | LoadMoodAlbums | LoadStyleAlbums
             | CycleGenreContentType | RefreshGenreView
-            | CycleArtistViewMode | RefreshArtistView | CycleNowPlayingMode
+            | CycleArtistViewMode | RefreshArtistView | CycleLibrarySubMode | CycleNowPlayingMode
             | RefreshNowPlayingView
-            | CyclePlaylistsMode | RefreshPlaylistsView | LoadRecentlyAddedAlbums
+            | CycleGenreTab | SetGenreTab(_)
             | ToggleBrowseShuffle => {
                 handlers::dispatch_browse::dispatch(&self.event_tx, action, state, client).await?
             }
@@ -525,9 +528,9 @@ impl EventLoop {
             }
 
             // Radio and stations
-            StartTrackRadio { .. } | StartAlbumRadio { .. } | StartArtistRadio { .. }
-            | StopRadio | JumpToRadioTrack(_) | FetchMoreRadioTracks
+            StopRadio | JumpToRadioTrack(_)
             | PlayCurrentRadioTrack
+            | StartPlexRadio { .. }
             | PlayStation(_) | DrillIntoStation(_, _) | NavigateStationsBack => {
                 handlers::dispatch_radio::dispatch(&self.event_tx, action, state, client, audio).await?
             }

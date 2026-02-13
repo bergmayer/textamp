@@ -1,6 +1,6 @@
 //! Search result models.
 
-use super::{Album, Artist, Playlist, Track};
+use super::{Album, Artist, Genre, Playlist, Track};
 use serde::{Deserialize, Serialize};
 
 /// Combined search results.
@@ -10,6 +10,7 @@ pub struct SearchResults {
     pub albums: Vec<Album>,
     pub tracks: Vec<Track>,
     pub playlists: Vec<Playlist>,
+    pub genres: Vec<Genre>,
 }
 
 impl SearchResults {
@@ -19,11 +20,12 @@ impl SearchResults {
             && self.albums.is_empty()
             && self.tracks.is_empty()
             && self.playlists.is_empty()
+            && self.genres.is_empty()
     }
 
     /// Get total result count.
     pub fn total_count(&self) -> usize {
-        self.artists.len() + self.albums.len() + self.tracks.len() + self.playlists.len()
+        self.artists.len() + self.albums.len() + self.tracks.len() + self.playlists.len() + self.genres.len()
     }
 }
 

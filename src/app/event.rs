@@ -50,11 +50,12 @@ pub enum Event {
     CategoryTracksLoaded(Vec<Track>),
     CategoryAlbumsLoaded { albums: Vec<Album>, status_message: String },
     DataLoadError(String),
+    /// All albums loaded asynchronously for the "All Artists" Miller column.
+    AllAlbumsForMillerLoaded(Vec<Album>),
     SimilarAlbumsLoaded(Vec<Album>),
     SimilarTracksLoaded(Vec<Track>),
     SearchCompleted(SearchResults),
-    GlobalSearchCompleted { version: u64, results: SearchResults },
-    FilterSearchCompleted { version: u64, results: SearchResults },
+    TrackSearchCompleted { version: u64, tracks: Vec<Track> },
 
     // API errors
     ApiError(String),
@@ -117,8 +118,6 @@ pub enum Event {
     MoodsPreloaded { library_key: String, moods: Vec<Genre> },
     StylesPreloaded { library_key: String, styles: Vec<Genre> },
     StationsPreloaded { library_key: String, stations: Vec<Station> },
-    RecentlyAddedPreloaded { library_key: String, albums: Vec<Album> },
-
     // Library switch (async cache load)
     LibraryCacheLoaded { library_key: String, cached: Box<crate::plex::CacheData> },
     LibraryCacheLoadFailed { library_key: String },
@@ -141,13 +140,6 @@ pub enum Event {
     StationLoadFailed { station_key: String, error: String },
     StationChildrenLoaded { station_key: String, station_title: String, children: Vec<Station> },
 
-    // Album radio loading (background)
-    AlbumRadioTracksLoaded { tracks: Vec<Track> },
-    AlbumRadioLoadFailed { error: String },
-
-    // Track radio similar tracks (background)
-    TrackRadioSimilarLoaded { tracks: Vec<Track>, title: String },
-
     // Radio track fetching (background)
     RadioTracksLoaded { tracks: Vec<Track>, time_travel_index: Option<usize> },
 
@@ -157,6 +149,10 @@ pub enum Event {
 
     // Playlist tracks preloading (background, cache-only, no Miller column push)
     PlaylistTracksPreloaded { playlist_key: String, tracks: Vec<Track> },
+
+    // Adventure launcher drill-down events
+    AdventureLauncherAlbumsLoaded { artist_key: String, artist_name: String, albums: Vec<Album> },
+    AdventureLauncherTracksLoaded { album_key: String, album_title: String, artist_name: String, tracks: Vec<Track> },
 
     // Inline list filter
     ListFilterCompleted {

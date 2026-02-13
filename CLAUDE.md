@@ -99,12 +99,11 @@ Backward compatibility: `src/lib.rs` provides `api::` and `cache::` aliases that
 
 ## Categories
 
-Five browse categories accessible globally via Ctrl+key:
+Four browse categories accessible globally via Ctrl+key:
 - Artists (Ctrl+A)
-- Playlists (Ctrl+P)
-- Genres (Ctrl+G) - cycles between Genres/Plex Genres/Moods
+- Playlists (Ctrl+P) - tabbed: Playlists / Stations
+- Genres (Ctrl+G) - tabbed: All / Library / Artist / Album / Mood / Style
 - Folders (Ctrl+O) - Miller columns navigation
-- Stations (Ctrl+T) - Plexamp radio stations
 
 Albums are accessed by drilling into an Artist, Genre, or Mood.
 

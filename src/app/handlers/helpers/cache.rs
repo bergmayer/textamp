@@ -70,7 +70,6 @@ pub fn maybe_save_cache_async(event_tx: &mpsc::Sender<Event>, state: &mut AppSta
     cache_data.moods = state.moods.clone();
     cache_data.styles = state.styles.clone();
     cache_data.stations = state.stations.clone();
-    cache_data.recently_added_albums = state.recently_added_albums.clone();
 
     // Save non-smart playlist tracks to disk cache
     for (key, cached) in &state.playlist_tracks_cache {

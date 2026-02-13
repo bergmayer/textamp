@@ -1,8 +1,9 @@
-//! Search popup screen (Ctrl+F).
+//! Radio launcher popup (Start Radio from Radio section).
 //!
-//! Local-first search with tabs: All | Artists | Albums | Playlists | Tracks | Genres
+//! Search for an artist, album, or track to start Plex radio.
+//! Uses Plex's playQueue API which incorporates full server-side heuristics.
 
-use crate::app::state::{SearchFocus, SearchTab};
+use crate::app::state::{RadioLauncherTab, SearchFocus};
 use crate::app::AppState;
 use crate::api::models::SearchResults;
 use crate::services::NavigationService;
@@ -11,8 +12,12 @@ use crate::ui::theme::theme;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs};
 
-/// Render the search popup as an overlay.
+/// Render the radio launcher popup as an overlay.
 pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
+    let launcher = match &state.radio_launcher {
+        Some(l) => l,
+        None => return,
+    };
     let t = theme();
 
     // Popup takes 60% width, 70% height, centered
@@ -22,7 +27,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     frame.render_widget(Clear, popup_area);
 
     let block = Block::default()
-        .title(" search ")
+        .title(" start radio ")
         .title_style(Style::default().fg(t.colors.fg_accent))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(t.colors.fg_accent))
@@ -30,37 +35,49 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     let inner = block.inner(popup_area);
     frame.render_widget(block, popup_area);
 
-    // Split inner area: tabs, search input, results
+    // Split inner area: instructions, tabs, search input, results
     let chunks = ratatui::layout::Layout::default()
         .direction(ratatui::layout::Direction::Vertical)
         .constraints([
-            ratatui::layout::Constraint::Length(2),
-            ratatui::layout::Constraint::Length(3),
-            ratatui::layout::Constraint::Min(3),
+            ratatui::layout::Constraint::Length(2), // instructions
+            ratatui::layout::Constraint::Length(2), // tabs
+            ratatui::layout::Constraint::Length(3), // search input
+            ratatui::layout::Constraint::Min(3),    // results
         ])
         .split(inner);
 
+    // Instructions
+    let instructions = Paragraph::new(vec![
+        Line::from(Span::styled(
+            "Search for an artist, album, or track to start radio.",
+            Style::default().fg(t.colors.fg_muted),
+        )),
+        Line::from(Span::styled(
+            "Tip: press Alt+R on any selection in Library or Search for sonic radio.",
+            Style::default().fg(t.colors.fg_muted).italic(),
+        )),
+    ]);
+    frame.render_widget(instructions, chunks[0]);
+
     // Tabs
-    render_tabs(frame, state, chunks[0]);
+    render_tabs(frame, launcher.tab, chunks[1]);
 
     // Search input
-    render_search_input(frame, state, chunks[1]);
+    render_search_input(frame, &launcher.query, launcher.focus == SearchFocus::Input, chunks[2]);
 
     // Results
-    render_results(frame, state, chunks[2]);
+    render_results(frame, launcher, chunks[3]);
 }
 
-fn render_tabs(frame: &mut Frame, state: &AppState, area: Rect) {
+fn render_tabs(frame: &mut Frame, tab: RadioLauncherTab, area: Rect) {
     let t = theme();
 
-    let titles: Vec<&str> = SearchTab::all().iter().map(|t| t.name()).collect();
-    let selected_idx = match state.search_tab {
-        SearchTab::Global => 0,
-        SearchTab::Artists => 1,
-        SearchTab::Albums => 2,
-        SearchTab::Playlists => 3,
-        SearchTab::Tracks => 4,
-        SearchTab::Genres => 5,
+    let titles: Vec<&str> = RadioLauncherTab::all().iter().map(|t| t.name()).collect();
+    let selected_idx = match tab {
+        RadioLauncherTab::All => 0,
+        RadioLauncherTab::Artists => 1,
+        RadioLauncherTab::Albums => 2,
+        RadioLauncherTab::Tracks => 3,
     };
 
     let tabs = Tabs::new(titles)
@@ -72,15 +89,13 @@ fn render_tabs(frame: &mut Frame, state: &AppState, area: Rect) {
     frame.render_widget(tabs, area);
 }
 
-fn render_search_input(frame: &mut Frame, state: &AppState, area: Rect) {
+fn render_search_input(frame: &mut Frame, query: &str, is_focused: bool, area: Rect) {
     let t = theme();
-
-    let is_input_focused = state.search_focus == SearchFocus::Input;
 
     let input_block = Block::default()
         .title(" search ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(if is_input_focused {
+        .border_style(Style::default().fg(if is_focused {
             t.colors.border_focused
         } else {
             t.colors.border
@@ -90,27 +105,28 @@ fn render_search_input(frame: &mut Frame, state: &AppState, area: Rect) {
     let input_inner = input_block.inner(area);
     frame.render_widget(input_block, area);
 
-    // Show search query with cursor only when input is focused
-    let query_text = if is_input_focused {
-        format!("{}▋", state.search_query)
+    let query_text = if is_focused {
+        format!("{}▋", query)
     } else {
-        state.search_query.clone()
+        query.to_string()
     };
-    let fg = if is_input_focused { t.colors.fg_primary } else { t.colors.fg_muted };
+    let fg = if is_focused { t.colors.fg_primary } else { t.colors.fg_muted };
     let input = Paragraph::new(query_text).style(Style::default().fg(fg));
     frame.render_widget(input, input_inner);
 }
 
-fn render_results(frame: &mut Frame, state: &AppState, area: Rect) {
+fn render_results(frame: &mut Frame, launcher: &crate::app::state::RadioLauncherState, area: Rect) {
     let t = theme();
 
-    let results = match &state.search_results {
+    let results = match &launcher.results {
         Some(r) => r,
         None => {
-            let msg = if state.search_query.is_empty() {
-                "Type to search library"
-            } else {
+            let msg = if launcher.query.is_empty() {
+                "Type to search your library"
+            } else if launcher.loading {
                 "Searching..."
+            } else {
+                "No results"
             };
             let empty = Paragraph::new(msg)
                 .style(Style::default().fg(t.colors.fg_muted))
@@ -120,61 +136,36 @@ fn render_results(frame: &mut Frame, state: &AppState, area: Rect) {
         }
     };
 
-    let is_results_focused = state.search_focus == SearchFocus::Results;
-    let selected_idx = state.list_state.search_item_index;
+    let is_results_focused = launcher.focus == SearchFocus::Results;
+    let selected_idx = launcher.item_index;
 
-    match state.search_tab {
-        SearchTab::Global => render_all_tab(frame, results, is_results_focused, selected_idx, area),
-        SearchTab::Artists => render_single_section(
-            frame, &results.artists, |a| if a.title.is_empty() { "Unknown Artist".to_string() } else { a.title.clone() },
+    match launcher.tab {
+        RadioLauncherTab::All => render_all_tab(frame, results, is_results_focused, selected_idx, area),
+        RadioLauncherTab::Artists => render_single_section(
+            frame, &results.artists, |a| a.title.clone(),
             is_results_focused, selected_idx, area,
         ),
-        SearchTab::Albums => render_single_section(
+        RadioLauncherTab::Albums => render_single_section(
             frame, &results.albums, |a| {
                 let artist = a.artist_name();
-                let title = if a.title.is_empty() {
-                    format!("Unknown Album ({})", artist)
-                } else if let Some(year) = a.year {
-                    format!("{} ({})", a.title, year)
+                if let Some(year) = a.year {
+                    format!("{} ({}) - {}", a.title, year, artist)
                 } else {
-                    a.title.clone()
-                };
-                format!("{} - {}", title, artist)
+                    format!("{} - {}", a.title, artist)
+                }
             },
             is_results_focused, selected_idx, area,
         ),
-        SearchTab::Playlists => render_single_section(
-            frame, &results.playlists, |p| p.title.clone(),
-            is_results_focused, selected_idx, area,
-        ),
-        SearchTab::Tracks => {
-            if state.search_track_loading && results.tracks.is_empty() {
-                let loading = Paragraph::new("Searching tracks...")
-                    .style(Style::default().fg(t.colors.fg_muted))
-                    .alignment(Alignment::Center);
-                frame.render_widget(loading, area);
-            } else {
-                render_single_section(
-                    frame, &results.tracks, |tr| {
-                        let title = if tr.title.is_empty() {
-                            tr.file_name().unwrap_or("Unknown Track")
-                        } else {
-                            &tr.title
-                        };
-                        format!("{} - {}", title, tr.artist_name())
-                    },
-                    is_results_focused, selected_idx, area,
-                );
-            }
-        }
-        SearchTab::Genres => render_single_section(
-            frame, &results.genres, |g| g.title.clone(),
+        RadioLauncherTab::Tracks => render_single_section(
+            frame, &results.tracks, |tr| {
+                format!("{} - {}", tr.title, tr.artist_name())
+            },
             is_results_focused, selected_idx, area,
         ),
     }
 }
 
-/// Render the All tab with section headers.
+/// Render the All tab with section headers (Artists, Albums, Tracks only — no Playlists/Genres).
 fn render_all_tab(
     frame: &mut Frame,
     results: &SearchResults,
@@ -184,7 +175,8 @@ fn render_all_tab(
 ) {
     let t = theme();
 
-    if results.is_empty() {
+    let has_any = !results.artists.is_empty() || !results.albums.is_empty() || !results.tracks.is_empty();
+    if !has_any {
         let empty = Paragraph::new("No matches found")
             .style(Style::default().fg(t.colors.fg_muted))
             .alignment(Alignment::Center);
@@ -192,9 +184,6 @@ fn render_all_tab(
         return;
     }
 
-    // Build flat list with section headers
-    // Each entry is: (display_text, is_header, is_selectable_idx)
-    // selectable_idx maps to the global flat index for selection tracking
     let mut entries: Vec<(String, bool, Option<usize>)> = Vec::new();
     let mut global_idx: usize = 0;
 
@@ -212,9 +201,7 @@ fn render_all_tab(
         entries.push((format!("── Albums ({}) ──", results.albums.len()), true, None));
         for a in &results.albums {
             let artist = a.artist_name();
-            let text = if a.title.is_empty() {
-                format!("  Unknown Album ({}) - {}", artist, artist)
-            } else if let Some(year) = a.year {
+            let text = if let Some(year) = a.year {
                 format!("  {} ({}) - {}", a.title, year, artist)
             } else {
                 format!("  {} - {}", a.title, artist)
@@ -224,49 +211,23 @@ fn render_all_tab(
         }
     }
 
-    // Playlists section
-    if !results.playlists.is_empty() {
-        entries.push((format!("── Playlists ({}) ──", results.playlists.len()), true, None));
-        for p in &results.playlists {
-            entries.push((format!("  {}", p.title), false, Some(global_idx)));
-            global_idx += 1;
-        }
-    }
-
-    // Genres section
-    if !results.genres.is_empty() {
-        entries.push((format!("── Genres ({}) ──", results.genres.len()), true, None));
-        for g in &results.genres {
-            entries.push((format!("  {}", g.title), false, Some(global_idx)));
-            global_idx += 1;
-        }
-    }
-
     // Tracks section
     if !results.tracks.is_empty() {
         entries.push((format!("── Tracks ({}) ──", results.tracks.len()), true, None));
         for tr in &results.tracks {
-            let title = if tr.title.is_empty() {
-                tr.file_name().unwrap_or("Unknown Track")
-            } else {
-                &tr.title
-            };
-            entries.push((format!("  {} - {}", title, tr.artist_name()), false, Some(global_idx)));
+            entries.push((format!("  {} - {}", tr.title, tr.artist_name()), false, Some(global_idx)));
             global_idx += 1;
         }
     }
 
     let visible_height = area.height as usize;
-
-    // Find display position of selected item
     let display_selected = entries.iter().position(|(_, _, idx)| *idx == Some(selected_idx)).unwrap_or(0);
     let scroll_offset = NavigationService::calc_scroll_offset(display_selected, visible_height, entries.len());
 
     let items: Vec<ListItem> = entries.iter()
-        .enumerate()
         .skip(scroll_offset)
         .take(visible_height)
-        .map(|(_, (text, is_header, sel_idx))| {
+        .map(|(text, is_header, sel_idx)| {
             if *is_header {
                 ListItem::new(text.as_str())
                     .style(Style::default().fg(t.colors.fg_accent))
@@ -285,7 +246,7 @@ fn render_all_tab(
     frame.render_widget(List::new(items), area);
 }
 
-/// Render a single-section list (for Artists, Albums, Playlists, Tracks, Genres tabs).
+/// Render a single-section list.
 fn render_single_section<T, F>(
     frame: &mut Frame,
     items: &[T],
@@ -299,8 +260,7 @@ fn render_single_section<T, F>(
     let t = theme();
 
     if items.is_empty() {
-        let msg = "No matches";
-        let empty = Paragraph::new(msg)
+        let empty = Paragraph::new("No matches")
             .style(Style::default().fg(t.colors.fg_muted))
             .alignment(Alignment::Center);
         frame.render_widget(empty, area);

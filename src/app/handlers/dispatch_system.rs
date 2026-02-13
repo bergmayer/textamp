@@ -105,9 +105,6 @@ pub async fn dispatch(
                 // Stations
                 cache_data.stations = state.stations.clone();
 
-                // Recent content
-                cache_data.recently_added_albums = state.recently_added_albums.clone();
-
                 // Save non-smart playlist tracks to disk cache
                 for (key, cached) in &state.playlist_tracks_cache {
                     let is_smart = state.playlists.iter().any(|p| p.rating_key == *key && p.smart);
@@ -283,7 +280,7 @@ pub async fn dispatch(
             if state.album_art_view {
                 // Load art only for visible items in the focused column
                 let nav = match state.browse_category {
-                    crate::app::state::BrowseCategory::Artists => &state.artist_nav,
+                    crate::app::state::BrowseCategory::Library => &state.artist_nav,
                     crate::app::state::BrowseCategory::Genres => &state.genre_nav,
                     crate::app::state::BrowseCategory::Playlists => &state.playlist_nav,
                     _ => return Ok(vec![]),

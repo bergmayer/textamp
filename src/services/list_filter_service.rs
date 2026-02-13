@@ -8,6 +8,13 @@ use crate::app::state::ListFilterResults;
 /// Maximum number of results to return by default.
 pub const DEFAULT_MAX_RESULTS: usize = 100;
 
+/// Strip punctuation for fuzzy comparison (keeps alphanumeric + whitespace).
+fn normalize_for_search(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .collect()
+}
+
 /// Filter items with priority-based matching.
 ///
 /// Returns indices of matching items in priority order:
@@ -34,11 +41,13 @@ where
     }
 
     let query_lower = query.to_lowercase();
+    let query_normalized = normalize_for_search(&query_lower);
     let short_query = query.len() < 2;
 
     let mut priority1: Vec<usize> = Vec::new(); // Starts with
     let mut priority2: Vec<usize> = Vec::new(); // Word starts with
     let mut priority3: Vec<usize> = Vec::new(); // Contains
+    let mut priority4: Vec<usize> = Vec::new(); // Normalized match (punctuation-insensitive)
 
     for (idx, item) in items.iter().enumerate() {
         let title = get_title(item).to_lowercase();
@@ -51,6 +60,12 @@ where
                 priority2.push(idx);
             } else if title.contains(&query_lower) {
                 priority3.push(idx);
+            } else {
+                // Fuzzy: try punctuation-insensitive match
+                let title_normalized = normalize_for_search(&title);
+                if title_normalized.contains(&query_normalized) {
+                    priority4.push(idx);
+                }
             }
         }
     }
@@ -59,6 +74,7 @@ where
     let mut matched_indices = priority1;
     matched_indices.extend(priority2);
     matched_indices.extend(priority3);
+    matched_indices.extend(priority4);
 
     let total_matches = matched_indices.len();
     let has_more = matched_indices.len() > max_results;
@@ -87,12 +103,14 @@ pub fn filter_browse_items(
     }
 
     let query_lower = query.to_lowercase();
+    let query_normalized = normalize_for_search(&query_lower);
     let short_query = query.len() < 2;
 
     let mut priority1: Vec<usize> = Vec::new(); // Starts with
     let mut priority2: Vec<usize> = Vec::new(); // Word starts with
     let mut priority3: Vec<usize> = Vec::new(); // Contains
-    let mut priority4: Vec<usize> = Vec::new(); // Year match
+    let mut priority4: Vec<usize> = Vec::new(); // Normalized match (punctuation-insensitive)
+    let mut priority5: Vec<usize> = Vec::new(); // Year match
 
     for (idx, item) in items.iter().enumerate() {
         let title = item.title().to_lowercase();
@@ -104,16 +122,22 @@ pub fn filter_browse_items(
                 priority2.push(idx);
             } else if title.contains(&query_lower) {
                 priority3.push(idx);
-            } else if let BrowseItem::Album { year: Some(year), .. } = item {
-                if year.to_string().contains(&query_lower) {
+            } else {
+                // Fuzzy: try punctuation-insensitive match
+                let title_normalized = normalize_for_search(&title);
+                if title_normalized.contains(&query_normalized) {
                     priority4.push(idx);
+                } else if let BrowseItem::Album { year: Some(year), .. } = item {
+                    if year.to_string().contains(&query_lower) {
+                        priority5.push(idx);
+                    }
                 }
             }
         } else {
             // Short query: check year match for single-char digits too
             if let BrowseItem::Album { year: Some(year), .. } = item {
                 if year.to_string().contains(&query_lower) {
-                    priority4.push(idx);
+                    priority5.push(idx);
                 }
             }
         }
@@ -123,6 +147,7 @@ pub fn filter_browse_items(
     matched_indices.extend(priority2);
     matched_indices.extend(priority3);
     matched_indices.extend(priority4);
+    matched_indices.extend(priority5);
 
     let total_matches = matched_indices.len();
     let has_more = matched_indices.len() > max_results;

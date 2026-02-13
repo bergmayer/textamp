@@ -15,7 +15,7 @@
 //! │ ^A artists │ ^P playlists │ ^N queue │ ^S similar │ ? │
 //! └──────────────────────────────────────────────────────────────┘
 
-use crate::app::state::{View, BrowseCategory, GenreContentType, InputDialog, ConfirmDialog};
+use crate::app::state::{View, BrowseCategory, InputDialog, ConfirmDialog};
 use crate::app::AppState;
 use crate::services::NavigationService;
 use super::layout::{AppLayout, FullScreenLayout, centered_rect};
@@ -24,7 +24,7 @@ use super::theme::theme;
 use super::widgets;
 
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs, Wrap};
 
 /// Render the entire UI.
 pub fn render(frame: &mut Frame, state: &AppState) {
@@ -45,6 +45,16 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     // Render search popup if active (floating dialog)
     if state.search_popup_active {
         render_search_popup(frame, state);
+    }
+
+    // Render radio launcher popup if active
+    if state.radio_launcher.is_some() {
+        screens::radio_launcher::render(frame, state, frame.area());
+    }
+
+    // Render adventure launcher popup if active
+    if state.adventure_launcher.is_some() {
+        screens::adventure_launcher::render(frame, state, frame.area());
     }
 
     // Render library picker popup if active
@@ -85,10 +95,10 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
 
     // All browse categories use dynamic Miller columns
     match state.browse_category {
-        BrowseCategory::Artists => {
+        BrowseCategory::Library => {
             // Get filter info if filter applies to this category
             let (filter_results, filter_column) = if state.list_filter.active
-                && state.list_filter.category == BrowseCategory::Artists {
+                && state.list_filter.category == BrowseCategory::Library {
                 (state.list_filter.results.as_ref(), Some(state.list_filter.column))
             } else {
                 (None, None)
@@ -118,63 +128,81 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
                 (None, None)
             };
 
-            if state.playlists_mode == crate::app::state::PlaylistsMode::Stations {
-                // Stations mode - render station_nav Miller columns
-                render_station_view(frame, state, filter_results, filter_column, layout.left_panel, layout.right_panel);
+            // Playlists view with dynamic Miller columns (no tab bar)
+            render_browse_miller_columns(
+                frame,
+                state,
+                &state.playlist_nav,
+                "playlists",
+                current_track_key,
+                filter_results,
+                filter_column,
+                true,
+                layout.left_panel,
+                layout.right_panel,
+            );
+        }
+        BrowseCategory::Radio => {
+            // Get filter info if filter applies to this category
+            let (filter_results, filter_column) = if state.list_filter.active
+                && state.list_filter.category == BrowseCategory::Radio {
+                (state.list_filter.results.as_ref(), Some(state.list_filter.column))
             } else {
-                // Playlists view with dynamic Miller columns
-                let title = state.playlists_mode.name();
-                render_browse_miller_columns(
-                    frame,
-                    state,
-                    &state.playlist_nav,
-                    title,
-                    current_track_key,
-                    filter_results,
-                    filter_column,
-                    true,
-                    layout.left_panel,
-                    layout.right_panel,
-                );
-            }
+                (None, None)
+            };
+
+            // Radio/stations view with Miller columns (no tab bar)
+            render_station_view(frame, state, filter_results, filter_column, layout.left_panel, layout.right_panel);
         }
         BrowseCategory::Genres => {
-            // Genres cycle includes Stations
-            if state.genre_content_type == GenreContentType::Stations {
-                // Get filter info if filter applies to stations (Genres category with Stations type)
-                let (filter_results, filter_column) = if state.list_filter.active
-                    && state.list_filter.category == BrowseCategory::Genres {
-                    (state.list_filter.results.as_ref(), Some(state.list_filter.column))
-                } else {
-                    (None, None)
-                };
-
-                // Stations view
-                render_station_view(frame, state, filter_results, filter_column, layout.left_panel, layout.right_panel);
+            // Get filter info if filter applies to this category
+            let (filter_results, filter_column) = if state.list_filter.active
+                && state.list_filter.category == BrowseCategory::Genres {
+                (state.list_filter.results.as_ref(), Some(state.list_filter.column))
             } else {
-                // Get filter info if filter applies to this category
-                let (filter_results, filter_column) = if state.list_filter.active
-                    && state.list_filter.category == BrowseCategory::Genres {
-                    (state.list_filter.results.as_ref(), Some(state.list_filter.column))
-                } else {
-                    (None, None)
-                };
+                (None, None)
+            };
 
-                // Genres with dynamic Miller columns
-                let title = state.genre_content_type.name();
-                render_browse_miller_columns(
-                    frame,
-                    state,
-                    &state.genre_nav,
-                    title,
-                    current_track_key,
-                    filter_results,
-                    filter_column,
-                    false,
-                    layout.left_panel,
-                    layout.right_panel,
-                );
-            }
+            // Split off 1 row for tab bar at the top
+            let full_area = Rect {
+                x: layout.left_panel.x,
+                y: layout.left_panel.y,
+                width: layout.left_panel.width + layout.right_panel.width,
+                height: layout.left_panel.height,
+            };
+            let tab_area = Rect { height: 1, ..full_area };
+            let content_left = Rect {
+                y: layout.left_panel.y + 1,
+                height: layout.left_panel.height.saturating_sub(1),
+                ..layout.left_panel
+            };
+            let content_right = Rect {
+                y: layout.right_panel.y + 1,
+                height: layout.right_panel.height.saturating_sub(1),
+                ..layout.right_panel
+            };
+
+            // Render tab bar
+            render_tab_bar(
+                frame, state, tab_area,
+                &["All", "Library", "Artist", "Album", "Mood", "Style"],
+                state.genre_tab as usize,
+            );
+
+            // Genres with dynamic Miller columns
+            let title = state.genre_tab.name();
+            render_browse_miller_columns(
+                frame,
+                state,
+                &state.genre_nav,
+                title,
+                current_track_key,
+                filter_results,
+                filter_column,
+                false,
+                content_left,
+                content_right,
+            );
         }
         BrowseCategory::Folders => {
             // Get filter info if filter applies to this category
@@ -485,6 +513,40 @@ fn render_folder_view(
     }
 }
 
+/// Render a horizontal tab bar for Playlists or Genres.
+fn render_tab_bar(
+    frame: &mut Frame,
+    _state: &AppState,
+    area: Rect,
+    labels: &[&str],
+    selected: usize,
+) {
+    let t = theme();
+
+    let titles: Vec<Line> = labels.iter().enumerate().map(|(i, label)| {
+        if i == selected {
+            Line::from(Span::styled(
+                format!(" {} ", label),
+                Style::default()
+                    .fg(t.colors.fg_accent)
+                    .add_modifier(Modifier::BOLD),
+            ))
+        } else {
+            Line::from(Span::styled(
+                format!(" {} ", label),
+                Style::default().fg(t.colors.fg_muted),
+            ))
+        }
+    }).collect();
+
+    let tabs = Tabs::new(titles)
+        .style(Style::default().bg(t.colors.bg_primary).fg(t.colors.fg_muted))
+        .divider(Span::styled(" │ ", Style::default().fg(t.colors.fg_muted)))
+        .padding("", "");
+
+    frame.render_widget(tabs, area);
+}
+
 /// Render a BrowseNavigationState as dynamic Miller columns.
 /// Used for Artists, Playlists, and Genres views.
 /// When filter_results is Some, only show items at the matched indices in the filter_column.
@@ -632,8 +694,18 @@ fn render_browse_miller_columns(
             // Calculate max width for text (minus prefix and padding)
             let max_text_width = inner.width.saturating_sub(4) as usize;
 
-            // Check if this column should use 2-row track display
-            let is_two_row = two_row_tracks && col.items.first().map_or(false, |item| matches!(item, BrowseItem::Track { .. }));
+            // Check if this column should use 2-row display:
+            // - Track columns in playlist mode (two_row_tracks)
+            // - Album columns in "All Artists" mode (shows artist on 2nd row)
+            let is_two_row_track = two_row_tracks && col.items.first().map_or(false, |item| matches!(item, BrowseItem::Track { .. }));
+            let is_all_artists_albums = col.items.first().map_or(false, |item| matches!(item, BrowseItem::Album { .. }))
+                && (nav.columns.first()
+                    .and_then(|c| c.selected_item())
+                    .map_or(false, |item| matches!(item, BrowseItem::AllArtists))
+                || (state.browse_category == crate::app::state::BrowseCategory::Library
+                    && state.library_sub_mode != crate::app::state::LibrarySubMode::Normal
+                    && col_idx == 0));
+            let is_two_row = is_two_row_track || is_all_artists_albums;
             let rows_per_item = if is_two_row { 2 } else { 1 };
             let visible_item_count = visible_height / rows_per_item;
 
@@ -686,21 +758,17 @@ fn render_browse_miller_columns(
                         let prefix = match item {
                             BrowseItem::Track { .. } if is_now_playing => "♪ ",
                             BrowseItem::Track { .. } => "  ",
+                            BrowseItem::AllArtists => "  ", // No arrow for AllArtists
                             _ => "▸ ", // Drillable items get arrow
                         };
 
                         // Full text for line 1 (before truncation)
                         let full_text = match item {
-                            BrowseItem::Album { title, artist, year, .. } => {
-                                let name = if title.is_empty() {
-                                    artist.clone()
+                            BrowseItem::Album { title, year, .. } => {
+                                if let Some(y) = year {
+                                    format!("{} ({})", title, y)
                                 } else {
                                     title.clone()
-                                };
-                                if let Some(y) = year {
-                                    format!("{} ({})", name, y)
-                                } else {
-                                    name
                                 }
                             }
                             BrowseItem::Track { title, track_number, .. } => {
@@ -737,29 +805,38 @@ fn render_browse_miller_columns(
                             truncate_middle(&full_text, max_text_width)
                         };
 
-                        // Build ListItem — 2-row for playlist tracks, 1-row otherwise
+                        // Build ListItem — 2-row for playlist tracks or All Artists albums, 1-row otherwise
                         if is_two_row {
-                            if let BrowseItem::Track { artist_name, album_name, year, .. } = item {
-                                // Subtitle content: "Artist — Album (Year)"
-                                let subtitle_content = match (artist_name.as_ref(), album_name.as_ref()) {
-                                    (Some(a), Some(b)) => {
-                                        if let Some(y) = year {
-                                            format!("{} — {} ({})", a, b, y)
-                                        } else {
-                                            format!("{} — {}", a, b)
+                            // Determine subtitle content based on item type
+                            let subtitle_content = match item {
+                                BrowseItem::Track { artist_name, album_name, year, .. } => {
+                                    match (artist_name.as_ref(), album_name.as_ref()) {
+                                        (Some(a), Some(b)) => {
+                                            if let Some(y) = year {
+                                                format!("{} — {} ({})", a, b, y)
+                                            } else {
+                                                format!("{} — {}", a, b)
+                                            }
                                         }
-                                    }
-                                    (Some(a), None) => a.clone(),
-                                    (None, Some(b)) => {
-                                        if let Some(y) = year {
-                                            format!("{} ({})", b, y)
-                                        } else {
-                                            b.clone()
+                                        (Some(a), None) => a.clone(),
+                                        (None, Some(b)) => {
+                                            if let Some(y) = year {
+                                                format!("{} ({})", b, y)
+                                            } else {
+                                                b.clone()
+                                            }
                                         }
+                                        (None, None) => String::new(),
                                     }
-                                    (None, None) => String::new(),
-                                };
+                                }
+                                BrowseItem::Album { artist, .. } => {
+                                    // All Artists mode: show artist on second row
+                                    artist.clone()
+                                }
+                                _ => String::new(),
+                            };
 
+                            if !subtitle_content.is_empty() || matches!(item, BrowseItem::Track { .. } | BrowseItem::Album { .. }) {
                                 // Subtitle display width (5 indent + 2 padding = 7 overhead)
                                 let subtitle_width = (inner.width as usize).saturating_sub(7);
 
@@ -807,7 +884,7 @@ fn render_browse_miller_columns(
                                 ]);
                                 ListItem::new(text).style(item_bg)
                             } else {
-                                // Non-track item in a two-row column (shouldn't happen but handle gracefully)
+                                // Non-track/album item in a two-row column (handle gracefully)
                                 let style = if is_selected {
                                     Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
                                 } else {
@@ -816,10 +893,13 @@ fn render_browse_miller_columns(
                                 ListItem::new(format!("{}{}", prefix, display_text)).style(style)
                             }
                         } else {
+                            let is_all_artists = matches!(item, BrowseItem::AllArtists);
                             let style = if is_now_playing {
                                 Style::default().fg(t.colors.fg_accent).add_modifier(ratatui::style::Modifier::BOLD)
                             } else if is_selected {
                                 Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
+                            } else if is_all_artists {
+                                Style::default().fg(t.colors.fg_accent)
                             } else {
                                 Style::default().fg(t.colors.fg_primary)
                             };
@@ -1001,12 +1081,7 @@ fn render_album_art_grid(
             let max_text = text_width.saturating_sub(1) as usize;
 
             // Title (line 1, vertically centered in row)
-            // Use album title, falling back to artist if title is empty
-            let display_title = if let BrowseItem::Album { title, artist, .. } = item {
-                if title.is_empty() { artist.as_str() } else { title.as_str() }
-            } else {
-                item.title()
-            };
+            let display_title = item.title();
             let title_text = truncate_middle(display_title, max_text);
             let title_y = row_y + (row_height / 2).saturating_sub(1);
             let title_style = if is_selected {
@@ -1020,19 +1095,11 @@ fn render_album_art_grid(
             );
 
             // Artist and year (line 2)
-            if let BrowseItem::Album { title, artist, year, .. } = item {
-                // Show artist on line 2 (or title if title was empty and artist was shown on line 1)
-                let sub_name = if title.is_empty() { "" } else { artist.as_str() };
+            if let BrowseItem::Album { artist, year, .. } = item {
                 let subtitle = if let Some(y) = year {
-                    if sub_name.is_empty() {
-                        format!("({})", y)
-                    } else {
-                        truncate_middle(&format!("{} ({})", sub_name, y), max_text)
-                    }
-                } else if sub_name.is_empty() {
-                    String::new()
+                    truncate_middle(&format!("{} ({})", artist, y), max_text)
                 } else {
-                    truncate_middle(sub_name, max_text)
+                    truncate_middle(artist, max_text)
                 };
                 let sub_style = if is_selected {
                     Style::default().fg(t.colors.fg_muted)
@@ -1231,9 +1298,10 @@ fn render_station_view(
                     .map(|(orig_idx, station)| {
                         let is_selected = orig_idx == selected_idx;
                         let is_category = station.is_category();
+                        let is_action = station.station_type == "action";
 
-                        // Show "›" suffix for categories (drillable)
-                        let suffix = if is_category { " ›" } else { "" };
+                        // Show "›" suffix for categories (drillable), not for action items
+                        let suffix = if is_category && !is_action { " ›" } else { "" };
 
                         // Apply middle truncation for long titles
                         let display_title = truncate_middle(&station.title, max_text_width);
@@ -1242,6 +1310,8 @@ fn render_station_view(
                             Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
                         } else if is_selected {
                             Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
+                        } else if is_action {
+                            Style::default().fg(t.colors.fg_accent)
                         } else {
                             Style::default().fg(t.colors.fg_primary)
                         };
@@ -1379,18 +1449,15 @@ fn render_shortcuts(frame: &mut Frame, state: &AppState, area: Rect) {
         }
     } else {
         // Default: navigation shortcuts
-        let artists_label = state.artist_view_mode.name();
-        let playlists_label = state.playlists_mode.name();
-        let genres_label = state.genre_content_type.name();
         let now_playing_label = state.now_playing_mode.name();
 
         let shortcuts: Vec<(&str, &str, bool)> = vec![
-            ("^A", artists_label, state.view == View::Browse && state.browse_category == BrowseCategory::Artists),
-            ("^P", playlists_label, state.view == View::Browse && state.browse_category == BrowseCategory::Playlists),
-            ("^G", genres_label, state.view == View::Browse && state.browse_category == BrowseCategory::Genres),
+            ("^L", "library", state.view == View::Browse && state.browse_category == BrowseCategory::Library),
+            ("^P", "playlists", state.view == View::Browse && state.browse_category == BrowseCategory::Playlists),
+            ("^G", "genres", state.view == View::Browse && state.browse_category == BrowseCategory::Genres),
+            ("^R", "radio", state.view == View::Browse && state.browse_category == BrowseCategory::Radio),
             ("^O", "folders", state.view == View::Browse && state.browse_category == BrowseCategory::Folders),
             ("^N", now_playing_label, state.view == View::NowPlaying),
-            ("^F", "search", state.search_popup_active),
             ("F1", "help", state.view == View::Help),
             ("F2", "settings", state.view == View::Settings),
         ];
@@ -1407,12 +1474,8 @@ fn render_shortcuts(frame: &mut Frame, state: &AppState, area: Rect) {
                 ));
             } else {
                 spans.push(Span::styled(
-                    format!(" {} ", key),
+                    format!(" {} {} ", key, label),
                     Style::default().fg(t.colors.shortcut_key).bg(t.colors.bg_secondary),
-                ));
-                spans.push(Span::styled(
-                    format!("{} ", label),
-                    Style::default().fg(t.colors.shortcut_text).bg(t.colors.bg_secondary),
                 ));
             }
         }

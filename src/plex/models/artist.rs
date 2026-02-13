@@ -63,9 +63,12 @@ impl Album {
         self.leaf_count.unwrap_or(0)
     }
 
-    /// Get artist name.
+    /// Get artist name (handles None and empty string).
     pub fn artist_name(&self) -> &str {
-        self.parent_title.as_deref().unwrap_or("Unknown Artist")
+        match self.parent_title.as_deref() {
+            Some(s) if !s.is_empty() => s,
+            _ => "Unknown Artist",
+        }
     }
 
     /// Create an Album stub from a Track's parent info.
@@ -129,14 +132,30 @@ pub struct Track {
 }
 
 impl Track {
-    /// Get album name.
+    /// Get album name (handles None and empty string).
     pub fn album_name(&self) -> &str {
-        self.parent_title.as_deref().unwrap_or("Unknown Album")
+        match self.parent_title.as_deref() {
+            Some(s) if !s.is_empty() => s,
+            _ => "Unknown Album",
+        }
     }
 
-    /// Get artist name.
+    /// Get artist name (handles None and empty string).
     pub fn artist_name(&self) -> &str {
-        self.grandparent_title.as_deref().unwrap_or("Unknown Artist")
+        match self.grandparent_title.as_deref() {
+            Some(s) if !s.is_empty() => s,
+            _ => "Unknown Artist",
+        }
+    }
+
+    /// Get filename from the first media part's file path (with extension).
+    pub fn file_name(&self) -> Option<&str> {
+        self.media.first()
+            .and_then(|m| m.part.first())
+            .and_then(|p| p.file.as_deref())
+            .and_then(|f| f.rsplit('/').next())
+            // Also handle Windows-style backslash paths
+            .map(|f| f.rsplit('\\').next().unwrap_or(f))
     }
 
     /// Get track number.

@@ -27,9 +27,9 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     let help_text = r#"
 NAVIGATION
   Arrow keys      Navigate lists
-  Tab             Next category (Artists→Playlists→Genres→Folders→Now Playing)
+  Tab             Next category (Library→Playlists→Genres→Radio→Folders→Now Playing)
   Shift+Tab       Previous category
-  Shift+Down      Cycle modes within category (e.g., Artists→Album Artists→Albums)
+  Shift+Down      Cycle modes within category (e.g., Library→Album Artists)
   Shift+Up        Cycle modes backwards
   Enter / Right   Select / Drill down / Play
   Left / Bksp     Go back / Move focus left
@@ -41,9 +41,10 @@ NAVIGATION
   /               Activate inline filter (type to filter list)
 
 CATEGORIES (Ctrl+key - works from any view)
-  Ctrl+A          Artists (cycles: artists/albums)
-  Ctrl+P          Playlists (cycles: all/stations/recently added)
-  Ctrl+G          Genres (cycles: genres/artist/album/moods/styles/stations)
+  Ctrl+L          Library (cycles: artists/album artists)
+  Ctrl+P          Playlists
+  Ctrl+G          Genres (Tab to switch: All/Library/Artist/Album/Mood/Style)
+  Ctrl+R          Radio (Plex curated stations)
   Ctrl+O          Folders
 
 VIEWS
@@ -51,16 +52,14 @@ VIEWS
   F1 / ?          This help screen
   F2              Settings
 
-COMMANDS (Alt+/ to see, press again for stations)
+COMMANDS (Alt+/ to see available commands)
   Ctrl+F          Search popup (floating dialog)
-  Alt+R           Sonic radio from selection
-                  Track: similar individual tracks
-                  Album: similar albums played in order
-                  Artist: artist + similar artists
+  Alt+R           Start Plex radio from selection (track, album, or artist)
   Alt+Q           Add selection to queue (enqueue)
                   Track: adds single track
                   Album: adds all tracks from album
-  Alt+S           Shuffle view / queue
+  Alt+S           Library: cycle all albums / shuffle / artists
+                  Other views: shuffle column / queue
   Alt+M           Show similar albums/tracks
   Alt+B           Show Album (navigate to track's album)
   Alt+G           Go to Artist (navigate to track's artist)
@@ -75,8 +74,13 @@ STATIONS & SHORTCUTS (Alt+/ twice to see available shortcuts)
   Ctrl+Alt+S      Quick library switcher
 
 SEARCH POPUP (Ctrl+F)
-  Tabs: Artists | Albums | Playlists | Tracks | Genres
-  Tab / Shift+Tab Switch between tabs
+  Type to search library (instant local search)
+  Tab / Shift+Tab Switch result tabs (All/Artists/Albums/Tracks/Playlists/Genres)
+  Left / Right    Switch result tabs
+  Enter / Down    Move to results
+  Up (at top)     Back to search input
+  Enter           Navigate to selected item in library
+  Esc             Close search
 
 INLINE FILTER (/ key)
   /               Activate filter in transport bar
@@ -98,25 +102,33 @@ NOW PLAYING (Ctrl+N)
                   Alt+W to save as playlist
   Now Playing     Album art, track info, waveform seekbar
 
-SONIC RADIO (Alt+R on selection)
-  Track Radio     Similar individual tracks
-  Album Radio     Tracks from similar albums in order
-  Artist Radio    Tracks from the artist and similar artists
-  Station Radio   Plex curated stations (via Ctrl+G)
+PLEX RADIO (Alt+R on selection)
+  Starts Plex radio seeded from the selected track, album, or artist.
+  Uses Plex server intelligence (sonic analysis, taste, popularity).
+  Station Radio   Plex curated stations (via Ctrl+R Radio)
 
-SONIC ADVENTURE (Alt+A)
+SONIC ADVENTURE (Alt+A or via Radio section)
   Creates a sonic bridge between two tracks.
-  1. Select start track, press Alt+A
-  2. Navigate to end track, press Alt+A
-  3. Enter length (5-100 tracks)
-  4. Adventure replaces queue, starts playing
+  Alt+A method:
+    1. Select start track, press Alt+A
+    2. Navigate to end track, press Alt+A
+    3. Enter length (5-100 tracks)
+    4. Adventure replaces queue, starts playing
+  Radio section: "Sonic Adventure" item provides a self-contained UI
   Tracks can be selected from Browse or Search (Tracks tab)
 
 PLAYLISTS (Ctrl+P)
-  Ctrl+P cycles:  All -> Stations -> Recently Added
+  Miller columns navigation (drill down into playlists)
+
+RADIO (Ctrl+R)
+  Miller columns navigation (browse Plex curated stations)
 
 GENRES (Ctrl+G)
-  Ctrl+G cycles:  Genres -> Artist Genres -> Album Genres -> Moods -> Styles -> Stations
+  Tab             Focus tab bar (All / Library / Artist / Album / Mood / Style)
+  Left/Right      Switch tabs (when tab bar focused)
+  Down/Enter      Return to content from tab bar
+  Up (at top)     Focus tab bar
+  All tab         Merged list of all genre types with type suffix
 
 FOLDERS (Ctrl+O)
   ♪ icon shows currently playing track

@@ -126,11 +126,16 @@ fn build_left_content(state: &AppState) -> String {
 
     // Track info
     if let Some(track) = state.current_track() {
-        line.push_str(&track.title);
+        let title = if track.title.is_empty() {
+            track.file_name().unwrap_or("Unknown Track")
+        } else {
+            &track.title
+        };
+        line.push_str(title);
         line.push_str(" by ");
-        line.push_str(&track.artist_name());
+        line.push_str(track.artist_name());
         line.push_str(" from ");
-        line.push_str(&track.album_name());
+        line.push_str(track.album_name());
     } else {
         line.push_str("No track playing");
     }

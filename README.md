@@ -73,8 +73,8 @@ For preference and config file locations, textamp checks for XDG environment var
 | Key | Action |
 |-----|--------|
 | `Ctrl+A` | Artists (cycles: Artists → Albums) |
-| `Ctrl+P` | Playlists (cycles: All → Stations → Recently Added → Recently Played) |
-| `Ctrl+G` | Genres (cycles: Genres → Artist Genres → Album Genres → Moods → Styles → Stations) |
+| `Ctrl+P` | Playlists (Tab to switch: Playlists / Stations) |
+| `Ctrl+G` | Genres (Tab to switch: All / Library / Artist / Album / Mood / Style) |
 | `Ctrl+O` | Folders |
 
 ### Views
@@ -105,15 +105,18 @@ For preference and config file locations, textamp checks for XDG environment var
 
 ### Navigation Flow
 - **Artists** (`Ctrl+A`): Press again to cycle between Artists and Albums views
-- **Playlists** (`Ctrl+P`): Press again to cycle between All Playlists, Stations, Recently Added, and Recently Played albums
-- **Genres** (`Ctrl+G`): Press again to cycle between Genres, Artist Genres, Album Genres, Moods, Styles, and Stations
+- **Playlists** (`Ctrl+P`): Tab bar with Playlists and Stations tabs. Press `Ctrl+P` again to cycle tabs, or press `Tab` to focus the tab bar and use `←`/`→` to switch.
+- **Genres** (`Ctrl+G`): Tab bar with All, Library, Artist, Album, Mood, and Style tabs. Press `Ctrl+G` again to cycle tabs, or press `Tab` to focus the tab bar.
 - **Folders** (`Ctrl+O`): Miller columns navigation (3 columns visible)
 
-### Genres and Moods
-The Genres view (`Ctrl+G`) provides three content types that you cycle through by pressing `Ctrl+G` again:
-- **Genres**: Actual genre tags from your music files (e.g., "Abstract Improvisation", "Post-Punk")
-- **Plex Genres**: Plex's standardized genre categories (e.g., "Rock", "Jazz", "Classical")
-- **Moods**: Plexamp-style mood tags (e.g., "Energetic", "Melancholic")
+### Genre Types
+The Genres view (`Ctrl+G`) provides six tabs for different genre sources:
+- **All**: Merged list of all genre types below, with type suffixes for disambiguation (e.g., "Rock (Library)", "Rock (Artist)")
+- **Library**: Actual genre tags from your music files (e.g., "Abstract Improvisation", "Post-Punk")
+- **Artist**: Plex-generated standardized genre categories at the artist level (e.g., "Rock", "Jazz")
+- **Album**: Plex-generated genre categories at the album level
+- **Mood**: Plex analysis-based mood metadata (e.g., "Energetic", "Melancholic")
+- **Style**: Plex analysis-based style metadata (e.g., "Avant-Garde", "Ambient")
 
 ### Queue vs Radio
 
@@ -131,7 +134,7 @@ textamp distinguishes between different playback modes:
 - **Sonic Album Radio**: When an album is selected, plays similar albums in order (full albums sequentially)
 - **Sonic Artist Radio**: When an artist is selected, plays tracks from the artist and similar artists
 
-**Stations** (via `Ctrl+G` or `Ctrl+P` cycling) - Curated Plex stations:
+**Stations** (via `Ctrl+P` Stations tab) - Curated Plex stations:
 - Eight station types: Library, Deep Cuts, Time Travel, Random Album, On This Day, Mood, Style, Decade
 - Category stations (Mood, Style, Decade) drill into sub-stations via Miller columns
 - Automatically fetches more tracks as needed
@@ -157,7 +160,7 @@ The similar albums feature is context-aware:
 
 ### Stations (Plexamp Radio)
 
-Access stations by cycling `Ctrl+G` (Genres → ... → Stations) or `Ctrl+P` (Playlists → Stations → ...). Stations use Miller columns — the first five are directly playable, while the last three are categories you drill into to pick a sub-station.
+Access stations via the Stations tab under Playlists (`Ctrl+P`, then Tab to switch). Stations use Miller columns — the first five are directly playable, while the last three are categories you drill into to pick a sub-station.
 
 **Directly playable:**
 

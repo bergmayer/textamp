@@ -2,16 +2,18 @@
 //! LoadMoods, LoadStyles, LoadGenreAlbums, LoadArtistGenreAlbums, LoadAlbumGenreAlbums,
 //! LoadMoodAlbums, LoadStyleAlbums, CycleGenreContentType, RefreshGenreView,
 //! CycleArtistViewMode, RefreshArtistView, CycleNowPlayingMode, RefreshNowPlayingView,
-//! CyclePlaylistsMode, RefreshPlaylistsView, LoadRecentlyAddedAlbums.
+//! CycleGenreTab, SetGenreTab.
 
 use crate::app::{Action, AppState, Event};
 use crate::app::state::{
-    ArtistViewMode, BrowseCategory, BrowseItem, BrowseNavigationState, Focus,
-    GenreContentType, NowPlayingMode, PlaylistsMode, RefreshCategory, RightPanelMode, StationColumn,
+    BrowseCategory, BrowseItem, BrowseNavigationState, Focus,
+    GenreContentType, GenreTab, LibrarySubMode, NowPlayingMode, RefreshCategory, RightPanelMode, StationColumn,
 };
 use crate::api::PlexClient;
 
 use anyhow::Result;
+
+use super::helpers;
 use tokio::sync::mpsc;
 
 /// Dispatch browse-related actions. Returns follow-up actions.
@@ -29,12 +31,14 @@ pub async fn dispatch(
                 state.stations_loading = true;
                 state.station_nav.loading = true;
                 match client.get_stations(lib_key).await {
-                    Ok(stations) => {
+                    Ok(mut stations) => {
+                        helpers::append_station_action_items(&mut stations);
+
                         // Initialize with root column
                         state.station_nav.columns.clear();
                         state.station_nav.columns.push(StationColumn::new(
                             None,
-                            "Stations".to_string(),
+                            "Radio".to_string(),
                             stations.clone(),
                         ));
                         state.station_nav.focused_column = 0;
@@ -181,10 +185,6 @@ pub async fn dispatch(
                         GenreContentType::Styles => {
                             client.get_style_albums(&lib_key, &genre_key).await
                         }
-                        GenreContentType::Stations => {
-                            // Stations don't have albums - this shouldn't be called
-                            Ok(Vec::new())
-                        }
                     };
 
                     match result {
@@ -233,7 +233,6 @@ pub async fn dispatch(
                 GenreContentType::AlbumGenres => RefreshCategory::AlbumGenres,
                 GenreContentType::Moods => RefreshCategory::Moods,
                 GenreContentType::Styles => RefreshCategory::Styles,
-                GenreContentType::Stations => RefreshCategory::Stations,
             };
             follow_ups.push(Action::CheckStaleness(tier1));
         }
@@ -245,65 +244,70 @@ pub async fn dispatch(
             // Reset genre_nav when cycling
             state.genre_nav = BrowseNavigationState::new();
 
-            // Load the appropriate content based on current type
-            match state.genre_content_type {
-                GenreContentType::Genres => {
-                    if state.genres.is_empty() {
-                        follow_ups.push(Action::LoadGenres);
-                    } else {
-                        // Initialize genre_nav from cached data
-                        let items = BrowseItem::from_genres(&state.genres);
-                        state.genre_nav.reset("genres", items);
-                    }
+            // Handle "All" tab separately - builds merged list
+            if state.genre_tab == GenreTab::All {
+                let items = build_merged_genres(state);
+                if items.is_empty() {
+                    // If all lists are empty, trigger loads for all genre types
+                    if state.genres.is_empty() { follow_ups.push(Action::LoadGenres); }
+                    if state.artist_genres.is_empty() { follow_ups.push(Action::LoadArtistGenres); }
+                    if state.album_genres.is_empty() { follow_ups.push(Action::LoadAlbumGenres); }
+                    if state.moods.is_empty() { follow_ups.push(Action::LoadMoods); }
+                    if state.styles.is_empty() { follow_ups.push(Action::LoadStyles); }
+                } else {
+                    state.genre_nav.reset("all genres", items);
                 }
-                GenreContentType::ArtistGenres => {
-                    if state.artist_genres.is_empty() {
-                        follow_ups.push(Action::LoadArtistGenres);
-                    } else {
-                        let items = BrowseItem::from_genres(&state.artist_genres);
-                        state.genre_nav.reset("artist genres", items);
+            } else {
+                // Load the appropriate content based on current type
+                match state.genre_content_type {
+                    GenreContentType::Genres => {
+                        if state.genres.is_empty() {
+                            follow_ups.push(Action::LoadGenres);
+                        } else {
+                            // Initialize genre_nav from cached data
+                            let items = BrowseItem::from_genres(&state.genres);
+                            state.genre_nav.reset("genres", items);
+                        }
                     }
-                }
-                GenreContentType::AlbumGenres => {
-                    if state.album_genres.is_empty() {
-                        follow_ups.push(Action::LoadAlbumGenres);
-                    } else {
-                        let items = BrowseItem::from_genres(&state.album_genres);
-                        state.genre_nav.reset("album genres", items);
+                    GenreContentType::ArtistGenres => {
+                        if state.artist_genres.is_empty() {
+                            follow_ups.push(Action::LoadArtistGenres);
+                        } else {
+                            let items = BrowseItem::from_genres(&state.artist_genres);
+                            state.genre_nav.reset("artist genres", items);
+                        }
                     }
-                }
-                GenreContentType::Moods => {
-                    if state.moods.is_empty() {
-                        follow_ups.push(Action::LoadMoods);
-                    } else {
-                        let items = BrowseItem::from_genres(&state.moods);
-                        state.genre_nav.reset("moods", items);
+                    GenreContentType::AlbumGenres => {
+                        if state.album_genres.is_empty() {
+                            follow_ups.push(Action::LoadAlbumGenres);
+                        } else {
+                            let items = BrowseItem::from_genres(&state.album_genres);
+                            state.genre_nav.reset("album genres", items);
+                        }
                     }
-                }
-                GenreContentType::Styles => {
-                    if state.styles.is_empty() {
-                        follow_ups.push(Action::LoadStyles);
-                    } else {
-                        let items = BrowseItem::from_genres(&state.styles);
-                        state.genre_nav.reset("styles", items);
+                    GenreContentType::Moods => {
+                        if state.moods.is_empty() {
+                            follow_ups.push(Action::LoadMoods);
+                        } else {
+                            let items = BrowseItem::from_genres(&state.moods);
+                            state.genre_nav.reset("moods", items);
+                        }
                     }
-                }
-                GenreContentType::Stations => {
-                    // Reset station navigation and load stations
-                    state.station_nav.columns.clear();
-                    state.station_nav.focused_column = 0;
-                    follow_ups.push(Action::LoadStations);
+                    GenreContentType::Styles => {
+                        if state.styles.is_empty() {
+                            follow_ups.push(Action::LoadStyles);
+                        } else {
+                            let items = BrowseItem::from_genres(&state.styles);
+                            state.genre_nav.reset("styles", items);
+                        }
+                    }
                 }
             }
         }
         Action::CycleArtistViewMode => {
             state.artist_view_mode = state.artist_view_mode.next();
             follow_ups.push(Action::RefreshArtistView);
-            let tier1 = match state.artist_view_mode {
-                ArtistViewMode::Artist | ArtistViewMode::AlbumArtist => RefreshCategory::Artists,
-                ArtistViewMode::Album => RefreshCategory::Albums,
-            };
-            follow_ups.push(Action::CheckStaleness(tier1));
+            follow_ups.push(Action::CheckStaleness(RefreshCategory::Artists));
         }
         Action::RefreshArtistView => {
             // Clear right panel state (drill-down state) but keep preloaded data
@@ -314,28 +318,13 @@ pub async fn dispatch(
             state.right_panel_mode = RightPanelMode::Empty;
             state.focus = Focus::Left;
 
-            // Only load if data is empty (not already preloaded)
-            match state.artist_view_mode {
-                ArtistViewMode::Artist |
-                ArtistViewMode::AlbumArtist => {
-                    if state.artists.is_empty() {
-                        follow_ups.push(Action::LoadArtists);
-                    }
-                    // Reset artist_nav with new data
-                    let title = state.artist_view_mode.name();
-                    let items = BrowseItem::from_artists(&state.artists);
-                    state.artist_nav.reset(title, items);
-                }
-                ArtistViewMode::Album => {
-                    if state.albums.is_empty() {
-                        follow_ups.push(Action::LoadAlbums);
-                    }
-                    // Reset artist_nav with albums
-                    let title = state.artist_view_mode.name();
-                    let items = BrowseItem::from_albums(&state.albums);
-                    state.artist_nav.reset(title, items);
-                }
+            if state.artists.is_empty() {
+                follow_ups.push(Action::LoadArtists);
             }
+            // Reset artist_nav with new data
+            let title = state.artist_view_mode.name();
+            let items = BrowseItem::artist_root_items(&state.artists);
+            state.artist_nav.reset(title, items);
         }
         Action::CycleNowPlayingMode => {
             state.now_playing_mode = state.now_playing_mode.next();
@@ -353,67 +342,66 @@ pub async fn dispatch(
                 }
             }
         }
-        Action::CyclePlaylistsMode => {
-            state.playlists_mode = state.playlists_mode.next();
-            follow_ups.push(Action::RefreshPlaylistsView);
-            let tier1 = match state.playlists_mode {
-                PlaylistsMode::All => RefreshCategory::Playlists,
-                PlaylistsMode::Stations => RefreshCategory::Stations,
-                PlaylistsMode::RecentlyAdded => RefreshCategory::RecentlyAdded,
+        Action::CycleGenreTab => {
+            state.genre_tab = state.genre_tab.next();
+
+            // Update genre_content_type from tab (for non-All tabs)
+            if let Some(ct) = state.genre_tab.to_content_type() {
+                state.genre_content_type = ct;
+            }
+            follow_ups.push(Action::RefreshGenreView);
+            // Check staleness for the relevant category
+            let tier1 = match state.genre_tab {
+                GenreTab::All => RefreshCategory::Genres, // Check genres as representative
+                GenreTab::Library => RefreshCategory::Genres,
+                GenreTab::Artist => RefreshCategory::ArtistGenres,
+                GenreTab::Album => RefreshCategory::AlbumGenres,
+                GenreTab::Mood => RefreshCategory::Moods,
+                GenreTab::Style => RefreshCategory::Styles,
             };
             follow_ups.push(Action::CheckStaleness(tier1));
         }
-        Action::RefreshPlaylistsView => {
-            // Load data for the current mode if needed and reset playlist_nav
-            match state.playlists_mode {
-                PlaylistsMode::All => {
-                    // All playlists - reload if empty
-                    if state.playlists.is_empty() {
-                        follow_ups.push(Action::LoadPlaylists);
-                    } else {
-                        // Reset playlist_nav with playlists
-                        let items = BrowseItem::from_playlists(&state.playlists);
-                        state.playlist_nav.reset("playlists", items);
-                    }
+        Action::SetGenreTab(tab) => {
+            if state.genre_tab != tab {
+                state.genre_tab = tab;
+    
+                if let Some(ct) = tab.to_content_type() {
+                    state.genre_content_type = ct;
                 }
-                PlaylistsMode::Stations => {
-                    // Stations mode - load stations into station_nav
-                    if state.station_nav.columns.is_empty() && !state.station_nav.loading {
-                        follow_ups.push(Action::LoadStations);
-                    }
-                }
-                PlaylistsMode::RecentlyAdded => {
-                    // Recently added albums
-                    if state.recently_added_albums.is_empty() {
-                        follow_ups.push(Action::LoadRecentlyAddedAlbums);
-                    }
-                    // Reset playlist_nav with recently added albums
-                    let items = BrowseItem::from_albums(&state.recently_added_albums);
-                    state.playlist_nav.reset("recently added", items);
-                }
+                follow_ups.push(Action::RefreshGenreView);
             }
         }
-        Action::LoadRecentlyAddedAlbums => {
-            if let Some(library_key) = &state.active_library {
-                state.recently_added_loading = true;
-                match client.get_recently_added_albums(library_key, 50).await {
-                    Ok(albums) => {
-                        state.recently_added_albums = albums;
-                        state.recently_added_loading = false;
-                        // Reset playlist_nav with recently added albums
-                        let items = BrowseItem::from_albums(&state.recently_added_albums);
-                        state.playlist_nav.reset("recently added", items);
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to load recently added albums: {}", e);
-                        state.recently_added_loading = false;
+        Action::CycleLibrarySubMode => {
+            state.library_sub_mode = state.library_sub_mode.next();
+            match state.library_sub_mode {
+                LibrarySubMode::Normal => {
+                    // Reset to normal artist list
+                    let title = state.artist_view_mode.name();
+                    let items = BrowseItem::artist_root_items(&state.artists);
+                    state.artist_nav.reset(title, items);
+                }
+                LibrarySubMode::AllByArtist => {
+                    // All albums sorted by artist, then by year
+                    let mut sorted = state.albums.clone();
+                    sorted.sort_by(|a, b| {
+                        a.artist_name().to_lowercase().cmp(&b.artist_name().to_lowercase())
+                            .then_with(|| a.year.cmp(&b.year))
+                    });
+                    let items = BrowseItem::from_albums(&sorted);
+                    state.artist_nav.reset("all albums", items);
+                }
+                LibrarySubMode::AllShuffled => {
+                    // Shuffle the current column
+                    if let Some(col) = state.artist_nav.columns.first_mut() {
+                        col.shuffle();
+                        col.title = "all albums (shuffled)".to_string();
                     }
                 }
             }
         }
         Action::ToggleBrowseShuffle => {
             match state.browse_category {
-                BrowseCategory::Artists => {
+                BrowseCategory::Library => {
                     if let Some(col) = state.artist_nav.focused_mut() {
                         if col.is_shuffled() {
                             col.unshuffle();
@@ -424,46 +412,34 @@ pub async fn dispatch(
                     state.artist_nav.truncate_right();
                 }
                 BrowseCategory::Playlists => {
-                    if state.playlists_mode == PlaylistsMode::Stations {
-                        if let Some(col) = state.station_nav.focused_mut() {
-                            if col.is_shuffled() {
-                                col.unshuffle();
-                            } else {
-                                col.shuffle();
-                            }
+                    if let Some(col) = state.playlist_nav.focused_mut() {
+                        if col.is_shuffled() {
+                            col.unshuffle();
+                        } else {
+                            col.shuffle();
                         }
-                        state.station_nav.truncate_right_columns();
-                    } else {
-                        if let Some(col) = state.playlist_nav.focused_mut() {
-                            if col.is_shuffled() {
-                                col.unshuffle();
-                            } else {
-                                col.shuffle();
-                            }
-                        }
-                        state.playlist_nav.truncate_right();
                     }
+                    state.playlist_nav.truncate_right();
+                }
+                BrowseCategory::Radio => {
+                    if let Some(col) = state.station_nav.focused_mut() {
+                        if col.is_shuffled() {
+                            col.unshuffle();
+                        } else {
+                            col.shuffle();
+                        }
+                    }
+                    state.station_nav.truncate_right_columns();
                 }
                 BrowseCategory::Genres => {
-                    if state.genre_content_type == GenreContentType::Stations {
-                        if let Some(col) = state.station_nav.focused_mut() {
-                            if col.is_shuffled() {
-                                col.unshuffle();
-                            } else {
-                                col.shuffle();
-                            }
+                    if let Some(col) = state.genre_nav.focused_mut() {
+                        if col.is_shuffled() {
+                            col.unshuffle();
+                        } else {
+                            col.shuffle();
                         }
-                        state.station_nav.truncate_right_columns();
-                    } else {
-                        if let Some(col) = state.genre_nav.focused_mut() {
-                            if col.is_shuffled() {
-                                col.unshuffle();
-                            } else {
-                                col.shuffle();
-                            }
-                        }
-                        state.genre_nav.truncate_right();
                     }
+                    state.genre_nav.truncate_right();
                 }
                 BrowseCategory::Folders => {
                     if let Some(ref mut folder_state) = state.folder_state {
@@ -482,4 +458,44 @@ pub async fn dispatch(
         _ => unreachable!("dispatch_browse called with non-browse action: {:?}", action),
     }
     Ok(follow_ups)
+}
+
+/// Build a merged genre list from all genre types with type suffixes.
+/// Items are sorted alphabetically by title, with type suffix for disambiguation.
+fn build_merged_genres(state: &AppState) -> Vec<BrowseItem> {
+    let mut items = Vec::new();
+
+    for g in &state.genres {
+        items.push(BrowseItem::Genre {
+            key: format!("lib:{}", g.key),
+            title: format!("{} (Library)", g.title),
+        });
+    }
+    for g in &state.artist_genres {
+        items.push(BrowseItem::Genre {
+            key: format!("art:{}", g.key),
+            title: format!("{} (Artist)", g.title),
+        });
+    }
+    for g in &state.album_genres {
+        items.push(BrowseItem::Genre {
+            key: format!("alb:{}", g.key),
+            title: format!("{} (Album)", g.title),
+        });
+    }
+    for g in &state.moods {
+        items.push(BrowseItem::Genre {
+            key: format!("mood:{}", g.key),
+            title: format!("{} (Mood)", g.title),
+        });
+    }
+    for g in &state.styles {
+        items.push(BrowseItem::Genre {
+            key: format!("style:{}", g.key),
+            title: format!("{} (Style)", g.title),
+        });
+    }
+
+    items.sort_by(|a, b| a.title().to_lowercase().cmp(&b.title().to_lowercase()));
+    items
 }

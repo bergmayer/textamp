@@ -1,9 +1,9 @@
 //! List navigation, scrolling, pagination, and filter selection.
 
-use crate::app::{Action, AppState, Event};
+use crate::app::{AppState, Event};
 use crate::app::state::{
-    BrowseCategory, Focus, PlaybackMode,
-    RightPanelMode, SearchTab, View,
+    BrowseCategory, Focus,
+    RightPanelMode, View,
 };
 use crate::api::PlexClient;
 use super::{sort_key, PAGE_SIZE};
@@ -100,7 +100,7 @@ pub async fn maybe_load_more(state: &mut AppState, client: &PlexClient) {
     }
 
     if let Some(lib_key) = &state.active_library.clone() {
-        if state.browse_category == BrowseCategory::Artists {
+        if state.browse_category == BrowseCategory::Library {
             let idx = state.list_state.artists_index;
             let loaded = state.artists.len();
             let total = state.artists_total as usize;
@@ -124,117 +124,6 @@ pub async fn maybe_load_more(state: &mut AppState, client: &PlexClient) {
             }
         }
     }
-}
-
-/// Select a filter result from the search/filter view.
-pub fn select_filter_result(state: &mut AppState) -> Vec<Action> {
-    let idx = state.list_state.search_item_index;
-    let search_tab = state.search_tab;
-
-    match search_tab {
-        SearchTab::Global => {
-            return vec![];
-        }
-        SearchTab::Artists => {
-            if let Some(ref results) = state.filter_results {
-                if let Some(artist) = results.artists.get(idx) {
-                    state.selected_artist_name = artist.title.clone();
-                    state.pending_filter_key = Some(artist.rating_key.clone());
-                    state.search_query.clear();
-                    state.filter_results = None;
-                    state.view = View::Browse;
-                    state.browse_category = BrowseCategory::Artists;
-                    return vec![Action::LoadArtistAlbums];
-                }
-            }
-            if let Some(artist) = state.artists.iter().enumerate()
-                .filter(|(_, a)| state.search_query.is_empty() || a.title.to_lowercase().contains(&state.search_query.to_lowercase()))
-                .nth(idx)
-                .map(|(i, _)| i)
-            {
-                state.set_category_index(artist);
-                state.search_query.clear();
-                state.filter_results = None;
-                state.view = View::Browse;
-                state.browse_category = BrowseCategory::Artists;
-            }
-        }
-        SearchTab::AlbumArtists => {
-            let query = state.search_query.to_lowercase();
-            let mut album_artists: Vec<(String, String)> = state.albums.iter()
-                .filter_map(|a| {
-                    let artist = a.parent_title.as_deref().unwrap_or("");
-                    if !artist.is_empty() && (query.is_empty() || artist.to_lowercase().contains(&query)) {
-                        Some((artist.to_string(), a.rating_key.clone()))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            album_artists.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
-            album_artists.dedup_by(|a, b| a.0.to_lowercase() == b.0.to_lowercase());
-
-            if let Some((_, _album_key)) = album_artists.get(idx) {
-                state.search_query.clear();
-                state.filter_results = None;
-                state.view = View::Browse;
-            }
-        }
-        SearchTab::Albums => {
-            if let Some(ref results) = state.filter_results {
-                if let Some(album) = results.albums.get(idx).cloned() {
-                    state.search_query.clear();
-                    state.filter_results = None;
-                    state.view = View::Browse;
-                    return vec![Action::PlayAlbum { rating_key: album.rating_key }];
-                }
-            }
-        }
-        SearchTab::Playlists => {
-            let query = state.search_query.to_lowercase();
-            if let Some((i, _playlist)) = state.playlists.iter().enumerate()
-                .filter(|(_, p)| query.is_empty() || p.title.to_lowercase().contains(&query))
-                .nth(idx)
-            {
-                state.set_category_index(i);
-                state.search_query.clear();
-                state.filter_results = None;
-                state.view = View::Browse;
-                state.browse_category = BrowseCategory::Playlists;
-                return vec![Action::LoadCategoryTracks];
-            }
-        }
-        SearchTab::Tracks => {
-            if let Some(ref results) = state.filter_results {
-                if let Some(track) = results.tracks.get(idx).cloned() {
-                    state.search_query.clear();
-                    state.filter_results = None;
-                    state.view = View::Browse;
-                    state.queue.clear();
-                    state.queue.push(track.clone());
-                    state.queue_index = Some(0);
-                    state.playback_mode = PlaybackMode::Queue;
-                    return vec![Action::PlayTrack(track)];
-                }
-            }
-        }
-        SearchTab::Genres => {
-            let query = state.search_query.to_lowercase();
-            if let Some(i) = state.genres.iter().enumerate()
-                .filter(|(_, g)| query.is_empty() || g.title.to_lowercase().contains(&query))
-                .nth(idx)
-                .map(|(i, _)| i)
-            {
-                state.set_category_index(i);
-                state.search_query.clear();
-                state.filter_results = None;
-                state.view = View::Browse;
-                state.browse_category = BrowseCategory::Genres;
-            }
-        }
-    }
-
-    vec![]
 }
 
 /// Adjust a list index by a delta (relative movement).
@@ -292,72 +181,7 @@ pub fn adjust_list_index(state: &mut AppState, delta: isize) {
             }
         }
         View::Search => {
-            let filtered_len = if let Some(ref results) = state.filter_results {
-                match state.search_tab {
-                    SearchTab::Global => 0,
-                    SearchTab::Artists => results.artists.len(),
-                    SearchTab::AlbumArtists => {
-                        let query = state.search_query.to_lowercase();
-                        let mut artists: Vec<String> = state.albums.iter()
-                            .filter_map(|a| a.parent_title.as_ref())
-                            .filter(|t| query.is_empty() || t.to_lowercase().contains(&query))
-                            .map(|s| s.to_lowercase())
-                            .collect();
-                        artists.sort();
-                        artists.dedup();
-                        artists.len()
-                    }
-                    SearchTab::Albums => results.albums.len(),
-                    SearchTab::Playlists => {
-                        let query = state.search_query.to_lowercase();
-                        state.playlists.iter()
-                            .filter(|p| query.is_empty() || p.title.to_lowercase().contains(&query))
-                            .count()
-                    }
-                    SearchTab::Tracks => results.tracks.len(),
-                    SearchTab::Genres => {
-                        let query = state.search_query.to_lowercase();
-                        state.genres.iter()
-                            .filter(|g| query.is_empty() || g.title.to_lowercase().contains(&query))
-                            .count()
-                    }
-                }
-            } else {
-                let query = state.search_query.to_lowercase();
-                match state.search_tab {
-                    SearchTab::Global => 0,
-                    SearchTab::Artists => state.artists.iter()
-                        .filter(|a| query.is_empty() || a.title.to_lowercase().contains(&query))
-                        .count(),
-                    SearchTab::AlbumArtists => {
-                        let mut artists: Vec<String> = state.albums.iter()
-                            .filter_map(|a| a.parent_title.as_ref())
-                            .filter(|t| query.is_empty() || t.to_lowercase().contains(&query))
-                            .map(|s| s.to_lowercase())
-                            .collect();
-                        artists.sort();
-                        artists.dedup();
-                        artists.len()
-                    }
-                    SearchTab::Albums => state.albums.iter()
-                        .filter(|a| query.is_empty() || a.title.to_lowercase().contains(&query))
-                        .count(),
-                    SearchTab::Playlists => state.playlists.iter()
-                        .filter(|p| query.is_empty() || p.title.to_lowercase().contains(&query))
-                        .count(),
-                    SearchTab::Tracks => state.selected_album_tracks.iter()
-                        .filter(|t| query.is_empty() || t.title.to_lowercase().contains(&query))
-                        .count(),
-                    SearchTab::Genres => state.genres.iter()
-                        .filter(|g| query.is_empty() || g.title.to_lowercase().contains(&query))
-                        .count(),
-                }
-            };
-
-            if filtered_len > 0 {
-                let idx = state.list_state.search_item_index as isize + delta;
-                state.list_state.search_item_index = idx.clamp(0, filtered_len as isize - 1) as usize;
-            }
+            // Search results navigation handled in search key handler
         }
         _ => {}
     }

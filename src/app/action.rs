@@ -11,7 +11,7 @@ pub enum Action {
     // Navigation (musikcube-style)
     SetView(View),
     SetCategory(BrowseCategory),
-    NextView,   // Tab: cycle Artists→Playlists→Genres→Folders→NowPlaying
+    NextView,   // Tab: cycle Library→Playlists→Genres→Folders→NowPlaying
     PrevView,   // Shift+Tab: cycle backwards
     NextMode,   // Shift+Down: cycle modes within current category
     PrevMode,   // Shift+Up: cycle modes backwards
@@ -80,25 +80,24 @@ pub enum Action {
     RefreshGenreView,          // Refresh genre view after mode change (shared logic)
 
     // Artist view mode cycling
-    CycleArtistViewMode, // Ctrl+A when in Artists: cycle Artist → Album
+    CycleArtistViewMode, // Ctrl+L when in Library: cycle Artist ↔ AlbumArtist
     RefreshArtistView,   // Refresh artist view after mode change (shared logic)
+    CycleLibrarySubMode, // Alt+S in Library: cycle Normal → AllByArtist → AllShuffled
 
     // Now Playing view mode cycling
     CycleNowPlayingMode, // Ctrl+N when already in Now Playing: cycle Queue → Recently Played
     RefreshNowPlayingView, // Refresh now playing view after mode change (shared logic)
 
-    // Playlists view mode cycling
-    CyclePlaylistsMode, // Ctrl+P when already in Playlists: cycle All → Recently Added
-    RefreshPlaylistsView, // Refresh playlists view after mode change (shared logic)
-    LoadRecentlyAddedAlbums,
+    // Genre tab cycling
+    CycleGenreTab,       // Ctrl+G when already in Genres: cycle All/Library/Artist/Album/Mood/Style
+    SetGenreTab(crate::app::state::GenreTab), // Direct tab selection (mouse clicks)
 
-    // Search/Filter
+    // Search
     AppendSearchChar(char),
     DeleteSearchChar,
-    ExecuteSearch,
+    ExecuteLocalSearch,
     ClearSearch,
-    SelectFilterResult,
-    ExecuteFilterSearch,  // API search for filter view
+    SelectSearchResult,
 
     // UI
     ListUp,
@@ -137,6 +136,7 @@ pub enum Action {
     LoadArtistAlbumsForMiller { artist_key: String },
     LoadAlbumTracksForMiller { album_key: String },
     LoadArtistAllTracksForMiller { artist_key: String },  // Load all tracks by artist (from "All Tracks" entry)
+    LoadAllAlbumsForMiller,  // Load all albums as a Miller column (from "All Artists" entry)
     PlayTrackFromMiller { column_index: usize, track_index: usize },
 
     // Miller column navigation for Genres view
@@ -146,15 +146,10 @@ pub enum Action {
 
     // Miller column navigation for Playlists view
     LoadPlaylistTracksForMiller { playlist_key: String },
-    LoadAlbumTracksForPlaylistMiller { album_key: String },  // For Recently Added mode
     PlayPlaylistTrackFromMiller { column_index: usize, track_index: usize },
 
-    // Sonic radio mode
-    StartTrackRadio { track_key: String, title: String },
-    StartAlbumRadio { album_key: String, title: String },
-    StartArtistRadio { artist_key: String, title: String },
+    // Radio mode
     StopRadio,
-    FetchMoreRadioTracks,
     JumpToRadioTrack(usize),  // Jump to track in radio queue without clearing
     PlayCurrentRadioTrack,    // Play current track in radio mode (stays in Radio playback mode)
 
@@ -217,6 +212,23 @@ pub enum Action {
     // Search popup (Ctrl+F)
     OpenSearchPopup,
     CloseSearchPopup,
+
+    // Radio launcher popup
+    OpenRadioLauncher,
+    CloseRadioLauncher,
+    RadioLauncherSearch,
+    RadioLauncherSelectResult,
+    /// Start radio using Plex playQueue API (full heuristics: similarity, popularity, taste, freshness)
+    StartPlexRadio { key: String, title: String },
+
+    // Adventure launcher popup (Sonic Adventure from Radio section)
+    OpenAdventureLauncher,
+    CloseAdventureLauncher,
+    AdventureLauncherSearch,
+    AdventureLauncherDrillArtist { key: String, name: String },
+    AdventureLauncherDrillAlbum { key: String, title: String, artist_name: String },
+    AdventureLauncherSelectTrack,
+    AdventureLauncherBack,
 
     // Library picker popup (Ctrl+Alt+S)
     OpenLibraryPicker,

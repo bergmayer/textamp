@@ -38,21 +38,24 @@ pub async fn dispatch(
         }
         Action::NextView => {
             // Tab: cycle through nav bar views
-            // Order: Artists → Playlists → Genres → Folders → Now Playing → Artists
+            // Order: Library → Playlists → Genres → Radio → Folders → Now Playing → Library
             if state.view == View::NowPlaying {
-                // From Now Playing, go to Artists
+                // From Now Playing, go to Library
                 state.view = View::Browse;
-                follow_ups.push(Action::SetCategory(BrowseCategory::Artists));
+                follow_ups.push(Action::SetCategory(BrowseCategory::Library));
             } else if state.view == View::Browse {
                 // Cycle through browse categories, then to Now Playing
                 match state.browse_category {
-                    BrowseCategory::Artists => {
+                    BrowseCategory::Library => {
                         follow_ups.push(Action::SetCategory(BrowseCategory::Playlists));
                     }
                     BrowseCategory::Playlists => {
                         follow_ups.push(Action::SetCategory(BrowseCategory::Genres));
                     }
                     BrowseCategory::Genres => {
+                        follow_ups.push(Action::SetCategory(BrowseCategory::Radio));
+                    }
+                    BrowseCategory::Radio => {
                         follow_ups.push(Action::SetCategory(BrowseCategory::Folders));
                     }
                     BrowseCategory::Folders => {
@@ -66,7 +69,7 @@ pub async fn dispatch(
         }
         Action::PrevView => {
             // Shift+Tab: cycle backwards through nav bar views
-            // Order: Artists ← Playlists ← Genres ← Folders ← Now Playing ← Artists
+            // Order: Library ← Playlists ← Genres ← Radio ← Folders ← Now Playing ← Library
             if state.view == View::NowPlaying {
                 // From Now Playing, go to Folders
                 state.view = View::Browse;
@@ -74,17 +77,20 @@ pub async fn dispatch(
             } else if state.view == View::Browse {
                 // Cycle backwards through browse categories, or to Now Playing
                 match state.browse_category {
-                    BrowseCategory::Artists => {
+                    BrowseCategory::Library => {
                         state.view = View::NowPlaying;
                     }
                     BrowseCategory::Playlists => {
-                        follow_ups.push(Action::SetCategory(BrowseCategory::Artists));
+                        follow_ups.push(Action::SetCategory(BrowseCategory::Library));
                     }
                     BrowseCategory::Genres => {
                         follow_ups.push(Action::SetCategory(BrowseCategory::Playlists));
                     }
-                    BrowseCategory::Folders => {
+                    BrowseCategory::Radio => {
                         follow_ups.push(Action::SetCategory(BrowseCategory::Genres));
+                    }
+                    BrowseCategory::Folders => {
+                        follow_ups.push(Action::SetCategory(BrowseCategory::Radio));
                     }
                 }
             } else {
@@ -99,17 +105,18 @@ pub async fn dispatch(
                 follow_ups.push(Action::RefreshNowPlayingView);
             } else if state.view == View::Browse {
                 match state.browse_category {
-                    BrowseCategory::Artists => {
+                    BrowseCategory::Library => {
                         state.artist_view_mode = state.artist_view_mode.next();
                         follow_ups.push(Action::RefreshArtistView);
                     }
                     BrowseCategory::Playlists => {
-                        state.playlists_mode = state.playlists_mode.next();
-                        follow_ups.push(Action::RefreshPlaylistsView);
+                        // Playlists has no modes to cycle
                     }
                     BrowseCategory::Genres => {
-                        state.genre_content_type = state.genre_content_type.next();
-                        follow_ups.push(Action::RefreshGenreView);
+                        follow_ups.push(Action::CycleGenreTab);
+                    }
+                    BrowseCategory::Radio => {
+                        // Radio has no modes to cycle
                     }
                     BrowseCategory::Folders => {
                         // Folders has no modes to cycle
@@ -124,17 +131,18 @@ pub async fn dispatch(
                 follow_ups.push(Action::RefreshNowPlayingView);
             } else if state.view == View::Browse {
                 match state.browse_category {
-                    BrowseCategory::Artists => {
+                    BrowseCategory::Library => {
                         state.artist_view_mode = state.artist_view_mode.prev();
                         follow_ups.push(Action::RefreshArtistView);
                     }
                     BrowseCategory::Playlists => {
-                        state.playlists_mode = state.playlists_mode.prev();
-                        follow_ups.push(Action::RefreshPlaylistsView);
+                        // Playlists has no modes to cycle
                     }
                     BrowseCategory::Genres => {
-                        state.genre_content_type = state.genre_content_type.prev();
-                        follow_ups.push(Action::RefreshGenreView);
+                        follow_ups.push(Action::CycleGenreTab);
+                    }
+                    BrowseCategory::Radio => {
+                        // Radio has no modes to cycle
                     }
                     BrowseCategory::Folders => {
                         // Folders has no modes to cycle
@@ -144,6 +152,10 @@ pub async fn dispatch(
         }
         Action::SetCategory(category) => {
             if state.browse_category != category {
+                // Reset library sub-mode when leaving Library
+                if state.browse_category == BrowseCategory::Library {
+                    state.library_sub_mode = crate::app::state::LibrarySubMode::Normal;
+                }
                 state.browse_category = category;
                 state.focus = Focus::Left;
                 // Clear right panel
@@ -153,7 +165,7 @@ pub async fn dispatch(
 
                 // Load category data if needed (and not already loading)
                 match category {
-                    BrowseCategory::Artists => {
+                    BrowseCategory::Library => {
                         if state.artists.is_empty() && !state.artists_loading {
                             helpers::load_artists(event_tx, state, client);
                         } else if !state.artists.is_empty() {
@@ -169,38 +181,42 @@ pub async fn dispatch(
                         }
                     }
                     BrowseCategory::Genres => {
-                        // Load the appropriate content based on current genre content type
-                        match state.genre_content_type {
-                            GenreContentType::Genres => {
-                                if state.genres.is_empty() && !state.genres_loading {
-                                    follow_ups.push(Action::LoadGenres);
+                        if state.genre_tab == crate::app::state::GenreTab::All {
+                            follow_ups.push(Action::RefreshGenreView);
+                        } else {
+                            // Load the appropriate content based on current genre content type
+                            match state.genre_content_type {
+                                GenreContentType::Genres => {
+                                    if state.genres.is_empty() && !state.genres_loading {
+                                        follow_ups.push(Action::LoadGenres);
+                                    }
+                                }
+                                GenreContentType::ArtistGenres => {
+                                    if state.artist_genres.is_empty() && !state.artist_genres_loading {
+                                        follow_ups.push(Action::LoadArtistGenres);
+                                    }
+                                }
+                                GenreContentType::AlbumGenres => {
+                                    if state.album_genres.is_empty() && !state.album_genres_loading {
+                                        follow_ups.push(Action::LoadAlbumGenres);
+                                    }
+                                }
+                                GenreContentType::Moods => {
+                                    if state.moods.is_empty() && !state.moods_loading {
+                                        follow_ups.push(Action::LoadMoods);
+                                    }
+                                }
+                                GenreContentType::Styles => {
+                                    if state.styles.is_empty() && !state.styles_loading {
+                                        follow_ups.push(Action::LoadStyles);
+                                    }
                                 }
                             }
-                            GenreContentType::ArtistGenres => {
-                                if state.artist_genres.is_empty() && !state.artist_genres_loading {
-                                    follow_ups.push(Action::LoadArtistGenres);
-                                }
-                            }
-                            GenreContentType::AlbumGenres => {
-                                if state.album_genres.is_empty() && !state.album_genres_loading {
-                                    follow_ups.push(Action::LoadAlbumGenres);
-                                }
-                            }
-                            GenreContentType::Moods => {
-                                if state.moods.is_empty() && !state.moods_loading {
-                                    follow_ups.push(Action::LoadMoods);
-                                }
-                            }
-                            GenreContentType::Styles => {
-                                if state.styles.is_empty() && !state.styles_loading {
-                                    follow_ups.push(Action::LoadStyles);
-                                }
-                            }
-                            GenreContentType::Stations => {
-                                if state.station_nav.columns.is_empty() && !state.stations_loading {
-                                    follow_ups.push(Action::LoadStations);
-                                }
-                            }
+                        }
+                    }
+                    BrowseCategory::Radio => {
+                        if state.station_nav.columns.is_empty() && !state.station_nav.loading {
+                            follow_ups.push(Action::LoadStations);
                         }
                     }
                     BrowseCategory::Folders => {

@@ -218,7 +218,7 @@ pub async fn dispatch(
                     // Check Miller columns first — selected album in any browse category
                     let miller_album = {
                         let nav = match state.browse_category {
-                            BrowseCategory::Artists => Some(&state.artist_nav),
+                            BrowseCategory::Library => Some(&state.artist_nav),
                             BrowseCategory::Genres => Some(&state.genre_nav),
                             BrowseCategory::Playlists => Some(&state.playlist_nav),
                             _ => None,
@@ -236,18 +236,7 @@ pub async fn dispatch(
                     } else {
                     match state.focus {
                         crate::app::state::Focus::Left => {
-                            // Check if we're in albums mode or have albums selected
                             match state.browse_category {
-                                crate::app::state::BrowseCategory::Artists if state.artist_view_mode == crate::app::state::ArtistViewMode::Album => {
-                                    // Albums view on left - enqueue selected album
-                                    state.albums.get(state.list_state.albums_index)
-                                        .map(|a| (a.rating_key.clone(), a.title.clone()))
-                                }
-                                crate::app::state::BrowseCategory::Playlists if state.playlists_mode == crate::app::state::PlaylistsMode::RecentlyAdded => {
-                                    // Recently added albums - enqueue selected album
-                                    state.recently_added_albums.get(state.list_state.playlists_index)
-                                        .map(|a| (a.rating_key.clone(), a.title.clone()))
-                                }
                                 _ => None,
                             }
                         }

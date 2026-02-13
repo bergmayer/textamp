@@ -27,6 +27,14 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
         return handle_library_picker_mouse(event, state);
     }
 
+    // Search popup intercepts mouse clicks when active
+    if state.search_popup_active {
+        if let crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) = event.kind {
+            return handle_search_popup_click(click_row, click_col, state);
+        }
+        return vec![];
+    }
+
     match event.kind {
         // Left click
         MouseEventKind::Down(MouseButton::Left) => {
@@ -179,24 +187,124 @@ fn handle_library_picker_mouse(event: crossterm::event::MouseEvent, state: &mut 
     vec![]
 }
 
+/// Handle mouse click when the search popup is active.
+fn handle_search_popup_click(click_row: u16, click_col: u16, state: &mut AppState) -> Vec<Action> {
+    use ratatui::layout::Rect;
+
+    // Replicate the double-centering from render_search_popup + filter::render.
+    // Step 1: render_search_popup does centered_rect(80, 70, frame.area())
+    let frame_area = Rect::new(0, 0, state.terminal_width, state.terminal_height);
+    let outer = centered_rect(80, 70, frame_area);
+
+    // Step 2: filter::render does centered_rect(60, 70, outer)
+    let popup = centered_rect(60, 70, outer);
+
+    // Check if click is outside popup — close it
+    if click_row < popup.y || click_row >= popup.y + popup.height
+        || click_col < popup.x || click_col >= popup.x + popup.width
+    {
+        state.search_query.clear();
+        state.search_results = None;
+        state.search_focus = crate::app::state::SearchFocus::Input;
+        return vec![Action::CloseSearchPopup];
+    }
+
+    // Inner area (inside block border)
+    let inner_x = popup.x + 1;
+    let inner_y = popup.y + 1;
+    let _inner_width = popup.width.saturating_sub(2);
+    let _inner_height = popup.height.saturating_sub(2);
+
+    // Convert to popup-inner-relative coordinates
+    let rel_row = click_row.saturating_sub(inner_y);
+    let rel_col = click_col.saturating_sub(inner_x);
+
+    // Layout inside popup: tabs (2 rows) | search input (3 rows) | results
+    // Tabs are at rel_row 0-1
+    if rel_row < 2 {
+        // Tab click — calculate which tab was hit
+        let tab_names = ["All", "Artists", "Albums", "Playlists", "Tracks", "Genres"];
+        let tabs_with_enum = [
+            SearchTab::Global,
+            SearchTab::Artists,
+            SearchTab::Albums,
+            SearchTab::Playlists,
+            SearchTab::Tracks,
+            SearchTab::Genres,
+        ];
+
+        // Tabs widget uses " | " dividers (3 chars each)
+        let mut x: u16 = 0;
+        for (i, name) in tab_names.iter().enumerate() {
+            let tab_width = name.len() as u16;
+            if rel_col >= x && rel_col < x + tab_width {
+                state.search_tab = tabs_with_enum[i];
+                state.search_focus = crate::app::state::SearchFocus::Input;
+                state.list_state.search_item_index = 0;
+                if !state.search_query.is_empty() {
+                    return vec![Action::ExecuteLocalSearch];
+                }
+                return vec![];
+            }
+            x += tab_width;
+            if i < tab_names.len() - 1 {
+                x += 3; // " | " divider
+            }
+        }
+        return vec![];
+    }
+
+    // Search input area: rel_row 2-4
+    if rel_row >= 2 && rel_row < 5 {
+        // Click on search input — focus it
+        state.search_focus = crate::app::state::SearchFocus::Input;
+        return vec![];
+    }
+
+    // Results area: rel_row 5+
+    if rel_row >= 5 {
+        let result_row = (rel_row - 5) as usize;
+
+        if let Some(ref results) = state.search_results {
+            let count = match state.search_tab {
+                SearchTab::Global => {
+                    results.artists.len() + results.albums.len()
+                        + results.playlists.len() + results.genres.len()
+                        + results.tracks.len()
+                }
+                SearchTab::Artists => results.artists.len(),
+                SearchTab::Albums => results.albums.len(),
+                SearchTab::Playlists => results.playlists.len(),
+                SearchTab::Tracks => results.tracks.len(),
+                SearchTab::Genres => results.genres.len(),
+            };
+            if result_row < count {
+                state.search_focus = crate::app::state::SearchFocus::Results;
+                state.list_state.search_item_index = result_row;
+            }
+        }
+    }
+
+    vec![]
+}
+
 /// Handle click on the shortcut bar at the bottom.
 fn handle_shortcut_bar_click(click_col: u16, state: &AppState) -> Vec<Action> {
     // Shortcut bar items (must match render_shortcuts in ui/app.rs):
-    // ^A artists | ^P playlists | ^G genres | ^O folders | ^N queue | F1 help | F2 settings
+    // ^L library | ^P playlists | ^G genres | ^R radio | ^O folders | ^N queue | F1 help | F2 settings
     //
     // These are centered, so we need to calculate positions based on terminal width.
     // Each item is roughly: " ^X label " with separators "|"
     //
     // Clicking an already-active item cycles its mode (like the keyboard shortcut does).
-    // Note: Genres cycle includes Stations (via Ctrl+G).
 
     let shortcuts: [(&str, &str, usize); 8] = [
-        ("^A", state.artist_view_mode.name(), 0),   // Artists
-        ("^P", state.playlists_mode.name(), 1),     // Playlists
-        ("^G", state.genre_content_type.name(), 2), // Genres (cycles through genres/moods/styles/stations)
-        ("^O", "folders", 3),                       // Folders
-        ("^N", state.now_playing_mode.name(), 4),   // Now Playing
-        ("^F", "search", 5),                        // Search
+        ("^L", "library", 0),                       // Library
+        ("^P", "playlists", 1),                     // Playlists
+        ("^G", "genres", 2),                        // Genres
+        ("^R", "radio", 3),                         // Radio
+        ("^O", "folders", 4),                       // Folders
+        ("^N", state.now_playing_mode.name(), 5),   // Now Playing
         ("F1", "help", 6),                          // Help
         ("F2", "settings", 7),                      // Settings
     ];
@@ -234,44 +342,31 @@ fn handle_shortcut_bar_click(click_col: u16, state: &AppState) -> Vec<Action> {
 fn shortcut_bar_action(idx: usize, state: &AppState) -> Vec<Action> {
     match idx {
         0 => {
-            // Artists: cycle mode if already there, else switch
-            if state.view == View::Browse && state.browse_category == BrowseCategory::Artists {
-                return vec![Action::CycleArtistViewMode];
-            }
-            vec![Action::SetCategory(BrowseCategory::Artists), Action::SetView(View::Browse)]
+            // Library: just switch (no cycling)
+            vec![Action::SetCategory(BrowseCategory::Library), Action::SetView(View::Browse)]
         }
         1 => {
-            // Playlists: cycle mode if already there, else switch
-            if state.view == View::Browse && state.browse_category == BrowseCategory::Playlists {
-                return vec![Action::CyclePlaylistsMode];
-            }
+            // Playlists: just switch (no cycling)
             vec![Action::SetCategory(BrowseCategory::Playlists), Action::SetView(View::Browse)]
         }
         2 => {
-            // Genres: cycle content type if already there, else switch (includes Stations)
-            if state.view == View::Browse && state.browse_category == BrowseCategory::Genres {
-                return vec![Action::CycleGenreContentType];
-            }
+            // Genres: just switch (no cycling -- use tabs)
             vec![Action::SetCategory(BrowseCategory::Genres), Action::SetView(View::Browse)]
         }
         3 => {
+            // Radio: just switch (no cycling)
+            vec![Action::SetCategory(BrowseCategory::Radio), Action::SetView(View::Browse)]
+        }
+        4 => {
             // Folders: just switch (no cycling)
             vec![Action::SetCategory(BrowseCategory::Folders), Action::SetView(View::Browse)]
         }
-        4 => {
+        5 => {
             // Now Playing: cycle mode if already there, else switch
             if state.view == View::NowPlaying {
                 return vec![Action::CycleNowPlayingMode];
             }
             vec![Action::SetView(View::NowPlaying)]
-        }
-        5 => {
-            // Search: toggle popup
-            if state.search_popup_active {
-                vec![Action::CloseSearchPopup]
-            } else {
-                vec![Action::OpenSearchPopup]
-            }
         }
         6 => {
             // Help
@@ -376,9 +471,12 @@ fn miller_area(state: &AppState) -> (u16, u16, u16, u16) {
     // Horizontal: left_panel (30) + right_panel (remaining)
     // Miller columns combine them: x=0, width=terminal_width
     let area_x = 0u16;
-    let area_y = 0u16;
+    // Genres has a 1-row tab bar above the content
+    let has_tab_bar = matches!(state.browse_category, BrowseCategory::Genres);
+    let tab_offset = if has_tab_bar { 1u16 } else { 0 };
+    let area_y = tab_offset;
     let area_width = state.terminal_width;
-    let area_height = state.terminal_height.saturating_sub(3);
+    let area_height = state.terminal_height.saturating_sub(3).saturating_sub(tab_offset);
     (area_x, area_y, area_width, area_height)
 }
 
@@ -406,6 +504,25 @@ fn browse_column_layout(nav: &BrowseNavigationState, area_width: u16) -> (usize,
     };
 
     (max_visible, col_width, start_col, effective_columns)
+}
+
+/// Hit-test a click against a tab bar.
+/// Returns Some(tab_index) if the click maps to a tab label.
+/// Tab labels should include padding (e.g., " Playlists ").
+fn tab_hit_test(click_col: u16, labels: &[&str]) -> Option<usize> {
+    let mut x = 0u16;
+    let divider_width = 3u16; // " │ "
+    for (i, label) in labels.iter().enumerate() {
+        let label_width = label.len() as u16;
+        if click_col >= x && click_col < x + label_width {
+            return Some(i);
+        }
+        x += label_width;
+        if i < labels.len() - 1 {
+            x += divider_width;
+        }
+    }
+    None
 }
 
 /// Hit-test a click against Miller column layout for BrowseNavigationState.
@@ -513,11 +630,23 @@ fn miller_hit_test(
             }
             return None;
         } else {
-            // Normal mode: 1 row per item
+            // Check if this column uses 2-row display (playlist tracks or All Artists albums)
+            let is_two_row_track = state.browse_category == BrowseCategory::Playlists
+                && col.items.first().map_or(false, |item| matches!(item, BrowseItem::Track { .. }));
+            let is_all_artists_albums = col.items.first().map_or(false, |item| matches!(item, BrowseItem::Album { .. }))
+                && (nav.columns.first()
+                    .and_then(|c| c.selected_item())
+                    .map_or(false, |item| matches!(item, BrowseItem::AllArtists))
+                || (state.browse_category == BrowseCategory::Library
+                    && state.library_sub_mode != crate::app::state::LibrarySubMode::Normal
+                    && col_idx == 0));
+            let rows_per_item = if is_two_row_track || is_all_artists_albums { 2 } else { 1 };
+
             let total_items = col.items.len();
             let visible_height = inner_height as usize;
-            let scroll_offset = pinned.unwrap_or_else(|| helpers::calc_scroll_offset(col.selected_index, visible_height, total_items));
-            let item_idx = scroll_offset + click_offset;
+            let visible_item_count = visible_height / rows_per_item;
+            let scroll_offset = pinned.unwrap_or_else(|| helpers::calc_scroll_offset(col.selected_index, visible_item_count, total_items));
+            let item_idx = scroll_offset + click_offset / rows_per_item;
 
             if item_idx < total_items {
                 return Some((col_idx, item_idx, scroll_offset));
@@ -776,25 +905,40 @@ fn miller_column_at(click_col: u16, nav: &BrowseNavigationState, state: &AppStat
 
 /// Handle click in Browse view using Miller column hit-testing.
 fn handle_browse_click(click_row: u16, click_col: u16, state: &mut AppState) -> Vec<Action> {
-    // Determine whether we're in stations mode
-    let is_stations = matches!(
-        (&state.browse_category, &state.genre_content_type, &state.playlists_mode),
-        (BrowseCategory::Genres, crate::app::state::GenreContentType::Stations, _)
-        | (BrowseCategory::Playlists, _, crate::app::state::PlaylistsMode::Stations)
-    );
-
-    if is_stations {
-        return handle_station_click(click_row, click_col, state);
+    // Tab bar click handling for Genres (row 0 of content area)
+    if click_row == 0 {
+        if state.browse_category == BrowseCategory::Genres {
+            // Genre tab bar: "All | Library | Artist | Album | Mood | Style"
+            let tab_labels = [" All ", " Library ", " Artist ", " Album ", " Mood ", " Style "];
+            if let Some(tab_idx) = tab_hit_test(click_col, &tab_labels) {
+                use crate::app::state::GenreTab;
+                let new_tab = match tab_idx {
+                    0 => GenreTab::All,
+                    1 => GenreTab::Library,
+                    2 => GenreTab::Artist,
+                    3 => GenreTab::Album,
+                    4 => GenreTab::Mood,
+                    _ => GenreTab::Style,
+                };
+                if new_tab != state.genre_tab {
+                    return vec![Action::SetGenreTab(new_tab)];
+                }
+            }
+            return vec![];
+        }
     }
 
     match state.browse_category {
+        BrowseCategory::Radio => {
+            return handle_station_click(click_row, click_col, state);
+        }
         BrowseCategory::Folders => {
             return handle_folder_click(click_row, click_col, state);
         }
-        BrowseCategory::Artists | BrowseCategory::Genres | BrowseCategory::Playlists => {
+        BrowseCategory::Library | BrowseCategory::Genres | BrowseCategory::Playlists => {
             // All use BrowseNavigationState
             let nav = match state.browse_category {
-                BrowseCategory::Artists => &state.artist_nav,
+                BrowseCategory::Library => &state.artist_nav,
                 BrowseCategory::Genres => &state.genre_nav,
                 BrowseCategory::Playlists => &state.playlist_nav,
                 _ => unreachable!(),
@@ -802,7 +946,7 @@ fn handle_browse_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
 
             if let Some((col_idx, item_idx, scroll_offset)) = miller_hit_test(click_col, click_row, nav, state) {
                 let nav = match state.browse_category {
-                    BrowseCategory::Artists => &mut state.artist_nav,
+                    BrowseCategory::Library => &mut state.artist_nav,
                     BrowseCategory::Genres => &mut state.genre_nav,
                     BrowseCategory::Playlists => &mut state.playlist_nav,
                     _ => unreachable!(),
@@ -886,9 +1030,9 @@ fn handle_browse_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
 /// Return the drill-down action for clicking an already-selected item in a browse Miller column.
 fn browse_drill_down_action(item: BrowseItem, col_idx: usize, item_idx: usize, state: &mut AppState) -> Vec<Action> {
     match state.browse_category {
-        BrowseCategory::Artists => {
+        BrowseCategory::Library => {
             match item {
-                BrowseItem::Artist { key, title } => {
+                BrowseItem::Artist { key, title, .. } => {
                     state.selected_artist_name = title;
                     vec![Action::LoadArtistAlbumsForMiller { artist_key: key }]
                 }
@@ -927,7 +1071,7 @@ fn browse_drill_down_action(item: BrowseItem, col_idx: usize, item_idx: usize, s
                 }
                 BrowseItem::Album { key, title, .. } => {
                     state.selected_album_title = title;
-                    vec![Action::LoadAlbumTracksForPlaylistMiller { album_key: key }]
+                    vec![Action::LoadAlbumTracksForMiller { album_key: key }]
                 }
                 BrowseItem::Track { .. } => {
                     vec![Action::PlayPlaylistTrackFromMiller { column_index: col_idx, track_index: item_idx }]
@@ -1046,8 +1190,7 @@ fn handle_station_click(click_row: u16, click_col: u16, state: &mut AppState) ->
             // Sync filter selection
             let filter_on_col = state.list_filter.active
                 && state.list_filter.column == col_idx
-                && (state.list_filter.category == BrowseCategory::Genres
-                    || state.list_filter.category == BrowseCategory::Playlists);
+                && state.list_filter.category == BrowseCategory::Radio;
             if filter_on_col {
                 if let Some(ref results) = state.list_filter.results {
                     if let Some(pos) = results.matched_indices.iter().position(|&idx| idx == item_idx) {
@@ -1070,8 +1213,7 @@ fn handle_station_click(click_row: u16, click_col: u16, state: &mut AppState) ->
             // When filter is active with results, use SelectFilteredItem for drill-down
             let filter_on_col = state.list_filter.active
                 && state.list_filter.column == col_idx
-                && (state.list_filter.category == BrowseCategory::Genres
-                    || state.list_filter.category == BrowseCategory::Playlists)
+                && state.list_filter.category == BrowseCategory::Radio
                 && state.list_filter.results.is_some();
             if filter_on_col {
                 return vec![Action::SelectFilteredItem];
@@ -1079,6 +1221,14 @@ fn handle_station_click(click_row: u16, click_col: u16, state: &mut AppState) ->
             if let Some(station) = state.station_nav.columns.get(col_idx)
                 .and_then(|c| c.stations.get(item_idx)).cloned()
             {
+                // Handle action items (Radio section launchers)
+                if station.key.starts_with("action:") {
+                    return match station.key.as_str() {
+                        "action:start_radio" => vec![Action::OpenRadioLauncher],
+                        "action:adventure" => vec![Action::OpenAdventureLauncher],
+                        _ => vec![],
+                    };
+                }
                 if station.is_category() {
                     return vec![Action::DrillIntoStation(station.key.clone(), station.title.clone())];
                 } else {
@@ -1311,73 +1461,24 @@ fn handle_search_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
         let result_row = (rel_row - results_start_row) as usize;
 
         // Handle based on current tab
-        match state.search_tab {
-            SearchTab::Global => {
-                // 3-column layout: Artists | Albums | Tracks
-                // Each column is roughly 1/3 of the popup inner width
-                let inner_width = popup_width.saturating_sub(2); // Subtract borders
-                let col_width = inner_width / 3;
-                let rel_inner_col = rel_col.saturating_sub(1); // Subtract left border
-
-                if let Some(ref results) = state.filter_results {
-                    if rel_inner_col < col_width {
-                        // Artists column
-                        if result_row < results.artists.len() {
-                            state.list_state.search_section = crate::app::state::SearchSection::Artists;
-                            state.list_state.search_item_index = result_row;
-                        }
-                    } else if rel_inner_col < col_width * 2 {
-                        // Albums column
-                        if result_row < results.albums.len() {
-                            state.list_state.search_section = crate::app::state::SearchSection::Albums;
-                            state.list_state.search_item_index = result_row;
-                        }
-                    } else {
-                        // Tracks column
-                        if result_row < results.tracks.len() {
-                            state.list_state.search_section = crate::app::state::SearchSection::Tracks;
-                            state.list_state.search_item_index = result_row;
-                        }
-                    }
+        // Click in search results — set focus to Results and update index
+        if let Some(ref results) = state.search_results {
+            let count = match state.search_tab {
+                SearchTab::Global => {
+                    // All tab: flat list with section headers
+                    results.artists.len() + results.albums.len()
+                        + results.playlists.len() + results.genres.len()
+                        + results.tracks.len()
                 }
-            }
-            SearchTab::Artists | SearchTab::AlbumArtists => {
-                if let Some(ref results) = state.filter_results {
-                    if result_row < results.artists.len() {
-                        state.list_state.search_item_index = result_row;
-                    }
-                }
-            }
-            SearchTab::Albums => {
-                if let Some(ref results) = state.filter_results {
-                    if result_row < results.albums.len() {
-                        state.list_state.search_item_index = result_row;
-                    }
-                }
-            }
-            SearchTab::Playlists => {
-                if let Some(ref results) = state.filter_results {
-                    if result_row < results.playlists.len() {
-                        state.list_state.search_item_index = result_row;
-                    }
-                }
-            }
-            SearchTab::Tracks => {
-                if let Some(ref results) = state.filter_results {
-                    if result_row < results.tracks.len() {
-                        state.list_state.search_item_index = result_row;
-                    }
-                }
-            }
-            SearchTab::Genres => {
-                // Genres are filtered from state.genres
-                let query_lower = state.search_query.to_lowercase();
-                let filtered: Vec<_> = state.genres.iter()
-                    .filter(|g| g.title.to_lowercase().contains(&query_lower))
-                    .collect();
-                if result_row < filtered.len() {
-                    state.list_state.search_item_index = result_row;
-                }
+                SearchTab::Artists => results.artists.len(),
+                SearchTab::Albums => results.albums.len(),
+                SearchTab::Playlists => results.playlists.len(),
+                SearchTab::Tracks => results.tracks.len(),
+                SearchTab::Genres => results.genres.len(),
+            };
+            if result_row < count {
+                state.search_focus = crate::app::state::SearchFocus::Results;
+                state.list_state.search_item_index = result_row;
             }
         }
     }
@@ -1604,7 +1705,7 @@ fn handle_help_click(click_row: u16, state: &mut AppState) -> Vec<Action> {
 fn handle_scroll(up: bool, click_row: u16, click_col: u16, state: &mut AppState) -> Vec<Action> {
     match state.view {
         View::Browse => {
-            handle_browse_scroll(up, click_row, click_col, state);
+            return handle_browse_scroll(up, click_row, click_col, state);
         }
         View::NowPlaying => {
             // Scroll queue (includes play history + current tracks)
@@ -1621,7 +1722,6 @@ fn handle_scroll(up: bool, click_row: u16, click_col: u16, state: &mut AppState)
         }
         View::Search => {
             // Search scrolling handled via keyboard for now
-            // (requires proper handling of optional filter_results)
         }
         View::Help => {
             // Scroll help content
@@ -1636,34 +1736,27 @@ fn handle_scroll(up: bool, click_row: u16, click_col: u16, state: &mut AppState)
 }
 
 /// Handle scroll in Browse view using Miller column awareness.
-fn handle_browse_scroll(up: bool, click_row: u16, click_col: u16, state: &mut AppState) {
+fn handle_browse_scroll(up: bool, click_row: u16, click_col: u16, state: &mut AppState) -> Vec<Action> {
     // If a mouse click recently set the scroll pin, ignore scroll events
     // to prevent trackpad inertia from clearing the pin and re-centering.
     if let Some(click_time) = state.browse_click_time {
         if click_time.elapsed() < std::time::Duration::from_millis(400) {
-            return;
+            return vec![];
         }
         state.browse_click_time = None;
     }
     // Clear scroll pin — scrolling should use fresh calc_scroll_offset
     state.browse_scroll_pin = None;
-    // Determine whether we're in stations mode
-    let is_stations = matches!(
-        (&state.browse_category, &state.genre_content_type, &state.playlists_mode),
-        (BrowseCategory::Genres, crate::app::state::GenreContentType::Stations, _)
-        | (BrowseCategory::Playlists, _, crate::app::state::PlaylistsMode::Stations)
-    );
 
-    if is_stations {
-        // Stations scroll
+    if state.browse_category == BrowseCategory::Radio {
+        // Radio/stations scroll
         if let Some((col_idx, _, _)) = station_hit_test(click_col, click_row, state) {
             let delta: i32 = if up { -1 } else { 1 };
 
             // Check if filter is active on this column
             let filter_on_col = state.list_filter.active
                 && state.list_filter.column == col_idx
-                && (state.list_filter.category == BrowseCategory::Genres
-                    || state.list_filter.category == BrowseCategory::Playlists);
+                && state.list_filter.category == BrowseCategory::Radio;
 
             if filter_on_col {
                 if let Some(ref results) = state.list_filter.results {
@@ -1690,7 +1783,7 @@ fn handle_browse_scroll(up: bool, click_row: u16, click_col: u16, state: &mut Ap
                 }
             }
         }
-        return;
+        return vec![];
     }
 
     match state.browse_category {
@@ -1733,9 +1826,12 @@ fn handle_browse_scroll(up: bool, click_row: u16, click_col: u16, state: &mut Ap
                 }
             }
         }
-        BrowseCategory::Artists | BrowseCategory::Genres | BrowseCategory::Playlists => {
+        BrowseCategory::Radio => {
+            // Radio scroll handled above
+        }
+        BrowseCategory::Library | BrowseCategory::Genres | BrowseCategory::Playlists => {
             let nav = match state.browse_category {
-                BrowseCategory::Artists => &state.artist_nav,
+                BrowseCategory::Library => &state.artist_nav,
                 BrowseCategory::Genres => &state.genre_nav,
                 BrowseCategory::Playlists => &state.playlist_nav,
                 _ => unreachable!(),
@@ -1753,7 +1849,7 @@ fn handle_browse_scroll(up: bool, click_row: u16, click_col: u16, state: &mut Ap
                     let now = std::time::Instant::now();
                     if let Some(last) = state.art_scroll_cooldown {
                         if now.duration_since(last).as_millis() < 120 {
-                            return;
+                            return vec![];
                         }
                     }
                     state.art_scroll_cooldown = Some(now);
@@ -1775,7 +1871,7 @@ fn handle_browse_scroll(up: bool, click_row: u16, click_col: u16, state: &mut Ap
                             state.list_filter.selected = new_sel;
                             if let Some(&item_idx) = results.matched_indices.get(new_sel) {
                                 let nav = match state.browse_category {
-                                    BrowseCategory::Artists => &mut state.artist_nav,
+                                    BrowseCategory::Library => &mut state.artist_nav,
                                     BrowseCategory::Genres => &mut state.genre_nav,
                                     BrowseCategory::Playlists => &mut state.playlist_nav,
                                     _ => unreachable!(),
@@ -1788,7 +1884,7 @@ fn handle_browse_scroll(up: bool, click_row: u16, click_col: u16, state: &mut Ap
                     }
                 } else {
                     let nav = match state.browse_category {
-                        BrowseCategory::Artists => &mut state.artist_nav,
+                        BrowseCategory::Library => &mut state.artist_nav,
                         BrowseCategory::Genres => &mut state.genre_nav,
                         BrowseCategory::Playlists => &mut state.playlist_nav,
                         _ => unreachable!(),
@@ -1808,4 +1904,11 @@ fn handle_browse_scroll(up: bool, click_row: u16, click_col: u16, state: &mut Ap
             }
         }
     }
+
+    // After scroll, lazily load album art for newly visible items
+    let art_batch = super::dispatch_miller::collect_viewport_art(state);
+    if !art_batch.is_empty() {
+        return vec![Action::LoadAlbumArt(art_batch)];
+    }
+    vec![]
 }

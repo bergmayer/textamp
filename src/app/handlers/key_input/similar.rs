@@ -34,7 +34,7 @@ pub(super) fn handle_similar_keys(key: event::KeyEvent, state: &mut AppState) ->
                         state.selected_album_title = album.title.clone();
                         state.selected_artist_name = album.artist_name().to_string();
                         state.view = View::Browse;
-                        state.browse_category = BrowseCategory::Artists;
+                        state.browse_category = BrowseCategory::Library;
                         if let Some(artist_key) = &album.parent_rating_key {
                             if let Some(idx) = state.artists.iter().position(|a| &a.rating_key == artist_key) {
                                 state.list_state.artists_index = idx;

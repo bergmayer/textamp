@@ -34,19 +34,19 @@ pub fn artwork_protocol_name() -> &'static str {
 }
 
 /// Format "Artist — Album (Year)" for queue display.
+/// Uses helper methods that handle empty/None fields with fallbacks.
 fn format_artist_album(track: &crate::api::models::Track) -> String {
+    let artist = track.artist_name();
+    let album = track.album_name();
     let year = track.year.or(track.parent_year);
-    let album_part = match (&track.parent_title, year) {
-        (Some(album), Some(y)) => format!("{} ({})", album, y),
-        (Some(album), None) => album.clone(),
-        (None, _) => String::new(),
+
+    let album_part = if let Some(y) = year {
+        format!("{} ({})", album, y)
+    } else {
+        album.to_string()
     };
-    match (&track.grandparent_title, album_part.is_empty()) {
-        (Some(artist), false) => format!("{} — {}", artist, album_part),
-        (Some(artist), true) => artist.clone(),
-        (None, false) => album_part,
-        (None, true) => "Unknown Artist".to_string(),
-    }
+
+    format!("{} — {}", artist, album_part)
 }
 
 /// Render the unified now playing screen.
@@ -216,7 +216,12 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
             continue;
         }
 
-        let title_display = crate::util::truncate_middle(&track.title, max_text_width);
+        let track_title = if track.title.is_empty() {
+            track.file_name().unwrap_or("Unknown Track")
+        } else {
+            &track.title
+        };
+        let title_display = crate::util::truncate_middle(track_title, max_text_width);
         let subtitle = format_artist_album(track);
         let subtitle_display = crate::util::truncate_middle(&subtitle, subtitle_width);
 
@@ -239,22 +244,29 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
 
         let prefix = if is_current { "♪ " } else { "  " };
 
+        // Title with empty fallback
+        let track_title = if track.title.is_empty() {
+            track.file_name().unwrap_or("Unknown Track")
+        } else {
+            &track.title
+        };
+
         // Title row: marquee if selected
         let title_display = if is_selected && state.view == crate::app::state::View::NowPlaying {
             let marquee_key = format!("np:{}", i);
             let mut marquee = state.marquee.borrow_mut();
             if marquee.selection_key != marquee_key {
-                marquee.reset(marquee_key, track.title.clone(), max_text_width);
+                marquee.reset(marquee_key, track_title.to_string(), max_text_width);
             }
             if marquee.phase == crate::app::state::MarqueePhase::Inactive {
-                crate::util::truncate_middle(&track.title, max_text_width)
+                crate::util::truncate_middle(track_title, max_text_width)
             } else {
                 let text = marquee.display_text();
                 drop(marquee);
                 text
             }
         } else {
-            crate::util::truncate_middle(&track.title, max_text_width)
+            crate::util::truncate_middle(track_title, max_text_width)
         };
 
         // Subtitle row: marquee if selected (independent)
@@ -428,9 +440,13 @@ fn render_track_info_panel(frame: &mut Frame, state: &AppState, area: Rect) {
     frame.render_widget(block, area);
 
     if let Some(track) = state.current_track() {
-        let title = &track.title;
+        let title = if track.title.is_empty() {
+            track.file_name().unwrap_or("Unknown Track")
+        } else {
+            &track.title
+        };
         let artist = track.artist_name();
-        let album = track.parent_title.as_deref().unwrap_or("");
+        let album = track.album_name();
 
         let status_icon = match state.playback.status {
             PlayStatus::Playing => "▶",
@@ -444,7 +460,7 @@ fn render_track_info_panel(frame: &mut Frame, state: &AppState, area: Rect) {
         let text = vec![
             Line::from(vec![
                 Span::styled(format!("{} ", status_icon), Style::default().fg(t.colors.fg_accent)),
-                Span::styled(title.clone(), Style::default().fg(t.colors.fg_primary).bold()),
+                Span::styled(title.to_string(), Style::default().fg(t.colors.fg_primary).bold()),
             ]),
             Line::from(""),
             Line::from(vec![

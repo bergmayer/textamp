@@ -1,17 +1,17 @@
-//! Search dispatch handlers: ExecuteSearch, ClearSearch, ExecuteFilterSearch,
-//! SelectFilterResult, ActivateListFilter, DeactivateListFilter, FilteredList*,
+//! Search dispatch handlers: ExecuteLocalSearch, ClearSearch, SelectSearchResult,
+//! ActivateListFilter, DeactivateListFilter, FilteredList*,
 //! SelectFilteredItem, AppendListFilterChar, DeleteListFilterChar, ClearListFilter,
 //! ExecuteListFilter, OpenSearchPopup, CloseSearchPopup, OpenLibraryPicker,
 //! CloseLibraryPicker.
 
 use crate::app::{Action, AppState, Event};
-use crate::app::state::{BrowseCategory, GenreContentType};
+use crate::app::state::{BrowseCategory, SearchFocus, SearchTab, View};
 use crate::api::PlexClient;
+use crate::api::models::SearchResults;
 
 use anyhow::Result;
 use tokio::sync::mpsc;
 
-use super::helpers;
 
 /// Dispatch search and filter actions. Returns follow-up actions.
 pub async fn dispatch(
@@ -23,88 +23,116 @@ pub async fn dispatch(
     let mut follow_ups = vec![];
 
     match action {
-        Action::ExecuteSearch => {
-            if state.search_query.len() >= 2 {
-                // Increment version to invalidate any pending searches
-                state.global_search_version = state.global_search_version.wrapping_add(1);
-                let version = state.global_search_version;
-                state.search_loading = true;
+        Action::ExecuteLocalSearch => {
+            let query = state.search_query.to_lowercase();
+            if query.is_empty() {
 
-                // Spawn search in background with debounce
+                state.search_track_loading = false;
+                return Ok(vec![]);
+            }
+
+            // Normalized query for punctuation-insensitive matching
+            let query_normalized: String = query.chars()
+                .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+                .collect();
+
+            // Local search: filter artists, albums, playlists, genres from cached data
+            let artists: Vec<_> = state.artists.iter()
+                .filter(|a| {
+                    let title = a.title.to_lowercase();
+                    title.contains(&query) || {
+                        let norm: String = title.chars().filter(|c| c.is_alphanumeric() || c.is_whitespace()).collect();
+                        norm.contains(&query_normalized)
+                    }
+                })
+                .take(50)
+                .cloned()
+                .collect();
+            let albums: Vec<_> = state.albums.iter()
+                .filter(|a| {
+                    let title = a.title.to_lowercase();
+                    title.contains(&query)
+                        || a.year.map(|y| y.to_string().contains(&query)).unwrap_or(false)
+                        || {
+                            let norm: String = title.chars().filter(|c| c.is_alphanumeric() || c.is_whitespace()).collect();
+                            norm.contains(&query_normalized)
+                        }
+                })
+                .take(50)
+                .cloned()
+                .collect();
+            let playlists: Vec<_> = state.playlists.iter()
+                .filter(|p| {
+                    let title = p.title.to_lowercase();
+                    title.contains(&query) || {
+                        let norm: String = title.chars().filter(|c| c.is_alphanumeric() || c.is_whitespace()).collect();
+                        norm.contains(&query_normalized)
+                    }
+                })
+                .take(50)
+                .cloned()
+                .collect();
+            let genres: Vec<_> = state.genres.iter()
+                .filter(|g| {
+                    let title = g.title.to_lowercase();
+                    title.contains(&query) || {
+                        let norm: String = title.chars().filter(|c| c.is_alphanumeric() || c.is_whitespace()).collect();
+                        norm.contains(&query_normalized)
+                    }
+                })
+                .take(50)
+                .cloned()
+                .collect();
+
+            // Check if we need track results (Global or Tracks tab)
+            let need_tracks = matches!(state.search_tab, SearchTab::Global | SearchTab::Tracks);
+
+            // Store local results immediately
+            state.search_results = Some(SearchResults {
+                artists,
+                albums,
+                playlists,
+                genres,
+                tracks: vec![], // Tracks will be filled by API search
+            });
+
+            // For tracks, fire async API search with debounce
+            if need_tracks && state.search_query.len() >= 2 {
+                state.search_track_version = state.search_track_version.wrapping_add(1);
+                let version = state.search_track_version;
+                state.search_track_loading = true;
+
                 let event_tx = event_tx.clone();
                 let query = state.search_query.clone();
                 let search_client = client.clone();
 
                 tokio::spawn(async move {
-                    // Debounce: wait before searching
                     tokio::time::sleep(std::time::Duration::from_millis(350)).await;
-
-                    // Execute search - stale results will be rejected by version check
                     match search_client.search(&query).await {
                         Ok(results) => {
-                            let _ = event_tx.send(Event::GlobalSearchCompleted {
+                            let _ = event_tx.send(Event::TrackSearchCompleted {
                                 version,
-                                results,
+                                tracks: results.tracks,
                             }).await;
                         }
                         Err(_) => {
-                            let _ = event_tx.send(Event::GlobalSearchCompleted {
+                            let _ = event_tx.send(Event::TrackSearchCompleted {
                                 version,
-                                results: Default::default(),
+                                tracks: vec![],
                             }).await;
                         }
                     }
                 });
             } else {
-                // Clear results for short queries
-                state.search_results = None;
-                state.search_loading = false;
+                state.search_track_loading = false;
             }
         }
         Action::ClearSearch => {
             state.search_query.clear();
             state.search_results = None;
         }
-        Action::ExecuteFilterSearch => {
-            if state.search_query.len() >= 2 {
-                // Increment version to invalidate any pending searches
-                state.filter_search_version = state.filter_search_version.wrapping_add(1);
-                let version = state.filter_search_version;
-                state.filter_loading = true;
-
-                // Spawn search in background with debounce
-                let event_tx = event_tx.clone();
-                let query = state.search_query.clone();
-                let search_client = client.clone();
-
-                tokio::spawn(async move {
-                    // Debounce: wait before searching
-                    tokio::time::sleep(std::time::Duration::from_millis(350)).await;
-
-                    // Execute search - stale results will be rejected by version check
-                    match search_client.search(&query).await {
-                        Ok(results) => {
-                            let _ = event_tx.send(Event::FilterSearchCompleted {
-                                version,
-                                results
-                            }).await;
-                        }
-                        Err(_) => {
-                            let _ = event_tx.send(Event::FilterSearchCompleted {
-                                version,
-                                results: Default::default()
-                            }).await;
-                        }
-                    }
-                });
-            } else {
-                // Clear filter results for short queries (use local filtering)
-                state.filter_results = None;
-                state.filter_loading = false;
-            }
-        }
-        Action::SelectFilterResult => {
-            let follow_up_actions = helpers::select_filter_result(state);
+        Action::SelectSearchResult => {
+            let follow_up_actions = select_search_result(state);
             follow_ups.extend(follow_up_actions);
         }
 
@@ -118,15 +146,10 @@ pub async fn dispatch(
             // Capture which category and column the filter was activated on
             state.list_filter.category = state.browse_category;
             state.list_filter.column = match state.browse_category {
-                BrowseCategory::Artists => state.artist_nav.focused_column,
+                BrowseCategory::Library => state.artist_nav.focused_column,
                 BrowseCategory::Playlists => state.playlist_nav.focused_column,
-                BrowseCategory::Genres => {
-                    if state.genre_content_type == GenreContentType::Stations {
-                        state.station_nav.focused_column
-                    } else {
-                        state.genre_nav.focused_column
-                    }
-                }
+                BrowseCategory::Genres => state.genre_nav.focused_column,
+                BrowseCategory::Radio => state.station_nav.focused_column,
                 BrowseCategory::Folders => {
                     state.folder_state.as_ref().map(|fs| fs.focused_column).unwrap_or(0)
                 }
@@ -140,41 +163,31 @@ pub async fn dispatch(
             state.list_filter.selected = 0;
         }
         Action::FilteredListUp => {
-            // Navigate up within filtered results and update the target column's selection
             if state.list_filter.selected > 0 {
                 state.list_filter.selected -= 1;
-                // Update the column's selected_index to match
                 if let Some(ref results) = state.list_filter.results {
                     if let Some(&item_idx) = results.matched_indices.get(state.list_filter.selected) {
                         super::key_input::update_filter_column_selection(state, item_idx);
                     }
                 }
-                // Clear stale drill-down columns from previous selection
                 super::key_input::truncate_filter_right_columns(state);
             }
         }
         Action::FilteredListDown => {
-            // Navigate down within filtered results and update the target column's selection
             if let Some(ref results) = state.list_filter.results {
                 if state.list_filter.selected + 1 < results.matched_indices.len() {
                     state.list_filter.selected += 1;
                     if let Some(&item_idx) = results.matched_indices.get(state.list_filter.selected) {
                         super::key_input::update_filter_column_selection(state, item_idx);
                     }
-                    // Clear stale drill-down columns from previous selection
                     super::key_input::truncate_filter_right_columns(state);
                 }
             }
         }
         Action::SelectFilteredItem => {
-            // Select the currently highlighted filtered item and drill down
-            // Filter stays active and continues to apply to the original column
             if let Some(ref results) = state.list_filter.results.clone() {
                 if let Some(&item_idx) = results.matched_indices.get(state.list_filter.selected) {
-                    // Update the column's selected_index to point to this item
                     super::key_input::update_filter_column_selection(state, item_idx);
-
-                    // Get and dispatch drill-down actions (filter stays active)
                     let drilldown_actions = super::key_input::get_filter_drilldown_actions(state);
                     follow_ups.extend(drilldown_actions);
                 }
@@ -183,29 +196,23 @@ pub async fn dispatch(
         Action::AppendListFilterChar(c) => {
             state.list_filter.query.push(c);
             state.list_filter.selected = 0;
-            // Only truncate drill-down columns if user is still on the filter column.
-            // If they've drilled deeper (e.g., into albums), preserve their navigation.
             if is_on_filter_column(state) {
                 super::key_input::truncate_filter_right_columns(state);
             }
-            // Trigger filter execution
             execute_list_filter(event_tx, state).await?;
         }
         Action::DeleteListFilterChar => {
             state.list_filter.query.pop();
             if state.list_filter.query.is_empty() {
-                // Query fully cleared: deactivate filter, preserve current navigation
                 state.list_filter.active = false;
                 state.list_filter.results = None;
                 state.list_filter.loading = false;
                 state.list_filter.selected = 0;
             } else if is_on_filter_column(state) {
-                // Still on filter column: truncate drill-down and re-filter
                 state.list_filter.selected = 0;
                 super::key_input::truncate_filter_right_columns(state);
                 execute_list_filter(event_tx, state).await?;
             } else {
-                // Drilled deeper: keep navigation, just update filter results
                 state.list_filter.selected = 0;
                 execute_list_filter(event_tx, state).await?;
             }
@@ -221,7 +228,6 @@ pub async fn dispatch(
 
         // Search popup actions
         Action::OpenSearchPopup => {
-            // Deactivate inline filter when opening search popup
             if state.list_filter.active {
                 state.list_filter.active = false;
                 state.list_filter.query.clear();
@@ -230,10 +236,9 @@ pub async fn dispatch(
                 state.list_filter.selected = 0;
             }
             state.search_popup_active = true;
-            // Clear previous search when opening
+            state.search_focus = SearchFocus::Input;
             state.search_query.clear();
             state.search_results = None;
-            state.filter_results = None;
         }
         Action::CloseSearchPopup => {
             state.search_popup_active = false;
@@ -242,7 +247,6 @@ pub async fn dispatch(
         // Library picker popup actions
         Action::OpenLibraryPicker => {
             state.library_picker_active = true;
-            // Set index to current active library (considering multi-server)
             if state.has_multiple_servers() {
                 let all_libs = state.all_libraries_with_servers();
                 state.library_picker_index = all_libs.iter()
@@ -262,20 +266,459 @@ pub async fn dispatch(
         Action::CloseLibraryPicker => {
             state.library_picker_active = false;
         }
+
+        // Radio launcher popup actions
+        Action::OpenRadioLauncher => {
+            state.radio_launcher = Some(crate::app::state::RadioLauncherState {
+                query: String::new(),
+                results: None,
+                focus: SearchFocus::Input,
+                tab: crate::app::state::RadioLauncherTab::All,
+                item_index: 0,
+                loading: false,
+            });
+        }
+        Action::CloseRadioLauncher => {
+            state.radio_launcher = None;
+        }
+        Action::RadioLauncherSearch => {
+            if let Some(ref mut launcher) = state.radio_launcher {
+                if launcher.query.is_empty() {
+                    launcher.results = None;
+                    launcher.loading = false;
+                } else {
+                    let query = launcher.query.to_lowercase();
+                    let query_normalized: String = query.chars()
+                        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+                        .collect();
+
+                    let artists: Vec<_> = state.artists.iter()
+                        .filter(|a| {
+                            let title = a.title.to_lowercase();
+                            title.contains(&query) || {
+                                let norm: String = title.chars().filter(|c| c.is_alphanumeric() || c.is_whitespace()).collect();
+                                norm.contains(&query_normalized)
+                            }
+                        })
+                        .take(20)
+                        .cloned()
+                        .collect();
+                    let albums: Vec<_> = state.albums.iter()
+                        .filter(|a| {
+                            let title = a.title.to_lowercase();
+                            let artist = a.artist_name().to_lowercase();
+                            title.contains(&query) || artist.contains(&query) || {
+                                let norm: String = title.chars().filter(|c| c.is_alphanumeric() || c.is_whitespace()).collect();
+                                norm.contains(&query_normalized)
+                            }
+                        })
+                        .take(20)
+                        .cloned()
+                        .collect();
+
+                    // For tracks, search if query is 2+ characters (same as main search)
+                    let need_tracks = launcher.query.len() >= 2;
+                    if need_tracks {
+                        launcher.loading = true;
+                        // Fire async track search
+                        let event_tx = event_tx.clone();
+                        let client_clone = client.clone();
+                        let q = launcher.query.clone();
+                        tokio::spawn(async move {
+                            match client_clone.search(&q).await {
+                                Ok(results) => {
+                                    let _ = event_tx.send(Event::TrackSearchCompleted {
+                                        version: u64::MAX, // Special marker for radio launcher
+                                        tracks: results.tracks,
+                                    }).await;
+                                }
+                                Err(_) => {
+                                    let _ = event_tx.send(Event::TrackSearchCompleted {
+                                        version: u64::MAX,
+                                        tracks: vec![],
+                                    }).await;
+                                }
+                            }
+                        });
+                    }
+
+                    // Store local results immediately (tracks will be updated async)
+                    launcher.results = Some(SearchResults {
+                        artists,
+                        albums,
+                        playlists: vec![],
+                        genres: vec![],
+                        tracks: vec![],
+                    });
+                    launcher.loading = need_tracks;
+                    launcher.item_index = 0;
+                    launcher.focus = SearchFocus::Input;
+                }
+            }
+        }
+        Action::RadioLauncherSelectResult => {
+            follow_ups = select_radio_launcher_result(state);
+        }
+
+        // Adventure launcher popup actions
+        Action::OpenAdventureLauncher => {
+            state.adventure_launcher = Some(crate::app::state::AdventureLauncherState {
+                step: crate::app::state::AdventureStep::FindStartTrack,
+                query: String::new(),
+                results: None,
+                focus: SearchFocus::Input,
+                item_index: 0,
+                loading: false,
+                drill: crate::app::state::AdventureDrillLevel::Search,
+                start_track: None,
+                track_count_input: String::new(),
+            });
+        }
+        Action::CloseAdventureLauncher => {
+            state.adventure_launcher = None;
+        }
+        Action::AdventureLauncherSearch => {
+            adventure_launcher_search(event_tx, state, client).await?;
+        }
+        Action::AdventureLauncherDrillArtist { key, name } => {
+            // Async fetch artist albums
+            if let Some(ref mut launcher) = state.adventure_launcher {
+                launcher.loading = true;
+            }
+            let event_tx = event_tx.clone();
+            let client_clone = client.clone();
+            let artist_key = key.clone();
+            let artist_name = name.clone();
+            tokio::spawn(async move {
+                match client_clone.get_artist_albums(&artist_key).await {
+                    Ok(albums) => {
+                        let _ = event_tx.send(Event::AdventureLauncherAlbumsLoaded {
+                            artist_key, artist_name, albums,
+                        }).await;
+                    }
+                    Err(e) => {
+                        tracing::warn!("Adventure launcher: failed to load artist albums: {}", e);
+                        // Send empty to clear loading state
+                        let _ = event_tx.send(Event::AdventureLauncherAlbumsLoaded {
+                            artist_key, artist_name, albums: vec![],
+                        }).await;
+                    }
+                }
+            });
+        }
+        Action::AdventureLauncherDrillAlbum { key, title, artist_name } => {
+            if let Some(ref mut launcher) = state.adventure_launcher {
+                launcher.loading = true;
+            }
+            let event_tx = event_tx.clone();
+            let client_clone = client.clone();
+            let album_key = key.clone();
+            let album_title = title.clone();
+            let artist = artist_name.clone();
+            tokio::spawn(async move {
+                match client_clone.get_album_tracks(&album_key).await {
+                    Ok(tracks) => {
+                        let _ = event_tx.send(Event::AdventureLauncherTracksLoaded {
+                            album_key, album_title, artist_name: artist, tracks,
+                        }).await;
+                    }
+                    Err(e) => {
+                        tracing::warn!("Adventure launcher: failed to load album tracks: {}", e);
+                        let _ = event_tx.send(Event::AdventureLauncherTracksLoaded {
+                            album_key, album_title, artist_name: artist, tracks: vec![],
+                        }).await;
+                    }
+                }
+            });
+        }
+        Action::AdventureLauncherSelectTrack => {
+            follow_ups = adventure_launcher_select_track(event_tx, state, client).await?;
+        }
+        Action::AdventureLauncherBack => {
+            adventure_launcher_back(state);
+        }
+
         _ => unreachable!("dispatch_search called with non-search action: {:?}", action),
     }
     Ok(follow_ups)
 }
 
+/// Handle radio launcher result selection — start Plex radio from the selected item.
+fn select_radio_launcher_result(state: &mut AppState) -> Vec<Action> {
+    let launcher = match state.radio_launcher.take() {
+        Some(l) => l,
+        None => return vec![],
+    };
+    let results = match launcher.results {
+        Some(r) => r,
+        None => return vec![],
+    };
+    let idx = launcher.item_index;
+
+    // Map global index to (section, local_index) for All tab
+    let (section_type, local_idx) = if launcher.tab == crate::app::state::RadioLauncherTab::All {
+        resolve_radio_launcher_index(&results, idx)
+    } else {
+        (launcher.tab, idx)
+    };
+
+    use crate::app::state::RadioLauncherTab;
+    match section_type {
+        RadioLauncherTab::Artists => {
+            if let Some(artist) = results.artists.get(local_idx) {
+                return vec![Action::StartPlexRadio {
+                    key: artist.rating_key.clone(),
+                    title: format!("{} Radio", artist.title),
+                }];
+            }
+        }
+        RadioLauncherTab::Albums => {
+            if let Some(album) = results.albums.get(local_idx) {
+                return vec![Action::StartPlexRadio {
+                    key: album.rating_key.clone(),
+                    title: format!("{} Radio", album.title),
+                }];
+            }
+        }
+        RadioLauncherTab::Tracks => {
+            if let Some(track) = results.tracks.get(local_idx) {
+                return vec![Action::StartPlexRadio {
+                    key: track.rating_key.clone(),
+                    title: format!("{} Radio", track.title),
+                }];
+            }
+        }
+        RadioLauncherTab::All => {
+            // Should be resolved above
+        }
+    }
+    vec![]
+}
+
+/// Resolve a flat index in radio launcher All tab to (section, local_index).
+fn resolve_radio_launcher_index(results: &SearchResults, global_idx: usize) -> (crate::app::state::RadioLauncherTab, usize) {
+    use crate::app::state::RadioLauncherTab;
+    let mut offset = 0;
+
+    // Artists section
+    if global_idx < offset + results.artists.len() {
+        return (RadioLauncherTab::Artists, global_idx - offset);
+    }
+    offset += results.artists.len();
+
+    // Albums section
+    if global_idx < offset + results.albums.len() {
+        return (RadioLauncherTab::Albums, global_idx - offset);
+    }
+    offset += results.albums.len();
+
+    // Tracks section
+    if global_idx < offset + results.tracks.len() {
+        return (RadioLauncherTab::Tracks, global_idx - offset);
+    }
+
+    (RadioLauncherTab::All, 0)
+}
+
+/// Handle SelectSearchResult — navigate to the selected item in the library.
+fn select_search_result(state: &mut AppState) -> Vec<Action> {
+    let results = match state.search_results.take() {
+        Some(r) => r,
+        None => return vec![],
+    };
+    let idx = state.list_state.search_item_index;
+
+    // For the All tab, map global index to (section, local_index)
+    let (section, local_idx) = if state.search_tab == SearchTab::Global {
+        resolve_global_index(&results, idx)
+    } else {
+        (state.search_tab, idx)
+    };
+
+    match section {
+        SearchTab::Artists => {
+            if let Some(artist) = results.artists.get(local_idx) {
+                // Navigate to artist in Library view
+                let artist_key = artist.rating_key.clone();
+                state.search_query.clear();
+
+                state.search_popup_active = false;
+                state.browse_category = BrowseCategory::Library;
+                state.view = View::Browse;
+
+                // Find artist in artist_nav and select it
+                if let Some(col) = state.artist_nav.columns.get_mut(0) {
+                    if let Some(pos) = col.items.iter().position(|i| i.key() == artist_key) {
+                        col.selected_index = pos;
+                        state.artist_nav.focused_column = 0;
+                        state.artist_nav.truncate_right();
+                        return vec![Action::LoadArtistAlbumsForMiller { artist_key }];
+                    }
+                }
+                // Artist not in nav (cache empty?) — load from scratch
+                return vec![Action::LoadArtistAlbumsForMiller { artist_key }];
+            }
+        }
+        SearchTab::Albums => {
+            if let Some(album) = results.albums.get(local_idx) {
+                let album_key = album.rating_key.clone();
+                let artist_key = album.parent_rating_key.clone();
+                state.search_query.clear();
+
+                state.search_popup_active = false;
+                state.browse_category = BrowseCategory::Library;
+                state.view = View::Browse;
+                state.pending_album_key = Some(album_key);
+
+                // If we have the parent artist key, navigate to them
+                if let Some(ref ak) = artist_key {
+                    state.selected_artist_name = album.artist_name().to_string();
+                    if let Some(col) = state.artist_nav.columns.get_mut(0) {
+                        if let Some(pos) = col.items.iter().position(|i| i.key() == ak.as_str()) {
+                            col.selected_index = pos;
+                            state.artist_nav.focused_column = 0;
+                            state.artist_nav.truncate_right();
+                            return vec![Action::LoadArtistAlbumsForMiller { artist_key: ak.clone() }];
+                        }
+                    }
+                    return vec![Action::LoadArtistAlbumsForMiller { artist_key: ak.clone() }];
+                }
+                // No parent artist key — try All Artists column
+                state.selected_artist_name = "All Artists".to_string();
+                if let Some(col) = state.artist_nav.columns.get_mut(0) {
+                    // Select "All Artists" entry (index 0)
+                    col.selected_index = 0;
+                    state.artist_nav.focused_column = 0;
+                    state.artist_nav.truncate_right();
+                }
+                return vec![Action::LoadAllAlbumsForMiller];
+            }
+        }
+        SearchTab::Tracks => {
+            if let Some(track) = results.tracks.get(local_idx) {
+                let artist_key = track.grandparent_rating_key.clone();
+                let album_key = track.parent_rating_key.clone();
+                let track_key = track.rating_key.clone();
+                let track_owned = track.clone();
+                state.search_query.clear();
+
+                state.search_popup_active = false;
+                state.browse_category = BrowseCategory::Library;
+                state.view = View::Browse;
+                state.pending_album_key = album_key;
+                state.pending_track_key = Some(track_key);
+
+                if let Some(ref ak) = artist_key {
+                    state.selected_artist_name = track.artist_name().to_string();
+                    if let Some(col) = state.artist_nav.columns.get_mut(0) {
+                        if let Some(pos) = col.items.iter().position(|i| i.key() == ak.as_str()) {
+                            col.selected_index = pos;
+                            state.artist_nav.focused_column = 0;
+                            state.artist_nav.truncate_right();
+                            return vec![Action::LoadArtistAlbumsForMiller { artist_key: ak.clone() }];
+                        }
+                    }
+                    return vec![Action::LoadArtistAlbumsForMiller { artist_key: ak.clone() }];
+                }
+                // No artist key — play the track directly
+                state.pending_album_key = None;
+                state.pending_track_key = None;
+                return vec![Action::PlayTrack(track_owned)];
+            }
+        }
+        SearchTab::Playlists => {
+            if let Some(playlist) = results.playlists.get(local_idx) {
+                let playlist_key = playlist.rating_key.clone();
+                state.search_query.clear();
+
+                state.search_popup_active = false;
+                state.browse_category = BrowseCategory::Playlists;
+                state.view = View::Browse;
+
+                // Find playlist in playlist_nav and select it
+                if let Some(col) = state.playlist_nav.columns.get_mut(0) {
+                    if let Some(pos) = col.items.iter().position(|i| i.key() == playlist_key) {
+                        col.selected_index = pos;
+                        state.playlist_nav.focused_column = 0;
+                        state.playlist_nav.truncate_right();
+                        return vec![Action::LoadPlaylistTracksForMiller { playlist_key }];
+                    }
+                }
+                return vec![Action::LoadPlaylistTracksForMiller { playlist_key }];
+            }
+        }
+        SearchTab::Genres => {
+            if let Some(genre) = results.genres.get(local_idx) {
+                let genre_key = genre.effective_key().to_string();
+                state.search_query.clear();
+
+                state.search_popup_active = false;
+                state.browse_category = BrowseCategory::Genres;
+                state.view = View::Browse;
+
+                // Find genre in genre_nav and select it
+                if let Some(col) = state.genre_nav.columns.get_mut(0) {
+                    if let Some(pos) = col.items.iter().position(|i| i.key() == genre_key) {
+                        col.selected_index = pos;
+                        state.genre_nav.focused_column = 0;
+                        state.genre_nav.truncate_right();
+                        return vec![Action::LoadGenreAlbumsForMiller { genre_key }];
+                    }
+                }
+                return vec![Action::LoadGenreAlbumsForMiller { genre_key }];
+            }
+        }
+        _ => {}
+    }
+
+    vec![]
+}
+
+/// For the All tab, map a global flat index to (section, local_index).
+/// Sections order: Artists, Albums, Playlists, Genres, Tracks.
+fn resolve_global_index(results: &SearchResults, global_idx: usize) -> (SearchTab, usize) {
+    let mut offset = 0;
+
+    let artists_len = results.artists.len();
+    if global_idx < offset + artists_len {
+        return (SearchTab::Artists, global_idx - offset);
+    }
+    offset += artists_len;
+
+    let albums_len = results.albums.len();
+    if global_idx < offset + albums_len {
+        return (SearchTab::Albums, global_idx - offset);
+    }
+    offset += albums_len;
+
+    let playlists_len = results.playlists.len();
+    if global_idx < offset + playlists_len {
+        return (SearchTab::Playlists, global_idx - offset);
+    }
+    offset += playlists_len;
+
+    let genres_len = results.genres.len();
+    if global_idx < offset + genres_len {
+        return (SearchTab::Genres, global_idx - offset);
+    }
+    offset += genres_len;
+
+    let tracks_len = results.tracks.len();
+    if global_idx < offset + tracks_len {
+        return (SearchTab::Tracks, global_idx - offset);
+    }
+
+    // Fallback
+    (SearchTab::Artists, 0)
+}
+
 /// Execute inline list filter with debounce.
-/// Collects filterable items from the filter's target column (captured when filter was activated).
 async fn execute_list_filter(
     event_tx: &mpsc::Sender<Event>,
     state: &mut AppState,
 ) -> Result<()> {
-    use crate::services::{filter_browse_items, filter_folder_items, filter_stations, DEFAULT_MAX_RESULTS};
+    use crate::services::{filter_browse_items, filter_folder_items, DEFAULT_MAX_RESULTS};
 
-    // Increment version for debouncing
     state.list_filter.version = state.list_filter.version.wrapping_add(1);
     let version = state.list_filter.version;
     let query = state.list_filter.query.clone();
@@ -288,14 +731,12 @@ async fn execute_list_filter(
 
     state.list_filter.loading = true;
 
-    // Use the filter's captured category and column (not the currently focused one)
     let event_tx = event_tx.clone();
     let category = state.list_filter.category;
     let column = state.list_filter.column;
 
     match category {
-        BrowseCategory::Artists => {
-            // Filter items in the captured column of artist_nav
+        BrowseCategory::Library => {
             if let Some(col) = state.artist_nav.columns.get(column) {
                 let items: Vec<_> = col.items.clone();
                 tokio::spawn(async move {
@@ -306,7 +747,6 @@ async fn execute_list_filter(
             }
         }
         BrowseCategory::Playlists => {
-            // Filter items in the captured column of playlist_nav
             if let Some(col) = state.playlist_nav.columns.get(column) {
                 let items: Vec<_> = col.items.clone();
                 tokio::spawn(async move {
@@ -317,30 +757,26 @@ async fn execute_list_filter(
             }
         }
         BrowseCategory::Genres => {
-            if state.genre_content_type == GenreContentType::Stations {
-                // Filter stations in the captured column
-                if let Some(col) = state.station_nav.columns.get(column) {
-                    let items: Vec<_> = col.stations.clone();
-                    tokio::spawn(async move {
-                        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-                        let results = filter_stations(&items, &query, DEFAULT_MAX_RESULTS);
-                        let _ = event_tx.send(Event::ListFilterCompleted { version, results }).await;
-                    });
-                }
-            } else {
-                // Filter items in the captured column of genre_nav
-                if let Some(col) = state.genre_nav.columns.get(column) {
-                    let items: Vec<_> = col.items.clone();
-                    tokio::spawn(async move {
-                        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-                        let results = filter_browse_items(&items, &query, DEFAULT_MAX_RESULTS);
-                        let _ = event_tx.send(Event::ListFilterCompleted { version, results }).await;
-                    });
-                }
+            if let Some(col) = state.genre_nav.columns.get(column) {
+                let items: Vec<_> = col.items.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                    let results = filter_browse_items(&items, &query, DEFAULT_MAX_RESULTS);
+                    let _ = event_tx.send(Event::ListFilterCompleted { version, results }).await;
+                });
+            }
+        }
+        BrowseCategory::Radio => {
+            if let Some(col) = state.station_nav.columns.get(column) {
+                let items: Vec<_> = col.stations.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                    let results = crate::services::filter_stations(&items, &query, DEFAULT_MAX_RESULTS);
+                    let _ = event_tx.send(Event::ListFilterCompleted { version, results }).await;
+                });
             }
         }
         BrowseCategory::Folders => {
-            // Filter folder items in the captured column
             if let Some(ref folder_state) = state.folder_state {
                 if let Some(col) = folder_state.columns.get(column) {
                     let items: Vec<_> = col.items.clone();
@@ -357,25 +793,237 @@ async fn execute_list_filter(
     Ok(())
 }
 
+/// Adventure launcher: perform search (local artists/albums + async tracks).
+async fn adventure_launcher_search(
+    event_tx: &mpsc::Sender<Event>,
+    state: &mut AppState,
+    client: &mut PlexClient,
+) -> Result<()> {
+    let launcher = match state.adventure_launcher.as_mut() {
+        Some(l) => l,
+        None => return Ok(()),
+    };
+
+    // Reset drill to search level when searching
+    launcher.drill = crate::app::state::AdventureDrillLevel::Search;
+
+    if launcher.query.is_empty() {
+        launcher.results = None;
+        launcher.loading = false;
+        return Ok(());
+    }
+
+    let query = launcher.query.to_lowercase();
+    let query_normalized: String = query.chars()
+        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .collect();
+
+    let artists: Vec<_> = state.artists.iter()
+        .filter(|a| {
+            let title = a.title.to_lowercase();
+            title.contains(&query) || {
+                let norm: String = title.chars().filter(|c| c.is_alphanumeric() || c.is_whitespace()).collect();
+                norm.contains(&query_normalized)
+            }
+        })
+        .take(20)
+        .cloned()
+        .collect();
+    let albums: Vec<_> = state.albums.iter()
+        .filter(|a| {
+            let title = a.title.to_lowercase();
+            let artist = a.artist_name().to_lowercase();
+            title.contains(&query) || artist.contains(&query) || {
+                let norm: String = title.chars().filter(|c| c.is_alphanumeric() || c.is_whitespace()).collect();
+                norm.contains(&query_normalized)
+            }
+        })
+        .take(20)
+        .cloned()
+        .collect();
+
+    let need_tracks = launcher.query.len() >= 2;
+    if need_tracks {
+        launcher.loading = true;
+        let event_tx = event_tx.clone();
+        let client_clone = client.clone();
+        let q = launcher.query.clone();
+        tokio::spawn(async move {
+            match client_clone.search(&q).await {
+                Ok(results) => {
+                    let _ = event_tx.send(Event::TrackSearchCompleted {
+                        version: u64::MAX - 1, // Marker for adventure launcher
+                        tracks: results.tracks,
+                    }).await;
+                }
+                Err(_) => {
+                    let _ = event_tx.send(Event::TrackSearchCompleted {
+                        version: u64::MAX - 1,
+                        tracks: vec![],
+                    }).await;
+                }
+            }
+        });
+    }
+
+    launcher.results = Some(SearchResults {
+        artists,
+        albums,
+        playlists: vec![],
+        genres: vec![],
+        tracks: vec![],
+    });
+    launcher.loading = need_tracks;
+    launcher.item_index = 0;
+    launcher.focus = SearchFocus::Input;
+
+    Ok(())
+}
+
+/// Adventure launcher: select track from current drill level.
+async fn adventure_launcher_select_track(
+    _event_tx: &mpsc::Sender<Event>,
+    state: &mut AppState,
+    client: &mut PlexClient,
+) -> Result<Vec<Action>> {
+    use crate::app::state::{AdventureStep, AdventureDrillLevel};
+
+    let launcher = match state.adventure_launcher.as_mut() {
+        Some(l) => l,
+        None => return Ok(vec![]),
+    };
+
+    // Extract the selected track based on drill level
+    let track = match &launcher.drill {
+        AdventureDrillLevel::AlbumTracks { tracks, .. } => {
+            tracks.get(launcher.item_index).cloned()
+        }
+        AdventureDrillLevel::Search => {
+            // In search mode, must be a track from search results
+            if let Some(ref results) = launcher.results {
+                // Resolve global index to find if it's a track
+                let idx = launcher.item_index;
+                let artist_count = results.artists.len();
+                let album_count = results.albums.len();
+                if idx >= artist_count + album_count {
+                    results.tracks.get(idx - artist_count - album_count).cloned()
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        AdventureDrillLevel::ArtistAlbums { .. } => {
+            None // Can't select a track from album list
+        }
+    };
+
+    let track = match track {
+        Some(t) => t,
+        None => return Ok(vec![]),
+    };
+
+    match launcher.step {
+        AdventureStep::FindStartTrack => {
+            launcher.start_track = Some(track);
+            launcher.step = AdventureStep::EnterTrackCount;
+            launcher.track_count_input = "20".to_string();
+            // Clear search state for next step
+            launcher.query.clear();
+            launcher.results = None;
+            launcher.drill = AdventureDrillLevel::Search;
+            launcher.item_index = 0;
+            launcher.focus = SearchFocus::Input;
+        }
+        AdventureStep::FindEndTrack => {
+            let start = launcher.start_track.clone();
+            let count_str = launcher.track_count_input.clone();
+            let count = count_str.parse::<usize>().unwrap_or(20).clamp(5, 100);
+
+            // Close launcher before starting generation
+            state.adventure_launcher = None;
+
+            if let Some(start_track) = start {
+                state.set_status("Adventure: generating sonic bridge...".to_string());
+
+                // Generate adventure
+                match crate::services::generate_adventure(client, &start_track, &track, count).await {
+                    Ok(tracks) => {
+                        if tracks.len() <= 2 {
+                            state.set_error("Adventure: no similar tracks found for these songs. Try different tracks with sonic analysis data.".to_string());
+                            return Ok(vec![]);
+                        }
+                        return Ok(vec![Action::AdventureComplete(tracks)]);
+                    }
+                    Err(e) => {
+                        return Ok(vec![Action::AdventureError(format!("{}", e))]);
+                    }
+                }
+            }
+        }
+        AdventureStep::EnterTrackCount => {
+            // Shouldn't happen (track count step doesn't select tracks)
+        }
+    }
+
+    Ok(vec![])
+}
+
+/// Adventure launcher: handle back navigation.
+fn adventure_launcher_back(state: &mut AppState) {
+    use crate::app::state::{AdventureStep, AdventureDrillLevel};
+
+    let launcher = match state.adventure_launcher.as_mut() {
+        Some(l) => l,
+        None => return,
+    };
+
+    match &launcher.drill {
+        AdventureDrillLevel::AlbumTracks { .. } => {
+            // Go back to search level (we don't cache the artist albums level)
+            launcher.drill = AdventureDrillLevel::Search;
+            launcher.item_index = 0;
+            launcher.focus = SearchFocus::Results;
+        }
+        AdventureDrillLevel::ArtistAlbums { .. } => {
+            launcher.drill = AdventureDrillLevel::Search;
+            launcher.item_index = 0;
+            launcher.focus = SearchFocus::Results;
+        }
+        AdventureDrillLevel::Search => {
+            // At search level, back depends on step
+            match launcher.step {
+                AdventureStep::FindStartTrack => {
+                    // Close the launcher
+                    state.adventure_launcher = None;
+                }
+                AdventureStep::EnterTrackCount => {
+                    // Go back to FindStartTrack
+                    launcher.step = AdventureStep::FindStartTrack;
+                    launcher.start_track = None;
+                    launcher.query.clear();
+                    launcher.results = None;
+                    launcher.item_index = 0;
+                    launcher.focus = SearchFocus::Input;
+                }
+                AdventureStep::FindEndTrack => {
+                    // Go back to EnterTrackCount
+                    launcher.step = AdventureStep::EnterTrackCount;
+                }
+            }
+        }
+    }
+}
+
 /// Check if the currently focused column is the filter's target column.
 pub(super) fn is_on_filter_column(state: &AppState) -> bool {
     let filter_col = state.list_filter.column;
     match state.list_filter.category {
-        BrowseCategory::Artists => state.artist_nav.focused_column == filter_col,
-        BrowseCategory::Playlists => {
-            if state.playlists_mode == crate::app::state::PlaylistsMode::Stations {
-                state.station_nav.focused_column == filter_col
-            } else {
-                state.playlist_nav.focused_column == filter_col
-            }
-        }
-        BrowseCategory::Genres => {
-            if state.genre_content_type == GenreContentType::Stations {
-                state.station_nav.focused_column == filter_col
-            } else {
-                state.genre_nav.focused_column == filter_col
-            }
-        }
+        BrowseCategory::Library => state.artist_nav.focused_column == filter_col,
+        BrowseCategory::Playlists => state.playlist_nav.focused_column == filter_col,
+        BrowseCategory::Genres => state.genre_nav.focused_column == filter_col,
+        BrowseCategory::Radio => state.station_nav.focused_column == filter_col,
         BrowseCategory::Folders => {
             state.folder_state.as_ref()
                 .map(|fs| fs.focused_column == filter_col)

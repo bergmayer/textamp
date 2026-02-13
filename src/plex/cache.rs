@@ -137,9 +137,6 @@ pub struct CacheData {
     #[serde(default)]
     pub stations: Vec<Station>,
 
-    // Recent content (from hubs)
-    #[serde(default)]
-    pub recently_added_albums: Vec<Album>,
     // Per-category refresh timestamps (category display_name -> epoch secs)
     #[serde(default)]
     pub category_timestamps: HashMap<String, u64>,

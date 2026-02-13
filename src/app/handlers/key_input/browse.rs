@@ -22,23 +22,11 @@ pub(super) fn handle_browse_keys(key: event::KeyEvent, state: &mut AppState) -> 
     // Inline list filter mode - handle filter-specific keys
     if state.list_filter.active {
         // Check if current focus is on the filter's target column
-        use crate::app::state::GenreContentType;
         let focused_on_filter_column = match state.list_filter.category {
-            BrowseCategory::Artists => state.artist_nav.focused_column == state.list_filter.column,
-            BrowseCategory::Playlists => {
-                if state.playlists_mode == crate::app::state::PlaylistsMode::Stations {
-                    state.station_nav.focused_column == state.list_filter.column
-                } else {
-                    state.playlist_nav.focused_column == state.list_filter.column
-                }
-            }
-            BrowseCategory::Genres => {
-                if state.genre_content_type == GenreContentType::Stations {
-                    state.station_nav.focused_column == state.list_filter.column
-                } else {
-                    state.genre_nav.focused_column == state.list_filter.column
-                }
-            }
+            BrowseCategory::Library => state.artist_nav.focused_column == state.list_filter.column,
+            BrowseCategory::Playlists => state.playlist_nav.focused_column == state.list_filter.column,
+            BrowseCategory::Genres => state.genre_nav.focused_column == state.list_filter.column,
+            BrowseCategory::Radio => state.station_nav.focused_column == state.list_filter.column,
             BrowseCategory::Folders => {
                 state.folder_state.as_ref()
                     .map(|fs| fs.focused_column == state.list_filter.column)
@@ -85,23 +73,17 @@ pub(super) fn handle_browse_keys(key: event::KeyEvent, state: &mut AppState) -> 
         return vec![Action::ActivateListFilter];
     }
 
-    // Tab/Shift+Tab cycles through nav bar views (handle before category-specific handlers)
-    // Shift+Up/Down cycles through modes within current category
+    // Tab/Shift+Tab navigates linearly through all sections and sub-tabs:
+    // Library → Playlists → Stations → Genres(All) → Genres(Library) → ... → Genres(Style) → Folders → Now Playing
     match key.code {
-        KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
-            return vec![Action::PrevMode];
-        }
-        KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
-            return vec![Action::NextMode];
-        }
         KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
-            return vec![Action::PrevView];
+            return tab_navigate_prev(state);
         }
         KeyCode::BackTab => {
-            return vec![Action::PrevView];
+            return tab_navigate_prev(state);
         }
         KeyCode::Tab => {
-            return vec![Action::NextView];
+            return tab_navigate_next(state);
         }
         _ => {}
     }
@@ -112,26 +94,24 @@ pub(super) fn handle_browse_keys(key: event::KeyEvent, state: &mut AppState) -> 
     }
 
     // Handle Artists category with Miller columns when artist_nav is populated
-    if state.browse_category == BrowseCategory::Artists && !state.artist_nav.is_empty() {
+    if state.browse_category == BrowseCategory::Library && !state.artist_nav.is_empty() {
         return handle_artist_browse_keys(key, state);
     }
 
     // Handle Playlists category with Miller columns when playlist_nav is populated
     if state.browse_category == BrowseCategory::Playlists {
-        if state.playlists_mode == crate::app::state::PlaylistsMode::Stations {
-            return handle_station_browse_keys(key, state);
-        }
         if !state.playlist_nav.is_empty() {
             return handle_playlist_browse_keys(key, state);
         }
     }
 
+    // Handle Radio category with station Miller columns
+    if state.browse_category == BrowseCategory::Radio {
+        return handle_station_browse_keys(key, state);
+    }
+
     // Handle Genres category with Miller columns (Genre | Albums | Tracks)
-    // When GenreContentType::Stations is active, redirect to station handling
     if state.browse_category == BrowseCategory::Genres {
-        if state.genre_content_type == crate::app::state::GenreContentType::Stations {
-            return handle_station_browse_keys(key, state);
-        }
         return handle_genre_browse_keys(key, state);
     }
 
@@ -155,7 +135,7 @@ pub(super) fn handle_browse_keys(key: event::KeyEvent, state: &mut AppState) -> 
             if state.focus == Focus::Left {
                 // Left panel: depends on category
                 match state.browse_category {
-                    BrowseCategory::Artists => {
+                    BrowseCategory::Library => {
                         // Artist -> load their albums into right panel
                         vec![Action::LoadArtistAlbums]
                     }
@@ -164,9 +144,12 @@ pub(super) fn handle_browse_keys(key: event::KeyEvent, state: &mut AppState) -> 
                         vec![Action::LoadCategoryTracks]
                     }
                     BrowseCategory::Genres => {
-                        // Genre/Mood/Stations -> handled by genre browse keys
-                        // (Stations are now part of genre content type cycle)
+                        // Genre/Mood -> handled by genre browse keys
                         vec![Action::LoadGenreAlbums]
+                    }
+                    BrowseCategory::Radio => {
+                        // Radio/stations -> handled by station browse keys
+                        vec![]
                     }
                     BrowseCategory::Folders => {
                         // Folders use folder navigation
@@ -217,16 +200,6 @@ pub(super) fn handle_browse_keys(key: event::KeyEvent, state: &mut AppState) -> 
                 } else {
                     vec![Action::ToggleFocus]
                 }
-            } else if state.browse_category == BrowseCategory::Genres && state.genre_content_type == crate::app::state::GenreContentType::Stations {
-                // In stations view (via Genres), go back in Miller columns
-                if state.station_nav.can_go_left() {
-                    state.station_nav.focus_left();
-                    // Update legacy state to match focused column
-                    if let Some(col) = state.station_nav.focused() {
-                        state.stations = col.stations.clone();
-                    }
-                }
-                vec![]
             } else {
                 vec![]
             }
@@ -314,7 +287,7 @@ pub(super) fn handle_folder_browse_keys(key: event::KeyEvent, state: &mut AppSta
             vec![]
         }
 
-        // Right/Enter - go into selected folder or play track
+        // Right/Enter - go into selected folder; only Enter plays tracks
         KeyCode::Enter | KeyCode::Right => {
             if let Some(ref mut folder_state) = state.folder_state {
                 // First check if there's already a column to the right we can move to
@@ -328,9 +301,11 @@ pub(super) fn handle_folder_browse_keys(key: event::KeyEvent, state: &mut AppSta
                         FolderItemType::Folder => {
                             return vec![Action::NavigateIntoFolder(item.key)];
                         }
-                        FolderItemType::Track => {
+                        FolderItemType::Track if key.code == KeyCode::Enter => {
+                            // Only Enter plays — Right arrow does not begin playback
                             return vec![Action::PlayFolderTracks];
                         }
+                        _ => {}
                     }
                 }
             }
@@ -458,7 +433,7 @@ pub(super) fn handle_station_browse_keys(key: event::KeyEvent, state: &mut AppSt
             vec![]
         }
 
-        // Right/Enter - drill into category or play station
+        // Right/Enter - drill into category; only Enter plays a station
         KeyCode::Enter | KeyCode::Right => {
             // First check if there's already a column to the right we can move to
             if state.station_nav.focus_right() {
@@ -471,9 +446,21 @@ pub(super) fn handle_station_browse_keys(key: event::KeyEvent, state: &mut AppSt
 
             // Otherwise, load the selected station
             if let Some(station) = state.station_nav.selected_station().cloned() {
+                // Handle action items (Radio section launchers)
+                if station.key.starts_with("action:") {
+                    if key.code == KeyCode::Enter {
+                        return match station.key.as_str() {
+                            "action:start_radio" => vec![Action::OpenRadioLauncher],
+                            "action:adventure" => vec![Action::OpenAdventureLauncher],
+                            _ => vec![],
+                        };
+                    }
+                    return vec![]; // Right arrow does nothing on action items
+                }
                 if station.is_category() {
                     return vec![Action::DrillIntoStation(station.key.clone(), station.title.clone())];
-                } else {
+                } else if key.code == KeyCode::Enter {
+                    // Only Enter plays — Right arrow does not begin playback
                     return vec![Action::PlayStation(station.key.clone())];
                 }
             }
@@ -552,7 +539,12 @@ pub(super) fn handle_artist_browse_keys(key: event::KeyEvent, state: &mut AppSta
     use crate::app::state::BrowseItem;
 
     // Handle common navigation keys
-    if let Some(actions) = handle_browse_nav_keys(key, &mut state.artist_nav) {
+    if let Some(mut actions) = handle_browse_nav_keys(key, &mut state.artist_nav) {
+        // After scroll, lazily load album art for newly visible items
+        let art_batch = super::super::dispatch_miller::collect_viewport_art(state);
+        if !art_batch.is_empty() {
+            actions.push(Action::LoadAlbumArt(art_batch));
+        }
         return actions;
     }
 
@@ -560,13 +552,16 @@ pub(super) fn handle_artist_browse_keys(key: event::KeyEvent, state: &mut AppSta
     if matches!(key.code, KeyCode::Enter | KeyCode::Right) {
         if let Some(item) = state.artist_nav.selected_item().cloned() {
             return match item {
-                BrowseItem::Artist { key, title } => {
+                BrowseItem::Artist { key, title, .. } => {
                     state.selected_artist_name = title;
                     vec![Action::LoadArtistAlbumsForMiller { artist_key: key }]
                 }
                 BrowseItem::Album { key, title, .. } => {
                     state.selected_album_title = title;
                     vec![Action::LoadAlbumTracksForMiller { album_key: key }]
+                }
+                BrowseItem::AllArtists => {
+                    vec![Action::LoadAllAlbumsForMiller]
                 }
                 BrowseItem::AllTracks { artist_key, artist_name, .. } => {
                     state.selected_album_title = format!("All tracks by {}", artist_name);
@@ -593,7 +588,12 @@ pub(super) fn handle_genre_browse_keys(key: event::KeyEvent, state: &mut AppStat
     use crate::app::state::BrowseItem;
 
     // Handle common navigation keys
-    if let Some(actions) = handle_browse_nav_keys(key, &mut state.genre_nav) {
+    if let Some(mut actions) = handle_browse_nav_keys(key, &mut state.genre_nav) {
+        // After scroll, lazily load album art for newly visible items
+        let art_batch = super::super::dispatch_miller::collect_viewport_art(state);
+        if !art_batch.is_empty() {
+            actions.push(Action::LoadAlbumArt(art_batch));
+        }
         return actions;
     }
 
@@ -640,9 +640,8 @@ pub(super) fn handle_playlist_browse_keys(key: event::KeyEvent, state: &mut AppS
                     vec![Action::LoadPlaylistTracksForMiller { playlist_key: key }]
                 }
                 BrowseItem::Album { key, title, .. } => {
-                    // For Recently Added mode - load album tracks
                     state.selected_album_title = title;
-                    vec![Action::LoadAlbumTracksForPlaylistMiller { album_key: key }]
+                    vec![Action::LoadAlbumTracksForMiller { album_key: key }]
                 }
                 BrowseItem::Track { .. } if key.code == KeyCode::Enter => {
                     if let Some(col) = state.playlist_nav.focused() {
@@ -782,12 +781,11 @@ pub fn handle_browse_nav_keys(
 
 /// Update the column's selected_index for the filter's target category/column.
 pub fn update_filter_column_selection(state: &mut AppState, item_idx: usize) {
-    use crate::app::state::GenreContentType;
     let category = state.list_filter.category;
     let column = state.list_filter.column;
 
     match category {
-        BrowseCategory::Artists => {
+        BrowseCategory::Library => {
             if let Some(col) = state.artist_nav.columns.get_mut(column) {
                 col.selected_index = item_idx;
             }
@@ -798,14 +796,13 @@ pub fn update_filter_column_selection(state: &mut AppState, item_idx: usize) {
             }
         }
         BrowseCategory::Genres => {
-            if state.genre_content_type == GenreContentType::Stations {
-                if let Some(col) = state.station_nav.columns.get_mut(column) {
-                    col.selected_index = item_idx;
-                }
-            } else {
-                if let Some(col) = state.genre_nav.columns.get_mut(column) {
-                    col.selected_index = item_idx;
-                }
+            if let Some(col) = state.genre_nav.columns.get_mut(column) {
+                col.selected_index = item_idx;
+            }
+        }
+        BrowseCategory::Radio => {
+            if let Some(col) = state.station_nav.columns.get_mut(column) {
+                col.selected_index = item_idx;
             }
         }
         BrowseCategory::Folders => {
@@ -821,31 +818,24 @@ pub fn update_filter_column_selection(state: &mut AppState, item_idx: usize) {
 /// Truncate columns to the right of the filter's target column and move focus there.
 /// Call this when the filter query or selection changes to remove stale drill-down columns.
 pub fn truncate_filter_right_columns(state: &mut AppState) {
-    use crate::app::state::GenreContentType;
     let column = state.list_filter.column;
 
     match state.list_filter.category {
-        BrowseCategory::Artists => {
+        BrowseCategory::Library => {
             state.artist_nav.columns.truncate(column + 1);
             state.artist_nav.focused_column = column;
         }
         BrowseCategory::Playlists => {
-            if state.playlists_mode == crate::app::state::PlaylistsMode::Stations {
-                state.station_nav.columns.truncate(column + 1);
-                state.station_nav.focused_column = column;
-            } else {
-                state.playlist_nav.columns.truncate(column + 1);
-                state.playlist_nav.focused_column = column;
-            }
+            state.playlist_nav.columns.truncate(column + 1);
+            state.playlist_nav.focused_column = column;
         }
         BrowseCategory::Genres => {
-            if state.genre_content_type == GenreContentType::Stations {
-                state.station_nav.columns.truncate(column + 1);
-                state.station_nav.focused_column = column;
-            } else {
-                state.genre_nav.columns.truncate(column + 1);
-                state.genre_nav.focused_column = column;
-            }
+            state.genre_nav.columns.truncate(column + 1);
+            state.genre_nav.focused_column = column;
+        }
+        BrowseCategory::Radio => {
+            state.station_nav.columns.truncate(column + 1);
+            state.station_nav.focused_column = column;
         }
         BrowseCategory::Folders => {
             if let Some(ref mut fs) = state.folder_state {
@@ -859,12 +849,11 @@ pub fn truncate_filter_right_columns(state: &mut AppState) {
 /// Get the drill-down actions for the selected filtered item.
 /// This simulates pressing Enter on the selected item to drill into it.
 pub fn get_filter_drilldown_actions(state: &mut AppState) -> Vec<Action> {
-    use crate::app::state::GenreContentType;
     let category = state.list_filter.category;
 
     // Get the appropriate drill-down action based on category
     match category {
-        BrowseCategory::Artists => {
+        BrowseCategory::Library => {
             // Use the artist_nav enter key logic
             handle_artist_browse_keys(
                 crossterm::event::KeyEvent::new(
@@ -884,15 +873,7 @@ pub fn get_filter_drilldown_actions(state: &mut AppState) -> Vec<Action> {
             )
         }
         BrowseCategory::Genres => {
-            if state.genre_content_type == GenreContentType::Stations {
-                handle_station_browse_keys(
-                    crossterm::event::KeyEvent::new(
-                        crossterm::event::KeyCode::Enter,
-                        crossterm::event::KeyModifiers::NONE,
-                    ),
-                    state,
-                )
-            } else {
+            {
                 handle_genre_browse_keys(
                     crossterm::event::KeyEvent::new(
                         crossterm::event::KeyCode::Enter,
@@ -901,6 +882,15 @@ pub fn get_filter_drilldown_actions(state: &mut AppState) -> Vec<Action> {
                     state,
                 )
             }
+        }
+        BrowseCategory::Radio => {
+            handle_station_browse_keys(
+                crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Enter,
+                    crossterm::event::KeyModifiers::NONE,
+                ),
+                state,
+            )
         }
         BrowseCategory::Folders => {
             handle_folder_browse_keys(
@@ -922,7 +912,7 @@ mod tests {
 
     fn make_browse_column(title: &str) -> BrowseColumn {
         BrowseColumn::new(title, vec![
-            BrowseItem::Artist { key: "1".into(), title: "A".into() },
+            BrowseItem::Artist { key: "1".into(), title: "A".into(), is_placeholder: false },
         ])
     }
 
@@ -958,7 +948,7 @@ mod tests {
     fn test_truncate_artists_removes_right_columns() {
         let mut state = AppState::new();
         state.list_filter.active = true;
-        state.list_filter.category = BrowseCategory::Artists;
+        state.list_filter.category = BrowseCategory::Library;
         state.list_filter.column = 0;
 
         state.artist_nav = BrowseNavigationState {
@@ -1004,7 +994,7 @@ mod tests {
     fn test_truncate_noop_when_no_right_columns() {
         let mut state = AppState::new();
         state.list_filter.active = true;
-        state.list_filter.category = BrowseCategory::Artists;
+        state.list_filter.category = BrowseCategory::Library;
         state.list_filter.column = 0;
 
         state.artist_nav = BrowseNavigationState {
@@ -1017,5 +1007,86 @@ mod tests {
 
         assert_eq!(state.artist_nav.columns.len(), 1);
         assert_eq!(state.artist_nav.focused_column, 0);
+    }
+}
+
+/// Navigate forward through all sections and sub-tabs.
+/// Order: Library → Playlists → Genres(All) → ... → Genres(Style) → Radio → Folders → Now Playing
+fn tab_navigate_next(state: &mut AppState) -> Vec<Action> {
+    use crate::app::state::{GenreTab, View};
+
+    match state.browse_category {
+        BrowseCategory::Library => {
+            // Library → Playlists
+            return vec![Action::SetCategory(BrowseCategory::Playlists)];
+        }
+        BrowseCategory::Playlists => {
+            // Playlists → Genres (All)
+            state.genre_tab = GenreTab::All;
+            return vec![Action::SetGenreTab(GenreTab::All), Action::SetCategory(BrowseCategory::Genres)];
+        }
+        BrowseCategory::Genres => {
+            match state.genre_tab {
+                GenreTab::Style => {
+                    // Last genre tab → Radio
+                    return vec![Action::SetCategory(BrowseCategory::Radio)];
+                }
+                _ => {
+                    // Advance to next genre tab
+                    let next = state.genre_tab.next();
+                    state.genre_tab = next;
+                    return vec![Action::SetGenreTab(next)];
+                }
+            }
+        }
+        BrowseCategory::Radio => {
+            // Radio → Folders
+            return vec![Action::SetCategory(BrowseCategory::Folders)];
+        }
+        BrowseCategory::Folders => {
+            // Folders → Now Playing
+            state.view = View::NowPlaying;
+            return vec![];
+        }
+    }
+}
+
+/// Navigate backward through all sections and sub-tabs.
+fn tab_navigate_prev(state: &mut AppState) -> Vec<Action> {
+    use crate::app::state::{GenreTab, View};
+
+    match state.browse_category {
+        BrowseCategory::Library => {
+            // Library (first) → wrap to Now Playing
+            state.view = View::NowPlaying;
+            return vec![];
+        }
+        BrowseCategory::Playlists => {
+            // Playlists → Library
+            return vec![Action::SetCategory(BrowseCategory::Library)];
+        }
+        BrowseCategory::Genres => {
+            match state.genre_tab {
+                GenreTab::All => {
+                    // First genre tab → Playlists
+                    return vec![Action::SetCategory(BrowseCategory::Playlists)];
+                }
+                _ => {
+                    // Go to previous genre tab
+                    let prev = state.genre_tab.prev();
+                    state.genre_tab = prev;
+                    return vec![Action::SetGenreTab(prev)];
+                }
+            }
+        }
+        BrowseCategory::Radio => {
+            // Radio → Genres (Style, last tab)
+            state.genre_tab = GenreTab::Style;
+            return vec![Action::SetGenreTab(GenreTab::Style), Action::SetCategory(BrowseCategory::Genres)];
+        }
+        BrowseCategory::Folders => {
+            // Folders → Radio
+            return vec![Action::SetCategory(BrowseCategory::Radio)];
+        }
     }
 }

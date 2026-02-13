@@ -6,7 +6,7 @@
 use crate::app::{Action, AppState, Event};
 use crate::app::state::{BrowseCategory, BrowseItem, Focus, RightPanelMode, View};
 use crate::api::PlexClient;
-use crate::api::models::{Album, Track};
+use crate::api::models::Track;
 use crate::cache::{CacheData, LibraryCache};
 use crate::config::Config;
 use crate::services::{FolderColumn, FolderNavigationState};
@@ -19,7 +19,6 @@ use super::helpers;
 /// Helper enum for LoadCategoryTracks spawn result disambiguation.
 enum Either {
     Tracks(Vec<Track>),
-    Albums(Vec<Album>, String),
 }
 
 /// Dispatch data-loading actions. Returns follow-up actions.
@@ -119,30 +118,7 @@ pub async fn dispatch(
         }
         Action::LoadArtistAlbums => {
             // Load albums for selected artist (right panel shows albums)
-            // First check for pending filter key (from API search selection)
-            let artist_key = if let Some(key) = state.pending_filter_key.take() {
-                // Coming from search - ensure artists are loaded first
-                if state.artists.is_empty() && !state.artists_loading {
-                    state.artists_loading = true;
-                    if let Some(lib_key) = &state.active_library {
-                        match client.get_artists(lib_key).await {
-                            Ok(mut artists) => {
-                                artists.sort_by(|a, b| helpers::sort_key(&a.title).cmp(&helpers::sort_key(&b.title)));
-                                state.artists = artists;
-                            }
-                            Err(e) => {
-                                tracing::error!("Failed to load artists: {}", e);
-                            }
-                        }
-                    }
-                    state.artists_loading = false;
-                }
-                // Find artist in loaded list and set correct index
-                if let Some(pos) = state.artists.iter().position(|a| a.rating_key == key) {
-                    state.list_state.artists_index = pos;
-                }
-                key
-            } else if let Some(artist) = state.artists.get(state.list_state.artists_index) {
+            let artist_key = if let Some(artist) = state.artists.get(state.list_state.artists_index) {
                 state.selected_artist_name = artist.title.clone();
                 artist.rating_key.clone()
             } else {
@@ -223,12 +199,10 @@ pub async fn dispatch(
         }
         Action::LoadCategoryTracks => {
             // Load tracks directly (for Playlists category)
-            // Check for pending filter key first
-            let pending_key = state.pending_filter_key.take();
 
             // Ensure category data is loaded first (synchronously - rare fallback)
             match state.browse_category {
-                BrowseCategory::Artists => {
+                BrowseCategory::Library => {
                     if state.artists.is_empty() && !state.artists_loading {
                         state.artists_loading = true;
                         if let Some(lib_key) = &state.active_library {
@@ -254,10 +228,6 @@ pub async fn dispatch(
                     }
                 }
                 BrowseCategory::Genres => {
-                    // Stations are handled separately via station_nav
-                    if state.genre_content_type == crate::app::state::GenreContentType::Stations {
-                        return Ok(vec![]);
-                    }
                     if state.genres.is_empty() {
                         if let Some(lib_key) = &state.active_library {
                             match client.get_genres(lib_key).await {
@@ -267,6 +237,10 @@ pub async fn dispatch(
                         }
                     }
                 }
+                BrowseCategory::Radio => {
+                    // Radio/stations don't use this load mechanism
+                    return Ok(vec![]);
+                }
                 BrowseCategory::Folders => {
                     // Folders don't use this load mechanism
                     return Ok(vec![]);
@@ -274,7 +248,7 @@ pub async fn dispatch(
             }
 
             // Get rating key AFTER category data is loaded
-            let rating_key = pending_key.or_else(|| state.selected_category_key());
+            let rating_key = state.selected_category_key();
 
             state.right_panel_mode = RightPanelMode::CategoryTracks;
             state.focus = Focus::Right;
@@ -286,8 +260,7 @@ pub async fn dispatch(
 
                 // Capture branching data synchronously before spawning
                 let browse_category = state.browse_category;
-                let playlists_mode = state.playlists_mode;
-                let playlist_title = state.selected_category_title()
+                let _playlist_title = state.selected_category_title()
                     .map(|s| s.to_lowercase());
                 let lib_key = state.active_library.clone();
 
@@ -295,38 +268,16 @@ pub async fn dispatch(
                 let client = client.clone();
                 tokio::spawn(async move {
                     let result = match browse_category {
-                        BrowseCategory::Artists => {
+                        BrowseCategory::Library => {
                             match client.get_artist_all_tracks(&key).await {
                                 Ok(tracks) => Ok(Either::Tracks(tracks)),
                                 Err(e) => Err(e),
                             }
                         }
                         BrowseCategory::Playlists => {
-                            match playlists_mode {
-                                crate::app::state::PlaylistsMode::RecentlyAdded => {
-                                    match client.get_album_tracks(&key).await {
-                                        Ok(tracks) => Ok(Either::Tracks(tracks)),
-                                        Err(e) => Err(e),
-                                    }
-                                }
-                                _ => {
-                                    let title = playlist_title.unwrap_or_default();
-                                    if title.contains("recently added") {
-                                        if let Some(lib_key) = &lib_key {
-                                            match client.get_recently_added_albums(lib_key, 50).await {
-                                                Ok(albums) => Ok(Either::Albums(albums, "Showing recently added albums".to_string())),
-                                                Err(e) => Err(e),
-                                            }
-                                        } else {
-                                            Err(crate::api::ApiError::NoServerSelected)
-                                        }
-                                    } else {
-                                        match client.get_playlist_tracks(&key).await {
-                                            Ok(tracks) => Ok(Either::Tracks(tracks)),
-                                            Err(e) => Err(e),
-                                        }
-                                    }
-                                }
+                            match client.get_playlist_tracks(&key).await {
+                                Ok(tracks) => Ok(Either::Tracks(tracks)),
+                                Err(e) => Err(e),
                             }
                         }
                         BrowseCategory::Genres => {
@@ -339,15 +290,16 @@ pub async fn dispatch(
                                 Err(crate::api::ApiError::NoServerSelected)
                             }
                         }
+                        BrowseCategory::Radio => {
+                            // Radio/stations don't load tracks this way
+                            return;
+                        }
                         BrowseCategory::Folders => unreachable!(),
                     };
 
                     match result {
                         Ok(Either::Tracks(tracks)) => {
                             let _ = event_tx.send(Event::CategoryTracksLoaded(tracks)).await;
-                        }
-                        Ok(Either::Albums(albums, msg)) => {
-                            let _ = event_tx.send(Event::CategoryAlbumsLoaded { albums, status_message: msg }).await;
                         }
                         Err(e) => {
                             let error_str = e.to_string();
@@ -459,7 +411,7 @@ fn load_from_cache(state: &mut AppState, cached: CacheData, lib_key: &str, lib_t
         state.artists = cached.artists;
         state.artists.sort_by(|a, b| helpers::sort_key(&a.title).cmp(&helpers::sort_key(&b.title)));
         state.artists_total = state.artists.len() as u32;
-        let items = BrowseItem::from_artists(&state.artists);
+        let items = BrowseItem::artist_root_items(&state.artists);
         state.artist_nav.reset(state.artist_view_mode.name(), items);
     }
     if !cached.albums.is_empty() {
@@ -525,18 +477,16 @@ fn load_from_cache(state: &mut AppState, cached: CacheData, lib_key: &str, lib_t
 
     // Stations
     if !cached.stations.is_empty() {
-        state.stations = cached.stations.clone();
+        let mut stations = cached.stations;
+        helpers::append_station_action_items(&mut stations);
+        state.stations = stations.clone();
         state.station_nav.columns.clear();
         state.station_nav.columns.push(crate::app::state::StationColumn::new(
             None,
-            "Stations".to_string(),
-            cached.stations,
+            "Radio".to_string(),
+            stations,
         ));
         state.station_nav.focused_column = 0;
     }
 
-    // Recent content
-    if !cached.recently_added_albums.is_empty() {
-        state.recently_added_albums = cached.recently_added_albums;
-    }
 }

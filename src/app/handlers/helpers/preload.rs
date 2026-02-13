@@ -84,13 +84,6 @@ pub fn preload_data(event_tx: &mpsc::Sender<Event>, preload_type: PreloadType, l
                     let _ = event_tx.send(Event::StationsPreloaded { library_key: lib_key, stations: data }).await;
                 }
             }
-            PreloadType::RecentlyAdded => {
-                tracing::debug!("Preloading recently added albums for library: {}", lib_key);
-                if let Ok(data) = client.get_recently_added_albums(lib_key_ref, 50).await {
-                    tracing::debug!("Recently added albums preloaded: {} items", data.len());
-                    let _ = event_tx.send(Event::RecentlyAddedPreloaded { library_key: lib_key, albums: data }).await;
-                }
-            }
             PreloadType::Folders { lib_title } => {
                 tracing::debug!("Preloading folders for library: {}", lib_key);
                 if let Ok(response) = client.get_library_folders(lib_key_ref).await {
@@ -380,5 +373,4 @@ pub fn preload_all_library_data(event_tx: &mpsc::Sender<Event>, lib_key: &str, l
     preload_data(event_tx, PreloadType::Styles, lib_key, client);
     preload_data(event_tx, PreloadType::Stations, lib_key, client);
     preload_data(event_tx, PreloadType::Playlists, lib_key, client);
-    preload_data(event_tx, PreloadType::RecentlyAdded, lib_key, client);
 }

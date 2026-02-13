@@ -1171,6 +1171,56 @@ impl PlexClient {
         Ok(queue.media_container.metadata)
     }
 
+    /// Create a radio play queue from a metadata key (artist, album, or track).
+    /// Uses the Plex playQueue API which incorporates full server-side heuristics:
+    /// similarity engine, popularity (Last.fm), personal taste (star ratings),
+    /// freshness (tracks not recently played), and sonic analysis (Plex Pass).
+    pub async fn create_radio_from_metadata(&mut self, rating_key: &str) -> Result<Vec<Track>, ApiError> {
+        let server = self.require_server()?.to_string();
+        let token = self.require_token()?.to_string();
+        let machine_id = self.get_server_machine_id().await?;
+
+        let uri = format!(
+            "server://{}/com.plexapp.plugins.library/library/metadata/{}",
+            machine_id, rating_key
+        );
+
+        let path = format!(
+            "{}?type=audio&uri={}&shuffle=1&repeat=0&continuous=1&includeChapters=1&includeMarkers=1&includeRelated=1",
+            EP_PLAY_QUEUES,
+            urlencoding::encode(&uri)
+        );
+
+        tracing::debug!("Radio from metadata request: {}", path);
+
+        let url = format!("{}{}&{}={}", server, path, HEADER_PLEX_TOKEN, token);
+
+        let response = self
+            .http
+            .post(&url)
+            .headers(self.build_headers()?)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let message = response.text().await.unwrap_or_default();
+            tracing::error!("Radio PlayQueue creation failed: {} - {}", status, message);
+            return Err(ApiError::ServerError { status, message });
+        }
+
+        let text = response.text().await?;
+        tracing::debug!("Radio PlayQueue response (first 500 chars): {}", &text[..text.len().min(500)]);
+
+        let queue: PlayQueueResponse = serde_json::from_str(&text).map_err(|e| {
+            tracing::error!("Radio PlayQueue parse error: {} - Response: {}", e, &text[..text.len().min(500)]);
+            ApiError::ParseError(format!("Radio PlayQueue parse error: {}", e))
+        })?;
+
+        tracing::info!("Radio from metadata created with {} tracks", queue.media_container.metadata.len());
+        Ok(queue.media_container.metadata)
+    }
+
     /// Create a filtered play queue for mood/style/decade stations.
     /// Uses the playQueue API which is what Plexamp uses for these stations.
     async fn create_filtered_station_queue(&mut self, station_key: &str) -> Result<Vec<Track>, ApiError> {

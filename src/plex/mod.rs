@@ -367,38 +367,6 @@ impl PlexService {
         }
     }
 
-    /// Get recently added albums with cache-first strategy.
-    pub async fn get_recently_added_cached(&self, library_key: &str, limit: u32) -> Vec<Album> {
-        // Try cache first (recently added changes frequently, shorter TTL)
-        {
-            let data_lock = self.cache_data.read().await;
-            if let Some(ref data) = *data_lock {
-                if data.library_key == library_key && !data.recently_added_albums.is_empty() {
-                    // Return cached, but limit to requested count
-                    return data.recently_added_albums.iter()
-                        .take(limit as usize)
-                        .cloned()
-                        .collect();
-                }
-            }
-        }
-
-        // Fallback to API
-        match self.client.get_recently_added_albums(library_key, limit).await {
-            Ok(albums) => {
-                // Update cache
-                let _ = self.update_cache(library_key, |data| {
-                    data.recently_added_albums = albums.clone();
-                }).await;
-                albums
-            }
-            Err(e) => {
-                tracing::error!("Failed to fetch recently added: {}", e);
-                Vec::new()
-            }
-        }
-    }
-
     // ========================================================================
     // Direct API Passthrough
     // ========================================================================

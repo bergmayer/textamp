@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 
 /// Refresh the current view's category and return actions.
 pub fn refresh_current_view(state: &mut AppState) -> Vec<Action> {
-    use crate::app::state::{RefreshCategory, ArtistViewMode, PlaylistsMode, GenreContentType};
+    use crate::app::state::{RefreshCategory, GenreContentType};
 
     // Special handling for Folders
     if state.view == View::Browse && state.browse_category == BrowseCategory::Folders {
@@ -28,24 +28,16 @@ pub fn refresh_current_view(state: &mut AppState) -> Vec<Action> {
 
     let category = match state.view {
         View::Browse => match state.browse_category {
-            BrowseCategory::Artists => match state.artist_view_mode {
-                ArtistViewMode::Artist => Some(RefreshCategory::Artists),
-                ArtistViewMode::AlbumArtist => Some(RefreshCategory::Artists),
-                ArtistViewMode::Album => Some(RefreshCategory::Albums),
-            },
-            BrowseCategory::Playlists => match state.playlists_mode {
-                PlaylistsMode::All => Some(RefreshCategory::Playlists),
-                PlaylistsMode::Stations => Some(RefreshCategory::Stations),
-                PlaylistsMode::RecentlyAdded => Some(RefreshCategory::RecentlyAdded),
-            },
+            BrowseCategory::Library => Some(RefreshCategory::Artists),
+            BrowseCategory::Playlists => Some(RefreshCategory::Playlists),
             BrowseCategory::Genres => match state.genre_content_type {
                 GenreContentType::Genres => Some(RefreshCategory::Genres),
                 GenreContentType::ArtistGenres => Some(RefreshCategory::ArtistGenres),
                 GenreContentType::AlbumGenres => Some(RefreshCategory::AlbumGenres),
                 GenreContentType::Moods => Some(RefreshCategory::Moods),
                 GenreContentType::Styles => Some(RefreshCategory::Styles),
-                GenreContentType::Stations => Some(RefreshCategory::Stations),
             },
+            BrowseCategory::Radio => Some(RefreshCategory::Stations),
             BrowseCategory::Folders => Some(RefreshCategory::Folders),
         },
         _ => None,
@@ -62,31 +54,21 @@ pub fn refresh_current_view(state: &mut AppState) -> Vec<Action> {
 
 /// Check if the user is currently viewing a specific category.
 pub fn is_viewing_category(category: &crate::app::state::RefreshCategory, state: &AppState) -> bool {
-    use crate::app::state::{RefreshCategory, ArtistViewMode, PlaylistsMode, GenreContentType};
+    use crate::app::state::{RefreshCategory, ArtistViewMode, GenreContentType};
 
     if state.view != View::Browse {
         return false;
     }
 
     match (state.browse_category, category) {
-        (BrowseCategory::Artists, RefreshCategory::Artists) => {
+        (BrowseCategory::Library, RefreshCategory::Artists) => {
             matches!(state.artist_view_mode, ArtistViewMode::Artist)
         }
-        (BrowseCategory::Artists, RefreshCategory::AlbumArtists) => {
+        (BrowseCategory::Library, RefreshCategory::AlbumArtists) => {
             matches!(state.artist_view_mode, ArtistViewMode::AlbumArtist)
         }
-        (BrowseCategory::Artists, RefreshCategory::Albums) => {
-            matches!(state.artist_view_mode, ArtistViewMode::Album)
-        }
-        (BrowseCategory::Playlists, RefreshCategory::Playlists) => {
-            matches!(state.playlists_mode, PlaylistsMode::All)
-        }
-        (BrowseCategory::Playlists, RefreshCategory::RecentlyAdded) => {
-            matches!(state.playlists_mode, PlaylistsMode::RecentlyAdded)
-        }
-        (BrowseCategory::Playlists, RefreshCategory::Stations) => {
-            matches!(state.playlists_mode, PlaylistsMode::Stations)
-        }
+        (BrowseCategory::Playlists, RefreshCategory::Playlists) => true,
+        (BrowseCategory::Radio, RefreshCategory::Stations) => true,
         (BrowseCategory::Genres, RefreshCategory::Genres) => {
             matches!(state.genre_content_type, GenreContentType::Genres)
         }
@@ -102,9 +84,6 @@ pub fn is_viewing_category(category: &crate::app::state::RefreshCategory, state:
         (BrowseCategory::Genres, RefreshCategory::Styles) => {
             matches!(state.genre_content_type, GenreContentType::Styles)
         }
-        (BrowseCategory::Genres, RefreshCategory::Stations) => {
-            matches!(state.genre_content_type, GenreContentType::Stations)
-        }
         (BrowseCategory::Folders, RefreshCategory::Folders) => true,
         _ => false,
     }
@@ -112,28 +91,20 @@ pub fn is_viewing_category(category: &crate::app::state::RefreshCategory, state:
 
 /// Map current view state to its primary RefreshCategory.
 pub fn current_view_category(state: &AppState) -> Option<crate::app::state::RefreshCategory> {
-    use crate::app::state::{RefreshCategory, ArtistViewMode, PlaylistsMode, GenreContentType};
+    use crate::app::state::{RefreshCategory, GenreContentType};
 
     match state.view {
         View::Browse => match state.browse_category {
-            BrowseCategory::Artists => match state.artist_view_mode {
-                ArtistViewMode::Artist => Some(RefreshCategory::Artists),
-                ArtistViewMode::AlbumArtist => Some(RefreshCategory::Artists),
-                ArtistViewMode::Album => Some(RefreshCategory::Albums),
-            },
-            BrowseCategory::Playlists => match state.playlists_mode {
-                PlaylistsMode::All => Some(RefreshCategory::Playlists),
-                PlaylistsMode::Stations => Some(RefreshCategory::Stations),
-                PlaylistsMode::RecentlyAdded => Some(RefreshCategory::RecentlyAdded),
-            },
+            BrowseCategory::Library => Some(RefreshCategory::Artists),
+            BrowseCategory::Playlists => Some(RefreshCategory::Playlists),
             BrowseCategory::Genres => match state.genre_content_type {
                 GenreContentType::Genres => Some(RefreshCategory::Genres),
                 GenreContentType::ArtistGenres => Some(RefreshCategory::ArtistGenres),
                 GenreContentType::AlbumGenres => Some(RefreshCategory::AlbumGenres),
                 GenreContentType::Moods => Some(RefreshCategory::Moods),
                 GenreContentType::Styles => Some(RefreshCategory::Styles),
-                GenreContentType::Stations => Some(RefreshCategory::Stations),
             },
+            BrowseCategory::Radio => Some(RefreshCategory::Stations),
             BrowseCategory::Folders => Some(RefreshCategory::Folders),
         },
         _ => None,
@@ -212,7 +183,6 @@ pub fn spawn_category_refresh(
         RefreshCategory::Artists | RefreshCategory::AlbumArtists => state.artists.len(),
         RefreshCategory::Albums => state.albums.len(),
         RefreshCategory::Playlists => state.playlists.len(),
-        RefreshCategory::RecentlyAdded => state.recently_added_albums.len(),
         RefreshCategory::Genres => state.genres.len(),
         RefreshCategory::ArtistGenres => state.artist_genres.len(),
         RefreshCategory::AlbumGenres => state.album_genres.len(),
@@ -263,19 +233,6 @@ pub fn spawn_category_refresh(
                     }
                     Err(e) => {
                         tracing::warn!("Failed to refresh playlists: {}", e);
-                        false
-                    }
-                }
-            }
-            RefreshCategory::RecentlyAdded => {
-                match client.get_recently_added_albums(&lib_key, 50).await {
-                    Ok(albums) => {
-                        let new_count = albums.len();
-                        let _ = event_tx.send(Event::RecentlyAddedPreloaded { library_key: lib_key.clone(), albums }).await;
-                        new_count != old_count
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to refresh recently added: {}", e);
                         false
                     }
                 }

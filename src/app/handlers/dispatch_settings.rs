@@ -60,7 +60,7 @@ pub async fn dispatch(
             state.moods.clear();
             state.styles.clear();
             state.stations.clear();
-            state.recently_added_albums.clear();
+
             state.selected_artist_albums.clear();
             state.selected_album_tracks.clear();
             state.genre_albums.clear();
@@ -545,7 +545,7 @@ pub async fn dispatch(
                 state.moods.clear();
                 state.styles.clear();
                 state.stations.clear();
-                state.recently_added_albums.clear();
+    
                 state.selected_artist_albums.clear();
                 state.selected_album_tracks.clear();
                 state.folder_state = None;
@@ -666,7 +666,7 @@ pub async fn dispatch(
                     state.moods.clear();
                     state.styles.clear();
                     state.stations.clear();
-                    state.recently_added_albums.clear();
+        
                     state.selected_artist_albums.clear();
                     state.selected_album_tracks.clear();
                     state.folder_state = None;
@@ -808,7 +808,6 @@ pub async fn dispatch(
                             helpers::preload_data(event_tx, PreloadType::Moods, &lib_key, client);
                             helpers::preload_data(event_tx, PreloadType::Styles, &lib_key, client);
                             helpers::preload_data(event_tx, PreloadType::Stations, &lib_key, client);
-                            helpers::preload_data(event_tx, PreloadType::RecentlyAdded, &lib_key, client);
                         }
 
                         state.set_status(format!("Cleared {} cache files, reloading...", count));
@@ -839,7 +838,7 @@ pub async fn dispatch(
                         state.moods.clear();
                         state.styles.clear();
                         state.stations.clear();
-                        state.recently_added_albums.clear();
+            
                         state.playlist_tracks_cache.clear();
                         state.category_timestamps.clear();
                         state.cache_dirty = true;

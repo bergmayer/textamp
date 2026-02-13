@@ -21,7 +21,7 @@ pub use cache::maybe_save_cache_async;
 pub use connection::{find_working_connection, find_working_connection_from_servers};
 pub use navigation::{
     adjust_list_index, calc_scroll_offset, load_albums, load_artists,
-    load_playlists, maybe_load_more, select_filter_result, set_list_index,
+    load_playlists, maybe_load_more, set_list_index,
 };
 pub use playback::{
     collect_tracks_from_column, fetch_more_radio_tracks, generate_plex_session_id,
@@ -36,6 +36,34 @@ pub use refresh::{
 
 /// Page size for paginated API requests.
 pub const PAGE_SIZE: u32 = 100;
+
+/// Append "Start Radio" and "Sonic Adventure" action items to a station list.
+/// Used when building station_nav from any source (API, cache, preload).
+pub fn append_station_action_items(stations: &mut Vec<crate::api::models::Station>) {
+    use crate::api::models::Station;
+    // Only append if not already present (avoid duplicates on reload)
+    if stations.iter().any(|s| s.key == "action:start_radio") {
+        return;
+    }
+    stations.push(Station {
+        key: "action:start_radio".to_string(),
+        title: "Start Radio".to_string(),
+        station_type: "action".to_string(),
+        identifier: None,
+        thumb: None,
+        art: None,
+        description: Some("Search for an artist, album, or track to start radio".to_string()),
+    });
+    stations.push(Station {
+        key: "action:adventure".to_string(),
+        title: "Sonic Adventure".to_string(),
+        station_type: "action".to_string(),
+        identifier: None,
+        thumb: None,
+        art: None,
+        description: Some("Create a sonic bridge between two tracks".to_string()),
+    });
+}
 
 /// Generate a sort key for a title, ignoring "The " prefix.
 pub fn sort_key(title: &str) -> String {

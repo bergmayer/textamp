@@ -1,6 +1,5 @@
-//! Radio dispatch handlers: StartTrackRadio, StartAlbumRadio, StartArtistRadio,
-//! StopRadio, JumpToRadioTrack, FetchMoreRadioTracks, PlayStation, DrillIntoStation,
-//! NavigateStationsBack.
+//! Radio dispatch handlers: StopRadio, JumpToRadioTrack, StartPlexRadio,
+//! PlayStation, DrillIntoStation, NavigateStationsBack.
 
 use crate::app::{Action, AppState, Event};
 use crate::app::state::{PlaybackMode, RadioMode, View};
@@ -21,177 +20,6 @@ pub async fn dispatch(
     audio: &mut AudioPlayer,
 ) -> Result<Vec<Action>> {
     match action {
-        Action::StartTrackRadio { track_key, title } => {
-            // Report stop for currently playing track before starting radio
-            // continuing=true because we're starting new content
-            if let Some(current) = state.current_track().cloned() {
-                helpers::report_playback_stop_to_plex(&current, state.playback.position_ms, true, state.plex_session_id.clone(), client);
-            }
-
-            // Generate new session ID for this playback context
-            state.plex_session_id = Some(helpers::generate_plex_session_id());
-
-            // Start sonic track radio - fetch similar tracks, shuffle to avoid album clustering
-            state.radio_state.mode = RadioMode::Track;
-            state.radio_state.seed_track_key = Some(track_key.clone());
-            state.radio_state.seed_title = title.clone();
-            state.radio_state.history.clear();
-            state.radio_state.fetching = true;
-            state.view = View::NowPlaying;
-            state.playback_mode = PlaybackMode::Radio;
-
-            // Get the seed track first (to start playing immediately)
-            let seed_track = if let Some(track) = state.selected_album_tracks.iter()
-                .find(|t| t.rating_key == track_key)
-                .cloned() {
-                Some(track)
-            } else if let Ok(tracks) = client.get_album_tracks(&track_key).await {
-                tracks.into_iter().find(|t| t.rating_key == track_key)
-            } else {
-                None
-            };
-
-            // Clear queue and track cache, start with seed track if found
-            audio.track_cache.flush();
-            state.queue.clear();
-            if let Some(track) = seed_track {
-                state.queue.push(track);
-                state.radio_state.history.push(track_key.clone());
-            }
-            state.queue_index = Some(0);
-
-            // Start playback immediately
-            if !state.queue.is_empty() {
-                helpers::play_current_track(event_tx, state, client, audio).await;
-            }
-
-            // Fetch similar tracks in background (non-blocking)
-            let tx = event_tx.clone();
-            let client_clone = client.clone();
-            let tk = track_key.clone();
-            let radio_title = title.clone();
-            tokio::spawn(async move {
-                match client_clone.get_similar_tracks(&tk, 50).await {
-                    Ok(tracks) => {
-                        let _ = tx.send(Event::TrackRadioSimilarLoaded {
-                            tracks,
-                            title: radio_title,
-                        }).await;
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to fetch similar tracks: {}", e);
-                        // Send empty result so UI can clear fetching state
-                        let _ = tx.send(Event::TrackRadioSimilarLoaded {
-                            tracks: vec![],
-                            title: radio_title,
-                        }).await;
-                    }
-                }
-            });
-        }
-        Action::StartAlbumRadio { album_key, title } => {
-            // Report stop for currently playing track before starting radio
-            // continuing=true because we're starting new content
-            if let Some(current) = state.current_track().cloned() {
-                helpers::report_playback_stop_to_plex(&current, state.playback.position_ms, true, state.plex_session_id.clone(), client);
-            }
-
-            // Generate new session ID for this playback context
-            state.plex_session_id = Some(helpers::generate_plex_session_id());
-
-            // Start sonic album radio - play album then similar albums
-            state.radio_state.mode = RadioMode::Album;
-            state.radio_state.seed_track_key = Some(album_key.clone());
-            state.radio_state.seed_title = title;
-            state.radio_state.history.clear();
-            state.radio_state.fetching = true;
-            state.view = View::NowPlaying;
-
-            // First, load the album's tracks
-            match client.get_album_tracks(&album_key).await {
-                Ok(tracks) => {
-                    state.queue = tracks;
-                    state.queue_index = Some(0);
-                    helpers::play_current_track(event_tx, state, client, audio).await;
-                }
-                Err(e) => {
-                    state.set_error(format!("Failed to load album tracks: {}", e));
-                }
-            }
-
-            // Fetch similar albums + their tracks in background (non-blocking)
-            let tx = event_tx.clone();
-            let client_clone = client.clone();
-            let ak = album_key.clone();
-            tokio::spawn(async move {
-                match client_clone.get_similar_albums(&ak, 10).await {
-                    Ok(albums) => {
-                        let mut all_tracks = Vec::new();
-                        for album in albums {
-                            if let Ok(tracks) = client_clone.get_album_tracks(&album.rating_key).await {
-                                all_tracks.extend(tracks);
-                            }
-                        }
-                        let _ = tx.send(Event::AlbumRadioTracksLoaded {
-                            tracks: all_tracks,
-                        }).await;
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to fetch similar albums: {}", e);
-                        let _ = tx.send(Event::AlbumRadioTracksLoaded {
-                            tracks: vec![],
-                        }).await;
-                    }
-                }
-            });
-        }
-        Action::StartArtistRadio { artist_key, title } => {
-            // Report stop for currently playing track before starting radio
-            // continuing=true because we're starting new content
-            if let Some(current) = state.current_track().cloned() {
-                helpers::report_playback_stop_to_plex(&current, state.playback.position_ms, true, state.plex_session_id.clone(), client);
-            }
-
-            // Generate new session ID for this playback context
-            state.plex_session_id = Some(helpers::generate_plex_session_id());
-
-            // Start sonic artist radio
-            state.radio_state.mode = RadioMode::Artist;
-            state.radio_state.seed_track_key = Some(artist_key.clone());
-            state.radio_state.seed_title = title;
-            state.radio_state.history.clear();
-            state.radio_state.fetching = true;
-            state.view = View::NowPlaying;
-
-            // Try PlayQueue API first (includes tracks from similar artists)
-            let mut got_tracks = false;
-            match client.create_artist_radio_queue(&artist_key).await {
-                Ok(tracks) if !tracks.is_empty() => {
-                    tracing::info!("Artist radio via PlayQueue: {} tracks (includes similar artists)", tracks.len());
-                    state.queue = tracks;
-                    state.queue_index = Some(0);
-                    helpers::play_current_track(event_tx, state, client, audio).await;
-                    got_tracks = true;
-                }
-                Ok(_) => tracing::debug!("Artist radio PlayQueue returned no tracks, falling back"),
-                Err(e) => tracing::debug!("Artist radio PlayQueue failed ({}), falling back", e),
-            }
-
-            // Fallback: load artist's own tracks
-            if !got_tracks {
-                match client.get_artist_all_tracks(&artist_key).await {
-                    Ok(tracks) => {
-                        state.queue = tracks;
-                        state.queue_index = Some(0);
-                        helpers::play_current_track(event_tx, state, client, audio).await;
-                    }
-                    Err(e) => {
-                        state.set_error(format!("Failed to load artist tracks: {}", e));
-                    }
-                }
-            }
-            state.radio_state.fetching = false;
-        }
         Action::StopRadio => {
             state.radio_state.mode = RadioMode::Off;
             state.radio_state.seed_track_key = None;
@@ -213,39 +41,54 @@ pub async fn dispatch(
                 helpers::play_current_track(event_tx, state, client, audio).await;
             }
         }
-        Action::FetchMoreRadioTracks => {
-            use rand::seq::SliceRandom;
+        Action::StartPlexRadio { key, title } => {
+            // Start radio using Plex playQueue API (full heuristics)
+            if let Some(current) = state.current_track().cloned() {
+                helpers::report_playback_stop_to_plex(&current, state.playback.position_ms, true, state.plex_session_id.clone(), client);
+            }
 
-            // Only fetch if in track radio mode and not already fetching
-            if state.radio_state.mode == RadioMode::Track && !state.radio_state.fetching {
-                if let Some(ref seed_key) = state.radio_state.seed_track_key.clone() {
-                    state.radio_state.fetching = true;
+            audio.stop();
+            state.playback.status = crate::app::state::PlayStatus::Stopped;
+            state.plex_session_id = Some(helpers::generate_plex_session_id());
 
-                    match client.get_similar_tracks(&seed_key, 30).await {
-                        Ok(mut tracks) => {
-                            // Shuffle to maintain diversity
-                            let mut rng = rand::rng();
-                            tracks.shuffle(&mut rng);
+            state.radio_state.mode = RadioMode::Active; // Plex decides the actual mix
+            state.radio_state.seed_track_key = Some(key.clone());
+            state.radio_state.seed_title = title.clone();
+            state.radio_state.history.clear();
+            state.radio_state.fetching = true;
+            state.view = View::NowPlaying;
+            state.playback_mode = PlaybackMode::Radio;
+            state.set_status(format!("Starting radio: {}...", title));
 
-                            let new_tracks: Vec<_> = tracks.into_iter()
-                                .filter(|t| !state.radio_state.history.contains(&t.rating_key))
-                                .take(15)
-                                .collect();
-
-                            for track in &new_tracks {
-                                state.radio_state.history.push(track.rating_key.clone());
-                            }
-
-                            state.queue.extend(new_tracks);
-                            state.radio_state.fetching = false;
-                        }
-                        Err(e) => {
-                            tracing::warn!("Failed to fetch more radio tracks: {}", e);
-                            state.radio_state.fetching = false;
-                        }
+            let tx = event_tx.clone();
+            let mut client_clone = client.clone();
+            let rk = key.clone();
+            let rt = title.clone();
+            tokio::spawn(async move {
+                let timeout_duration = std::time::Duration::from_secs(30);
+                match tokio::time::timeout(timeout_duration, client_clone.create_radio_from_metadata(&rk)).await {
+                    Ok(Ok(tracks)) => {
+                        let _ = tx.send(Event::StationTracksLoaded {
+                            station_key: format!("plex_radio:{}", rk),
+                            station_title: rt,
+                            tracks,
+                            time_travel_decades: vec![],
+                        }).await;
+                    }
+                    Ok(Err(e)) => {
+                        let _ = tx.send(Event::StationLoadFailed {
+                            station_key: format!("plex_radio:{}", rk),
+                            error: format!("Failed to start radio: {}", e),
+                        }).await;
+                    }
+                    Err(_) => {
+                        let _ = tx.send(Event::StationLoadFailed {
+                            station_key: format!("plex_radio:{}", rk),
+                            error: "Radio creation timed out".into(),
+                        }).await;
                     }
                 }
-            }
+            });
         }
         Action::PlayStation(station_key) => {
             // Report stop for currently playing track before starting station
