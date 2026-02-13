@@ -168,10 +168,10 @@ pub async fn dispatch(
                     BrowseCategory::Library => {
                         if state.artists.is_empty() && !state.artists_loading {
                             helpers::load_artists(event_tx, state, client);
-                        } else if !state.artists.is_empty() {
-                            // Initialize artist_nav with existing artists
+                        } else if !state.artists.is_empty() && state.artist_nav.columns.is_empty() {
+                            // Initialize artist_nav only if not already populated
                             let title = state.artist_view_mode.name();
-                            let items = BrowseItem::from_artists(&state.artists);
+                            let items = BrowseItem::artist_root_items(&state.artists);
                             state.artist_nav.reset(title, items);
                         }
                     }
