@@ -303,19 +303,14 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
                 'r' => return create_station_from_context(state),
                 'q' => return vec![Action::EnqueueSelection],
                 's' => {
-                    if state.view == View::Browse && state.browse_category == BrowseCategory::Library
-                        && state.artist_nav.focused_column == 0
-                    {
-                        // Only cycle sub-modes on root column; drill-down columns shuffle
-                        return vec![Action::CycleLibrarySubMode];
-                    } else if state.view == View::Browse {
+                    if state.view == View::Browse {
                         return vec![Action::ToggleBrowseShuffle];
                     } else {
                         return vec![Action::ToggleQueueShuffle];
                     }
                 }
                 'm' => return get_similar_action(state),
-                'a' => return handle_adventure_key(state),
+                'a' => return handle_album_group_toggle(state),
                 'b' => return navigate_to_album(state),
                 'g' => return navigate_to_artist(state),
                 'w' => return vec![Action::PromptSavePlaylist],
@@ -769,33 +764,13 @@ fn create_station_from_context(state: &AppState) -> Vec<Action> {
     vec![]
 }
 
-/// Handle Alt+A for Sonic Adventure.
-fn handle_adventure_key(state: &mut AppState) -> Vec<Action> {
-    // Ignore if already generating
-    if state.adventure.generating {
-        return vec![];
-    }
-
-    // Get the currently selected/highlighted track
-    let selected_track = get_selected_track(state);
-
-    if !state.adventure.active {
-        // Start adventure mode
-        if let Some(track) = selected_track {
-            return vec![Action::SetAdventureStart(track)];
-        } else {
-            return vec![Action::StartAdventure];
-        }
-    }
-
-    // Adventure mode is active
-    if state.adventure.start_track.is_some() && state.adventure.end_track.is_none() {
-        // Set end track
-        if let Some(track) = selected_track {
-            return vec![Action::SetAdventureEnd(track)];
-        }
-    }
-
+/// Handle Alt+A for toggling playlist group-by-album view mode.
+fn handle_album_group_toggle(state: &mut AppState) -> Vec<Action> {
+    use crate::app::state::PlaylistViewMode;
+    state.playlist_view_mode = match state.playlist_view_mode {
+        PlaylistViewMode::Tracks => PlaylistViewMode::TracksByAlbum,
+        PlaylistViewMode::TracksByAlbum => PlaylistViewMode::Tracks,
+    };
     vec![]
 }
 

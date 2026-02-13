@@ -2,7 +2,7 @@
 //! SetCategory, ToggleFocus.
 
 use crate::app::{Action, AppState, Event};
-use crate::app::state::{BrowseCategory, BrowseItem, Focus, GenreContentType, RightPanelMode, View};
+use crate::app::state::{BrowseCategory, Focus, GenreContentType, RightPanelMode, View};
 use crate::api::PlexClient;
 
 use anyhow::Result;
@@ -152,18 +152,13 @@ pub async fn dispatch(
         }
         Action::SetCategory(category) => {
             if state.browse_category != category {
-                // Reset library sub-mode when leaving Library
+                // Unshuffle Library root when leaving, so "All Artists" is in correct position
                 if state.browse_category == BrowseCategory::Library {
-                    if state.library_sub_mode != crate::app::state::LibrarySubMode::Normal {
-                        // Rebuild artist_nav to match Normal mode (restores "All Artists")
-                        state.library_sub_mode = crate::app::state::LibrarySubMode::Normal;
-                        if !state.artists.is_empty() {
-                            let title = state.artist_view_mode.name();
-                            let items = BrowseItem::artist_root_items(&state.artists);
-                            state.artist_nav.reset(title, items);
+                    if let Some(col) = state.artist_nav.columns.first_mut() {
+                        if col.is_shuffled() {
+                            col.unshuffle();
                         }
                     }
-                    state.album_art_view = false;
                 }
                 state.browse_category = category;
                 state.focus = Focus::Left;

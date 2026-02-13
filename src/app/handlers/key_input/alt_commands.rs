@@ -35,17 +35,8 @@ pub fn available_alt_commands(state: &AppState) -> Vec<AltCommand> {
         cmds.push(AltCommand { key: 'q', label: "queue" });
     }
 
-    // Alt+S shuffle: in Library root column cycles sub-mode, otherwise shuffle column/queue
-    if state.view == View::Browse && state.browse_category == BrowseCategory::Library
-        && state.artist_nav.focused_column == 0
-    {
-        let label = match state.library_sub_mode {
-            crate::app::state::LibrarySubMode::Normal => "all albums",
-            crate::app::state::LibrarySubMode::AllByArtist => "shuffle albums",
-            crate::app::state::LibrarySubMode::AllShuffled => "artists",
-        };
-        cmds.push(AltCommand { key: 's', label });
-    } else if state.view == View::Browse
+    // Alt+S shuffle: shuffle current column/queue
+    if state.view == View::Browse
         || !state.queue.is_empty()
         || !state.radio.tracks.is_empty()
     {
@@ -72,9 +63,15 @@ pub fn available_alt_commands(state: &AppState) -> Vec<AltCommand> {
         cmds.push(AltCommand { key: 'g', label: "artist" });
     }
 
-    // Alt+A adventure: library loaded
-    if !state.artists.is_empty() {
-        cmds.push(AltCommand { key: 'a', label: "adventure" });
+    // Alt+A group by album: available in Playlists track view
+    if state.view == View::Browse && state.browse_category == BrowseCategory::Playlists
+        && state.playlist_nav.focused_column > 0
+    {
+        let label = match state.playlist_view_mode {
+            crate::app::state::PlaylistViewMode::Tracks => "by album",
+            crate::app::state::PlaylistViewMode::TracksByAlbum => "tracks",
+        };
+        cmds.push(AltCommand { key: 'a', label });
     }
 
     // Alt+W save: has tracks in queue or radio (only in NowPlaying view)
