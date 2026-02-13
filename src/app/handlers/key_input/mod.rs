@@ -303,7 +303,10 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
                 'r' => return create_station_from_context(state),
                 'q' => return vec![Action::EnqueueSelection],
                 's' => {
-                    if state.view == View::Browse && state.browse_category == BrowseCategory::Library {
+                    if state.view == View::Browse && state.browse_category == BrowseCategory::Library
+                        && state.artist_nav.focused_column == 0
+                    {
+                        // Only cycle sub-modes on root column; drill-down columns shuffle
                         return vec![Action::CycleLibrarySubMode];
                     } else if state.view == View::Browse {
                         return vec![Action::ToggleBrowseShuffle];

@@ -373,10 +373,6 @@ pub async fn dispatch(
         }
         Action::CycleLibrarySubMode => {
             state.library_sub_mode = state.library_sub_mode.next();
-            // Disable album art view in sub-modes (art is for drill-down album columns)
-            if state.library_sub_mode != LibrarySubMode::Normal {
-                state.album_art_view = false;
-            }
             match state.library_sub_mode {
                 LibrarySubMode::Normal => {
                     // Reset to normal artist list

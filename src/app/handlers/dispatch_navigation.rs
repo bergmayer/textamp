@@ -154,7 +154,16 @@ pub async fn dispatch(
             if state.browse_category != category {
                 // Reset library sub-mode when leaving Library
                 if state.browse_category == BrowseCategory::Library {
-                    state.library_sub_mode = crate::app::state::LibrarySubMode::Normal;
+                    if state.library_sub_mode != crate::app::state::LibrarySubMode::Normal {
+                        // Rebuild artist_nav to match Normal mode (restores "All Artists")
+                        state.library_sub_mode = crate::app::state::LibrarySubMode::Normal;
+                        if !state.artists.is_empty() {
+                            let title = state.artist_view_mode.name();
+                            let items = BrowseItem::artist_root_items(&state.artists);
+                            state.artist_nav.reset(title, items);
+                        }
+                    }
+                    state.album_art_view = false;
                 }
                 state.browse_category = category;
                 state.focus = Focus::Left;
@@ -168,11 +177,6 @@ pub async fn dispatch(
                     BrowseCategory::Library => {
                         if state.artists.is_empty() && !state.artists_loading {
                             helpers::load_artists(event_tx, state, client);
-                        } else if !state.artists.is_empty() && state.artist_nav.columns.is_empty() {
-                            // Initialize artist_nav only if not already populated
-                            let title = state.artist_view_mode.name();
-                            let items = BrowseItem::artist_root_items(&state.artists);
-                            state.artist_nav.reset(title, items);
                         }
                     }
                     BrowseCategory::Playlists => {

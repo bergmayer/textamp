@@ -678,9 +678,11 @@ fn render_browse_miller_columns(
         }
 
         // Check if this column has albums and cover art view is active
+        // Never show album art on Library root column (artists/all-albums sub-modes)
         let has_albums = col.items.iter().any(|item| matches!(item, BrowseItem::Album { .. }));
+        let is_library_root = state.browse_category == BrowseCategory::Library && col_idx == 0;
         let is_filter_column = filter_column == Some(col_idx);
-        if state.album_art_view && has_albums {
+        if state.album_art_view && has_albums && !is_library_root {
             let col_filter = if is_filter_column { filter_results } else { None };
             render_album_art_grid(frame, state, col, is_focused, inner, col_area, col_idx, col_filter);
             continue;

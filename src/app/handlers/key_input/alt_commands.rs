@@ -35,8 +35,10 @@ pub fn available_alt_commands(state: &AppState) -> Vec<AltCommand> {
         cmds.push(AltCommand { key: 'q', label: "queue" });
     }
 
-    // Alt+S shuffle: in Library browse cycles sub-mode, otherwise shuffle column/queue
-    if state.view == View::Browse && state.browse_category == BrowseCategory::Library {
+    // Alt+S shuffle: in Library root column cycles sub-mode, otherwise shuffle column/queue
+    if state.view == View::Browse && state.browse_category == BrowseCategory::Library
+        && state.artist_nav.focused_column == 0
+    {
         let label = match state.library_sub_mode {
             crate::app::state::LibrarySubMode::Normal => "all albums",
             crate::app::state::LibrarySubMode::AllByArtist => "shuffle albums",
