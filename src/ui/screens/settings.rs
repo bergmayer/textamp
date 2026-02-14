@@ -595,6 +595,26 @@ fn render_about_content(frame: &mut Frame, state: &AppState, area: Rect) {
         Style::default().fg(t.colors.fg_muted),
     )));
 
+    // Artwork mode selector (selectable items after themes)
+    lines.push(Line::from(Span::styled(
+        "Artwork:",
+        Style::default().fg(t.colors.fg_accent),
+    )));
+
+    let theme_count = ThemeName::all().len();
+    for (i, mode) in crate::app::state::ArtworkMode::all().iter().enumerate() {
+        let item_idx = theme_count + i;
+        let is_active = *mode == state.artwork_mode;
+        let is_selected = is_focused && state.settings_state.item_index == item_idx;
+        let prefix = if is_selected { "> " } else { "  " };
+        let active_marker = if is_active { " *" } else { "" };
+        let style = if is_selected { Theme::selected() } else { Style::default().fg(t.colors.fg_primary) };
+        lines.push(Line::from(Span::styled(
+            format!("{}{}{}", prefix, mode.name(), active_marker),
+            style,
+        )));
+    }
+
     let paragraph = Paragraph::new(lines);
     frame.render_widget(paragraph, area);
 }

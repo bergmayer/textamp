@@ -237,10 +237,6 @@ pub async fn dispatch(
                         }
                     }
                 }
-                BrowseCategory::Radio => {
-                    // Radio/stations don't use this load mechanism
-                    return Ok(vec![]);
-                }
                 BrowseCategory::Folders => {
                     // Folders don't use this load mechanism
                     return Ok(vec![]);
@@ -289,10 +285,6 @@ pub async fn dispatch(
                             } else {
                                 Err(crate::api::ApiError::NoServerSelected)
                             }
-                        }
-                        BrowseCategory::Radio => {
-                            // Radio/stations don't load tracks this way
-                            return;
                         }
                         BrowseCategory::Folders => unreachable!(),
                     };
@@ -478,7 +470,7 @@ fn load_from_cache(state: &mut AppState, cached: CacheData, lib_key: &str, lib_t
     // Stations
     if !cached.stations.is_empty() {
         let mut stations = cached.stations;
-        helpers::append_station_action_items(&mut stations);
+        helpers::append_station_action_items(&mut stations, state.shuffle_undo_queue.is_some());
         state.stations = stations.clone();
         state.station_nav.columns.clear();
         state.station_nav.columns.push(crate::app::state::StationColumn::new(

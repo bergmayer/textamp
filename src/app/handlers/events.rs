@@ -939,7 +939,7 @@ pub fn handle_app_event(
             }
             if state.stations.is_empty() && !state.stations_loading {
                 let count = stations.len();
-                helpers::append_station_action_items(&mut stations);
+                helpers::append_station_action_items(&mut stations, state.shuffle_undo_queue.is_some());
                 state.stations = stations.clone();
                 tracing::debug!("Stations preloaded: {} items", count);
                 // Rebuild station Miller columns
@@ -1050,6 +1050,38 @@ pub fn handle_app_event(
                         if !to_load.is_empty() {
                             return vec![Action::LoadAlbumArt(to_load)];
                         }
+                    }
+                }
+            }
+
+            // Visualizer data safety net: ensure waveform/spectrogram are generated
+            // when on NowPlaying view. This catches all edge cases (track change,
+            // re-entry, failed downloads) without fragile event-based triggering.
+            if state.view == View::NowPlaying {
+                if let Some(track) = state.current_track().cloned() {
+                    let tk = &track.rating_key;
+
+                    // Ensure track_key is set (handles track change while on this view)
+                    if state.waveform.track_key.as_ref() != Some(tk) {
+                        state.waveform = crate::app::state::WaveformState::default();
+                        state.waveform.track_key = Some(tk.clone());
+                        state.spectrogram = crate::app::state::SpectrogramState::default();
+                        state.spectrogram.track_key = Some(tk.clone());
+                    }
+
+                    // Trigger waveform if needed (co-generates spectrogram)
+                    if state.waveform.data.is_none() && !state.waveform.generating {
+                        state.waveform.error = None;
+                        return vec![Action::LoadWaveform];
+                    }
+
+                    // Trigger spectrogram independently if waveform is done but spectrogram isn't
+                    if state.spectrogram.data.is_none()
+                        && !state.spectrogram.generating
+                        && state.waveform.data.is_some()
+                    {
+                        state.spectrogram.error = None;
+                        return vec![Action::LoadSpectrogram];
                     }
                 }
             }
@@ -1184,7 +1216,7 @@ pub fn handle_app_event(
             // Stations
             if !cached.stations.is_empty() {
                 let mut stations = cached.stations;
-                helpers::append_station_action_items(&mut stations);
+                helpers::append_station_action_items(&mut stations, state.shuffle_undo_queue.is_some());
                 state.stations = stations.clone();
                 state.station_nav.columns.clear();
                 state.station_nav.columns.push(crate::app::state::StationColumn::new(
@@ -1282,6 +1314,35 @@ pub fn handle_app_event(
                 vec![]
             }
         }
+        Event::SpectrogramGenerated { track_key, data } => {
+            if state.spectrogram.track_key.as_ref() == Some(&track_key) {
+                state.spectrogram.data = Some(data);
+                state.spectrogram.generating = false;
+                state.spectrogram.error = None;
+                tracing::debug!("Spectrogram generated for track: {}", track_key);
+            }
+            vec![]
+        }
+        Event::SpectrogramFailed { track_key, error } => {
+            if state.spectrogram.track_key.as_ref() == Some(&track_key) {
+                state.spectrogram.generating = false;
+                // Only set error for real failures, not empty signals from cache miss
+                if !error.is_empty() {
+                    state.spectrogram.error = Some(error.clone());
+                    tracing::warn!("Spectrogram failed for {}: {}", track_key, error);
+                }
+            }
+            vec![]
+        }
+        Event::SpectrogramCacheHit { track_key, data } => {
+            if state.spectrogram.track_key.as_ref() == Some(&track_key) {
+                state.spectrogram.data = Some(data);
+                state.spectrogram.generating = false;
+                state.spectrogram.error = None;
+                tracing::debug!("Spectrogram loaded from cache for track: {}", track_key);
+            }
+            vec![]
+        }
         Event::StationTracksLoaded { station_key, station_title, tracks, time_travel_decades } => {
             state.stations_loading = false;
             state.station_nav.loading = false;
@@ -1307,7 +1368,7 @@ pub fn handle_app_event(
                         state.radio.time_travel_decades.len());
                 }
 
-                state.view = View::NowPlaying;
+                state.view = View::Queue;
                 state.set_status(format!("Playing {} ({} tracks)", station_title, state.radio.tracks.len()));
                 return vec![Action::PlayCurrentRadioTrack];
             }
@@ -1395,6 +1456,24 @@ pub fn handle_app_event(
                 state.cache_dirty = true;
             }
             vec![]
+        }
+
+        // DJ mode tracks ready (continuous modes)
+        Event::DjTracksReady { tracks, insert_next } => {
+            vec![Action::DjModeTracksReady(tracks, insert_next)]
+        }
+        // DJ mode batch ready (inserter modes)
+        Event::DjBatchReady { inserts } => {
+            vec![Action::DjModeBatchReady(inserts)]
+        }
+        // Queue remix batch ready
+        Event::RemixBatchReady { inserts } => {
+            vec![Action::RemixBatchReady(inserts)]
+        }
+
+        // Multi-artist radio complete
+        Event::ArtistRadioComplete { tracks } => {
+            vec![Action::ArtistRadioComplete(tracks)]
         }
 
         // Inline list filter completed

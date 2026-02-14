@@ -15,6 +15,47 @@ const MAX_ARTIST_TRACKS: usize = 3;
 
 /// Generate a Sonic Adventure playlist from start to end track.
 ///
+/// Tries Plex server-side `/computePath` first (best quality), then falls
+/// back to the client-side algorithm if the endpoint is unavailable.
+pub async fn generate_adventure(
+    client: &PlexClient,
+    start: &Track,
+    end: &Track,
+    length: usize,
+) -> Result<Vec<Track>, ApiError> {
+    generate_adventure_for_library(client, start, end, length, None).await
+}
+
+/// Generate a Sonic Adventure playlist, optionally using a specific library section.
+/// When `section_id` is provided, tries the server-side `/computePath` endpoint first.
+pub async fn generate_adventure_for_library(
+    client: &PlexClient,
+    start: &Track,
+    end: &Track,
+    length: usize,
+    section_id: Option<&str>,
+) -> Result<Vec<Track>, ApiError> {
+    // Try server-side /computePath if section_id is available
+    if let Some(sid) = section_id {
+        match client.compute_path(sid, &start.rating_key, &end.rating_key, length, 0.25).await {
+            Ok(tracks) if tracks.len() >= 2 => {
+                tracing::info!("Sonic Adventure: server /computePath returned {} tracks", tracks.len());
+                return Ok(tracks);
+            }
+            Ok(_) => {
+                tracing::debug!("Sonic Adventure: /computePath returned too few tracks, falling back to client algorithm");
+            }
+            Err(e) => {
+                tracing::debug!("Sonic Adventure: /computePath failed ({}), falling back to client algorithm", e);
+            }
+        }
+    }
+
+    generate_adventure_client(client, start, end, length).await
+}
+
+/// Client-side adventure generation algorithm (fallback).
+///
 /// The algorithm:
 /// 1. Get similar tracks for both start and end points
 /// 2. Find "bridge" tracks that are similar to both
@@ -22,7 +63,7 @@ const MAX_ARTIST_TRACKS: usize = 3;
 ///    - Avoid recent artists (last 4, not just immediate previous)
 ///    - Cap per-artist tracks (max 3 per artist in the adventure)
 /// 4. Structure: start -> start-similar -> bridges -> end-similar -> end
-pub async fn generate_adventure(
+async fn generate_adventure_client(
     client: &PlexClient,
     start: &Track,
     end: &Track,

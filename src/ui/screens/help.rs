@@ -27,8 +27,8 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     let help_text = r#"
 NAVIGATION
   Arrow keys      Navigate lists
-  Tab             Next category (Library→Playlists→Genres→Radio→Folders→Now Playing)
-  Shift+Tab       Previous category
+  Tab             Next view (Library→Playlists→Genres→Folders→Queue→Now Playing)
+  Shift+Tab       Previous view
   Shift+Down      Cycle modes within category (e.g., Library→Album Artists)
   Shift+Up        Cycle modes backwards
   Enter / Right   Select / Drill down / Play
@@ -44,28 +44,25 @@ CATEGORIES (Ctrl+key - works from any view)
   Ctrl+L          Library (cycles: artists/album artists)
   Ctrl+P          Playlists
   Ctrl+G          Genres (Tab to switch: All/Library/Artist/Album/Mood/Style)
-  Ctrl+R          Radio (Plex curated stations)
   Ctrl+O          Folders
+  Ctrl+U          Queue (track list with stations panel)
+  Ctrl+N          Now Playing (visualizer: waveform/spectrum/spectrogram)
 
 VIEWS
-  Ctrl+N          Now Playing (cycles: queue/now playing)
   F1 / ?          This help screen
   F2              Settings
 
 COMMANDS (Alt+/ to see available commands)
   Ctrl+F          Search popup (floating dialog)
-  Alt+R           Start Plex radio from selection (track, album, or artist)
-  Alt+Q           Add selection to queue (enqueue)
-                  Track: adds single track
-                  Album: adds all tracks from album
-  Alt+S           Library: cycle all albums / shuffle / artists
-                  Other views: shuffle column / queue
+  Alt+E           Add selection to queue (enqueue)
+  Alt+V           Cycle view mode (context-dependent)
+                  Albums: list → shuffled → covers → covers shuffled
+                  Playlist tracks: tracks → shuffled → by album → shuffled → covers → covers shuffled
+                  Genres: cycle through tabs (All/Library/Artist/Album/Mood/Style)
+                  Now Playing: cycle visualizer (Waveform→Spectrum→Spectrogram)
   Alt+M           Show similar albums/tracks
-  Alt+B           Show Album (navigate to track's album)
-  Alt+G           Go to Artist (navigate to track's artist)
-  Alt+A           Sonic Adventure (see below)
+  Alt+G           Go to Album (navigate to track's album in Library)
   Alt+W           Save queue/radio as playlist
-  Alt+C           Toggle cover art view (album grid with artwork)
 
 STATIONS & SHORTCUTS (Alt+/ twice to see available shortcuts)
   Ctrl+Alt+A      Play track album (play album of current track)
@@ -95,33 +92,80 @@ PLAYBACK
   Shift+Right     Seek forward 10 seconds
   Play history syncs to Plex server
 
+QUEUE (Ctrl+U)
+  Left panel: artwork + station browser
+  Right panel: current queue or radio tracks
+  Tab             Toggle focus: track list / stations
+  Left/Right      Switch focus between panels
+  Del             Remove track from queue
+  Shift+Up/Down   Move selected track up/down in queue
+  Ctrl+Z          Undo last queue remix
+  Alt+W           Save queue/radio as playlist
+  Enter on playing track → opens Now Playing view
+  Stations panel  Browse Plex radio stations, DJ modes, and remix tools
+                  Enter/Right     Drill into category or play station
+                  Left/Backspace  Go back (at root: return to track list)
+
 NOW PLAYING (Ctrl+N)
-  Ctrl+N cycles:  Queue -> Now Playing
-  Queue mode      Current queue or radio tracks
-                  Del to remove from queue
-                  Alt+W to save as playlist
-  Now Playing     Album art, track info, waveform seekbar
+  Album art, track info, and visualizer panel
+  Visualizer tabs Waveform / Spectrum / Spectrogram
+  Tab             Cycle visualizer tab forward
+  Shift+Tab       Cycle visualizer tab backward
+  Alt+V           Cycle visualizer tab
+  Up              Focus tab bar (then Left/Right to switch, Down to return)
+  Left/Right      Seek ±1 second
+  Esc             Return to Queue view
 
-PLEX RADIO (Alt+R on selection)
-  Starts Plex radio seeded from the selected track, album, or artist.
-  Uses Plex server intelligence (sonic analysis, taste, popularity).
-  Station Radio   Plex curated stations (via Ctrl+R Radio)
+ARTIST RADIO
+  In Library, drill into an artist to see "Artist Radio" above "All Tracks".
+  Press Enter to start Plex radio seeded from that artist.
+  Multi-artist radio: select "Artist Radio" in the stations panel to open
+  the picker. Enter count (2-12), filter and select artists, press Tab to
+  launch blended radio from multiple artists.
 
-SONIC ADVENTURE (Alt+A or via Radio section)
-  Creates a sonic bridge between two tracks.
+SONIC ADVENTURE (Alt+A or via stations panel)
+  Creates a sonic bridge between two tracks using Plex sonic analysis.
   Alt+A method:
     1. Select start track, press Alt+A
     2. Navigate to end track, press Alt+A
     3. Enter length (5-100 tracks)
     4. Adventure replaces queue, starts playing
-  Radio section: "Sonic Adventure" item provides a self-contained UI
+  Stations panel: "Sonic Adventure" item provides a self-contained UI
   Tracks can be selected from Browse or Search (Tracks tab)
+
+DJ MODES (via stations panel)
+  Guest DJ modes that modify playback while active.
+  Toggle on/off by pressing Enter on a DJ mode in the station panel.
+  Only one DJ mode can be active at a time.
+  Activating DJ while a station is playing converts it to a queue.
+  Starting a station deactivates the active DJ mode.
+
+  Interleaving modes (insert tracks between original queue tracks):
+    DJ Gemini       Inserts a sonically similar track after each original track
+    DJ Twofer       Inserts a same-artist track (skips if next is same artist)
+    DJ Stretch      Inserts a sonic bridge between current and next track
+    Pattern: original -> DJ pick -> original -> DJ pick -> ...
+
+  Continuous modes (insert after every track, original queue keeps getting pushed down):
+    DJ Freeze       Keeps the mood with sonically similar tracks
+    DJ Contempo     Keeps the mood with tracks from the same era
+    DJ Groupie      Keeps queueing from current and related artists
+    Pattern: original -> DJ pick -> DJ pick -> DJ pick -> ...
+
+  Active DJ mode shows a dot prefix in the station panel.
+
+QUEUE REMIX (via stations panel)
+  One-time operations that modify the entire queue at once.
+  Available in the Remix section of the stations panel.
+  Ctrl+Z undoes the last remix operation.
+
+    Remix: Gemini   Insert similar tracks between each queue pair
+    Remix: Twofer   Insert same-artist tracks between each queue pair
+    Remix: Stretch  Insert sonic bridge tracks between each queue pair
+    Remix: Shuffle  Shuffle the queue (press again to undo)
 
 PLAYLISTS (Ctrl+P)
   Miller columns navigation (drill down into playlists)
-
-RADIO (Ctrl+R)
-  Miller columns navigation (browse Plex curated stations)
 
 GENRES (Ctrl+G)
   Tab             Focus tab bar (All / Library / Artist / Album / Mood / Style)
@@ -138,6 +182,8 @@ SETTINGS (F2)
   Output section  Select playback target (local or remote Plex player)
                   Remote players: Apple TV, Plexamp on phone, etc.
                   Audio plays on remote device; textamp acts as controller
+  About section   Themes, artwork mode (Auto / Halfblocks / Braille)
+                  Braille: 2x4 dot-art rendering for Apple Terminal
 
 GENERAL
   F5              Refresh current view (updates cache)

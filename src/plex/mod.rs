@@ -40,6 +40,7 @@ pub mod constants;
 mod error;
 pub mod models;
 pub mod remote;
+mod spectrogram;
 mod waveform;
 
 pub use artwork_cache::ArtworkCache;
@@ -48,6 +49,7 @@ pub use cache::{CacheData, CachedFolder, CachedPlaylistTracks, LibraryCache};
 pub use client::{PlexClient, test_connection};
 pub use error::ApiError;
 pub use remote::RemotePlayerClient;
+pub use spectrogram::{SpectrogramCache, SpectrogramData, generate_spectrogram, generate_spectrogram_from_pcm};
 pub use waveform::{WaveformCache, WaveformData, WaveformError, generate_waveform};
 
 use models::{Album, Artist, Genre, Playlist, Station, Track};

@@ -24,11 +24,11 @@ mod preload_service;
 mod search_filter_service;
 
 
-pub use adventure::generate_adventure;
+pub use adventure::{generate_adventure, generate_adventure_for_library};
 pub use cache_service::{CacheDataSources, CacheSaveConditions, CacheService, CACHE_IDLE_THRESHOLD_SECS, CACHE_SAVE_INTERVAL_SECS};
 pub use folder_service::{FolderColumn, FolderItem, FolderItemType, FolderNavigationState, FolderService};
 pub use library_service::LibraryService;
-pub use list_filter_service::{filter_with_priority, filter_browse_items, filter_folder_items, filter_stations, DEFAULT_MAX_RESULTS};
+pub use list_filter_service::{filter_with_priority, filter_browse_items, filter_folder_items, filter_stations, search_with_ranking, search_albums_with_ranking, DEFAULT_MAX_RESULTS};
 pub use navigation_service::NavigationService;
 pub use playback_service::{PlaybackService, QueueManager, NavigationResult, MAX_HISTORY_SIZE};
 pub use preload_service::{ConnectionParams, PreloadService};
@@ -37,3 +37,5 @@ pub use search_filter_service::{FilteredItem, SearchFilterService};
 
 // Re-export waveform from plex module for backward compatibility
 pub use crate::plex::{WaveformCache, WaveformData, WaveformError, generate_waveform};
+// Re-export spectrogram from plex module
+pub use crate::plex::{SpectrogramCache, SpectrogramData, generate_spectrogram, generate_spectrogram_from_pcm};

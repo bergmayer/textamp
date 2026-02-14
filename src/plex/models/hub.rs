@@ -174,6 +174,26 @@ impl Station {
         }
     }
 
+    /// Check if this station is a visual separator (non-selectable).
+    pub fn is_separator(&self) -> bool {
+        self.station_type == "separator"
+    }
+
+    /// Check if this station is a DJ mode item.
+    pub fn is_dj_mode(&self) -> bool {
+        self.station_type == "dj_mode"
+    }
+
+    /// Check if this station is a remix action item.
+    pub fn is_remix(&self) -> bool {
+        self.station_type == "remix"
+    }
+
+    /// Check if this station is an action item (non-playable, triggers an action).
+    pub fn is_action(&self) -> bool {
+        self.station_type == "action"
+    }
+
     /// Check if this station is a category with sub-stations.
     /// Categories like "Mood Radio", "Style Radio", "Decade Radio" have children.
     pub fn is_category(&self) -> bool {

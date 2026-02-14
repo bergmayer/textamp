@@ -191,6 +191,12 @@ pub async fn dispatch(
 
                 if needs_generation {
                     state.waveform.generating = true;
+                    // Also mark spectrogram as generating if it needs data
+                    let also_generate_spectrogram = state.spectrogram.data.is_none()
+                        && !state.spectrogram.generating;
+                    if also_generate_spectrogram {
+                        state.spectrogram.generating = true;
+                    }
                     let track_key = track.rating_key.clone();
                     let duration_ms = track.duration_ms();
                     let event_tx = event_tx.clone();
@@ -199,24 +205,66 @@ pub async fn dispatch(
                         let token = client.token().map(|s| s.to_string());
 
                         tokio::spawn(async move {
-                            // Check cache first
-                            let cache_dir = dirs::cache_dir()
+                            // Check waveform cache first
+                            let waveform_cache_dir = dirs::cache_dir()
                                 .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
                                 .join("textamp")
                                 .join("waveforms");
-                            let cache = crate::services::WaveformCache::new(cache_dir);
+                            let waveform_cache = crate::services::WaveformCache::new(waveform_cache_dir);
 
-                            if let Some(data) = cache.load(&track_key) {
-                                // Cache hit
+                            let spectrogram_cache_dir = dirs::cache_dir()
+                                .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+                                .join("textamp")
+                                .join("spectrograms");
+                            let spectrogram_cache = crate::services::SpectrogramCache::new(spectrogram_cache_dir);
+
+                            // Try waveform cache
+                            let waveform_cached = waveform_cache.load(&track_key);
+                            if let Some(data) = waveform_cached {
                                 let _ = event_tx.send(Event::WaveformCacheHit {
-                                    track_key,
+                                    track_key: track_key.clone(),
                                     data,
                                 }).await;
+
+                                // Check spectrogram cache; if miss, leave it for LoadSpectrogram
+                                // (triggered by tick safety net) rather than downloading here.
+                                if also_generate_spectrogram {
+                                    if let Some(sg_data) = spectrogram_cache.load(&track_key) {
+                                        let _ = event_tx.send(Event::SpectrogramCacheHit {
+                                            track_key,
+                                            data: sg_data,
+                                        }).await;
+                                    } else {
+                                        // Signal that spectrogram still needs work —
+                                        // SpectrogramFailed clears generating so the tick
+                                        // safety net triggers LoadSpectrogram independently.
+                                        let _ = event_tx.send(Event::SpectrogramFailed {
+                                            track_key,
+                                            error: String::new(),
+                                        }).await;
+                                    }
+                                }
                                 return;
                             }
 
-                            // Cache miss - download and generate
-                            let http_client = reqwest::Client::new();
+                            // Check spectrogram cache too
+                            let spectrogram_cached = if also_generate_spectrogram {
+                                spectrogram_cache.load(&track_key)
+                            } else {
+                                None
+                            };
+                            if let Some(sg_data) = &spectrogram_cached {
+                                let _ = event_tx.send(Event::SpectrogramCacheHit {
+                                    track_key: track_key.clone(),
+                                    data: sg_data.clone(),
+                                }).await;
+                            }
+
+                            // Download audio with timeout and generate waveform (+ spectrogram if not cached)
+                            let http_client = reqwest::Client::builder()
+                                .timeout(std::time::Duration::from_secs(30))
+                                .build()
+                                .unwrap_or_default();
                             let mut request = http_client.get(&stream_url);
                             if let Some(ref token) = token {
                                 request = request.header("X-Plex-Token", token);
@@ -226,44 +274,163 @@ pub async fn dispatch(
                                 Ok(response) => {
                                     match response.bytes().await {
                                         Ok(audio_data) => {
-                                            // Generate waveform
                                             match crate::services::generate_waveform(
                                                 track_key.clone(),
                                                 duration_ms,
                                                 audio_data.to_vec(),
                                             ) {
                                                 Ok(data) => {
-                                                    // Save to cache
-                                                    cache.save(&data);
+                                                    waveform_cache.save(&data);
                                                     let _ = event_tx.send(Event::WaveformGenerated {
-                                                        track_key,
+                                                        track_key: track_key.clone(),
                                                         data,
                                                     }).await;
                                                 }
                                                 Err(e) => {
                                                     let _ = event_tx.send(Event::WaveformFailed {
-                                                        track_key,
+                                                        track_key: track_key.clone(),
                                                         error: e.to_string(),
                                                     }).await;
+                                                }
+                                            }
+
+                                            // Co-compute spectrogram from same audio data if not cached
+                                            if also_generate_spectrogram && spectrogram_cached.is_none() {
+                                                match crate::services::generate_spectrogram(
+                                                    track_key.clone(), duration_ms, audio_data.to_vec(),
+                                                ) {
+                                                    Ok(sg_data) => {
+                                                        spectrogram_cache.save(&sg_data);
+                                                        let _ = event_tx.send(Event::SpectrogramGenerated {
+                                                            track_key, data: sg_data,
+                                                        }).await;
+                                                    }
+                                                    Err(e) => {
+                                                        let _ = event_tx.send(Event::SpectrogramFailed {
+                                                            track_key, error: e.to_string(),
+                                                        }).await;
+                                                    }
                                                 }
                                             }
                                         }
                                         Err(e) => {
                                             let _ = event_tx.send(Event::WaveformFailed {
-                                                track_key,
+                                                track_key: track_key.clone(),
                                                 error: format!("Download failed: {}", e),
                                             }).await;
+                                            if also_generate_spectrogram && spectrogram_cached.is_none() {
+                                                let _ = event_tx.send(Event::SpectrogramFailed {
+                                                    track_key, error: format!("Download failed: {}", e),
+                                                }).await;
+                                            }
                                         }
                                     }
                                 }
                                 Err(e) => {
                                     let _ = event_tx.send(Event::WaveformFailed {
-                                        track_key,
+                                        track_key: track_key.clone(),
                                         error: format!("Request failed: {}", e),
                                     }).await;
+                                    if also_generate_spectrogram && spectrogram_cached.is_none() {
+                                        let _ = event_tx.send(Event::SpectrogramFailed {
+                                            track_key, error: format!("Request failed: {}", e),
+                                        }).await;
+                                    }
                                 }
                             }
                         });
+                    }
+                }
+            }
+        }
+        Action::LoadSpectrogram => {
+            // Load spectrogram data — check cache first, then generate if needed.
+            // Generation is normally co-computed with waveform, but if waveform is
+            // already loaded (e.g., re-entering NowPlaying), we download independently.
+            if let Some(track) = state.current_track().cloned() {
+                let needs_generation = state.spectrogram.data.is_none()
+                    && !state.spectrogram.generating
+                    && state.spectrogram.track_key.as_ref() == Some(&track.rating_key);
+
+                if needs_generation {
+                    // Check cache first
+                    let cache_dir = dirs::cache_dir()
+                        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+                        .join("textamp")
+                        .join("spectrograms");
+                    let cache = crate::services::SpectrogramCache::new(cache_dir);
+
+                    if let Some(data) = cache.load(&track.rating_key) {
+                        state.spectrogram.data = Some(data);
+                        state.spectrogram.generating = false;
+                        state.spectrogram.error = None;
+                    } else if state.waveform.data.is_none() && !state.waveform.generating {
+                        // Neither waveform nor spectrogram — trigger LoadWaveform to co-compute
+                        return Ok(vec![Action::LoadWaveform]);
+                    } else if state.waveform.generating {
+                        // Waveform is being generated right now — it will co-compute spectrogram
+                        state.spectrogram.generating = true;
+                    } else {
+                        // Waveform already loaded but no spectrogram — download independently
+                        state.spectrogram.generating = true;
+                        state.spectrogram.error = None;
+                        let track_key = track.rating_key.clone();
+                        let duration_ms = track.duration_ms();
+                        let event_tx = event_tx.clone();
+
+                        if let Ok(stream_url) = client.get_stream_url(&track) {
+                            let token = client.token().map(|s| s.to_string());
+
+                            tokio::spawn(async move {
+                                let http_client = reqwest::Client::builder()
+                                    .timeout(std::time::Duration::from_secs(30))
+                                    .build()
+                                    .unwrap_or_default();
+                                let mut request = http_client.get(&stream_url);
+                                if let Some(ref token) = token {
+                                    request = request.header("X-Plex-Token", token);
+                                }
+
+                                match request.send().await {
+                                    Ok(response) => {
+                                        match response.bytes().await {
+                                            Ok(audio_data) => {
+                                                match crate::services::generate_spectrogram(
+                                                    track_key.clone(), duration_ms, audio_data.to_vec(),
+                                                ) {
+                                                    Ok(data) => {
+                                                        let sg_cache_dir = dirs::cache_dir()
+                                                            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+                                                            .join("textamp")
+                                                            .join("spectrograms");
+                                                        let sg_cache = crate::services::SpectrogramCache::new(sg_cache_dir);
+                                                        sg_cache.save(&data);
+                                                        let _ = event_tx.send(Event::SpectrogramGenerated {
+                                                            track_key, data,
+                                                        }).await;
+                                                    }
+                                                    Err(e) => {
+                                                        let _ = event_tx.send(Event::SpectrogramFailed {
+                                                            track_key, error: e.to_string(),
+                                                        }).await;
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                let _ = event_tx.send(Event::SpectrogramFailed {
+                                                    track_key, error: format!("Download failed: {}", e),
+                                                }).await;
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        let _ = event_tx.send(Event::SpectrogramFailed {
+                                            track_key, error: format!("Request failed: {}", e),
+                                        }).await;
+                                    }
+                                }
+                            });
+                        }
                     }
                 }
             }

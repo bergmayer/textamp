@@ -167,7 +167,9 @@ pub(super) fn handle_settings_keys(key: event::KeyEvent, state: &mut AppState, c
                             1 + state.remote_players.len()
                         }
                         SettingsSection::About => {
-                            crate::ui::theme::ThemeName::all().len().saturating_sub(1)
+                            // Themes (0..N-1) + Artwork modes (N..N+2)
+                            crate::ui::theme::ThemeName::all().len()
+                                + crate::app::state::ArtworkMode::all().len() - 1
                         }
                     };
                     if state.settings_state.item_index < max_index {

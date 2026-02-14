@@ -35,6 +35,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     match state.view {
         View::Auth => render_auth(frame, state),
         View::Browse => render_browse(frame, state),
+        View::Queue => render_queue(frame, state),
         View::NowPlaying => render_now_playing(frame, state),
         View::Search => render_search(frame, state),
         View::Similar => render_similar(frame, state),
@@ -47,14 +48,26 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         render_search_popup(frame, state);
     }
 
+    // Popup area: center within queue right panel when on Queue view
+    let popup_area = if state.view == View::Queue {
+        queue_right_panel(frame)
+    } else {
+        frame.area()
+    };
+
     // Render radio launcher popup if active
     if state.radio_launcher.is_some() {
-        screens::radio_launcher::render(frame, state, frame.area());
+        screens::radio_launcher::render(frame, state, popup_area);
     }
 
     // Render adventure launcher popup if active
     if state.adventure_launcher.is_some() {
-        screens::adventure_launcher::render(frame, state, frame.area());
+        screens::adventure_launcher::render(frame, state, popup_area);
+    }
+
+    // Render artist radio picker popup if active
+    if state.artist_radio_picker.is_some() {
+        screens::artist_radio_picker::render(frame, state, popup_area);
     }
 
     // Render library picker popup if active
@@ -142,18 +155,6 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
                 layout.right_panel,
             );
         }
-        BrowseCategory::Radio => {
-            // Get filter info if filter applies to this category
-            let (filter_results, filter_column) = if state.list_filter.active
-                && state.list_filter.category == BrowseCategory::Radio {
-                (state.list_filter.results.as_ref(), Some(state.list_filter.column))
-            } else {
-                (None, None)
-            };
-
-            // Radio/stations view with Miller columns (no tab bar)
-            render_station_view(frame, state, filter_results, filter_column, layout.left_panel, layout.right_panel);
-        }
         BrowseCategory::Genres => {
             // Get filter info if filter applies to this category
             let (filter_results, filter_column) = if state.list_filter.active
@@ -187,6 +188,7 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
                 frame, state, tab_area,
                 &["All", "Library", "Artist", "Album", "Mood", "Style"],
                 state.genre_tab as usize,
+                state.genre_tab_focused,
             );
 
             // Genres with dynamic Miller columns
@@ -225,10 +227,34 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
     render_shortcuts(frame, state, layout.shortcuts);
 }
 
+fn render_queue(frame: &mut Frame, state: &AppState) {
+    let layout = FullScreenLayout::new(frame.area());
+
+    screens::now_playing::render_queue_mode(frame, state, layout.content);
+    render_transport(frame, state, layout.transport);
+    render_shortcuts(frame, state, layout.shortcuts);
+}
+
+/// Compute the queue right panel (track list) area for popup centering.
+/// Replicates the layout calculation from render_queue_mode.
+fn queue_right_panel(frame: &Frame) -> Rect {
+    let layout = FullScreenLayout::new(frame.area());
+    let area = layout.content;
+    let art_height = (area.height * 40 / 100).max(8);
+    let art_width = (art_height * 2).min(area.width * 40 / 100).max(25);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(art_width),
+            Constraint::Min(40),
+        ])
+        .split(area)[1]
+}
+
 fn render_now_playing(frame: &mut Frame, state: &AppState) {
     let layout = FullScreenLayout::new(frame.area());
 
-    screens::now_playing::render(frame, state, layout.content);
+    screens::now_playing::render_visualizer_mode(frame, state, layout.content);
     render_transport(frame, state, layout.transport);
     render_shortcuts(frame, state, layout.shortcuts);
 }
@@ -520,11 +546,21 @@ fn render_tab_bar(
     area: Rect,
     labels: &[&str],
     selected: usize,
+    tab_focused: bool,
 ) {
     let t = theme();
 
     let titles: Vec<Line> = labels.iter().enumerate().map(|(i, label)| {
-        if i == selected {
+        if i == selected && tab_focused {
+            // Focused tab bar: highlight selected tab with inverted colors
+            Line::from(Span::styled(
+                format!(" {} ", label),
+                Style::default()
+                    .fg(t.colors.bg_primary)
+                    .bg(t.colors.fg_accent)
+                    .add_modifier(Modifier::BOLD),
+            ))
+        } else if i == selected {
             Line::from(Span::styled(
                 format!(" {} ", label),
                 Style::default()
@@ -540,6 +576,8 @@ fn render_tab_bar(
     }).collect();
 
     let tabs = Tabs::new(titles)
+        .select(selected)
+        .highlight_style(Style::default()) // Disable built-in highlight (we handle it ourselves)
         .style(Style::default().bg(t.colors.bg_primary).fg(t.colors.fg_muted))
         .divider(Span::styled(" │ ", Style::default().fg(t.colors.fg_muted)))
         .padding("", "");
@@ -707,7 +745,12 @@ fn render_browse_miller_columns(
                 || (state.browse_category == crate::app::state::BrowseCategory::Library
                     && state.library_sub_mode != crate::app::state::LibrarySubMode::Normal
                     && col_idx == 0));
-            let is_two_row = is_two_row_track || is_all_artists_albums;
+            // Playlist album groups (TracksByAlbum) also use 2-row to show artist
+            let is_playlist_album_group = col_idx > 0
+                && state.browse_category == BrowseCategory::Playlists
+                && state.playlist_view_mode == crate::app::state::PlaylistViewMode::TracksByAlbum
+                && col.items.first().map_or(false, |item| matches!(item, BrowseItem::Album { .. }));
+            let is_two_row = is_two_row_track || is_all_artists_albums || is_playlist_album_group;
             let rows_per_item = if is_two_row { 2 } else { 1 };
             let visible_item_count = visible_height / rows_per_item;
 
@@ -1131,218 +1174,6 @@ fn render_album_art_grid(
         );
     }
 }
-/// Render Station view with Miller columns navigation
-fn render_station_view(
-    frame: &mut Frame,
-    state: &AppState,
-    filter_results: Option<&crate::app::state::ListFilterResults>,
-    filter_column: Option<usize>,
-    left_area: Rect,
-    right_area: Rect,
-) {
-    use crate::util::truncate_middle;
-    let t = theme();
-
-    // Combine left and right panels for Miller columns view
-    let area = Rect {
-        x: left_area.x,
-        y: left_area.y,
-        width: left_area.width + right_area.width,
-        height: left_area.height,
-    };
-
-    // Loading state
-    if state.station_nav.loading || state.stations_loading {
-        let block = Block::default()
-            .title(" stations ")
-            .title_style(Style::default().fg(t.colors.fg_accent))
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(t.colors.border_focused))
-            .style(Style::default().bg(t.colors.bg_primary));
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-        let loading = Paragraph::new("Loading...")
-            .style(Style::default().fg(t.colors.fg_muted));
-        frame.render_widget(loading, inner);
-        return;
-    }
-
-    let num_columns = state.station_nav.columns.len();
-    if num_columns == 0 {
-        // No columns yet - show empty state
-        let block = Block::default()
-            .title(" stations ")
-            .title_style(Style::default().fg(t.colors.fg_accent))
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(t.colors.border_focused))
-            .style(Style::default().bg(t.colors.bg_primary));
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-        let msg = Paragraph::new("No stations loaded")
-            .style(Style::default().fg(t.colors.fg_muted));
-        frame.render_widget(msg, inner);
-        return;
-    }
-
-    // Don't show empty trailing columns
-    let last_meaningful = (0..num_columns)
-        .rev()
-        .find(|&i| !state.station_nav.columns[i].stations.is_empty() || i <= state.station_nav.focused_column)
-        .unwrap_or(0);
-    let effective_columns = last_meaningful + 1;
-
-    // Calculate column width - show up to 3 columns
-    let max_visible = 3.min(effective_columns);
-    let col_width = area.width / max_visible as u16;
-
-    // Determine which columns to show (always include focused column)
-    let start_col = if state.station_nav.focused_column + 1 > max_visible {
-        state.station_nav.focused_column + 1 - max_visible
-    } else {
-        0
-    };
-
-    for (vis_idx, col_idx) in (start_col..effective_columns.min(start_col + max_visible)).enumerate() {
-        let col = &state.station_nav.columns[col_idx];
-        let is_focused = col_idx == state.station_nav.focused_column;
-
-        let col_area = Rect {
-            x: area.x + (vis_idx as u16 * col_width),
-            y: area.y,
-            width: if vis_idx == max_visible - 1 {
-                area.width - (vis_idx as u16 * col_width) // Last column gets remaining width
-            } else {
-                col_width
-            },
-            height: area.height,
-        };
-
-        let border_color = if is_focused { t.colors.border_focused } else { t.colors.border };
-
-        // Show title for root column, or any shuffled column
-        let title = if col_idx == 0 && col.is_shuffled() {
-            format!(" {} (shuffled) ", col.title)
-        } else if col_idx == 0 {
-            format!(" {} ", col.title)
-        } else if col.is_shuffled() {
-            format!(" {} (shuffled) ", col.title)
-        } else {
-            String::new()
-        };
-
-        let mut block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(border_color))
-            .style(Style::default().bg(t.colors.bg_primary));
-
-        if !title.is_empty() {
-            block = block
-                .title(title)
-                .title_style(Style::default().fg(t.colors.fg_accent));
-        }
-
-        let inner = block.inner(col_area);
-        frame.render_widget(block, col_area);
-
-        if col.stations.is_empty() {
-            let empty = Paragraph::new("(empty)")
-                .style(Style::default().fg(t.colors.fg_muted));
-            frame.render_widget(empty, inner);
-        } else {
-            // LAZY LOADING: Only render visible items
-            let visible_height = inner.height as usize;
-            let selected_idx = col.selected_index;
-
-            // Calculate max text width for middle truncation
-            let max_text_width = inner.width.saturating_sub(3) as usize; // Leave room for " ›" suffix
-
-            // Check if filter is active on this column
-            let is_filter_column = filter_column == Some(col_idx);
-            let (items_to_show, total_items, filter_active_on_col): (Vec<(usize, &crate::api::models::Station)>, usize, bool) =
-                if let Some(results) = filter_results.filter(|_| is_filter_column) {
-                    if results.matched_indices.is_empty() {
-                        (vec![], 0, true)
-                    } else {
-                        let items: Vec<_> = results.matched_indices.iter()
-                            .filter_map(|&idx| col.stations.get(idx).map(|s| (idx, s)))
-                            .collect();
-                        let len = items.len();
-                        (items, len, true)
-                    }
-                } else {
-                    let items: Vec<_> = col.stations.iter().enumerate().collect();
-                    let len = items.len();
-                    (items, len, false)
-                };
-
-            if items_to_show.is_empty() && filter_active_on_col {
-                let empty = Paragraph::new("no matches")
-                    .style(Style::default().fg(t.colors.fg_muted));
-                frame.render_widget(empty, inner);
-            } else {
-                // Calculate scroll offset based on display items
-                let display_selected_idx = if let Some(results) = filter_results.filter(|_| filter_active_on_col) {
-                    results.matched_indices.iter()
-                        .position(|&idx| idx == selected_idx)
-                        .unwrap_or(0)
-                } else {
-                    selected_idx
-                };
-                let scroll_offset = match state.browse_scroll_pin {
-                    Some((pin_col, pinned)) if pin_col == col_idx => pinned,
-                    _ => NavigationService::calc_scroll_offset(display_selected_idx, visible_height, total_items),
-                };
-
-                // Only create ListItems for visible range
-                let visible_items: Vec<ListItem> = items_to_show.into_iter()
-                    .skip(scroll_offset)
-                    .take(visible_height)
-                    .map(|(orig_idx, station)| {
-                        let is_selected = orig_idx == selected_idx;
-                        let is_category = station.is_category();
-                        let is_action = station.station_type == "action";
-
-                        // Show "›" suffix for categories (drillable), not for action items
-                        let suffix = if is_category && !is_action { " ›" } else { "" };
-
-                        // Apply middle truncation for long titles
-                        let display_title = truncate_middle(&station.title, max_text_width);
-
-                        let style = if is_selected && is_focused {
-                            Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
-                        } else if is_selected {
-                            Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
-                        } else if is_action {
-                            Style::default().fg(t.colors.fg_accent)
-                        } else {
-                            Style::default().fg(t.colors.fg_primary)
-                        };
-                        ListItem::new(format!("{}{}", display_title, suffix)).style(style)
-                    })
-                    .collect();
-
-                let list = List::new(visible_items);
-                frame.render_widget(list, inner);
-            }
-
-            // Position indicator for long lists
-            if total_items > visible_height {
-                let footer = format!("{}/{}", selected_idx + 1, total_items);
-                let footer_area = Rect::new(
-                    col_area.x + col_area.width.saturating_sub(footer.len() as u16 + 2),
-                    col_area.y + col_area.height - 1,
-                    footer.len() as u16 + 1,
-                    1,
-                );
-                frame.render_widget(
-                    Paragraph::new(footer).style(Style::default().fg(t.colors.fg_muted)),
-                    footer_area,
-                );
-            }
-        }
-    }
-}
-
 /// Render the transport bar (now playing info).
 fn render_transport(frame: &mut Frame, state: &AppState, area: Rect) {
     widgets::transport::render(frame, state, area);
@@ -1451,17 +1282,13 @@ fn render_shortcuts(frame: &mut Frame, state: &AppState, area: Rect) {
         }
     } else {
         // Default: navigation shortcuts
-        let now_playing_label = state.now_playing_mode.name();
-
         let shortcuts: Vec<(&str, &str, bool)> = vec![
             ("^L", "library", state.view == View::Browse && state.browse_category == BrowseCategory::Library),
             ("^P", "playlists", state.view == View::Browse && state.browse_category == BrowseCategory::Playlists),
             ("^G", "genres", state.view == View::Browse && state.browse_category == BrowseCategory::Genres),
-            ("^R", "radio", state.view == View::Browse && state.browse_category == BrowseCategory::Radio),
             ("^O", "folders", state.view == View::Browse && state.browse_category == BrowseCategory::Folders),
-            ("^N", now_playing_label, state.view == View::NowPlaying),
-            ("F1", "help", state.view == View::Help),
-            ("F2", "settings", state.view == View::Settings),
+            ("^U", "queue", state.view == View::Queue),
+            ("^N", "now playing", state.view == View::NowPlaying),
         ];
 
         for (i, (key, label, is_current)) in shortcuts.iter().enumerate() {

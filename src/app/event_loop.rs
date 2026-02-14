@@ -105,6 +105,9 @@ impl EventLoop {
         // Restore cover art view preference
         state.album_art_view = self.config.ui.cover_art_view;
 
+        // Restore artwork mode preference
+        state.artwork_mode = crate::app::state::ArtworkMode::from_config(&self.config.ui.artwork_mode);
+
         // Start authentication in background
         self.start_auth_task(state);
 
@@ -451,7 +454,7 @@ impl EventLoop {
             // System
             Quit | ShowError(_) | ClearError | SetStatus(_) | ClearStatus
             | RefreshCategory(_) | CheckStaleness(_) | CycleTheme | LoadArtwork | LoadWaveform
-            | ToggleAlbumArtView | LoadAlbumArt(_) => {
+            | LoadSpectrogram | ToggleAlbumArtView | LoadAlbumArt(_) => {
                 handlers::dispatch_system::dispatch(&self.event_tx, &mut self.config, action, state, client).await?
             }
 
@@ -475,7 +478,7 @@ impl EventLoop {
             | LoadArtistAllTracksForMiller { .. } | LoadAllAlbumsForMiller | PlayTrackFromMiller { .. }
             | LoadGenreAlbumsForMiller { .. } | LoadGenreTracksForMiller { .. }
             | PlayGenreTrackFromMiller { .. } | LoadPlaylistTracksForMiller { .. }
-            | PlayPlaylistTrackFromMiller { .. } => {
+            | PlayPlaylistTrackFromMiller { .. } | PlayPlaylistAlbumGroupTrack { .. } => {
                 handlers::dispatch_miller::dispatch(&self.event_tx, action, state, client, audio).await?
             }
 
@@ -491,7 +494,10 @@ impl EventLoop {
             | EnqueueAlbum { .. } | ClearQueue | RemoveFromQueue(_)
             | JumpToQueueIndex(_)
             | EnqueueSelection | PromptSavePlaylist | SaveQueueAsPlaylist(_)
-            | ToggleQueueShuffle => {
+            | ToggleQueueShuffle
+            | RemixGemini | RemixTwofer | RemixStretch
+            | RemixShuffle | RemixUndoShuffle | UndoLastRemix
+            | MoveQueueTrackUp | MoveQueueTrackDown | RemixBatchReady(_) => {
                 handlers::dispatch_queue::dispatch(&self.event_tx, action, state, client, audio).await?
             }
 
@@ -505,7 +511,10 @@ impl EventLoop {
             | OpenAdventureLauncher | CloseAdventureLauncher | AdventureLauncherSearch
             | AdventureLauncherDrillArtist { .. } | AdventureLauncherDrillAlbum { .. }
             | AdventureLauncherSelectTrack | AdventureLauncherBack
-            | OpenLibraryPicker | CloseLibraryPicker => {
+            | OpenLibraryPicker | CloseLibraryPicker
+            | OpenArtistRadioPicker | CloseArtistRadioPicker | ArtistRadioPickerSearch
+            | ArtistRadioPickerSetCount | ArtistRadioPickerToggleArtist
+            | ArtistRadioPickerLaunch => {
                 handlers::dispatch_search::dispatch(&self.event_tx, action, state, client).await?
             }
 
@@ -514,8 +523,7 @@ impl EventLoop {
             | LoadMoods | LoadStyles | LoadGenreAlbums | LoadArtistGenreAlbums
             | LoadAlbumGenreAlbums | LoadMoodAlbums | LoadStyleAlbums
             | CycleGenreContentType | RefreshGenreView
-            | CycleArtistViewMode | RefreshArtistView | CycleLibrarySubMode | CycleNowPlayingMode
-            | RefreshNowPlayingView
+            | CycleArtistViewMode | RefreshArtistView | CycleLibrarySubMode
             | CycleGenreTab | SetGenreTab(_)
             | ToggleBrowseShuffle => {
                 handlers::dispatch_browse::dispatch(&self.event_tx, action, state, client).await?
@@ -527,11 +535,13 @@ impl EventLoop {
                 handlers::dispatch_folders::dispatch(&self.event_tx, action, state, client, audio).await?
             }
 
-            // Radio and stations
+            // Radio, stations, and DJ modes
             StopRadio | JumpToRadioTrack(_)
             | PlayCurrentRadioTrack
             | StartPlexRadio { .. }
-            | PlayStation(_) | DrillIntoStation(_, _) | NavigateStationsBack => {
+            | PlayStation(_) | DrillIntoStation(_, _) | NavigateStationsBack
+            | ToggleDjMode(_) | DjModeProcess | DjModeTracksReady(_, _)
+            | DjModeBatchReady(_) => {
                 handlers::dispatch_radio::dispatch(&self.event_tx, action, state, client, audio).await?
             }
 
@@ -545,7 +555,7 @@ impl EventLoop {
             | DiscoverPlayers | SetOutputTarget(_)
             | StartAdventure | SetAdventureStart(_) | SetAdventureEnd(_)
             | SetAdventureLength(_) | CancelAdventure | AdventureComplete(_)
-            | AdventureError(_) => {
+            | AdventureError(_) | ArtistRadioComplete(_) => {
                 handlers::dispatch_settings::dispatch(&self.event_tx, &mut self.config, action, state, client, audio).await?
             }
 

@@ -84,10 +84,6 @@ pub enum Action {
     RefreshArtistView,   // Refresh artist view after mode change (shared logic)
     CycleLibrarySubMode, // Alt+S in Library: cycle Normal → AllByArtist → AllShuffled
 
-    // Now Playing view mode cycling
-    CycleNowPlayingMode, // Ctrl+N when already in Now Playing: cycle Queue → Recently Played
-    RefreshNowPlayingView, // Refresh now playing view after mode change (shared logic)
-
     // Genre tab cycling
     CycleGenreTab,       // Ctrl+G when already in Genres: cycle All/Library/Artist/Album/Mood/Style
     SetGenreTab(crate::app::state::GenreTab), // Direct tab selection (mouse clicks)
@@ -147,6 +143,8 @@ pub enum Action {
     // Miller column navigation for Playlists view
     LoadPlaylistTracksForMiller { playlist_key: String },
     PlayPlaylistTrackFromMiller { column_index: usize, track_index: usize },
+    /// Play from album-grouped playlist: queue is all groups flattened, starting at track_index.
+    PlayPlaylistAlbumGroupTrack { track_index: usize },
 
     // Radio mode
     StopRadio,
@@ -172,8 +170,9 @@ pub enum Action {
     /// Load album art for a batch of albums: Vec<(rating_key, thumb_path)>
     LoadAlbumArt(Vec<(String, String)>),
 
-    // Waveform (for Seekbar visualizer)
+    // Waveform and spectrogram (for visualizers)
     LoadWaveform,
+    LoadSpectrogram,
 
     // System
     Quit,
@@ -233,6 +232,34 @@ pub enum Action {
     // Library picker popup (Ctrl+Alt+S)
     OpenLibraryPicker,
     CloseLibraryPicker,
+
+    // DJ modes
+    ToggleDjMode(crate::app::state::DjMode),
+    DjModeProcess,
+    DjModeTracksReady(Vec<Track>, bool), // (tracks, insert_next)
+    /// Batch result from inserter DJ modes: Vec<(original_queue_index, tracks_to_insert_after)>
+    DjModeBatchReady(Vec<(usize, Vec<Track>)>),
+
+    // Queue remix
+    RemixGemini,
+    RemixTwofer,
+    RemixStretch,
+    RemixShuffle,
+    RemixUndoShuffle,
+    UndoLastRemix,
+    MoveQueueTrackUp,
+    MoveQueueTrackDown,
+    /// Batch result from remix: Vec<(original_queue_index, tracks_to_insert_after)>
+    RemixBatchReady(Vec<(usize, Vec<Track>)>),
+
+    // Multi-artist radio picker
+    OpenArtistRadioPicker,
+    CloseArtistRadioPicker,
+    ArtistRadioPickerSearch,
+    ArtistRadioPickerSetCount,
+    ArtistRadioPickerToggleArtist,
+    ArtistRadioPickerLaunch,
+    ArtistRadioComplete(Vec<crate::api::models::Track>),
 
     // Remote player control
     DiscoverPlayers,

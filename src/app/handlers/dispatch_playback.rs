@@ -75,6 +75,8 @@ pub async fn dispatch(
                 helpers::report_playback_stop_to_plex(&track, state.playback.position_ms, true, state.plex_session_id.clone(), client);
             }
 
+            let mut track_advanced = false;
+
             match state.playback_mode {
                 PlaybackMode::Radio => {
                     // Radio mode: use radio.tracks and auto-fetch more
@@ -82,6 +84,7 @@ pub async fn dispatch(
                         if idx + 1 < state.radio.tracks.len() {
                             state.radio.track_index = Some(idx + 1);
                             helpers::play_current_track(event_tx, state, client, audio).await;
+                            track_advanced = true;
 
                             // Auto-fetch more tracks when running low
                             let remaining = state.radio.tracks.len().saturating_sub(idx + 1);
@@ -100,6 +103,7 @@ pub async fn dispatch(
                         if idx + 1 < state.queue.len() {
                             state.queue_index = Some(idx + 1);
                             helpers::play_current_track(event_tx, state, client, audio).await;
+                            track_advanced = true;
                         } else {
                             // End of queue: report final stop to Plex (not continuing)
                             if let Some(track) = state.current_track().cloned() {
@@ -110,6 +114,14 @@ pub async fn dispatch(
                             state.plex_session_id = None;
                         }
                     }
+                }
+            }
+
+            // Trigger DJ mode processing after every track transition.
+            // All DJ modes are continuous: insert tracks after current position.
+            if track_advanced && !state.dj_inserting {
+                if state.active_dj_mode.is_some() {
+                    return Ok(vec![Action::DjModeProcess]);
                 }
             }
         }

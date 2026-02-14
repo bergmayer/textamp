@@ -373,16 +373,49 @@ pub async fn dispatch(
                     }
                 }
                 SettingsSection::About => {
-                    // Apply selected theme
-                    if let Some(theme_name) = crate::ui::theme::ThemeName::all().get(state.settings_state.item_index) {
-                        state.theme = *theme_name;
-                        crate::ui::theme::set_theme(state.theme);
-                        state.set_status(format!("Theme: {}", state.theme.display_name()));
+                    let theme_count = crate::ui::theme::ThemeName::all().len();
+                    if state.settings_state.item_index < theme_count {
+                        // Apply selected theme
+                        if let Some(theme_name) = crate::ui::theme::ThemeName::all().get(state.settings_state.item_index) {
+                            state.theme = *theme_name;
+                            crate::ui::theme::set_theme(state.theme);
+                            state.set_status(format!("Theme: {}", state.theme.display_name()));
 
-                        // Persist theme to config
-                        config.ui.theme = state.theme.config_name().to_string();
-                        if let Err(e) = crate::config::save_config(config) {
-                            tracing::warn!("Failed to save theme preference: {}", e);
+                            config.ui.theme = state.theme.config_name().to_string();
+                            if let Err(e) = crate::config::save_config(config) {
+                                tracing::warn!("Failed to save theme preference: {}", e);
+                            }
+                        }
+                    } else if state.settings_state.item_index >= theme_count
+                        && state.settings_state.item_index < theme_count + crate::app::state::ArtworkMode::all().len()
+                    {
+                        // Select artwork mode
+                        let mode_idx = state.settings_state.item_index - theme_count;
+                        if let Some(&mode) = crate::app::state::ArtworkMode::all().get(mode_idx) {
+                            state.artwork_mode = mode;
+                            crate::ui::screens::now_playing::set_artwork_mode(mode);
+                            crate::ui::artwork::set_grid_artwork_mode(mode);
+
+                            match mode {
+                                crate::app::state::ArtworkMode::Halfblocks => {
+                                    let hb = ratatui_image::picker::ProtocolType::Halfblocks;
+                                    crate::ui::screens::now_playing::set_artwork_protocol_type(hb);
+                                    crate::ui::artwork::set_grid_protocol_type(hb);
+                                }
+                                crate::app::state::ArtworkMode::Auto => {
+                                    // Native protocol requires restart
+                                }
+                                crate::app::state::ArtworkMode::Braille => {
+                                    // Braille doesn't use picker protocol
+                                }
+                            }
+
+                            state.set_status(format!("Artwork: {}", mode.name()));
+
+                            config.ui.artwork_mode = mode.config_value().to_string();
+                            if let Err(e) = crate::config::save_config(config) {
+                                tracing::warn!("Failed to save artwork_mode preference: {}", e);
+                            }
                         }
                     }
                 }
@@ -1041,7 +1074,7 @@ pub async fn dispatch(
             // Generate the adventure
             if let (Some(start), Some(end)) = (state.adventure.start_track.clone(), state.adventure.end_track.clone()) {
                 let requested_length = state.adventure.requested_length;
-                match crate::services::generate_adventure(client, &start, &end, requested_length).await {
+                match crate::services::generate_adventure_for_library(client, &start, &end, requested_length, state.active_library.as_deref()).await {
                     Ok(tracks) => {
                         // Check if we got meaningful results (more than just start + end)
                         if tracks.len() <= 2 {
@@ -1104,6 +1137,25 @@ pub async fn dispatch(
         Action::AdventureError(msg) => {
             state.adventure.generating = false;
             state.set_error(format!("Adventure failed: {}", msg));
+        }
+        Action::ArtistRadioComplete(tracks) => {
+            if tracks.is_empty() {
+                state.set_error("Artist radio: no tracks returned".to_string());
+                return Ok(vec![]);
+            }
+            // Clear radio state if switching from radio mode
+            if state.playback_mode == PlaybackMode::Radio {
+                state.radio.clear();
+            }
+            let count = tracks.len();
+            state.queue = tracks;
+            state.queue_index = Some(0);
+            state.queue_original.clear();
+            state.queue_sort_mode = QueueSortMode::QueueOrder;
+            state.playback_mode = PlaybackMode::Queue;
+            state.view = View::NowPlaying;
+            state.set_status(format!("Artist radio: {} tracks", count));
+            helpers::play_current_track(event_tx, state, client, audio).await;
         }
         _ => unreachable!("dispatch_settings called with non-settings action: {:?}", action),
     }

@@ -233,6 +233,12 @@ pub enum BrowseItem {
     },
     /// "All Artists" entry - pinned at top of artist list, drills into all albums.
     AllArtists,
+    /// "Artist Radio" entry - starts Plex radio seeded from this artist.
+    ArtistRadio {
+        artist_key: String,
+        artist_name: String,
+        thumb: Option<String>,
+    },
 }
 
 impl BrowseItem {
@@ -245,6 +251,7 @@ impl BrowseItem {
             BrowseItem::Playlist { key, .. } => key,
             BrowseItem::AllTracks { artist_key, .. } => artist_key,
             BrowseItem::AllArtists => "__all_artists__",
+            BrowseItem::ArtistRadio { artist_key, .. } => artist_key,
         }
     }
 
@@ -257,12 +264,13 @@ impl BrowseItem {
             BrowseItem::Playlist { title, .. } => title,
             BrowseItem::AllTracks { .. } => "► All Tracks",
             BrowseItem::AllArtists => "All Artists",
+            BrowseItem::ArtistRadio { .. } => "♪ Artist Radio",
         }
     }
 
     pub fn is_drillable(&self) -> bool {
-        // AllTracks is drillable (loads tracks column), Track is not
-        !matches!(self, BrowseItem::Track { .. })
+        // AllTracks is drillable (loads tracks column), Track and ArtistRadio are not
+        !matches!(self, BrowseItem::Track { .. } | BrowseItem::ArtistRadio { .. })
     }
 
     /// Whether this item is a placeholder (Textamp filled in "Unknown ..." for empty metadata).
@@ -474,6 +482,7 @@ impl BrowseColumn {
         }
         self.selected_index = 0;
     }
+
 }
 
 impl MillerColumn for BrowseColumn {
@@ -566,6 +575,86 @@ pub struct AuthState {
     pub error_message: Option<String>,
     /// Plex Pass status (cached during auth flow for server selection)
     pub has_plex_pass: bool,
+}
+
+/// Step in the multi-artist radio picker flow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtistRadioPickerStep {
+    /// Enter number of artists to blend
+    EnterCount,
+    /// Select artists from filtered list
+    SelectArtists,
+}
+
+/// State for the multi-artist radio picker popup.
+#[derive(Debug, Clone)]
+pub struct ArtistRadioPickerState {
+    pub step: ArtistRadioPickerStep,
+    pub max_artists: usize,
+    pub count_input: String,
+    pub query: String,
+    pub filtered_artists: Vec<Artist>,
+    pub selected_artists: Vec<Artist>,
+    pub focus: SearchFocus,
+    pub item_index: usize,
+}
+
+/// Snapshot of queue state for undo.
+#[derive(Debug, Clone)]
+pub struct QueueSnapshot {
+    pub queue: Vec<Track>,
+    pub queue_index: Option<usize>,
+    pub description: String,
+}
+
+/// Artwork rendering mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ArtworkMode {
+    /// Auto-detect best protocol (Kitty/iTerm2/Sixel/Halfblocks)
+    #[default]
+    Auto,
+    /// Force halfblocks (ANSI) rendering
+    Halfblocks,
+    /// Braille character rendering (2x4 dot resolution per cell)
+    Braille,
+}
+
+impl ArtworkMode {
+    pub fn all() -> &'static [ArtworkMode] {
+        &[ArtworkMode::Auto, ArtworkMode::Halfblocks, ArtworkMode::Braille]
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            ArtworkMode::Auto => "Auto",
+            ArtworkMode::Halfblocks => "Halfblocks",
+            ArtworkMode::Braille => "Braille",
+        }
+    }
+
+    pub fn config_value(&self) -> &'static str {
+        match self {
+            ArtworkMode::Auto => "auto",
+            ArtworkMode::Halfblocks => "halfblocks",
+            ArtworkMode::Braille => "braille",
+        }
+    }
+
+    pub fn from_config(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "halfblocks" | "ansi" => ArtworkMode::Halfblocks,
+            "braille" => ArtworkMode::Braille,
+            _ => ArtworkMode::Auto,
+        }
+    }
+
+    pub fn next(&self) -> Self {
+        match self {
+            ArtworkMode::Auto => ArtworkMode::Halfblocks,
+            ArtworkMode::Halfblocks => ArtworkMode::Braille,
+            ArtworkMode::Braille => ArtworkMode::Auto,
+        }
+    }
 }
 
 /// Root application state.
@@ -752,15 +841,37 @@ pub struct AppState {
     // Sonic Adventure state
     pub adventure: AdventureState,
 
-    // Now Playing view mode (Queue vs Now Playing)
-    pub now_playing_mode: NowPlayingMode,
+    // DJ mode state (Guest DJ modes that modify queue behavior)
+    pub active_dj_mode: Option<DjMode>,
+    /// Track keys already inserted by DJ, to avoid repeats
+    pub dj_history: Vec<String>,
+    /// True while a DJ insert is in-flight (prevents duplicates)
+    pub dj_inserting: bool,
+    /// True when the last track played was a DJ-inserted track.
+    /// Interleaving modes (Gemini/Twofer/Stretch) skip when this is true
+    /// so that original queue tracks still play in alternation.
+    pub dj_last_was_inserted: bool,
+
+    // Now Playing panel focus (track list vs stations)
+    pub now_playing_focus: NowPlayingFocus,
+
+    // Visualizer tab (Waveform / Spectrum / Spectrogram)
+    pub visualizer_tab: VisualizerTab,
+    /// Whether the visualizer tab bar is focused (for arrow key navigation)
+    pub visualizer_tab_focused: bool,
 
     // Genre tab (All / Library / Artist / Album / Mood / Style)
     pub genre_tab: GenreTab,
+    /// Whether the genre tab bar itself is focused (for arrow key navigation)
+    pub genre_tab_focused: bool,
 
     // Playlist view mode (Tracks vs TracksByAlbum)
     pub playlist_view_mode: PlaylistViewMode,
     pub playlist_album_groups: Vec<Vec<Track>>,
+    /// Original track column items saved when switching to TracksByAlbum mode.
+    pub playlist_original_items: Option<Vec<BrowseItem>>,
+    /// Original track column Track objects saved when switching to TracksByAlbum mode.
+    pub playlist_original_tracks: Option<Vec<Track>>,
 
     // Cache management
     /// Per-category timestamps (Unix epoch secs) for when each category was last refreshed.
@@ -773,6 +884,9 @@ pub struct AppState {
 
     // Waveform seekbar state
     pub waveform: WaveformState,
+
+    // Spectrogram state
+    pub spectrogram: SpectrogramState,
 
     // Toast notification
     pub toast_message: Option<String>,
@@ -792,6 +906,16 @@ pub struct AppState {
 
     // Adventure launcher popup state (Sonic Adventure from Radio section)
     pub adventure_launcher: Option<AdventureLauncherState>,
+
+    // Multi-artist radio picker popup state
+    pub artist_radio_picker: Option<ArtistRadioPickerState>,
+
+    // Queue undo state
+    pub queue_undo_snapshot: Option<QueueSnapshot>,
+    /// Saved queue for shuffle toggle undo
+    pub shuffle_undo_queue: Option<Vec<Track>>,
+    /// Saved queue index for shuffle toggle undo
+    pub shuffle_undo_index: Option<usize>,
 
     // Library picker popup state (Ctrl+Alt+S)
     pub library_picker_active: bool,
@@ -813,6 +937,8 @@ pub struct AppState {
 
     // Album art cover view mode (Alt+C toggle in browse)
     pub album_art_view: bool,
+    /// Artwork rendering mode (Auto / Halfblocks / Braille).
+    pub artwork_mode: ArtworkMode,
     pub album_art_cache: HashMap<String, Vec<u8>>,
     pub album_art_pending: std::collections::HashSet<String>,
     /// Artwork disk cache stats: (file_count, total_bytes). Computed on startup and after clears.
@@ -826,6 +952,85 @@ pub struct AppState {
     /// of this timestamp are ignored to prevent trackpad inertia from
     /// clearing the pin and re-centering the viewport.
     pub browse_click_time: Option<std::time::Instant>,
+}
+
+/// Active DJ mode that modifies queue behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DjMode {
+    /// Inserts a short Sonic Adventure between each pair of tracks
+    Stretch,
+    /// Inserts the most sonically similar track after each track
+    Gemini,
+    /// Keeps the mood going with sonically similar tracks to the current one
+    Freeze,
+    /// Inserts another track by the same artist after each track
+    Twofer,
+    /// Keeps the mood going with tracks from the same era
+    Contempo,
+    /// Keeps queueing tracks from the same artist
+    Groupie,
+    // Friendganger deferred — requires Sonic Analysis on shared libraries
+}
+
+impl DjMode {
+    pub fn name(&self) -> &'static str {
+        match self {
+            DjMode::Stretch => "DJ Stretch",
+            DjMode::Gemini => "DJ Gemini",
+            DjMode::Freeze => "DJ Freeze",
+            DjMode::Twofer => "DJ Twofer",
+            DjMode::Contempo => "DJ Contempo",
+            DjMode::Groupie => "DJ Groupie",
+        }
+    }
+
+    pub fn description(&self) -> &'static str {
+        match self {
+            DjMode::Stretch => "Inserts a sonic bridge between current and next",
+            DjMode::Gemini => "Inserts a sonically similar track on each transition",
+            DjMode::Freeze => "Keeps the mood going with sonically similar tracks",
+            DjMode::Twofer => "Inserts a same-artist track when next differs",
+            DjMode::Contempo => "Keeps the mood going with tracks from the same era",
+            DjMode::Groupie => "Queues tracks from current and related artists",
+        }
+    }
+
+    /// Number of tracks this mode inserts per transition.
+    pub fn insert_count(&self) -> usize {
+        match self {
+            DjMode::Gemini | DjMode::Twofer | DjMode::Stretch => 1,
+            DjMode::Freeze | DjMode::Contempo | DjMode::Groupie => 2,
+        }
+    }
+
+    /// Interleaving modes insert between original queue tracks (alternate: original → DJ → original).
+    /// Continuous modes insert after every track (original queue tracks get pushed down).
+    pub fn is_interleaving(&self) -> bool {
+        matches!(self, DjMode::Gemini | DjMode::Twofer | DjMode::Stretch)
+    }
+
+    pub fn key(&self) -> &'static str {
+        match self {
+            DjMode::Stretch => "dj:stretch",
+            DjMode::Gemini => "dj:gemini",
+            DjMode::Freeze => "dj:freeze",
+            DjMode::Twofer => "dj:twofer",
+            DjMode::Contempo => "dj:contempo",
+            DjMode::Groupie => "dj:groupie",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<DjMode> {
+        match key {
+            "dj:stretch" => Some(DjMode::Stretch),
+            "dj:gemini" => Some(DjMode::Gemini),
+            "dj:freeze" => Some(DjMode::Freeze),
+            "dj:twofer" => Some(DjMode::Twofer),
+            "dj:contempo" => Some(DjMode::Contempo),
+            "dj:groupie" => Some(DjMode::Groupie),
+            _ => None,
+        }
+    }
 }
 
 /// Playback mode - determines behavior (finite queue vs continuous radio).
@@ -1146,10 +1351,19 @@ impl AppState {
             stations_loading: false,
             theme: ThemeName::default(),
             adventure: AdventureState::default(),
-            now_playing_mode: NowPlayingMode::default(),
+            active_dj_mode: None,
+            dj_history: Vec::new(),
+            dj_inserting: false,
+            dj_last_was_inserted: false,
+            now_playing_focus: NowPlayingFocus::default(),
+            visualizer_tab: VisualizerTab::default(),
+            visualizer_tab_focused: false,
             genre_tab: GenreTab::default(),
+            genre_tab_focused: false,
             playlist_view_mode: PlaylistViewMode::default(),
             playlist_album_groups: Vec::new(),
+            playlist_original_items: None,
+            playlist_original_tracks: None,
             category_timestamps: HashMap::new(),
             cache_dirty: false,
             last_input_time: std::time::Instant::now(),
@@ -1157,6 +1371,7 @@ impl AppState {
             cache_save_in_progress: false,
             background_refresh_in_progress: std::collections::HashSet::new(),
             waveform: WaveformState::default(),
+            spectrogram: SpectrogramState::default(),
             toast_message: None,
             toast_show_time: None,
             confirm_dialog: None,
@@ -1164,6 +1379,10 @@ impl AppState {
             search_popup_active: false,
             radio_launcher: None,
             adventure_launcher: None,
+            artist_radio_picker: None,
+            queue_undo_snapshot: None,
+            shuffle_undo_queue: None,
+            shuffle_undo_index: None,
             library_picker_active: false,
             library_picker_index: 0,
             marquee: std::cell::RefCell::new(MarqueeState::default()),
@@ -1174,6 +1393,7 @@ impl AppState {
             discovering_players: false,
             remote_playback: RemotePlaybackState::default(),
             album_art_view: false,
+            artwork_mode: ArtworkMode::Auto,
             album_art_cache: HashMap::new(),
             album_art_pending: std::collections::HashSet::new(),
             artwork_cache_stats: None,
@@ -1312,7 +1532,6 @@ impl AppState {
             BrowseCategory::Library => self.artists.len(),
             BrowseCategory::Playlists => self.playlists.len(),
             BrowseCategory::Genres => self.current_genre_list().len(),
-            BrowseCategory::Radio => 0, // Handled via station_nav
             BrowseCategory::Folders => 0, // Handled separately via folder_state
         }
     }
@@ -1334,7 +1553,6 @@ impl AppState {
             BrowseCategory::Library => self.list_state.artists_index,
             BrowseCategory::Playlists => self.list_state.playlists_index,
             BrowseCategory::Genres => self.genres_index,
-            BrowseCategory::Radio => 0, // Handled via station_nav
             BrowseCategory::Folders => 0, // Handled separately via folder_state
         }
     }
@@ -1345,7 +1563,6 @@ impl AppState {
             BrowseCategory::Library => self.list_state.artists_index = idx,
             BrowseCategory::Playlists => self.list_state.playlists_index = idx,
             BrowseCategory::Genres => self.genres_index = idx,
-            BrowseCategory::Radio => {}, // Handled via station_nav
             BrowseCategory::Folders => {}, // Handled separately via folder_state
         }
     }
@@ -1363,7 +1580,6 @@ impl AppState {
             }
             BrowseCategory::Genres => self.current_genre_list().get(self.genres_index)
                 .map(|g| g.effective_key().to_string()),
-            BrowseCategory::Radio => None, // Handled via station_nav
             BrowseCategory::Folders => None, // Handled separately via folder_state
         }
     }
@@ -1381,7 +1597,6 @@ impl AppState {
             }
             BrowseCategory::Genres => self.current_genre_list().get(self.genres_index)
                 .map(|g| g.title.clone()),
-            BrowseCategory::Radio => None, // Handled via station_nav
             BrowseCategory::Folders => None, // Handled separately via folder_state
         }
     }
@@ -1424,7 +1639,9 @@ pub enum View {
     Auth,
     /// Browse library (main view with left: categories, right: tracks)
     Browse,
-    /// Unified Now Playing screen - shows queue/playlist/station tracks with history
+    /// Queue view — shows queue/radio tracks with stations panel and artwork
+    Queue,
+    /// Now Playing view — shows artwork, track info, and visualizer (waveform/spectrum/spectrogram)
     NowPlaying,
     /// Unified Search/Filter screen with tabs
     Search,
@@ -1436,38 +1653,6 @@ pub enum View {
     Settings,
 }
 
-/// Now Playing view mode - cycles with Ctrl+N.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum NowPlayingMode {
-    /// Show current queue/radio tracks
-    #[default]
-    Queue,
-    /// Now Playing view with artwork and waveform seekbar
-    NowPlaying,
-}
-
-impl NowPlayingMode {
-    pub fn next(&self) -> Self {
-        match self {
-            NowPlayingMode::Queue => NowPlayingMode::NowPlaying,
-            NowPlayingMode::NowPlaying => NowPlayingMode::Queue,
-        }
-    }
-
-    pub fn prev(&self) -> Self {
-        match self {
-            NowPlayingMode::Queue => NowPlayingMode::NowPlaying,
-            NowPlayingMode::NowPlaying => NowPlayingMode::Queue,
-        }
-    }
-
-    pub fn name(&self) -> &'static str {
-        match self {
-            NowPlayingMode::Queue => "queue",
-            NowPlayingMode::NowPlaying => "now playing",
-        }
-    }
-}
 
 /// Playlist view mode for track column display.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1477,6 +1662,41 @@ pub enum PlaylistViewMode {
     Tracks,
     /// Tracks grouped by album
     TracksByAlbum,
+}
+
+/// Visualizer tab for the Now Playing view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VisualizerTab {
+    #[default]
+    Waveform,
+    Spectrum,
+    Spectrogram,
+}
+
+impl VisualizerTab {
+    pub fn next(&self) -> Self {
+        match self {
+            VisualizerTab::Waveform => VisualizerTab::Spectrum,
+            VisualizerTab::Spectrum => VisualizerTab::Spectrogram,
+            VisualizerTab::Spectrogram => VisualizerTab::Waveform,
+        }
+    }
+
+    pub fn prev(&self) -> Self {
+        match self {
+            VisualizerTab::Waveform => VisualizerTab::Spectrogram,
+            VisualizerTab::Spectrum => VisualizerTab::Waveform,
+            VisualizerTab::Spectrogram => VisualizerTab::Spectrum,
+        }
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            VisualizerTab::Waveform => "Waveform",
+            VisualizerTab::Spectrum => "Spectrum",
+            VisualizerTab::Spectrogram => "Spectrogram",
+        }
+    }
 }
 
 /// Genre tab for the genre category tab bar.
@@ -1614,7 +1834,6 @@ pub enum BrowseCategory {
     Library,
     Playlists,
     Genres,
-    Radio,
     Folders,
 }
 
@@ -1624,7 +1843,6 @@ impl BrowseCategory {
             BrowseCategory::Library,
             BrowseCategory::Playlists,
             BrowseCategory::Genres,
-            BrowseCategory::Radio,
             BrowseCategory::Folders,
         ]
     }
@@ -1634,7 +1852,6 @@ impl BrowseCategory {
             BrowseCategory::Library => "library",
             BrowseCategory::Playlists => "playlists",
             BrowseCategory::Genres => "genres",
-            BrowseCategory::Radio => "radio",
             BrowseCategory::Folders => "folders",
         }
     }
@@ -1644,7 +1861,6 @@ impl BrowseCategory {
             BrowseCategory::Library => 'l',
             BrowseCategory::Playlists => 'p',
             BrowseCategory::Genres => 'g',
-            BrowseCategory::Radio => 'r',
             BrowseCategory::Folders => 'o',
         }
     }
@@ -1775,6 +1991,14 @@ pub enum Focus {
     Right,
 }
 
+/// Focus within the Now Playing queue view (track list vs stations panel).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NowPlayingFocus {
+    #[default]
+    Tracks,
+    Stations,
+}
+
 /// What the right panel is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RightPanelMode {
@@ -1848,6 +2072,19 @@ pub struct WaveformState {
     pub retry_count: u8,
 }
 
+/// Spectrogram state for Now Playing visualizer.
+#[derive(Debug, Clone, Default)]
+pub struct SpectrogramState {
+    /// Cached spectrogram data for current track.
+    pub data: Option<crate::plex::SpectrogramData>,
+    /// Track key this spectrogram is for.
+    pub track_key: Option<String>,
+    /// Whether spectrogram is being generated.
+    pub generating: bool,
+    /// Error message if generation failed.
+    pub error: Option<String>,
+}
+
 /// Search popup focus state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SearchFocus {
@@ -1856,45 +2093,37 @@ pub enum SearchFocus {
     Results,
 }
 
-/// Radio launcher tab.
+/// Radio launcher tab (artist-only radio).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RadioLauncherTab {
     #[default]
     All,
     Artists,
-    Albums,
-    Tracks,
 }
 
 impl RadioLauncherTab {
     pub fn all() -> &'static [RadioLauncherTab] {
-        &[RadioLauncherTab::All, RadioLauncherTab::Artists, RadioLauncherTab::Albums, RadioLauncherTab::Tracks]
+        &[RadioLauncherTab::All, RadioLauncherTab::Artists]
     }
 
     pub fn name(&self) -> &'static str {
         match self {
             RadioLauncherTab::All => "All",
             RadioLauncherTab::Artists => "Artists",
-            RadioLauncherTab::Albums => "Albums",
-            RadioLauncherTab::Tracks => "Tracks",
         }
     }
 
     pub fn next(&self) -> Self {
         match self {
             RadioLauncherTab::All => RadioLauncherTab::Artists,
-            RadioLauncherTab::Artists => RadioLauncherTab::Albums,
-            RadioLauncherTab::Albums => RadioLauncherTab::Tracks,
-            RadioLauncherTab::Tracks => RadioLauncherTab::All,
+            RadioLauncherTab::Artists => RadioLauncherTab::All,
         }
     }
 
     pub fn prev(&self) -> Self {
         match self {
-            RadioLauncherTab::All => RadioLauncherTab::Tracks,
+            RadioLauncherTab::All => RadioLauncherTab::Artists,
             RadioLauncherTab::Artists => RadioLauncherTab::All,
-            RadioLauncherTab::Albums => RadioLauncherTab::Artists,
-            RadioLauncherTab::Tracks => RadioLauncherTab::Albums,
         }
     }
 }

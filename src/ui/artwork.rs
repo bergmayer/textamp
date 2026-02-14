@@ -6,8 +6,12 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
+use image::DynamicImage;
 use ratatui::prelude::*;
+use ratatui::widgets::Paragraph;
 use ratatui_image::{picker::Picker, protocol::StatefulProtocol, StatefulImage};
+
+use crate::app::state::ArtworkMode;
 
 /// Artwork renderer using ratatui-image.
 ///
@@ -17,6 +21,8 @@ pub struct ArtworkRenderer {
     picker: Option<Picker>,
     protocol: Option<StatefulProtocol>,
     current_thumb: Option<String>,
+    braille_image: Option<DynamicImage>,
+    mode: ArtworkMode,
 }
 
 impl Default for ArtworkRenderer {
@@ -32,6 +38,8 @@ impl ArtworkRenderer {
             picker: None,
             protocol: None,
             current_thumb: None,
+            braille_image: None,
+            mode: ArtworkMode::Auto,
         }
     }
 
@@ -42,6 +50,8 @@ impl ArtworkRenderer {
             picker: Some(picker),
             protocol: None,
             current_thumb: None,
+            braille_image: None,
+            mode: ArtworkMode::Auto,
         }
     }
 
@@ -67,7 +77,24 @@ impl ArtworkRenderer {
     /// Returns true if the image was loaded successfully.
     pub fn load_image(&mut self, image_data: &[u8], thumb_path: &str) -> bool {
         // Skip if same image already loaded
-        if self.current_thumb.as_deref() == Some(thumb_path) && self.protocol.is_some() {
+        if self.current_thumb.as_deref() == Some(thumb_path) {
+            if self.mode == ArtworkMode::Braille && self.braille_image.is_some() {
+                return true;
+            }
+            if self.mode != ArtworkMode::Braille && self.protocol.is_some() {
+                return true;
+            }
+        }
+
+        // Load image from bytes
+        let Ok(img) = image::load_from_memory(image_data) else {
+            return false;
+        };
+
+        if self.mode == ArtworkMode::Braille {
+            self.braille_image = Some(img);
+            self.protocol = None;
+            self.current_thumb = Some(thumb_path.to_string());
             return true;
         }
 
@@ -75,13 +102,9 @@ impl ArtworkRenderer {
             return false;
         };
 
-        // Load image from bytes
-        let Ok(img) = image::load_from_memory(image_data) else {
-            return false;
-        };
-
         // Create protocol for rendering (this handles resizing automatically)
         self.protocol = Some(picker.new_resize_protocol(img));
+        self.braille_image = None;
         self.current_thumb = Some(thumb_path.to_string());
         true
     }
@@ -89,11 +112,18 @@ impl ArtworkRenderer {
     /// Clear the current image.
     pub fn clear(&mut self) {
         self.protocol = None;
+        self.braille_image = None;
         self.current_thumb = None;
     }
 
     /// Render the artwork to a frame area.
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
+        if self.mode == ArtworkMode::Braille {
+            if let Some(ref img) = self.braille_image {
+                render_braille_image(frame, img, area);
+            }
+            return;
+        }
         if let Some(ref mut protocol) = self.protocol {
             let image = StatefulImage::new();
             frame.render_stateful_widget(image, area, protocol);
@@ -102,6 +132,9 @@ impl ArtworkRenderer {
 
     /// Check if there's an image loaded.
     pub fn has_image(&self) -> bool {
+        if self.mode == ArtworkMode::Braille {
+            return self.braille_image.is_some();
+        }
         self.protocol.is_some()
     }
 
@@ -109,6 +142,164 @@ impl ArtworkRenderer {
     pub fn current_thumb(&self) -> Option<&str> {
         self.current_thumb.as_deref()
     }
+
+    /// Change the graphics protocol and clear cached images.
+    pub fn set_protocol_type(&mut self, protocol_type: ratatui_image::picker::ProtocolType) {
+        if let Some(ref mut picker) = self.picker {
+            picker.set_protocol_type(protocol_type);
+            // Clear cached image so it's re-created with the new protocol
+            self.protocol = None;
+            self.current_thumb = None;
+        }
+    }
+
+    /// Set the artwork rendering mode and clear all caches.
+    pub fn set_mode(&mut self, mode: ArtworkMode) {
+        self.mode = mode;
+        self.protocol = None;
+        self.braille_image = None;
+        self.current_thumb = None;
+    }
+}
+
+// ============================================================================
+// Braille Image Rendering
+// ============================================================================
+
+/// Render an image as Braille characters in the given area.
+///
+/// Uses adaptive thresholding: computes the median luminance of the resized image
+/// so that roughly half the dots are lit, producing dense output regardless of
+/// whether the source image is dark or bright.
+///
+/// Each terminal cell maps to a 2x4 pixel block using Unicode Braille patterns (U+2800..U+28FF).
+/// Dot bit mapping per cell:
+///   Col 0: bits 0,1,2,6 (rows 0-3)
+///   Col 1: bits 3,4,5,7 (rows 0-3)
+fn render_braille_image(frame: &mut Frame, img: &DynamicImage, area: Rect) {
+    use image::GenericImageView;
+
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    // Braille resolution: 2 dots wide × 4 dots tall per terminal cell
+    let pixel_w = area.width as u32 * 2;
+    let pixel_h = area.height as u32 * 4;
+
+    let resized = img.resize_exact(pixel_w, pixel_h, image::imageops::FilterType::Triangle);
+
+    // Build luminance histogram for adaptive thresholding
+    let mut histogram = [0u32; 256];
+    let total_pixels = pixel_w * pixel_h;
+    for y in 0..pixel_h {
+        for x in 0..pixel_w {
+            let pixel = resized.get_pixel(x, y);
+            let lum = (pixel[0] as u32 * 299 + pixel[1] as u32 * 587 + pixel[2] as u32 * 114) / 1000;
+            histogram[lum.min(255) as usize] += 1;
+        }
+    }
+
+    // Find the median luminance — threshold where ~50% of pixels are above
+    let target = total_pixels / 2;
+    let mut cumulative = 0u32;
+    let mut threshold = 128u32;
+    for (lum, &count) in histogram.iter().enumerate() {
+        cumulative += count;
+        if cumulative >= target {
+            threshold = lum as u32;
+            break;
+        }
+    }
+    // Clamp threshold so we never go fully black or fully white
+    threshold = threshold.clamp(15, 240);
+
+    // Braille dot bit positions:
+    // (0,0)→bit0  (1,0)→bit3
+    // (0,1)→bit1  (1,1)→bit4
+    // (0,2)→bit2  (1,2)→bit5
+    // (0,3)→bit6  (1,3)→bit7
+    let bit_map: [[u8; 4]; 2] = [
+        [0, 1, 2, 6], // col 0, rows 0-3
+        [3, 4, 5, 7], // col 1, rows 0-3
+    ];
+
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(area.height as usize);
+
+    for row in 0..area.height as u32 {
+        let mut spans: Vec<Span<'static>> = Vec::with_capacity(area.width as usize);
+
+        for col in 0..area.width as u32 {
+            let px = col * 2;
+            let py = row * 4;
+
+            let mut pattern: u8 = 0;
+            let mut fg_r: u32 = 0;
+            let mut fg_g: u32 = 0;
+            let mut fg_b: u32 = 0;
+            let mut bright_count: u32 = 0;
+            let mut bg_r: u32 = 0;
+            let mut bg_g: u32 = 0;
+            let mut bg_b: u32 = 0;
+            let mut dark_count: u32 = 0;
+
+            for dx in 0..2u32 {
+                for dy in 0..4u32 {
+                    let x = px + dx;
+                    let y = py + dy;
+                    if x < pixel_w && y < pixel_h {
+                        let pixel = resized.get_pixel(x, y);
+                        let r = pixel[0] as u32;
+                        let g = pixel[1] as u32;
+                        let b = pixel[2] as u32;
+                        let lum = (r * 299 + g * 587 + b * 114) / 1000;
+                        if lum >= threshold {
+                            pattern |= 1 << bit_map[dx as usize][dy as usize];
+                            fg_r += r;
+                            fg_g += g;
+                            fg_b += b;
+                            bright_count += 1;
+                        } else {
+                            bg_r += r;
+                            bg_g += g;
+                            bg_b += b;
+                            dark_count += 1;
+                        }
+                    }
+                }
+            }
+
+            let ch = char::from_u32(0x2800 + pattern as u32).unwrap_or(' ');
+            let fg_color = if bright_count > 0 {
+                Color::Rgb(
+                    (fg_r / bright_count) as u8,
+                    (fg_g / bright_count) as u8,
+                    (fg_b / bright_count) as u8,
+                )
+            } else {
+                Color::Rgb(0, 0, 0)
+            };
+            let bg_color = if dark_count > 0 {
+                Color::Rgb(
+                    (bg_r / dark_count) as u8,
+                    (bg_g / dark_count) as u8,
+                    (bg_b / dark_count) as u8,
+                )
+            } else {
+                fg_color
+            };
+
+            spans.push(Span::styled(
+                String::from(ch),
+                Style::default().fg(fg_color).bg(bg_color),
+            ));
+        }
+
+        lines.push(Line::from(spans));
+    }
+
+    let paragraph = Paragraph::new(lines);
+    frame.render_widget(paragraph, area);
 }
 
 // ============================================================================
@@ -118,6 +309,8 @@ impl ArtworkRenderer {
 thread_local! {
     static GRID_PICKER: RefCell<Option<Picker>> = RefCell::new(None);
     static GRID_PROTOCOLS: RefCell<HashMap<String, StatefulProtocol>> = RefCell::new(HashMap::new());
+    static GRID_BRAILLE_IMAGES: RefCell<HashMap<String, DynamicImage>> = RefCell::new(HashMap::new());
+    static GRID_ARTWORK_MODE: RefCell<ArtworkMode> = RefCell::new(ArtworkMode::Auto);
 }
 
 /// Initialize the grid renderer with a Picker clone.
@@ -130,7 +323,13 @@ pub fn init_grid_renderer(picker: Picker) {
 /// Uses a thread-local protocol cache keyed by album rating_key.
 /// Returns true if an image was rendered.
 pub fn render_grid_image(frame: &mut Frame, area: Rect, key: &str, data: &[u8]) -> bool {
-    // Ensure protocol is cached
+    let mode = GRID_ARTWORK_MODE.with(|m| *m.borrow());
+
+    if mode == ArtworkMode::Braille {
+        return render_grid_braille(frame, area, key, data);
+    }
+
+    // Protocol-based rendering (Auto/Halfblocks)
     let has_protocol = GRID_PROTOCOLS.with(|protos| protos.borrow().contains_key(key));
 
     if !has_protocol {
@@ -149,7 +348,6 @@ pub fn render_grid_image(frame: &mut Frame, area: Rect, key: &str, data: &[u8]) 
         }
     }
 
-    // Render from cache
     GRID_PROTOCOLS.with(|protos| {
         let mut map = protos.borrow_mut();
         if let Some(protocol) = map.get_mut(key) {
@@ -162,7 +360,46 @@ pub fn render_grid_image(frame: &mut Frame, area: Rect, key: &str, data: &[u8]) 
     })
 }
 
+/// Render a grid album cover using braille characters.
+fn render_grid_braille(frame: &mut Frame, area: Rect, key: &str, data: &[u8]) -> bool {
+    let has_image = GRID_BRAILLE_IMAGES.with(|imgs| imgs.borrow().contains_key(key));
+
+    if !has_image {
+        let Ok(img) = image::load_from_memory(data) else { return false; };
+        GRID_BRAILLE_IMAGES.with(|imgs| {
+            imgs.borrow_mut().insert(key.to_string(), img);
+        });
+    }
+
+    GRID_BRAILLE_IMAGES.with(|imgs| {
+        let map = imgs.borrow();
+        if let Some(img) = map.get(key) {
+            render_braille_image(frame, img, area);
+            true
+        } else {
+            false
+        }
+    })
+}
+
 /// Clear the grid protocol cache (e.g. on library switch).
 pub fn clear_grid_cache() {
     GRID_PROTOCOLS.with(|protos| protos.borrow_mut().clear());
+    GRID_BRAILLE_IMAGES.with(|imgs| imgs.borrow_mut().clear());
+}
+
+/// Change the grid renderer's graphics protocol and clear cached images.
+pub fn set_grid_protocol_type(protocol_type: ratatui_image::picker::ProtocolType) {
+    GRID_PICKER.with(|p| {
+        if let Some(ref mut picker) = *p.borrow_mut() {
+            picker.set_protocol_type(protocol_type);
+        }
+    });
+    clear_grid_cache();
+}
+
+/// Set the grid renderer's artwork mode and clear caches.
+pub fn set_grid_artwork_mode(mode: ArtworkMode) {
+    GRID_ARTWORK_MODE.with(|m| *m.borrow_mut() = mode);
+    clear_grid_cache();
 }

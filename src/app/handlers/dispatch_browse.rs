@@ -1,13 +1,12 @@
 //! Browse dispatch handlers: LoadStations, LoadGenres, LoadArtistGenres, LoadAlbumGenres,
 //! LoadMoods, LoadStyles, LoadGenreAlbums, LoadArtistGenreAlbums, LoadAlbumGenreAlbums,
 //! LoadMoodAlbums, LoadStyleAlbums, CycleGenreContentType, RefreshGenreView,
-//! CycleArtistViewMode, RefreshArtistView, CycleNowPlayingMode, RefreshNowPlayingView,
-//! CycleGenreTab, SetGenreTab.
+//! CycleArtistViewMode, RefreshArtistView, CycleGenreTab, SetGenreTab.
 
 use crate::app::{Action, AppState, Event};
 use crate::app::state::{
     BrowseCategory, BrowseItem, BrowseNavigationState, Focus,
-    GenreContentType, GenreTab, LibrarySubMode, NowPlayingMode, RefreshCategory, RightPanelMode, StationColumn,
+    GenreContentType, GenreTab, LibrarySubMode, RefreshCategory, RightPanelMode, StationColumn,
 };
 use crate::api::PlexClient;
 
@@ -32,7 +31,7 @@ pub async fn dispatch(
                 state.station_nav.loading = true;
                 match client.get_stations(lib_key).await {
                     Ok(mut stations) => {
-                        helpers::append_station_action_items(&mut stations);
+                        helpers::append_station_action_items(&mut stations, state.shuffle_undo_queue.is_some());
 
                         // Initialize with root column
                         state.station_nav.columns.clear();
@@ -326,22 +325,6 @@ pub async fn dispatch(
             let items = BrowseItem::artist_root_items(&state.artists);
             state.artist_nav.reset(title, items);
         }
-        Action::CycleNowPlayingMode => {
-            state.now_playing_mode = state.now_playing_mode.next();
-            follow_ups.push(Action::RefreshNowPlayingView);
-        }
-        Action::RefreshNowPlayingView => {
-            // Load data for the current mode if needed
-            match state.now_playing_mode {
-                NowPlayingMode::Queue => {
-                    // Queue mode - nothing to load, already have queue
-                }
-                NowPlayingMode::NowPlaying => {
-                    // Now Playing mode - load waveform
-                    follow_ups.push(Action::LoadWaveform);
-                }
-            }
-        }
         Action::CycleGenreTab => {
             state.genre_tab = state.genre_tab.next();
 
@@ -420,16 +403,6 @@ pub async fn dispatch(
                         }
                     }
                     state.playlist_nav.truncate_right();
-                }
-                BrowseCategory::Radio => {
-                    if let Some(col) = state.station_nav.focused_mut() {
-                        if col.is_shuffled() {
-                            col.unshuffle();
-                        } else {
-                            col.shuffle();
-                        }
-                    }
-                    state.station_nav.truncate_right_columns();
                 }
                 BrowseCategory::Genres => {
                     if let Some(col) = state.genre_nav.focused_mut() {

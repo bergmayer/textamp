@@ -156,85 +156,13 @@ pub async fn play_current_track(
         state.playback.duration_ms = track.duration_ms();
         state.playback.position_ms = 0;
 
-        // Reset waveform state for new track
+        // Reset waveform and spectrogram state for new track.
+        // The tick handler auto-triggers generation when on NowPlaying view.
         if state.waveform.track_key.as_ref() != Some(&track.rating_key) {
             state.waveform = crate::app::state::WaveformState::default();
             state.waveform.track_key = Some(track.rating_key.clone());
-
-            // Auto-generate waveform if currently in visualizer mode
-            if state.view == View::NowPlaying
-                && state.now_playing_mode == crate::app::state::NowPlayingMode::NowPlaying
-            {
-                if let Ok(stream_url) = client.get_stream_url(&track) {
-                    state.waveform.generating = true;
-                    let track_key = track.rating_key.clone();
-                    let duration_ms = track.duration_ms();
-                    let event_tx = event_tx.clone();
-                    let token = client.token().map(|s| s.to_string());
-
-                    tokio::spawn(async move {
-                        let cache_dir = dirs::cache_dir()
-                            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-                            .join("textamp")
-                            .join("waveforms");
-                        let cache = crate::services::WaveformCache::new(cache_dir);
-
-                        if let Some(data) = cache.load(&track_key) {
-                            let _ = event_tx.send(Event::WaveformCacheHit {
-                                track_key,
-                                data,
-                            }).await;
-                            return;
-                        }
-
-                        let http_client = reqwest::Client::new();
-                        let mut request = http_client.get(&stream_url);
-                        if let Some(ref token) = token {
-                            request = request.header("X-Plex-Token", token);
-                        }
-
-                        match request.send().await {
-                            Ok(response) => {
-                                match response.bytes().await {
-                                    Ok(audio_data) => {
-                                        match crate::services::generate_waveform(
-                                            track_key.clone(),
-                                            duration_ms,
-                                            audio_data.to_vec(),
-                                        ) {
-                                            Ok(data) => {
-                                                cache.save(&data);
-                                                let _ = event_tx.send(Event::WaveformGenerated {
-                                                    track_key,
-                                                    data,
-                                                }).await;
-                                            }
-                                            Err(e) => {
-                                                let _ = event_tx.send(Event::WaveformFailed {
-                                                    track_key,
-                                                    error: e.to_string(),
-                                                }).await;
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        let _ = event_tx.send(Event::WaveformFailed {
-                                            track_key,
-                                            error: format!("Download failed: {}", e),
-                                        }).await;
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                let _ = event_tx.send(Event::WaveformFailed {
-                                    track_key,
-                                    error: format!("Request failed: {}", e),
-                                }).await;
-                            }
-                        }
-                    });
-                }
-            }
+            state.spectrogram = crate::app::state::SpectrogramState::default();
+            state.spectrogram.track_key = Some(track.rating_key.clone());
         }
 
         // Load artwork for the new track (non-blocking)
@@ -520,85 +448,13 @@ async fn play_current_track_remote(
         state.playback.duration_ms = track.duration_ms();
         state.playback.position_ms = 0;
 
-        // Reset waveform state for new track
+        // Reset waveform and spectrogram state for new track.
+        // The tick handler auto-triggers generation when on NowPlaying view.
         if state.waveform.track_key.as_ref() != Some(&track.rating_key) {
             state.waveform = crate::app::state::WaveformState::default();
             state.waveform.track_key = Some(track.rating_key.clone());
-
-            // Auto-generate waveform if currently in visualizer mode
-            if state.view == View::NowPlaying
-                && state.now_playing_mode == crate::app::state::NowPlayingMode::NowPlaying
-            {
-                if let Ok(stream_url) = client.get_stream_url(&track) {
-                    state.waveform.generating = true;
-                    let track_key = track.rating_key.clone();
-                    let duration_ms = track.duration_ms();
-                    let event_tx_wf = event_tx.clone();
-                    let token_wf = client.token().map(|s| s.to_string());
-
-                    tokio::spawn(async move {
-                        let cache_dir = dirs::cache_dir()
-                            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-                            .join("textamp")
-                            .join("waveforms");
-                        let cache = crate::services::WaveformCache::new(cache_dir);
-
-                        if let Some(data) = cache.load(&track_key) {
-                            let _ = event_tx_wf.send(Event::WaveformCacheHit {
-                                track_key,
-                                data,
-                            }).await;
-                            return;
-                        }
-
-                        let http_client = reqwest::Client::new();
-                        let mut request = http_client.get(&stream_url);
-                        if let Some(ref token) = token_wf {
-                            request = request.header("X-Plex-Token", token);
-                        }
-
-                        match request.send().await {
-                            Ok(response) => {
-                                match response.bytes().await {
-                                    Ok(audio_data) => {
-                                        match crate::services::generate_waveform(
-                                            track_key.clone(),
-                                            duration_ms,
-                                            audio_data.to_vec(),
-                                        ) {
-                                            Ok(data) => {
-                                                cache.save(&data);
-                                                let _ = event_tx_wf.send(Event::WaveformGenerated {
-                                                    track_key,
-                                                    data,
-                                                }).await;
-                                            }
-                                            Err(e) => {
-                                                let _ = event_tx_wf.send(Event::WaveformFailed {
-                                                    track_key,
-                                                    error: e.to_string(),
-                                                }).await;
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        let _ = event_tx_wf.send(Event::WaveformFailed {
-                                            track_key,
-                                            error: format!("Download failed: {}", e),
-                                        }).await;
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                let _ = event_tx_wf.send(Event::WaveformFailed {
-                                    track_key,
-                                    error: format!("Request failed: {}", e),
-                                }).await;
-                            }
-                        }
-                    });
-                }
-            }
+            state.spectrogram = crate::app::state::SpectrogramState::default();
+            state.spectrogram.track_key = Some(track.rating_key.clone());
         }
 
         // Load artwork for the new track (same as local)

@@ -35,6 +35,9 @@ rodio = { version = "0.21", features = ["symphonia-all"] }
 # Audio decoding for waveform generation
 symphonia = { version = "0.5", default-features = false, features = ["mp3", "aac", "alac", "flac", "ogg", "wav", "pcm"] }
 
+# FFT for spectrogram generation
+rustfft = "6"
+
 # Ring buffer for streaming
 ringbuf = "0.4"
 

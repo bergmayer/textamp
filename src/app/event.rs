@@ -135,6 +135,11 @@ pub enum Event {
     WaveformCacheHit { track_key: String, data: WaveformData },
     WaveformRetry(String),
 
+    // Spectrogram generation
+    SpectrogramGenerated { track_key: String, data: crate::plex::SpectrogramData },
+    SpectrogramFailed { track_key: String, error: String },
+    SpectrogramCacheHit { track_key: String, data: crate::plex::SpectrogramData },
+
     // Station loading (background)
     StationTracksLoaded { station_key: String, station_title: String, tracks: Vec<Track>, time_travel_decades: Vec<String> },
     StationLoadFailed { station_key: String, error: String },
@@ -159,6 +164,18 @@ pub enum Event {
         version: u64,
         results: crate::app::state::ListFilterResults,
     },
+
+    // DJ mode
+    DjTracksReady { tracks: Vec<Track>, insert_next: bool },
+    /// Batch result from inserter DJ modes: (original_queue_index, tracks_to_insert_after)
+    DjBatchReady { inserts: Vec<(usize, Vec<Track>)> },
+
+    // Queue remix
+    /// Batch result from remix operations: (original_queue_index, tracks_to_insert_after)
+    RemixBatchReady { inserts: Vec<(usize, Vec<Track>)> },
+
+    // Multi-artist radio
+    ArtistRadioComplete { tracks: Vec<Track> },
 
     // Remote player control
     PlayersDiscovered(Vec<crate::plex::models::RemotePlayer>),

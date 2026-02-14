@@ -56,7 +56,7 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
                 View::Browse => {
                     return handle_browse_click(click_row, click_col, state);
                 }
-                View::NowPlaying => {
+                View::Queue | View::NowPlaying => {
                     return handle_now_playing_down(click_row, click_col, state);
                 }
                 View::Search => {
@@ -85,9 +85,7 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
 
                 // Dragging in visualizer seekbar (Now Playing view)
                 if state.view == View::NowPlaying {
-                    if let crate::app::state::NowPlayingMode::NowPlaying = state.now_playing_mode {
-                        return handle_visualizer_drag(click_col, state);
-                    }
+                    return handle_visualizer_drag(click_col, state);
                 }
 
                 // If dragging but mouse is in content area, still update based on horizontal position
@@ -261,26 +259,70 @@ fn handle_search_popup_click(click_row: u16, click_col: u16, state: &mut AppStat
         return vec![];
     }
 
-    // Results area: rel_row 5+
+    // Results area: rel_row 5+ (tabs=2 + search_input=3)
     if rel_row >= 5 {
-        let result_row = (rel_row - 5) as usize;
+        use crate::services::NavigationService;
+
+        let visual_row = (rel_row - 5) as usize;
+        // Results visible height: popup inner height minus tabs and search
+        let results_height = popup.height.saturating_sub(2 + 2 + 3) as usize;
+
+        if visual_row >= results_height {
+            return vec![];
+        }
 
         if let Some(ref results) = state.search_results {
-            let count = match state.search_tab {
+            match state.search_tab {
                 SearchTab::Global => {
-                    results.artists.len() + results.albums.len()
-                        + results.playlists.len() + results.genres.len()
-                        + results.tracks.len()
+                    // All tab: map visual row accounting for section headers and scroll
+                    let section_counts = [
+                        results.artists.len(),
+                        results.albums.len(),
+                        results.playlists.len(),
+                        results.genres.len(),
+                        results.tracks.len(),
+                    ];
+                    let mut entries: Vec<Option<usize>> = Vec::new();
+                    let mut global_idx: usize = 0;
+                    for &count in &section_counts {
+                        if count > 0 {
+                            entries.push(None); // section header
+                            for _ in 0..count {
+                                entries.push(Some(global_idx));
+                                global_idx += 1;
+                            }
+                        }
+                    }
+                    let display_selected = entries.iter()
+                        .position(|e| *e == Some(state.list_state.search_item_index))
+                        .unwrap_or(0);
+                    let scroll_offset = NavigationService::calc_scroll_offset(
+                        display_selected, results_height, entries.len(),
+                    );
+                    let abs_row = scroll_offset + visual_row;
+                    if let Some(Some(idx)) = entries.get(abs_row) {
+                        state.search_focus = crate::app::state::SearchFocus::Results;
+                        state.list_state.search_item_index = *idx;
+                    }
                 }
-                SearchTab::Artists => results.artists.len(),
-                SearchTab::Albums => results.albums.len(),
-                SearchTab::Playlists => results.playlists.len(),
-                SearchTab::Tracks => results.tracks.len(),
-                SearchTab::Genres => results.genres.len(),
-            };
-            if result_row < count {
-                state.search_focus = crate::app::state::SearchFocus::Results;
-                state.list_state.search_item_index = result_row;
+                _ => {
+                    let total = match state.search_tab {
+                        SearchTab::Artists => results.artists.len(),
+                        SearchTab::Albums => results.albums.len(),
+                        SearchTab::Playlists => results.playlists.len(),
+                        SearchTab::Tracks => results.tracks.len(),
+                        SearchTab::Genres => results.genres.len(),
+                        _ => 0,
+                    };
+                    let scroll_offset = NavigationService::calc_scroll_offset(
+                        state.list_state.search_item_index, results_height, total,
+                    );
+                    let actual_idx = scroll_offset + visual_row;
+                    if actual_idx < total {
+                        state.search_focus = crate::app::state::SearchFocus::Results;
+                        state.list_state.search_item_index = actual_idx;
+                    }
+                }
             }
         }
     }
@@ -291,22 +333,20 @@ fn handle_search_popup_click(click_row: u16, click_col: u16, state: &mut AppStat
 /// Handle click on the shortcut bar at the bottom.
 fn handle_shortcut_bar_click(click_col: u16, state: &AppState) -> Vec<Action> {
     // Shortcut bar items (must match render_shortcuts in ui/app.rs):
-    // ^L library | ^P playlists | ^G genres | ^R radio | ^O folders | ^N queue | F1 help | F2 settings
+    // ^L library | ^P playlists | ^G genres | ^O folders | ^N queue
     //
     // These are centered, so we need to calculate positions based on terminal width.
     // Each item is roughly: " ^X label " with separators "|"
     //
     // Clicking an already-active item cycles its mode (like the keyboard shortcut does).
 
-    let shortcuts: [(&str, &str, usize); 8] = [
+    let shortcuts: [(&str, &str, usize); 6] = [
         ("^L", "library", 0),                       // Library
         ("^P", "playlists", 1),                     // Playlists
         ("^G", "genres", 2),                        // Genres
-        ("^R", "radio", 3),                         // Radio
-        ("^O", "folders", 4),                       // Folders
-        ("^N", state.now_playing_mode.name(), 5),   // Now Playing
-        ("F1", "help", 6),                          // Help
-        ("F2", "settings", 7),                      // Settings
+        ("^O", "folders", 3),                       // Folders
+        ("^U", "queue", 4),                         // Queue
+        ("^N", "now playing", 5),                   // Now Playing
     ];
 
     // Calculate total width of shortcut bar
@@ -339,7 +379,7 @@ fn handle_shortcut_bar_click(click_col: u16, state: &AppState) -> Vec<Action> {
 }
 
 /// Return the action for clicking a shortcut bar item (with cycling support).
-fn shortcut_bar_action(idx: usize, state: &AppState) -> Vec<Action> {
+fn shortcut_bar_action(idx: usize, _state: &AppState) -> Vec<Action> {
     match idx {
         0 => {
             // Library: just switch (no cycling)
@@ -354,27 +394,16 @@ fn shortcut_bar_action(idx: usize, state: &AppState) -> Vec<Action> {
             vec![Action::SetCategory(BrowseCategory::Genres), Action::SetView(View::Browse)]
         }
         3 => {
-            // Radio: just switch (no cycling)
-            vec![Action::SetCategory(BrowseCategory::Radio), Action::SetView(View::Browse)]
-        }
-        4 => {
             // Folders: just switch (no cycling)
             vec![Action::SetCategory(BrowseCategory::Folders), Action::SetView(View::Browse)]
         }
+        4 => {
+            // Queue
+            vec![Action::SetView(View::Queue)]
+        }
         5 => {
-            // Now Playing: cycle mode if already there, else switch
-            if state.view == View::NowPlaying {
-                return vec![Action::CycleNowPlayingMode];
-            }
-            vec![Action::SetView(View::NowPlaying)]
-        }
-        6 => {
-            // Help
-            vec![Action::SetView(View::Help)]
-        }
-        7 => {
-            // Settings
-            vec![Action::SetView(View::Settings)]
+            // Now Playing (visualizer)
+            vec![Action::SetView(View::NowPlaying), Action::LoadWaveform]
         }
         _ => vec![],
     }
@@ -763,110 +792,6 @@ fn folder_hit_test(
     None
 }
 
-/// Hit-test a click against Miller column layout for StationNavigationState.
-fn station_hit_test(
-    click_col: u16,
-    click_row: u16,
-    state: &AppState,
-) -> Option<(usize, usize, usize)> {
-    let (area_x, area_y, area_width, area_height) = miller_area(state);
-
-    if click_row < area_y || click_row >= area_y + area_height {
-        return None;
-    }
-
-    let num_columns = state.station_nav.columns.len();
-    if num_columns == 0 {
-        return None;
-    }
-
-    let last_meaningful = (0..num_columns)
-        .rev()
-        .find(|&i| !state.station_nav.columns[i].stations.is_empty() || i <= state.station_nav.focused_column)
-        .unwrap_or(0);
-    let effective_columns = last_meaningful + 1;
-    let max_visible = 3.min(effective_columns);
-    let col_width = if max_visible > 0 { area_width / max_visible as u16 } else { return None; };
-    let start_col = if state.station_nav.focused_column + 1 > max_visible {
-        state.station_nav.focused_column + 1 - max_visible
-    } else {
-        0
-    };
-
-    for vis_idx in 0..max_visible {
-        let col_idx = start_col + vis_idx;
-        if col_idx >= effective_columns || col_idx >= state.station_nav.columns.len() {
-            continue;
-        }
-
-        let col_x = area_x + (vis_idx as u16 * col_width);
-        let col_w = if vis_idx == max_visible - 1 {
-            area_width - (vis_idx as u16 * col_width)
-        } else {
-            col_width
-        };
-
-        if click_col < col_x || click_col >= col_x + col_w {
-            continue;
-        }
-
-        let col = &state.station_nav.columns[col_idx];
-        if col.stations.is_empty() {
-            return None;
-        }
-
-        let inner_y = area_y + 1;
-        let inner_height = area_height.saturating_sub(2);
-
-        if click_row < inner_y || click_row >= inner_y + inner_height {
-            return None;
-        }
-
-        let click_offset = (click_row - inner_y) as usize;
-        let visible_height = inner_height as usize;
-
-        // Use pinned scroll offset if set for this column
-        let pinned = state.browse_scroll_pin.and_then(|(pc, po)| if pc == col_idx { Some(po) } else { None });
-
-        // Check if filter is active on this station column with actual results
-        let filter_on_col = state.list_filter.active
-            && state.list_filter.column == col_idx
-            && (state.list_filter.category == BrowseCategory::Genres
-                || state.list_filter.category == BrowseCategory::Playlists)
-            && state.list_filter.results.is_some();
-
-        if filter_on_col {
-            if let Some(ref results) = state.list_filter.results {
-                if results.matched_indices.is_empty() {
-                    return None;
-                }
-                let total_display = results.matched_indices.len();
-                let display_selected = results.matched_indices.iter()
-                    .position(|&idx| idx == col.selected_index)
-                    .unwrap_or(0);
-                let scroll_offset = pinned.unwrap_or_else(|| helpers::calc_scroll_offset(display_selected, visible_height, total_display));
-                let display_idx = scroll_offset + click_offset;
-                if display_idx < total_display {
-                    return Some((col_idx, results.matched_indices[display_idx], scroll_offset));
-                }
-            }
-            return None;
-        }
-
-        let total_items = col.stations.len();
-        let scroll_offset = pinned.unwrap_or_else(|| helpers::calc_scroll_offset(col.selected_index, visible_height, total_items));
-        let item_idx = scroll_offset + click_offset;
-
-        if item_idx < total_items {
-            return Some((col_idx, item_idx, scroll_offset));
-        }
-
-        return None;
-    }
-
-    None
-}
-
 /// Identify which Miller column the cursor is over (for scroll events).
 /// Returns the column index, or None if not over a column.
 fn miller_column_at(click_col: u16, nav: &BrowseNavigationState, state: &AppState) -> Option<usize> {
@@ -928,10 +853,34 @@ fn handle_browse_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
         }
     }
 
-    match state.browse_category {
-        BrowseCategory::Radio => {
-            return handle_station_click(click_row, click_col, state);
+    // Column header click: cycle view mode (same as Alt+V)
+    // Header is at area_y (row 0 for Library/Playlists, row 1 for Genres due to tab bar)
+    let (_, area_y, _, _) = miller_area(state);
+    if click_row == area_y && state.browse_category != BrowseCategory::Folders {
+        let nav = match state.browse_category {
+            BrowseCategory::Library => &state.artist_nav,
+            BrowseCategory::Genres => &state.genre_nav,
+            BrowseCategory::Playlists => &state.playlist_nav,
+            _ => return vec![],
+        };
+        if let Some(col_idx) = miller_column_at(click_col, nav, state) {
+            // Skip playlist root column (no need to cycle playlist listing)
+            if state.browse_category == BrowseCategory::Playlists && col_idx == 0 {
+                return vec![];
+            }
+            let nav_mut = match state.browse_category {
+                BrowseCategory::Library => &mut state.artist_nav,
+                BrowseCategory::Genres => &mut state.genre_nav,
+                BrowseCategory::Playlists => &mut state.playlist_nav,
+                _ => return vec![],
+            };
+            nav_mut.focused_column = col_idx;
+            return super::key_input::handle_cycle_view(state);
         }
+        return vec![];
+    }
+
+    match state.browse_category {
         BrowseCategory::Folders => {
             return handle_folder_click(click_row, click_col, state);
         }
@@ -1044,6 +993,9 @@ fn browse_drill_down_action(item: BrowseItem, col_idx: usize, item_idx: usize, s
                     state.selected_album_title = format!("All tracks by {}", artist_name);
                     vec![Action::LoadArtistAllTracksForMiller { artist_key }]
                 }
+                BrowseItem::AllArtists => {
+                    vec![Action::LoadAllAlbumsForMiller]
+                }
                 BrowseItem::Track { .. } => {
                     vec![Action::PlayTrackFromMiller { column_index: col_idx, track_index: item_idx }]
                 }
@@ -1067,14 +1019,54 @@ fn browse_drill_down_action(item: BrowseItem, col_idx: usize, item_idx: usize, s
         BrowseCategory::Playlists => {
             match item {
                 BrowseItem::Playlist { key, .. } => {
+                    // Reset album grouping when selecting a new playlist
+                    state.playlist_view_mode = crate::app::state::PlaylistViewMode::Tracks;
+                    state.playlist_album_groups.clear();
+                    state.playlist_original_items = None;
+                    state.playlist_original_tracks = None;
                     vec![Action::LoadPlaylistTracksForMiller { playlist_key: key }]
+                }
+                BrowseItem::Album { .. }
+                    if state.playlist_view_mode == crate::app::state::PlaylistViewMode::TracksByAlbum =>
+                {
+                    // Drill into playlist album group
+                    if let Some(tracks) = state.playlist_album_groups.get(item_idx) {
+                        let items = BrowseItem::from_tracks(tracks);
+                        let title = match &state.playlist_nav.columns.get(col_idx)
+                            .and_then(|c| c.items.get(item_idx))
+                        {
+                            Some(BrowseItem::Album { title, .. }) => title.clone(),
+                            _ => "tracks".to_string(),
+                        };
+                        let new_col = crate::app::state::BrowseColumn::new_with_tracks(
+                            title, items, tracks.clone(),
+                        );
+                        state.playlist_nav.push_column(new_col);
+                    }
+                    vec![]
                 }
                 BrowseItem::Album { key, title, .. } => {
                     state.selected_album_title = title;
                     vec![Action::LoadAlbumTracksForMiller { album_key: key }]
                 }
                 BrowseItem::Track { .. } => {
-                    vec![Action::PlayPlaylistTrackFromMiller { column_index: col_idx, track_index: item_idx }]
+                    // When playing from a TracksByAlbum drill-down, queue all grouped tracks
+                    if state.playlist_view_mode == crate::app::state::PlaylistViewMode::TracksByAlbum
+                        && !state.playlist_album_groups.is_empty()
+                    {
+                        let parent_col_idx = col_idx.saturating_sub(1);
+                        let album_group_idx = state.playlist_nav.columns.get(parent_col_idx)
+                            .map(|c| c.selected_index)
+                            .unwrap_or(0);
+                        let offset: usize = state.playlist_album_groups.iter()
+                            .take(album_group_idx)
+                            .map(|g| g.len())
+                            .sum();
+                        let abs_idx = offset + item_idx;
+                        vec![Action::PlayPlaylistAlbumGroupTrack { track_index: abs_idx }]
+                    } else {
+                        vec![Action::PlayPlaylistTrackFromMiller { column_index: col_idx, track_index: item_idx }]
+                    }
                 }
                 _ => vec![],
             }
@@ -1170,126 +1162,97 @@ fn handle_folder_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
     vec![]
 }
 
-/// Handle click in Station browse mode.
-fn handle_station_click(click_row: u16, click_col: u16, state: &mut AppState) -> Vec<Action> {
-    if let Some((col_idx, item_idx, scroll_offset)) = station_hit_test(click_col, click_row, state) {
-        // If clicking a different column, change focus
-        if col_idx != state.station_nav.focused_column {
-            // Pin viewport so the clicked column doesn't re-center
-            state.browse_scroll_pin = Some((col_idx, scroll_offset));
-            state.browse_click_time = Some(std::time::Instant::now());
-            state.station_nav.focused_column = col_idx;
-            state.station_nav.truncate_right_columns();
-            if let Some(col) = state.station_nav.columns.get_mut(col_idx) {
-                col.selected_index = item_idx;
-            }
-            // Update legacy state
-            if let Some(col) = state.station_nav.focused() {
-                state.stations = col.stations.clone();
-            }
-            // Sync filter selection
-            let filter_on_col = state.list_filter.active
-                && state.list_filter.column == col_idx
-                && state.list_filter.category == BrowseCategory::Radio;
-            if filter_on_col {
-                if let Some(ref results) = state.list_filter.results {
-                    if let Some(pos) = results.matched_indices.iter().position(|&idx| idx == item_idx) {
-                        state.list_filter.selected = pos;
-                    }
-                }
-            }
-            return vec![];
-        }
-
-        // Same column: check for drill-down
-        let already_selected = state.station_nav.columns.get(col_idx)
-            .map(|c| c.selected_index == item_idx)
-            .unwrap_or(false);
-
-        if already_selected {
-            // Drill down - preserve parent column viewport position
-            state.browse_scroll_pin = Some((col_idx, scroll_offset));
-            state.browse_click_time = Some(std::time::Instant::now());
-            // When filter is active with results, use SelectFilteredItem for drill-down
-            let filter_on_col = state.list_filter.active
-                && state.list_filter.column == col_idx
-                && state.list_filter.category == BrowseCategory::Radio
-                && state.list_filter.results.is_some();
-            if filter_on_col {
-                return vec![Action::SelectFilteredItem];
-            }
-            if let Some(station) = state.station_nav.columns.get(col_idx)
-                .and_then(|c| c.stations.get(item_idx)).cloned()
-            {
-                // Handle action items (Radio section launchers)
-                if station.key.starts_with("action:") {
-                    return match station.key.as_str() {
-                        "action:start_radio" => vec![Action::OpenRadioLauncher],
-                        "action:adventure" => vec![Action::OpenAdventureLauncher],
-                        _ => vec![],
-                    };
-                }
-                if station.is_category() {
-                    return vec![Action::DrillIntoStation(station.key.clone(), station.title.clone())];
-                } else {
-                    return vec![Action::PlayStation(station.key.clone())];
-                }
-            }
-        } else {
-            // Pin the current scroll offset so the viewport doesn't jump
-            state.browse_scroll_pin = Some((col_idx, scroll_offset));
-            state.browse_click_time = Some(std::time::Instant::now());
-
-            if let Some(col) = state.station_nav.columns.get_mut(col_idx) {
-                col.selected_index = item_idx;
-            }
-            state.station_nav.truncate_right_columns();
-
-            // Update filter selection if active on this column
-            let filter_on_col = state.list_filter.active
-                && state.list_filter.column == col_idx
-                && (state.list_filter.category == BrowseCategory::Genres
-                    || state.list_filter.category == BrowseCategory::Playlists);
-            if filter_on_col {
-                if let Some(ref results) = state.list_filter.results {
-                    if let Some(pos) = results.matched_indices.iter().position(|&idx| idx == item_idx) {
-                        state.list_filter.selected = pos;
-                    }
-                }
-            }
-        }
-    }
-
-    vec![]
-}
-
-/// Handle mouse down in Now Playing view.
+/// Handle mouse down in Queue or NowPlaying view.
 fn handle_now_playing_down(click_row: u16, click_col: u16, state: &mut AppState) -> Vec<Action> {
-    use crate::app::state::NowPlayingMode;
+    use crate::app::state::NowPlayingFocus;
 
-    match state.now_playing_mode {
-        NowPlayingMode::Queue => {
-            // Queue mode layout: optional artwork (25 cols) + track list
-            let artwork_width = if state.artwork_data.is_some() && state.terminal_width > 60 {
-                25u16
-            } else {
-                0u16
-            };
+    match state.view {
+        View::Queue => {
+            // Queue mode layout: left column (artwork + stations) + right column (track list)
+            // Must match render_queue_mode layout in now_playing.rs
+            let content_height = state.terminal_height.saturating_sub(3);
+            let art_height = (content_height * 40 / 100).max(8);
+            let art_width = (art_height * 2).min(state.terminal_width * 40 / 100).max(25);
+
+            // Click in station panel area (left column, below artwork)
+            if click_col < art_width && click_row >= art_height {
+                state.now_playing_focus = NowPlayingFocus::Stations;
+                // Map click to station item (accounting for border)
+                let inner_top = art_height + 1;
+                let inner_bottom = content_height.saturating_sub(1);
+                if click_row >= inner_top && click_row < inner_bottom {
+                    let click_offset = (click_row - inner_top) as usize;
+                    let visible_height = (inner_bottom - inner_top) as usize;
+                    let (already_selected, item_idx) = if let Some(col) = state.station_nav.focused() {
+                        let scroll_offset = helpers::calc_scroll_offset(
+                            col.selected_index, visible_height, col.stations.len(),
+                        );
+                        let idx = scroll_offset + click_offset;
+                        if idx < col.stations.len() {
+                            (col.selected_index == idx, Some(idx))
+                        } else {
+                            (false, None)
+                        }
+                    } else {
+                        (false, None)
+                    };
+
+                    if let Some(idx) = item_idx {
+                        if already_selected {
+                            // Click already-selected: drill down / play (same as Enter)
+                            if let Some(station) = state.station_nav.selected_station().cloned() {
+                                if station.key.starts_with("action:") {
+                                    return match station.key.as_str() {
+                                        "action:adventure" => vec![Action::OpenAdventureLauncher],
+                                        "action:artist_radio" => vec![Action::OpenArtistRadioPicker],
+                                        _ => vec![],
+                                    };
+                                }
+                                if station.key.starts_with("remix:") {
+                                    return match station.key.as_str() {
+                                        "remix:gemini" => vec![Action::RemixGemini],
+                                        "remix:twofer" => vec![Action::RemixTwofer],
+                                        "remix:stretch" => vec![Action::RemixStretch],
+                                        "remix:shuffle" => {
+                                            if state.shuffle_undo_queue.is_some() {
+                                                vec![Action::RemixUndoShuffle]
+                                            } else {
+                                                vec![Action::RemixShuffle]
+                                            }
+                                        }
+                                        _ => vec![],
+                                    };
+                                }
+                                if station.is_category() {
+                                    return vec![Action::DrillIntoStation(station.key.clone(), station.title.clone())];
+                                }
+                                return vec![Action::PlayStation(station.key.clone())];
+                            }
+                        } else {
+                            if let Some(col) = state.station_nav.focused_mut() {
+                                col.selected_index = idx;
+                            }
+                        }
+                    }
+                }
+                return vec![];
+            }
 
             // Click on title bar (row 0) of track list toggles shuffle
-            if click_row == 0 && click_col >= artwork_width && !state.queue.is_empty() {
+            if click_row == 0 && click_col >= art_width && !state.queue.is_empty() {
                 return vec![Action::ToggleQueueShuffle];
             }
 
-            // Track list starts after artwork
-            if click_col >= artwork_width {
+            // Track list area (right column)
+            if click_col >= art_width {
+                state.now_playing_focus = NowPlayingFocus::Tracks;
                 // Visual row (accounting for border + 2-row layout per item)
                 let visual_row = click_row.saturating_sub(1) as usize;
                 let item_row = visual_row / 2;
 
                 // Calculate visible item count (2 rows per item)
-                let content_height = state.terminal_height.saturating_sub(5) as usize;
-                let visible_item_count = content_height / 2;
+                let content_height_usize = content_height.saturating_sub(2) as usize;
+                let visible_item_count = content_height_usize / 2;
 
                 // Combined list: play_history + queue tracks
                 let history_len = state.play_history.len();
@@ -1318,8 +1281,7 @@ fn handle_now_playing_down(click_row: u16, click_col: u16, state: &mut AppState)
                                 PlaybackMode::Radio => state.radio.track_index == Some(queue_idx),
                             };
                             if is_current {
-                                state.now_playing_mode = crate::app::state::NowPlayingMode::NowPlaying;
-                                return vec![Action::LoadWaveform];
+                                return vec![Action::SetView(View::NowPlaying), Action::LoadWaveform];
                             }
                             return match state.playback_mode {
                                 PlaybackMode::Radio => vec![Action::JumpToRadioTrack(queue_idx)],
@@ -1331,19 +1293,66 @@ fn handle_now_playing_down(click_row: u16, click_col: u16, state: &mut AppState)
                 }
             }
         }
-        NowPlayingMode::NowPlaying => {
-            // Visualizer mode: click to seek (enable drag only on indicator)
+        View::NowPlaying => {
+            // Visualizer mode layout depends on whether artwork is shown
             let content_height = state.terminal_height.saturating_sub(3);
-            let track_info_height = 5u16;
-            let visualizer_top = track_info_height;
+            let show_artwork = state.artwork_data.is_some() && state.terminal_width > 50;
+
+            let visualizer_top = if show_artwork {
+                // Top panel: 40% of height (min 12) for artwork + track info
+                (content_height * 40 / 100).max(12)
+            } else {
+                // Narrow layout: 5 rows for track info
+                5u16
+            };
             let visualizer_bottom = content_height;
-            let visualizer_inner_top = visualizer_top + 1;
+            let visualizer_inner_top = visualizer_top + 1; // After top border
             let visualizer_inner_bottom = visualizer_bottom.saturating_sub(1);
             let visualizer_inner_left = 1u16;
             let visualizer_inner_right = state.terminal_width.saturating_sub(1);
 
-            // Check if click is within the visualizer inner area (for seeking)
-            if click_row >= visualizer_inner_top
+            // Tab bar is the first row of the visualizer inner area
+            let tab_bar_row = visualizer_inner_top;
+
+            // Check if click is on the tab bar row
+            if click_row == tab_bar_row
+                && click_col >= visualizer_inner_left
+                && click_col < visualizer_inner_right
+            {
+                // Tab bar is centered: "Waveform │ Spectrum │ Spectrogram"
+                let inner_width = (visualizer_inner_right - visualizer_inner_left) as usize;
+                let tab_labels = ["Waveform", "Spectrum", "Spectrogram"];
+                let divider = " │ ";
+                let total_text_width: usize = tab_labels.iter().map(|l| l.len()).sum::<usize>()
+                    + divider.len() * (tab_labels.len() - 1);
+                let center_offset = inner_width.saturating_sub(total_text_width) / 2;
+                let rel_col = (click_col - visualizer_inner_left) as usize;
+
+                // Check if click falls on a tab label
+                let mut x = center_offset;
+                for (i, label) in tab_labels.iter().enumerate() {
+                    if rel_col >= x && rel_col < x + label.len() {
+                        let new_tab = match i {
+                            0 => crate::app::state::VisualizerTab::Waveform,
+                            1 => crate::app::state::VisualizerTab::Spectrum,
+                            _ => crate::app::state::VisualizerTab::Spectrogram,
+                        };
+                        state.visualizer_tab = new_tab;
+                        return vec![];
+                    }
+                    x += label.len();
+                    if i < tab_labels.len() - 1 {
+                        x += divider.len();
+                    }
+                }
+                return vec![];
+            }
+
+            // Content area starts after tab bar row
+            let content_top = tab_bar_row + 1;
+
+            // Check if click is within the visualizer content area (for seeking)
+            if click_row >= content_top
                 && click_row < visualizer_inner_bottom
                 && click_col >= visualizer_inner_left
                 && click_col < visualizer_inner_right
@@ -1371,6 +1380,7 @@ fn handle_now_playing_down(click_row: u16, click_col: u16, state: &mut AppState)
                 return vec![Action::Seek(seek_ms)];
             }
         }
+        _ => {}
     }
 
     vec![]
@@ -1397,37 +1407,34 @@ fn handle_visualizer_drag(click_col: u16, state: &AppState) -> Vec<Action> {
 
 /// Handle click in Search view.
 fn handle_search_click(click_row: u16, click_col: u16, state: &mut AppState) -> Vec<Action> {
-    // Search view is a centered popup: 60% width, 70% height
-    // Calculate popup bounds
-    let content_height = state.terminal_height.saturating_sub(3); // Minus transport + shortcuts
-    let content_width = state.terminal_width;
+    use ratatui::layout::Rect;
+    use crate::services::NavigationService;
 
-    let popup_height = content_height * 70 / 100;
-    let popup_width = content_width * 60 / 100;
-    let popup_top = (content_height - popup_height) / 2;
-    let popup_left = (content_width - popup_width) / 2;
+    // Use the same layout calculation as the renderer for accurate bounds
+    let content_area = Rect::new(0, 0, state.terminal_width, state.terminal_height.saturating_sub(3));
+    let popup_area = centered_rect(60, 70, content_area);
 
     // Check if click is within popup
-    if click_row < popup_top || click_row >= popup_top + popup_height {
+    if click_row < popup_area.y || click_row >= popup_area.y + popup_area.height {
         return vec![];
     }
-    if click_col < popup_left || click_col >= popup_left + popup_width {
+    if click_col < popup_area.x || click_col >= popup_area.x + popup_area.width {
         return vec![];
     }
 
     // Convert to popup-relative coordinates
-    let rel_row = click_row - popup_top;
-    let rel_col = click_col - popup_left;
+    let rel_row = click_row - popup_area.y;
+    let rel_col = click_col - popup_area.x;
 
-    // Popup layout: border (1) + tabs (2 rows) + search input (3 rows) + results
-    // Tabs are at rows 1-2 (after top border at row 0)
-    let tabs_start_row = 1u16;
-    let tabs_end_row = 3u16;
+    // Popup layout (rel_row):
+    //   0: top border
+    //   1-2: tabs (Length 2)
+    //   3-5: search input (Length 3)
+    //   6+: results
+    //   last: bottom border
 
-    if rel_row >= tabs_start_row && rel_row < tabs_end_row {
-        // Click is in tabs area
-        // Tabs rendered with Ratatui Tabs widget: "All | Artists | Album Artists | ..."
-        // Format: "tab1 | tab2 | tab3" with spaces around separators
+    // Tabs area (rel_rows 1-2)
+    if rel_row >= 1 && rel_row < 3 {
         let tab_names = ["All", "Artists", "Albums", "Playlists", "Tracks", "Genres"];
         let tabs_with_enum = [
             SearchTab::Global,
@@ -1438,7 +1445,6 @@ fn handle_search_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
             SearchTab::Genres,
         ];
 
-        // Calculate tab positions (accounting for left border)
         let mut x: u16 = 1; // After left border
         for (i, name) in tab_names.iter().enumerate() {
             let tab_width = name.len() as u16;
@@ -1447,38 +1453,80 @@ fn handle_search_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
                 return vec![];
             }
             x += tab_width;
-            // Add separator width " | " = 3 chars
             if i < tab_names.len() - 1 {
-                x += 3;
+                x += 3; // " | " separator
             }
         }
         return vec![];
     }
 
-    // Results area starts after tabs (3) + search input (3) + border (1) = row 7
-    let results_start_row = 7u16;
-    if rel_row >= results_start_row {
-        let result_row = (rel_row - results_start_row) as usize;
+    // Results area starts at rel_row 6 (border=1 + tabs=2 + search=3)
+    let results_start_row = 6u16;
+    // Visible results height: popup inner height minus tabs and search
+    let results_height = popup_area.height.saturating_sub(2 + 2 + 3) as usize;
 
-        // Handle based on current tab
-        // Click in search results — set focus to Results and update index
+    if rel_row >= results_start_row {
+        let visual_row = (rel_row - results_start_row) as usize;
+        if visual_row >= results_height {
+            return vec![];
+        }
+
         if let Some(ref results) = state.search_results {
-            let count = match state.search_tab {
+            match state.search_tab {
                 SearchTab::Global => {
-                    // All tab: flat list with section headers
-                    results.artists.len() + results.albums.len()
-                        + results.playlists.len() + results.genres.len()
-                        + results.tracks.len()
+                    // All tab: build entry map accounting for section headers
+                    // Each non-empty section adds 1 header row before its items
+                    let section_counts = [
+                        results.artists.len(),
+                        results.albums.len(),
+                        results.playlists.len(),
+                        results.genres.len(),
+                        results.tracks.len(),
+                    ];
+                    // Build flat list: (is_header, selectable_global_idx)
+                    let mut entries: Vec<Option<usize>> = Vec::new();
+                    let mut global_idx: usize = 0;
+                    for &count in &section_counts {
+                        if count > 0 {
+                            entries.push(None); // header
+                            for _ in 0..count {
+                                entries.push(Some(global_idx));
+                                global_idx += 1;
+                            }
+                        }
+                    }
+
+                    // Find display position of current selection for scroll offset
+                    let display_selected = entries.iter()
+                        .position(|e| *e == Some(state.list_state.search_item_index))
+                        .unwrap_or(0);
+                    let scroll_offset = NavigationService::calc_scroll_offset(
+                        display_selected, results_height, entries.len(),
+                    );
+                    let abs_row = scroll_offset + visual_row;
+                    if let Some(Some(idx)) = entries.get(abs_row) {
+                        state.search_focus = crate::app::state::SearchFocus::Results;
+                        state.list_state.search_item_index = *idx;
+                    }
                 }
-                SearchTab::Artists => results.artists.len(),
-                SearchTab::Albums => results.albums.len(),
-                SearchTab::Playlists => results.playlists.len(),
-                SearchTab::Tracks => results.tracks.len(),
-                SearchTab::Genres => results.genres.len(),
-            };
-            if result_row < count {
-                state.search_focus = crate::app::state::SearchFocus::Results;
-                state.list_state.search_item_index = result_row;
+                _ => {
+                    let total = match state.search_tab {
+                        SearchTab::Artists => results.artists.len(),
+                        SearchTab::Albums => results.albums.len(),
+                        SearchTab::Playlists => results.playlists.len(),
+                        SearchTab::Tracks => results.tracks.len(),
+                        SearchTab::Genres => results.genres.len(),
+                        _ => 0,
+                    };
+                    let scroll_offset = NavigationService::calc_scroll_offset(
+                        state.list_state.search_item_index, results_height, total,
+                    );
+                    let actual_idx = scroll_offset + visual_row;
+                    if actual_idx < total {
+                        state.search_focus = crate::app::state::SearchFocus::Results;
+                        state.list_state.search_item_index = actual_idx;
+                    }
+                }
             }
         }
     }
@@ -1677,8 +1725,7 @@ fn settings_visual_row_to_item(visual_row: usize, state: &AppState) -> Option<us
         }
         SettingsSection::About => {
             // Logo lines + blank + version + description + author + url + blank + "Theme:" header
-            // Theme items are selectable
-            // Count logo lines
+            // Theme items are selectable, followed by blank + "Enter:" + blank + "Graphics:" + protocol + "Artwork:" + modes
             let logo_lines = crate::ui::screens::settings::ansi_logo_line_count();
             // logo + blank + version + description + author + url + blank + "Theme:" = logo + 7
             let theme_start = logo_lines + 7;
@@ -1686,7 +1733,15 @@ fn settings_visual_row_to_item(visual_row: usize, state: &AppState) -> Option<us
             if visual_row >= theme_start && visual_row < theme_start + theme_count {
                 Some(visual_row - theme_start)
             } else {
-                None
+                // After themes: blank + "Enter:" + blank + "Graphics:" + protocol + "Artwork:" header + mode items
+                let artwork_header_row = theme_start + theme_count + 5;
+                let artwork_items_start = artwork_header_row + 1;
+                let mode_count = crate::app::state::ArtworkMode::all().len();
+                if visual_row >= artwork_items_start && visual_row < artwork_items_start + mode_count {
+                    Some(theme_count + (visual_row - artwork_items_start))
+                } else {
+                    None
+                }
             }
         }
     }
@@ -1707,7 +1762,24 @@ fn handle_scroll(up: bool, click_row: u16, click_col: u16, state: &mut AppState)
         View::Browse => {
             return handle_browse_scroll(up, click_row, click_col, state);
         }
-        View::NowPlaying => {
+        View::Queue => {
+            // Check if scrolling in station panel area (left column)
+            let content_height = state.terminal_height.saturating_sub(3);
+            let art_height = (content_height * 40 / 100).max(8);
+            let art_width = (art_height * 2).min(state.terminal_width * 40 / 100).max(25);
+
+            if click_col < art_width && click_row >= art_height {
+                // Station panel scroll
+                let delta: i32 = if up { -1 } else { 1 };
+                if let Some(col) = state.station_nav.focused_mut() {
+                    let max = col.stations.len().saturating_sub(1);
+                    let new_idx = (col.selected_index as i32 + delta).clamp(0, max as i32) as usize;
+                    col.selected_index = new_idx;
+                }
+                state.station_nav.truncate_right_columns();
+                return vec![];
+            }
+
             // Scroll queue (includes play history + current tracks)
             let delta: i32 = if up { -1 } else { 1 };
             let tracks_len = if state.playback_mode == PlaybackMode::Radio {
@@ -1748,44 +1820,6 @@ fn handle_browse_scroll(up: bool, click_row: u16, click_col: u16, state: &mut Ap
     // Clear scroll pin — scrolling should use fresh calc_scroll_offset
     state.browse_scroll_pin = None;
 
-    if state.browse_category == BrowseCategory::Radio {
-        // Radio/stations scroll
-        if let Some((col_idx, _, _)) = station_hit_test(click_col, click_row, state) {
-            let delta: i32 = if up { -1 } else { 1 };
-
-            // Check if filter is active on this column
-            let filter_on_col = state.list_filter.active
-                && state.list_filter.column == col_idx
-                && state.list_filter.category == BrowseCategory::Radio;
-
-            if filter_on_col {
-                if let Some(ref results) = state.list_filter.results {
-                    if !results.matched_indices.is_empty() {
-                        let max = results.matched_indices.len().saturating_sub(1);
-                        let new_sel = (state.list_filter.selected as i32 + delta).clamp(0, max as i32) as usize;
-                        state.list_filter.selected = new_sel;
-                        if let Some(&item_idx) = results.matched_indices.get(new_sel) {
-                            if let Some(col) = state.station_nav.columns.get_mut(col_idx) {
-                                col.selected_index = item_idx;
-                            }
-                        }
-                    }
-                }
-            } else {
-                if let Some(col) = state.station_nav.columns.get_mut(col_idx) {
-                    let max = col.stations.len().saturating_sub(1);
-                    let new_idx = (col.selected_index as i32 + delta).clamp(0, max as i32) as usize;
-                    col.selected_index = new_idx;
-                }
-                if col_idx != state.station_nav.focused_column {
-                    state.station_nav.focused_column = col_idx;
-                    state.station_nav.truncate_right_columns();
-                }
-            }
-        }
-        return vec![];
-    }
-
     match state.browse_category {
         BrowseCategory::Folders => {
             if let Some((col_idx, _, _)) = folder_hit_test(click_col, click_row, state) {
@@ -1825,9 +1859,6 @@ fn handle_browse_scroll(up: bool, click_row: u16, click_col: u16, state: &mut Ap
                     }
                 }
             }
-        }
-        BrowseCategory::Radio => {
-            // Radio scroll handled above
         }
         BrowseCategory::Library | BrowseCategory::Genres | BrowseCategory::Playlists => {
             let nav = match state.browse_category {

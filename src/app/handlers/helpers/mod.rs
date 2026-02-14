@@ -37,31 +37,118 @@ pub use refresh::{
 /// Page size for paginated API requests.
 pub const PAGE_SIZE: u32 = 100;
 
-/// Append "Start Radio" and "Sonic Adventure" action items to a station list.
+/// Append DJ modes, actions, and remix items to a station list.
 /// Used when building station_nav from any source (API, cache, preload).
-pub fn append_station_action_items(stations: &mut Vec<crate::api::models::Station>) {
+///
+/// Layout:
+/// ```text
+/// [Plex radio stations...]
+/// ─────────────── (sep:dj)
+/// DJ Freeze, Contempo, Groupie, Gemini, Twofer, Stretch (all continuous)
+/// DJ Friendgänger (grayed)
+/// ─────────────── (sep:actions)
+/// Sonic Adventure, Artist Radio
+/// ─────────────── (sep:remix)
+/// Remix: Gemini, Twofer, Stretch, Shuffle
+/// ```
+pub fn append_station_action_items(stations: &mut Vec<crate::api::models::Station>, shuffle_active: bool) {
     use crate::api::models::Station;
-    // Only append if not already present (avoid duplicates on reload)
-    if stations.iter().any(|s| s.key == "action:start_radio") {
-        return;
-    }
-    stations.push(Station {
-        key: "action:start_radio".to_string(),
-        title: "Start Radio".to_string(),
-        station_type: "action".to_string(),
-        identifier: None,
-        thumb: None,
-        art: None,
-        description: Some("Search for an artist, album, or track to start radio".to_string()),
+    use crate::app::state::DjMode;
+
+    // Strip any previously appended synthetic items so we always rebuild fresh.
+    stations.retain(|s| {
+        s.station_type != "action"
+            && s.station_type != "separator"
+            && s.station_type != "dj_mode"
+            && s.station_type != "remix"
     });
+
+    // ── DJ Modes ──
+    stations.push(Station {
+        key: "sep:dj".to_string(),
+        title: "\u{2500}".to_string(), // ─
+        station_type: "separator".to_string(),
+        identifier: None, thumb: None, art: None, description: None,
+    });
+
+    // All 6 DJ modes are now continuous (insert on every track transition)
+    for mode in &[DjMode::Freeze, DjMode::Contempo, DjMode::Groupie, DjMode::Gemini, DjMode::Twofer, DjMode::Stretch] {
+        stations.push(Station {
+            key: mode.key().to_string(),
+            title: mode.name().to_string(),
+            station_type: "dj_mode".to_string(),
+            identifier: None, thumb: None, art: None,
+            description: Some(mode.description().to_string()),
+        });
+    }
+
+    // DJ Friendgänger (deferred/unavailable)
+    stations.push(Station {
+        key: "dj:friendganger".to_string(),
+        title: "DJ Friendg\u{00e4}nger".to_string(),
+        station_type: "dj_mode".to_string(),
+        identifier: None, thumb: None, art: None,
+        description: Some("Requires Sonic Analysis on shared libraries".to_string()),
+    });
+
+    // ── Actions ──
+    stations.push(Station {
+        key: "sep:actions".to_string(),
+        title: "\u{2500}".to_string(), // ─
+        station_type: "separator".to_string(),
+        identifier: None, thumb: None, art: None, description: None,
+    });
+
     stations.push(Station {
         key: "action:adventure".to_string(),
         title: "Sonic Adventure".to_string(),
         station_type: "action".to_string(),
-        identifier: None,
-        thumb: None,
-        art: None,
+        identifier: None, thumb: None, art: None,
         description: Some("Create a sonic bridge between two tracks".to_string()),
+    });
+    stations.push(Station {
+        key: "action:artist_radio".to_string(),
+        title: "Artist Radio".to_string(),
+        station_type: "action".to_string(),
+        identifier: None, thumb: None, art: None,
+        description: Some("Blend radio from multiple artists".to_string()),
+    });
+
+    // ── Queue Remix ──
+    stations.push(Station {
+        key: "sep:remix".to_string(),
+        title: "\u{2500}".to_string(), // ─
+        station_type: "separator".to_string(),
+        identifier: None, thumb: None, art: None, description: None,
+    });
+
+    stations.push(Station {
+        key: "remix:gemini".to_string(),
+        title: "Remix: Gemini".to_string(),
+        station_type: "remix".to_string(),
+        identifier: None, thumb: None, art: None,
+        description: Some("Insert similar tracks between queue items".to_string()),
+    });
+    stations.push(Station {
+        key: "remix:twofer".to_string(),
+        title: "Remix: Twofer".to_string(),
+        station_type: "remix".to_string(),
+        identifier: None, thumb: None, art: None,
+        description: Some("Insert same-artist tracks between queue items".to_string()),
+    });
+    stations.push(Station {
+        key: "remix:stretch".to_string(),
+        title: "Remix: Stretch".to_string(),
+        station_type: "remix".to_string(),
+        identifier: None, thumb: None, art: None,
+        description: Some("Insert sonic bridge tracks between queue items".to_string()),
+    });
+    stations.push(Station {
+        key: "remix:shuffle".to_string(),
+        title: if shuffle_active { "Undo Shuffle" } else { "Remix: Shuffle" }.to_string(),
+        station_type: "remix".to_string(),
+        identifier: None, thumb: None, art: None,
+        description: Some(if shuffle_active { "Restore original queue order" } else { "Shuffle the current queue" }.to_string()),
     });
 }
 

@@ -145,6 +145,10 @@ pub struct UiConfig {
     /// Persist cover art view mode across sessions (Alt+C toggle).
     #[serde(default)]
     pub cover_art_view: bool,
+
+    /// Artwork rendering mode: "auto", "halfblocks", or "braille".
+    #[serde(default = "default_artwork_mode")]
+    pub artwork_mode: String,
 }
 
 impl Default for UiConfig {
@@ -154,6 +158,7 @@ impl Default for UiConfig {
             album_art_size: default_album_art_size(),
             theme: default_theme(),
             cover_art_view: false,
+            artwork_mode: default_artwork_mode(),
         }
     }
 }
@@ -168,4 +173,8 @@ fn default_album_art_size() -> u16 {
 
 fn default_theme() -> String {
     "solarized-dark".to_string()
+}
+
+fn default_artwork_mode() -> String {
+    "auto".to_string()
 }

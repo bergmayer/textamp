@@ -521,9 +521,6 @@ fn apply_key_to_state(state: &mut AppState, key: crossterm::event::KeyEvent) {
                             BrowseCategory::Genres => {
                                 state.genres_index = state.genres_index.saturating_sub(1);
                             }
-                            BrowseCategory::Radio => {
-                                // Radio handled by station navigation
-                            }
                             BrowseCategory::Folders => {
                                 // Folders handled separately
                             }
@@ -546,9 +543,6 @@ fn apply_key_to_state(state: &mut AppState, key: crossterm::event::KeyEvent) {
                             BrowseCategory::Genres => {
                                 let max = state.genres.len().saturating_sub(1);
                                 state.genres_index = (state.genres_index + 1).min(max);
-                            }
-                            BrowseCategory::Radio => {
-                                // Radio handled by station navigation
                             }
                             BrowseCategory::Folders => {
                                 // Folders handled separately
@@ -581,11 +575,11 @@ fn apply_key_to_state(state: &mut AppState, key: crossterm::event::KeyEvent) {
                 _ => {}
             }
         }
-        View::NowPlaying | View::Similar => {
+        View::Queue | View::NowPlaying | View::Similar => {
             match key.code {
                 KeyCode::Esc | KeyCode::Char('b') => state.view = View::Browse,
                 KeyCode::Down => {
-                    if state.view == View::NowPlaying {
+                    if state.view == View::Queue || state.view == View::NowPlaying {
                         let max = state.queue.len().saturating_sub(1);
                         state.list_state.queue_index = (state.list_state.queue_index + 1).min(max);
                     } else if state.view == View::Similar {
@@ -594,7 +588,7 @@ fn apply_key_to_state(state: &mut AppState, key: crossterm::event::KeyEvent) {
                     }
                 }
                 KeyCode::Up => {
-                    if state.view == View::NowPlaying {
+                    if state.view == View::Queue || state.view == View::NowPlaying {
                         state.list_state.queue_index = state.list_state.queue_index.saturating_sub(1);
                     } else if state.view == View::Similar {
                         state.list_state.similar_index = state.list_state.similar_index.saturating_sub(1);
@@ -660,9 +654,40 @@ async fn run_tui_mode(verbose: bool) -> Result<()> {
     let mut terminal = setup_terminal()?;
 
     // Detect terminal graphics capabilities (must happen before event reader starts)
-    if let Ok(picker) = ratatui_image::picker::Picker::from_query_stdio() {
+    // Apple Terminal can't render Sixel/Kitty protocols and from_query_stdio() echoes artifacts.
+    let is_apple_terminal = std::env::var("TERM_PROGRAM")
+        .map(|v| v == "Apple_Terminal")
+        .unwrap_or(false)
+        || std::env::var("TERM_SESSION_ID")
+            .map(|v| v.contains("com.apple.Terminal"))
+            .unwrap_or(false);
+
+    // Resolve artwork mode from config, with Apple Terminal defaulting to Braille
+    let configured_mode = textamp::app::state::ArtworkMode::from_config(&config.ui.artwork_mode);
+    let effective_mode = if configured_mode == textamp::app::state::ArtworkMode::Auto && is_apple_terminal {
+        tracing::info!("Apple Terminal detected, defaulting to Braille artwork mode");
+        textamp::app::state::ArtworkMode::Braille
+    } else {
+        configured_mode
+    };
+
+    let picker_result = if is_apple_terminal {
+        tracing::info!("Apple Terminal detected, using halfblocks protocol for fallback");
+        Ok(ratatui_image::picker::Picker::halfblocks())
+    } else {
+        ratatui_image::picker::Picker::from_query_stdio()
+    };
+    if let Ok(mut picker) = picker_result {
+        // Apply halfblocks if artwork mode requires it
+        if effective_mode == textamp::app::state::ArtworkMode::Halfblocks {
+            tracing::info!("Halfblocks artwork mode, using halfblocks protocol");
+            picker.set_protocol_type(ratatui_image::picker::ProtocolType::Halfblocks);
+        }
+        tracing::info!("Image protocol: {:?}, Artwork mode: {:?}", picker.protocol_type(), effective_mode);
         textamp::ui::artwork::init_grid_renderer(picker.clone());
+        textamp::ui::artwork::set_grid_artwork_mode(effective_mode);
         textamp::ui::screens::now_playing::init_artwork_renderer(picker);
+        textamp::ui::screens::now_playing::set_artwork_mode(effective_mode);
     }
 
     // Run the app and ensure terminal is always restored

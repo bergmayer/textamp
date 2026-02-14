@@ -284,6 +284,50 @@ impl PlexClient {
         Ok(response.media_container.metadata)
     }
 
+    /// Get related artists for an artist (via Plex's related hub).
+    /// Uses the /library/metadata/{id}/related endpoint and extracts artist items.
+    pub async fn get_related_artists(&self, artist_id: &str) -> Result<Vec<Artist>, ApiError> {
+        let path = format!("{}/{}/related", EP_LIBRARY_METADATA, artist_id);
+
+        let raw = self.get_raw(&path).await?;
+        let response: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
+            ApiError::ParseError(format!("Related artists parse error: {}", e))
+        })?;
+
+        let mut artists = Vec::new();
+
+        if let Some(hubs) = response
+            .get("MediaContainer")
+            .and_then(|mc| mc.get("Hub"))
+            .and_then(|h| h.as_array())
+        {
+            for hub in hubs {
+                let hub_type = hub.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                if hub_type != "artist" {
+                    continue;
+                }
+                if let Some(metadata) = hub.get("Metadata").and_then(|m| m.as_array()) {
+                    for item in metadata {
+                        if let (Some(key), Some(title)) = (
+                            item.get("ratingKey").and_then(|k| k.as_str()),
+                            item.get("title").and_then(|t| t.as_str()),
+                        ) {
+                            artists.push(Artist {
+                                rating_key: key.to_string(),
+                                title: title.to_string(),
+                                thumb: item.get("thumb").and_then(|t| t.as_str()).map(|s| s.to_string()),
+                                ..Artist::default()
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        tracing::info!("get_related_artists for {} found {} artists", artist_id, artists.len());
+        Ok(artists)
+    }
+
     // ========================================================================
     // Album Methods
     // ========================================================================
@@ -1307,7 +1351,7 @@ impl PlexClient {
 
     /// Create radio tracks by first getting albums matching a filter, then getting their tracks.
     /// Style and decade metadata is attached to albums, not tracks, so we need this approach.
-    async fn create_album_filter_radio_tracks(&self, library_key: &str, filter_type: &str, filter_value: &str) -> Result<Vec<Track>, ApiError> {
+    pub async fn create_album_filter_radio_tracks(&self, library_key: &str, filter_type: &str, filter_value: &str) -> Result<Vec<Track>, ApiError> {
         // Get random albums matching this filter (style or decade)
         let albums_path = format!(
             "{}/{}/all?type={}&{}={}&sort=random&limit=10",
@@ -1653,6 +1697,56 @@ impl PlexClient {
         tracing::info!(
             "get_similar_tracks for {} found {} tracks",
             rating_key, tracks.len()
+        );
+
+        Ok(tracks)
+    }
+
+    /// Get sonically similar tracks with configurable maxDistance.
+    /// Looser distance (e.g. 0.5) finds more diverse bridge tracks for DJ Stretch.
+    pub async fn get_similar_tracks_with_distance(
+        &self,
+        rating_key: &str,
+        limit: u32,
+        max_distance: f32,
+    ) -> Result<Vec<Track>, ApiError> {
+        let path = format!(
+            "{}/{}/nearest?limit={}&maxDistance={}",
+            EP_LIBRARY_METADATA, rating_key, limit, max_distance
+        );
+
+        let response: TracksResponse = self.get(&path).await?;
+        let tracks = response.media_container.metadata;
+
+        tracing::info!(
+            "get_similar_tracks_with_distance for {} (maxDistance={}) found {} tracks",
+            rating_key, max_distance, tracks.len()
+        );
+
+        Ok(tracks)
+    }
+
+    /// Compute a sonic path between two tracks using Plex's /computePath endpoint.
+    /// Returns a sequence of tracks forming a sonic bridge between start and end.
+    pub async fn compute_path(
+        &self,
+        section_id: &str,
+        start_id: &str,
+        end_id: &str,
+        count: usize,
+        max_distance: f32,
+    ) -> Result<Vec<Track>, ApiError> {
+        let path = format!(
+            "{}/{}/computePath?startID={}&endID={}&count={}&maxDistance={}",
+            EP_LIBRARY_SECTIONS, section_id, start_id, end_id, count, max_distance
+        );
+
+        let response: TracksResponse = self.get(&path).await?;
+        let tracks = response.media_container.metadata;
+
+        tracing::info!(
+            "compute_path from {} to {} (count={}, maxDistance={}) returned {} tracks",
+            start_id, end_id, count, max_distance, tracks.len()
         );
 
         Ok(tracks)

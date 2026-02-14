@@ -2,7 +2,8 @@
 //! display and the key handler dispatch.
 
 use crate::app::state::{
-    BrowseCategory, BrowseItem, Focus, PlaybackMode, RightPanelMode, View,
+    BrowseCategory, BrowseItem, Focus, PlaybackMode, PlaylistViewMode,
+    RightPanelMode, View,
 };
 use crate::app::AppState;
 
@@ -22,25 +23,16 @@ pub fn available_alt_commands(state: &AppState) -> Vec<AltCommand> {
 
     let has_track = has_track_context(state);
     let has_album = has_album_context(state);
-    let has_artist_or_album_or_track = has_track || has_album || has_artist_context(state);
     let has_playing = state.current_track().is_some();
 
-    // Alt+R radio: need a track, album, or artist in context, or something playing
-    if has_artist_or_album_or_track || has_playing {
-        cmds.push(AltCommand { key: 'r', label: "radio" });
+    // Alt+E enqueue: need a track or album that can be enqueued (not from Queue or Now Playing)
+    if state.view != View::Queue && state.view != View::NowPlaying && (has_track || has_album || has_enqueue_context(state)) {
+        cmds.push(AltCommand { key: 'e', label: "enqueue" });
     }
 
-    // Alt+Q queue: need a track or album that can be enqueued
-    if has_track || has_album || has_enqueue_context(state) {
-        cmds.push(AltCommand { key: 'q', label: "queue" });
-    }
-
-    // Alt+S shuffle: shuffle current column/queue
-    if state.view == View::Browse
-        || !state.queue.is_empty()
-        || !state.radio.tracks.is_empty()
-    {
-        cmds.push(AltCommand { key: 's', label: "shuffle" });
+    // Alt+V view cycle: context-dependent cycling (albums, playlist tracks, genre tabs)
+    if let Some(label) = get_view_cycle_label(state) {
+        cmds.push(AltCommand { key: 'v', label });
     }
 
     // Alt+M similar: need a track or album in context, or something playing
@@ -48,43 +40,18 @@ pub fn available_alt_commands(state: &AppState) -> Vec<AltCommand> {
         cmds.push(AltCommand { key: 'm', label: "similar" });
     }
 
-    // Alt+B album: need a track with album info (Miller columns, folder, old state, or now-playing)
+    // Alt+G album: need a track with album info (Miller columns, folder, or now-playing)
     if has_track_with_album(state) || has_miller_album_context(state)
         || has_folder_track_with_album(state) || has_playing_with_album(state)
     {
-        cmds.push(AltCommand { key: 'b', label: "album" });
+        cmds.push(AltCommand { key: 'g', label: "album" });
     }
 
-    // Alt+G artist: need a track/album with artist info (Miller columns, folder, old state, or now-playing)
-    if has_track_with_artist(state) || has_album_with_artist(state)
-        || has_miller_artist_context(state) || has_folder_track_with_artist(state)
-        || has_playing_with_artist(state)
-    {
-        cmds.push(AltCommand { key: 'g', label: "artist" });
-    }
-
-    // Alt+A group by album: available in Playlists track view
-    if state.view == View::Browse && state.browse_category == BrowseCategory::Playlists
-        && state.playlist_nav.focused_column > 0
-    {
-        let label = match state.playlist_view_mode {
-            crate::app::state::PlaylistViewMode::Tracks => "by album",
-            crate::app::state::PlaylistViewMode::TracksByAlbum => "tracks",
-        };
-        cmds.push(AltCommand { key: 'a', label });
-    }
-
-    // Alt+W save: has tracks in queue or radio (only in NowPlaying view)
-    if state.view == View::NowPlaying
+    // Alt+W save: has tracks in queue or radio (in Queue or NowPlaying view)
+    if (state.view == View::Queue || state.view == View::NowPlaying)
         && (!state.queue.is_empty() || !state.radio.tracks.is_empty())
     {
         cmds.push(AltCommand { key: 'w', label: "save" });
-    }
-
-    // Alt+C covers: available in Browse view except Folders (toggles album art grid)
-    if state.view == View::Browse && state.browse_category != BrowseCategory::Folders {
-        let label = if state.album_art_view { "list view" } else { "covers" };
-        cmds.push(AltCommand { key: 'c', label });
     }
 
     cmds
@@ -96,6 +63,60 @@ pub fn is_alt_command_available(state: &AppState, key: char) -> bool {
 }
 
 // --- Context helpers ---
+
+/// Determine the view cycle context and return the label for the next state.
+/// Returns None if Alt+V is not available in the current context.
+fn get_view_cycle_label(state: &AppState) -> Option<&'static str> {
+    // Alt+V cycles visualizer tab in NowPlaying view
+    if state.view == View::NowPlaying {
+        return Some("cycle viz");
+    }
+
+    if state.view != View::Browse {
+        return None;
+    }
+
+    // Genre tab cycle: Genres category, focused column has Genre items
+    if state.browse_category == BrowseCategory::Genres {
+        let is_genre_col = state.genre_nav.focused()
+            .and_then(|col| col.items.first())
+            .map_or(false, |item| matches!(item, BrowseItem::Genre { .. }));
+        if is_genre_col {
+            return Some("cycle view");
+        }
+    }
+
+    // Playlist track/album cycle: Playlists, view-cycle column focused (index > 0)
+    if state.browse_category == BrowseCategory::Playlists && state.playlist_nav.focused_column > 0 {
+        let col = state.playlist_nav.focused()?;
+        let first_item = col.items.first()?;
+        let is_valid = match (state.playlist_view_mode, first_item) {
+            (PlaylistViewMode::Tracks, BrowseItem::Track { .. }) => true,
+            (PlaylistViewMode::TracksByAlbum, BrowseItem::Album { .. }) => true,
+            _ => false,
+        };
+        if is_valid {
+            return Some("cycle view");
+        }
+        return None;
+    }
+
+    // General column cycle: Library | Genres | Playlists (not TracksByAlbum)
+    let nav = match state.browse_category {
+        BrowseCategory::Library => Some(&state.artist_nav),
+        BrowseCategory::Genres => Some(&state.genre_nav),
+        BrowseCategory::Playlists if state.playlist_view_mode != PlaylistViewMode::TracksByAlbum => {
+            Some(&state.playlist_nav)
+        }
+        _ => None,
+    }?;
+    let col = nav.focused()?;
+    if col.items.is_empty() {
+        return None;
+    }
+
+    Some("cycle view")
+}
 
 /// Is there a track highlighted/selected in the current view?
 fn has_track_context(state: &AppState) -> bool {
@@ -165,14 +186,6 @@ fn has_album_context(state: &AppState) -> bool {
     }
 }
 
-/// Is there an artist highlighted in the current view?
-fn has_artist_context(state: &AppState) -> bool {
-    state.view == View::Browse
-        && state.focus == Focus::Left
-        && state.browse_category == BrowseCategory::Library
-        && !state.artists.is_empty()
-}
-
 /// Does the enqueue action have valid context? (albums on left panel, playlists, etc.)
 fn has_enqueue_context(state: &AppState) -> bool {
     match state.view {
@@ -228,67 +241,6 @@ fn has_track_with_album(state: &AppState) -> bool {
     }
 }
 
-/// Is there a selected track that has artist info (grandparent_rating_key)?
-fn has_track_with_artist(state: &AppState) -> bool {
-    match state.view {
-        View::NowPlaying => {
-            let idx = state.list_state.queue_index;
-            let track = match state.playback_mode {
-                PlaybackMode::Queue | PlaybackMode::None => {
-                    let history_len = state.play_history.len();
-                    if idx < history_len {
-                        state.play_history.get(idx)
-                    } else {
-                        state.queue.get(idx - history_len)
-                    }
-                }
-                PlaybackMode::Radio => state.radio.tracks.get(idx),
-            };
-            track.map(|t| t.grandparent_rating_key.is_some()).unwrap_or(false)
-        }
-        View::Browse => {
-            match state.right_panel_mode {
-                RightPanelMode::AlbumTracks | RightPanelMode::CategoryTracks => {
-                    state.selected_album_tracks.get(state.list_state.tracks_index)
-                        .map(|t| t.grandparent_rating_key.is_some())
-                        .unwrap_or(false)
-                }
-                _ => false,
-            }
-        }
-        _ => false,
-    }
-}
-
-/// Is there a selected album with artist info (parent_rating_key)?
-fn has_album_with_artist(state: &AppState) -> bool {
-    match state.view {
-        View::Browse => {
-            match state.right_panel_mode {
-                RightPanelMode::ArtistAlbums => {
-                    let idx = state.list_state.right_albums_index.saturating_sub(1);
-                    state.list_state.right_albums_index > 0
-                        && state.selected_artist_albums.get(idx)
-                            .map(|a| a.parent_rating_key.is_some())
-                            .unwrap_or(false)
-                }
-                RightPanelMode::CategoryAlbums => {
-                    state.genre_albums.get(state.genre_albums_index)
-                        .map(|a| a.parent_rating_key.is_some())
-                        .unwrap_or(false)
-                }
-                _ => false,
-            }
-        }
-        View::Similar => {
-            state.similar_albums.get(state.list_state.similar_index)
-                .map(|a| a.parent_rating_key.is_some())
-                .unwrap_or(false)
-        }
-        _ => false,
-    }
-}
-
 /// Is there a Track or Album selected in Miller columns that has album context?
 fn has_miller_album_context(state: &AppState) -> bool {
     if state.view != View::Browse {
@@ -315,33 +267,6 @@ fn has_miller_album_context(state: &AppState) -> bool {
     }
 }
 
-/// Is there a Track, Album, or Artist selected in Miller columns with artist context?
-fn has_miller_artist_context(state: &AppState) -> bool {
-    if state.view != View::Browse {
-        return false;
-    }
-    let nav = match state.browse_category {
-        BrowseCategory::Library => &state.artist_nav,
-        BrowseCategory::Genres => &state.genre_nav,
-        BrowseCategory::Playlists => &state.playlist_nav,
-        _ => return false,
-    };
-    let focused = nav.focused_column;
-    let item = nav.columns.get(focused).and_then(|c| c.items.get(c.selected_index));
-    match item {
-        Some(BrowseItem::Track { .. } | BrowseItem::Album { .. } | BrowseItem::AllTracks { .. }) => {
-            // Need an Artist column somewhere in the hierarchy
-            nav.columns.iter().any(|c| {
-                c.items.get(c.selected_index)
-                    .map(|i| matches!(i, BrowseItem::Artist { .. }))
-                    .unwrap_or(false)
-            })
-        }
-        Some(BrowseItem::Artist { .. }) => true,
-        _ => false,
-    }
-}
-
 /// Is there a selected track in folder view with album info (parent_rating_key)?
 fn has_folder_track_with_album(state: &AppState) -> bool {
     if state.view != View::Browse || state.browse_category != BrowseCategory::Folders {
@@ -353,17 +278,6 @@ fn has_folder_track_with_album(state: &AppState) -> bool {
         .unwrap_or(false)
 }
 
-/// Is there a selected track in folder view with artist info (grandparent_rating_key)?
-fn has_folder_track_with_artist(state: &AppState) -> bool {
-    if state.view != View::Browse || state.browse_category != BrowseCategory::Folders {
-        return false;
-    }
-    state.folder_state.as_ref()
-        .and_then(|fs| fs.selected_item())
-        .map(|item| item.is_track() && item.grandparent_rating_key.is_some())
-        .unwrap_or(false)
-}
-
 /// Does the now-playing track have album info?
 fn has_playing_with_album(state: &AppState) -> bool {
     state.current_track()
@@ -371,9 +285,3 @@ fn has_playing_with_album(state: &AppState) -> bool {
         .unwrap_or(false)
 }
 
-/// Does the now-playing track have artist info?
-fn has_playing_with_artist(state: &AppState) -> bool {
-    state.current_track()
-        .map(|t| t.grandparent_rating_key.is_some())
-        .unwrap_or(false)
-}

@@ -1,11 +1,10 @@
 //! Radio launcher popup (Start Radio from Radio section).
 //!
-//! Search for an artist, album, or track to start Plex radio.
+//! Search for an artist to start Plex radio.
 //! Uses Plex's playQueue API which incorporates full server-side heuristics.
 
 use crate::app::state::{RadioLauncherTab, SearchFocus};
 use crate::app::AppState;
-use crate::api::models::SearchResults;
 use crate::services::NavigationService;
 use crate::ui::theme::theme;
 
@@ -49,7 +48,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     // Instructions
     let instructions = Paragraph::new(vec![
         Line::from(Span::styled(
-            "Search for an artist, album, or track to start radio.",
+            "Search for an artist to start radio.",
             Style::default().fg(t.colors.fg_muted),
         )),
         Line::from(Span::styled(
@@ -76,8 +75,6 @@ fn render_tabs(frame: &mut Frame, tab: RadioLauncherTab, area: Rect) {
     let selected_idx = match tab {
         RadioLauncherTab::All => 0,
         RadioLauncherTab::Artists => 1,
-        RadioLauncherTab::Albums => 2,
-        RadioLauncherTab::Tracks => 3,
     };
 
     let tabs = Tabs::new(titles)
@@ -139,44 +136,27 @@ fn render_results(frame: &mut Frame, launcher: &crate::app::state::RadioLauncher
     let is_results_focused = launcher.focus == SearchFocus::Results;
     let selected_idx = launcher.item_index;
 
+    // Both tabs show artists only (All shows with header, Artists shows plain list)
     match launcher.tab {
         RadioLauncherTab::All => render_all_tab(frame, results, is_results_focused, selected_idx, area),
         RadioLauncherTab::Artists => render_single_section(
             frame, &results.artists, |a| a.title.clone(),
             is_results_focused, selected_idx, area,
         ),
-        RadioLauncherTab::Albums => render_single_section(
-            frame, &results.albums, |a| {
-                let artist = a.artist_name();
-                if let Some(year) = a.year {
-                    format!("{} ({}) - {}", a.title, year, artist)
-                } else {
-                    format!("{} - {}", a.title, artist)
-                }
-            },
-            is_results_focused, selected_idx, area,
-        ),
-        RadioLauncherTab::Tracks => render_single_section(
-            frame, &results.tracks, |tr| {
-                format!("{} - {}", tr.title, tr.artist_name())
-            },
-            is_results_focused, selected_idx, area,
-        ),
     }
 }
 
-/// Render the All tab with section headers (Artists, Albums, Tracks only — no Playlists/Genres).
+/// Render the All tab with artists section header.
 fn render_all_tab(
     frame: &mut Frame,
-    results: &SearchResults,
+    results: &crate::api::models::SearchResults,
     is_focused: bool,
     selected_idx: usize,
     area: Rect,
 ) {
     let t = theme();
 
-    let has_any = !results.artists.is_empty() || !results.albums.is_empty() || !results.tracks.is_empty();
-    if !has_any {
+    if results.artists.is_empty() {
         let empty = Paragraph::new("No matches found")
             .style(Style::default().fg(t.colors.fg_muted))
             .alignment(Alignment::Center);
@@ -192,30 +172,6 @@ fn render_all_tab(
         entries.push((format!("── Artists ({}) ──", results.artists.len()), true, None));
         for a in &results.artists {
             entries.push((format!("  {}", a.title), false, Some(global_idx)));
-            global_idx += 1;
-        }
-    }
-
-    // Albums section
-    if !results.albums.is_empty() {
-        entries.push((format!("── Albums ({}) ──", results.albums.len()), true, None));
-        for a in &results.albums {
-            let artist = a.artist_name();
-            let text = if let Some(year) = a.year {
-                format!("  {} ({}) - {}", a.title, year, artist)
-            } else {
-                format!("  {} - {}", a.title, artist)
-            };
-            entries.push((text, false, Some(global_idx)));
-            global_idx += 1;
-        }
-    }
-
-    // Tracks section
-    if !results.tracks.is_empty() {
-        entries.push((format!("── Tracks ({}) ──", results.tracks.len()), true, None));
-        for tr in &results.tracks {
-            entries.push((format!("  {} - {}", tr.title, tr.artist_name()), false, Some(global_idx)));
             global_idx += 1;
         }
     }

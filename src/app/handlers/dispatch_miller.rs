@@ -90,17 +90,22 @@ pub async fn dispatch(
 
             match client.get_artist_albums(&artist_key).await {
                 Ok(albums) => {
-                    // Create "All Tracks" entry first, with artist thumb for artwork
+                    // Create special entries: Artist Radio, then All Tracks
                     let artist_thumb = state.artists.iter()
                         .find(|a| a.rating_key == artist_key)
                         .and_then(|a| a.thumb.clone());
+                    let artist_radio = BrowseItem::ArtistRadio {
+                        artist_key: artist_key.clone(),
+                        artist_name: state.selected_artist_name.clone(),
+                        thumb: artist_thumb.clone(),
+                    };
                     let all_tracks = BrowseItem::AllTracks {
                         artist_key: artist_key.clone(),
                         artist_name: state.selected_artist_name.clone(),
                         thumb: artist_thumb,
                     };
                     // Then add albums
-                    let mut items = vec![all_tracks];
+                    let mut items = vec![artist_radio, all_tracks];
                     items.extend(BrowseItem::from_albums(&albums));
 
                     let title = state.selected_artist_name.clone();
@@ -394,6 +399,20 @@ pub async fn dispatch(
                     state.view = View::NowPlaying;
                     helpers::play_current_track(event_tx, state, client, audio).await;
                 }
+            }
+        }
+
+        Action::PlayPlaylistAlbumGroupTrack { track_index } => {
+            // Build queue from all album groups flattened (in album order)
+            let tracks: Vec<_> = state.playlist_album_groups.iter().flatten().cloned().collect();
+            if !tracks.is_empty() && track_index < tracks.len() {
+                audio.track_cache.flush();
+                state.queue.clear();
+                state.queue.extend(tracks);
+                state.queue_index = Some(track_index);
+                state.playback_mode = PlaybackMode::Queue;
+                state.view = View::NowPlaying;
+                helpers::play_current_track(event_tx, state, client, audio).await;
             }
         }
 

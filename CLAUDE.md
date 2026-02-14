@@ -111,7 +111,8 @@ Albums are accessed by drilling into an Artist, Genre, or Mood.
 
 - **Browse**: Main view showing categories and content
 - **Search** (Ctrl+F): Tabbed search/filter view
-- **Now Playing** (Ctrl+N): Queue and playback status
+- **Queue** (Ctrl+U): Track list with stations panel and artwork
+- **Now Playing** (Ctrl+N): Visualizer with artwork, track info, and waveform/spectrum/spectrogram tabs
 - **Similar**: Shows similar albums/tracks
 - **Help** (F1): Keyboard shortcuts (scrollable)
 - **Settings** (F2): Configuration

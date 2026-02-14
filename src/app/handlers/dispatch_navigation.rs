@@ -35,16 +35,31 @@ pub async fn dispatch(
     match action {
         Action::SetView(view) => {
             state.view = view;
+            // Load stations when entering Queue view if not already loaded
+            if view == View::Queue
+                && state.station_nav.columns.is_empty()
+                && !state.station_nav.loading
+            {
+                follow_ups.push(Action::LoadStations);
+            }
+            // Load waveform and spectrogram when entering NowPlaying view
+            if view == View::NowPlaying {
+                follow_ups.push(Action::LoadWaveform);
+                follow_ups.push(Action::LoadSpectrogram);
+            }
         }
         Action::NextView => {
             // Tab: cycle through nav bar views
-            // Order: Library → Playlists → Genres → Radio → Folders → Now Playing → Library
+            // Order: Library → Playlists → Genres → Folders → Queue → Now Playing → Library
             if state.view == View::NowPlaying {
                 // From Now Playing, go to Library
                 state.view = View::Browse;
                 follow_ups.push(Action::SetCategory(BrowseCategory::Library));
+            } else if state.view == View::Queue {
+                // From Queue, go to Now Playing
+                state.view = View::NowPlaying;
             } else if state.view == View::Browse {
-                // Cycle through browse categories, then to Now Playing
+                // Cycle through browse categories, then to Queue
                 match state.browse_category {
                     BrowseCategory::Library => {
                         follow_ups.push(Action::SetCategory(BrowseCategory::Playlists));
@@ -53,13 +68,10 @@ pub async fn dispatch(
                         follow_ups.push(Action::SetCategory(BrowseCategory::Genres));
                     }
                     BrowseCategory::Genres => {
-                        follow_ups.push(Action::SetCategory(BrowseCategory::Radio));
-                    }
-                    BrowseCategory::Radio => {
                         follow_ups.push(Action::SetCategory(BrowseCategory::Folders));
                     }
                     BrowseCategory::Folders => {
-                        state.view = View::NowPlaying;
+                        state.view = View::Queue;
                     }
                 }
             } else {
@@ -69,9 +81,12 @@ pub async fn dispatch(
         }
         Action::PrevView => {
             // Shift+Tab: cycle backwards through nav bar views
-            // Order: Library ← Playlists ← Genres ← Radio ← Folders ← Now Playing ← Library
+            // Order: Library ← Playlists ← Genres ← Folders ← Queue ← Now Playing ← Library
             if state.view == View::NowPlaying {
-                // From Now Playing, go to Folders
+                // From Now Playing, go to Queue
+                state.view = View::Queue;
+            } else if state.view == View::Queue {
+                // From Queue, go to Folders
                 state.view = View::Browse;
                 follow_ups.push(Action::SetCategory(BrowseCategory::Folders));
             } else if state.view == View::Browse {
@@ -86,11 +101,8 @@ pub async fn dispatch(
                     BrowseCategory::Genres => {
                         follow_ups.push(Action::SetCategory(BrowseCategory::Playlists));
                     }
-                    BrowseCategory::Radio => {
-                        follow_ups.push(Action::SetCategory(BrowseCategory::Genres));
-                    }
                     BrowseCategory::Folders => {
-                        follow_ups.push(Action::SetCategory(BrowseCategory::Radio));
+                        follow_ups.push(Action::SetCategory(BrowseCategory::Genres));
                     }
                 }
             } else {
@@ -100,10 +112,7 @@ pub async fn dispatch(
         }
         Action::NextMode => {
             // Shift+Down: cycle modes within current category
-            if state.view == View::NowPlaying {
-                state.now_playing_mode = state.now_playing_mode.next();
-                follow_ups.push(Action::RefreshNowPlayingView);
-            } else if state.view == View::Browse {
+            if state.view == View::Browse {
                 match state.browse_category {
                     BrowseCategory::Library => {
                         state.artist_view_mode = state.artist_view_mode.next();
@@ -115,9 +124,6 @@ pub async fn dispatch(
                     BrowseCategory::Genres => {
                         follow_ups.push(Action::CycleGenreTab);
                     }
-                    BrowseCategory::Radio => {
-                        // Radio has no modes to cycle
-                    }
                     BrowseCategory::Folders => {
                         // Folders has no modes to cycle
                     }
@@ -126,10 +132,7 @@ pub async fn dispatch(
         }
         Action::PrevMode => {
             // Shift+Up: cycle modes backwards within current category
-            if state.view == View::NowPlaying {
-                state.now_playing_mode = state.now_playing_mode.prev();
-                follow_ups.push(Action::RefreshNowPlayingView);
-            } else if state.view == View::Browse {
+            if state.view == View::Browse {
                 match state.browse_category {
                     BrowseCategory::Library => {
                         state.artist_view_mode = state.artist_view_mode.prev();
@@ -140,9 +143,6 @@ pub async fn dispatch(
                     }
                     BrowseCategory::Genres => {
                         follow_ups.push(Action::CycleGenreTab);
-                    }
-                    BrowseCategory::Radio => {
-                        // Radio has no modes to cycle
                     }
                     BrowseCategory::Folders => {
                         // Folders has no modes to cycle
@@ -159,6 +159,13 @@ pub async fn dispatch(
                             col.unshuffle();
                         }
                     }
+                }
+                // Reset playlist album grouping when leaving Playlists
+                if state.browse_category == BrowseCategory::Playlists {
+                    state.playlist_view_mode = crate::app::state::PlaylistViewMode::Tracks;
+                    state.playlist_album_groups.clear();
+                    state.playlist_original_items = None;
+                    state.playlist_original_tracks = None;
                 }
                 state.browse_category = category;
                 state.focus = Focus::Left;
@@ -211,11 +218,6 @@ pub async fn dispatch(
                                     }
                                 }
                             }
-                        }
-                    }
-                    BrowseCategory::Radio => {
-                        if state.station_nav.columns.is_empty() && !state.station_nav.loading {
-                            follow_ups.push(Action::LoadStations);
                         }
                     }
                     BrowseCategory::Folders => {

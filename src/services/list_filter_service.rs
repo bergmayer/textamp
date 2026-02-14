@@ -178,6 +178,137 @@ pub fn filter_stations(
     filter_with_priority(items, query, |item| &item.title, max_results)
 }
 
+/// Search items with priority-based ranking and last-name prioritization.
+///
+/// Returns cloned items in priority order:
+/// 1. Exact match (title == query)
+/// 2. Last word starts with query (last-name heuristic: "J.S. Bach" for "bach")
+/// 3. Title starts with query
+/// 4. Any word starts with query
+/// 5. Contains query as substring
+/// 6. Normalized contains (punctuation-stripped)
+pub fn search_with_ranking<T: Clone, F>(
+    items: &[T],
+    query: &str,
+    get_title: F,
+    max_results: usize,
+) -> Vec<T>
+where
+    F: Fn(&T) -> &str,
+{
+    if query.is_empty() {
+        return vec![];
+    }
+
+    let query_lower = query.to_lowercase();
+    let query_normalized = normalize_for_search(&query_lower);
+
+    let mut bucket1: Vec<usize> = Vec::new(); // Exact match
+    let mut bucket2: Vec<usize> = Vec::new(); // Last word starts with
+    let mut bucket3: Vec<usize> = Vec::new(); // Title starts with
+    let mut bucket4: Vec<usize> = Vec::new(); // Any word starts with
+    let mut bucket5: Vec<usize> = Vec::new(); // Contains
+    let mut bucket6: Vec<usize> = Vec::new(); // Normalized contains
+
+    for (idx, item) in items.iter().enumerate() {
+        let title = get_title(item).to_lowercase();
+
+        if title == query_lower {
+            bucket1.push(idx);
+        } else if title.starts_with(&query_lower) {
+            bucket3.push(idx);
+        } else {
+            // Check last word starts with query (last-name heuristic)
+            let last_word = title.split_whitespace().last().unwrap_or("");
+            if last_word.starts_with(&query_lower) {
+                bucket2.push(idx);
+            } else if title.split_whitespace().any(|w| w.starts_with(&query_lower)) {
+                bucket4.push(idx);
+            } else if title.contains(&query_lower) {
+                bucket5.push(idx);
+            } else {
+                let title_normalized = normalize_for_search(&title);
+                if title_normalized.contains(&query_normalized) {
+                    bucket6.push(idx);
+                }
+            }
+        }
+    }
+
+    let mut result = Vec::new();
+    for bucket in [bucket1, bucket2, bucket3, bucket4, bucket5, bucket6] {
+        for idx in bucket {
+            if result.len() >= max_results {
+                return result;
+            }
+            result.push(items[idx].clone());
+        }
+    }
+    result
+}
+
+/// Search albums with priority-based ranking, including year matching.
+///
+/// Same priorities as `search_with_ranking`, plus:
+/// 7. Year matches query
+pub fn search_albums_with_ranking(
+    albums: &[crate::api::models::Album],
+    query: &str,
+    max_results: usize,
+) -> Vec<crate::api::models::Album> {
+    if query.is_empty() {
+        return vec![];
+    }
+
+    let query_lower = query.to_lowercase();
+    let query_normalized = normalize_for_search(&query_lower);
+
+    let mut bucket1: Vec<usize> = Vec::new(); // Exact match
+    let mut bucket2: Vec<usize> = Vec::new(); // Last word starts with
+    let mut bucket3: Vec<usize> = Vec::new(); // Title starts with
+    let mut bucket4: Vec<usize> = Vec::new(); // Any word starts with
+    let mut bucket5: Vec<usize> = Vec::new(); // Contains
+    let mut bucket6: Vec<usize> = Vec::new(); // Normalized contains
+    let mut bucket7: Vec<usize> = Vec::new(); // Year match
+
+    for (idx, album) in albums.iter().enumerate() {
+        let title = album.title.to_lowercase();
+
+        if title == query_lower {
+            bucket1.push(idx);
+        } else if title.starts_with(&query_lower) {
+            bucket3.push(idx);
+        } else {
+            let last_word = title.split_whitespace().last().unwrap_or("");
+            if last_word.starts_with(&query_lower) {
+                bucket2.push(idx);
+            } else if title.split_whitespace().any(|w| w.starts_with(&query_lower)) {
+                bucket4.push(idx);
+            } else if title.contains(&query_lower) {
+                bucket5.push(idx);
+            } else {
+                let title_normalized = normalize_for_search(&title);
+                if title_normalized.contains(&query_normalized) {
+                    bucket6.push(idx);
+                } else if album.year.map(|y| y.to_string().contains(&query_lower)).unwrap_or(false) {
+                    bucket7.push(idx);
+                }
+            }
+        }
+    }
+
+    let mut result = Vec::new();
+    for bucket in [bucket1, bucket2, bucket3, bucket4, bucket5, bucket6, bucket7] {
+        for idx in bucket {
+            if result.len() >= max_results {
+                return result;
+            }
+            result.push(albums[idx].clone());
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

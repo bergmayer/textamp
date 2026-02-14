@@ -37,7 +37,6 @@ pub fn refresh_current_view(state: &mut AppState) -> Vec<Action> {
                 GenreContentType::Moods => Some(RefreshCategory::Moods),
                 GenreContentType::Styles => Some(RefreshCategory::Styles),
             },
-            BrowseCategory::Radio => Some(RefreshCategory::Stations),
             BrowseCategory::Folders => Some(RefreshCategory::Folders),
         },
         _ => None,
@@ -68,7 +67,6 @@ pub fn is_viewing_category(category: &crate::app::state::RefreshCategory, state:
             matches!(state.artist_view_mode, ArtistViewMode::AlbumArtist)
         }
         (BrowseCategory::Playlists, RefreshCategory::Playlists) => true,
-        (BrowseCategory::Radio, RefreshCategory::Stations) => true,
         (BrowseCategory::Genres, RefreshCategory::Genres) => {
             matches!(state.genre_content_type, GenreContentType::Genres)
         }
@@ -104,7 +102,6 @@ pub fn current_view_category(state: &AppState) -> Option<crate::app::state::Refr
                 GenreContentType::Moods => Some(RefreshCategory::Moods),
                 GenreContentType::Styles => Some(RefreshCategory::Styles),
             },
-            BrowseCategory::Radio => Some(RefreshCategory::Stations),
             BrowseCategory::Folders => Some(RefreshCategory::Folders),
         },
         _ => None,
