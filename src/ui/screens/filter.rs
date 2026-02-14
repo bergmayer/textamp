@@ -53,7 +53,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
 fn render_tabs(frame: &mut Frame, state: &AppState, area: Rect) {
     let t = theme();
 
-    let titles: Vec<&str> = SearchTab::all().iter().map(|t| t.name()).collect();
+    let labels = SearchTab::all();
     let selected_idx = match state.search_tab {
         SearchTab::Global => 0,
         SearchTab::Artists => 1,
@@ -63,11 +63,37 @@ fn render_tabs(frame: &mut Frame, state: &AppState, area: Rect) {
         SearchTab::Genres => 5,
     };
 
+    let is_tab_focused = state.search_focus == SearchFocus::Input;
+
+    let titles: Vec<Line> = labels.iter().enumerate().map(|(i, tab)| {
+        if i == selected_idx && is_tab_focused {
+            Line::from(Span::styled(
+                format!(" {} ", tab.name()),
+                Style::default()
+                    .fg(t.colors.selection_text)
+                    .bg(t.colors.selection_bar_bg),
+            ))
+        } else if i == selected_idx {
+            Line::from(Span::styled(
+                format!(" {} ", tab.name()),
+                Style::default()
+                    .fg(t.colors.fg_accent)
+                    .add_modifier(Modifier::BOLD),
+            ))
+        } else {
+            Line::from(Span::styled(
+                format!(" {} ", tab.name()),
+                Style::default().fg(t.colors.fg_muted),
+            ))
+        }
+    }).collect();
+
     let tabs = Tabs::new(titles)
         .select(selected_idx)
-        .style(Style::default().fg(t.colors.fg_muted))
-        .highlight_style(Style::default().fg(t.colors.fg_accent).bold())
-        .divider(" | ");
+        .highlight_style(Style::default())
+        .style(Style::default().bg(t.colors.bg_primary).fg(t.colors.fg_muted))
+        .divider(Span::styled(" │ ", Style::default().fg(t.colors.fg_muted)))
+        .padding("", "");
 
     frame.render_widget(tabs, area);
 }
@@ -102,6 +128,7 @@ fn render_search_input(frame: &mut Frame, state: &AppState, area: Rect) {
 }
 
 fn render_results(frame: &mut Frame, state: &AppState, area: Rect) {
+    let scroll_pin = state.search_scroll_pin;
     let t = theme();
 
     let results = match &state.search_results {
@@ -124,10 +151,10 @@ fn render_results(frame: &mut Frame, state: &AppState, area: Rect) {
     let selected_idx = state.list_state.search_item_index;
 
     match state.search_tab {
-        SearchTab::Global => render_all_tab(frame, results, is_results_focused, selected_idx, area),
+        SearchTab::Global => render_all_tab(frame, results, is_results_focused, selected_idx, scroll_pin, area),
         SearchTab::Artists => render_single_section(
             frame, &results.artists, |a| if a.title.is_empty() { "Unknown Artist".to_string() } else { a.title.clone() },
-            is_results_focused, selected_idx, area,
+            is_results_focused, selected_idx, scroll_pin, area,
         ),
         SearchTab::Albums => render_single_section(
             frame, &results.albums, |a| {
@@ -141,11 +168,11 @@ fn render_results(frame: &mut Frame, state: &AppState, area: Rect) {
                 };
                 format!("{} - {}", title, artist)
             },
-            is_results_focused, selected_idx, area,
+            is_results_focused, selected_idx, scroll_pin, area,
         ),
         SearchTab::Playlists => render_single_section(
             frame, &results.playlists, |p| p.title.clone(),
-            is_results_focused, selected_idx, area,
+            is_results_focused, selected_idx, scroll_pin, area,
         ),
         SearchTab::Tracks => {
             if state.search_track_loading && results.tracks.is_empty() {
@@ -163,13 +190,13 @@ fn render_results(frame: &mut Frame, state: &AppState, area: Rect) {
                         };
                         format!("{} - {}", title, tr.artist_name())
                     },
-                    is_results_focused, selected_idx, area,
+                    is_results_focused, selected_idx, scroll_pin, area,
                 );
             }
         }
         SearchTab::Genres => render_single_section(
             frame, &results.genres, |g| g.title.clone(),
-            is_results_focused, selected_idx, area,
+            is_results_focused, selected_idx, scroll_pin, area,
         ),
     }
 }
@@ -180,6 +207,7 @@ fn render_all_tab(
     results: &SearchResults,
     is_focused: bool,
     selected_idx: usize,
+    scroll_pin: Option<usize>,
     area: Rect,
 ) {
     let t = theme();
@@ -260,7 +288,10 @@ fn render_all_tab(
 
     // Find display position of selected item
     let display_selected = entries.iter().position(|(_, _, idx)| *idx == Some(selected_idx)).unwrap_or(0);
-    let scroll_offset = NavigationService::calc_scroll_offset(display_selected, visible_height, entries.len());
+    let scroll_offset = match scroll_pin {
+        Some(pinned) => pinned,
+        None => NavigationService::calc_scroll_offset(display_selected, visible_height, entries.len()),
+    };
 
     let items: Vec<ListItem> = entries.iter()
         .enumerate()
@@ -292,6 +323,7 @@ fn render_single_section<T, F>(
     format_item: F,
     is_focused: bool,
     selected_idx: usize,
+    scroll_pin: Option<usize>,
     area: Rect,
 ) where
     F: Fn(&T) -> String,
@@ -309,7 +341,10 @@ fn render_single_section<T, F>(
 
     let visible_height = area.height as usize;
     let total = items.len();
-    let scroll_offset = NavigationService::calc_scroll_offset(selected_idx, visible_height, total);
+    let scroll_offset = match scroll_pin {
+        Some(pinned) => pinned,
+        None => NavigationService::calc_scroll_offset(selected_idx, visible_height, total),
+    };
 
     let list_items: Vec<ListItem> = items.iter()
         .enumerate()

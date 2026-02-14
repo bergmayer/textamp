@@ -220,33 +220,22 @@ fn handle_search_popup_click(click_row: u16, click_col: u16, state: &mut AppStat
     // Layout inside popup: tabs (2 rows) | search input (3 rows) | results
     // Tabs are at rel_row 0-1
     if rel_row < 2 {
-        // Tab click — calculate which tab was hit
-        let tab_names = ["All", "Artists", "Albums", "Playlists", "Tracks", "Genres"];
-        let tabs_with_enum = [
-            SearchTab::Global,
-            SearchTab::Artists,
-            SearchTab::Albums,
-            SearchTab::Playlists,
-            SearchTab::Tracks,
-            SearchTab::Genres,
-        ];
-
-        // Tabs widget uses " | " dividers (3 chars each)
-        let mut x: u16 = 0;
-        for (i, name) in tab_names.iter().enumerate() {
-            let tab_width = name.len() as u16;
-            if rel_col >= x && rel_col < x + tab_width {
-                state.search_tab = tabs_with_enum[i];
-                state.search_focus = crate::app::state::SearchFocus::Input;
-                state.list_state.search_item_index = 0;
-                if !state.search_query.is_empty() {
-                    return vec![Action::ExecuteLocalSearch];
-                }
-                return vec![];
-            }
-            x += tab_width;
-            if i < tab_names.len() - 1 {
-                x += 3; // " | " divider
+        let tab_labels = [" all ", " artists ", " albums ", " playlists ", " tracks ", " genres "];
+        if let Some(tab_idx) = tab_hit_test(rel_col, &tab_labels) {
+            let new_tab = match tab_idx {
+                0 => SearchTab::Global,
+                1 => SearchTab::Artists,
+                2 => SearchTab::Albums,
+                3 => SearchTab::Playlists,
+                4 => SearchTab::Tracks,
+                _ => SearchTab::Genres,
+            };
+            state.search_tab = new_tab;
+            state.search_focus = crate::app::state::SearchFocus::Input;
+            state.list_state.search_item_index = 0;
+            state.search_scroll_pin = None;
+            if !state.search_query.is_empty() {
+                return vec![Action::ExecuteLocalSearch];
             }
         }
         return vec![];
@@ -296,13 +285,17 @@ fn handle_search_popup_click(click_row: u16, click_col: u16, state: &mut AppStat
                     let display_selected = entries.iter()
                         .position(|e| *e == Some(state.list_state.search_item_index))
                         .unwrap_or(0);
-                    let scroll_offset = NavigationService::calc_scroll_offset(
-                        display_selected, results_height, entries.len(),
-                    );
+                    let scroll_offset = match state.search_scroll_pin {
+                        Some(pinned) => pinned,
+                        None => NavigationService::calc_scroll_offset(
+                            display_selected, results_height, entries.len(),
+                        ),
+                    };
                     let abs_row = scroll_offset + visual_row;
                     if let Some(Some(idx)) = entries.get(abs_row) {
                         state.search_focus = crate::app::state::SearchFocus::Results;
                         state.list_state.search_item_index = *idx;
+                        state.search_scroll_pin = Some(scroll_offset);
                     }
                 }
                 _ => {
@@ -314,13 +307,17 @@ fn handle_search_popup_click(click_row: u16, click_col: u16, state: &mut AppStat
                         SearchTab::Genres => results.genres.len(),
                         _ => 0,
                     };
-                    let scroll_offset = NavigationService::calc_scroll_offset(
-                        state.list_state.search_item_index, results_height, total,
-                    );
+                    let scroll_offset = match state.search_scroll_pin {
+                        Some(pinned) => pinned,
+                        None => NavigationService::calc_scroll_offset(
+                            state.list_state.search_item_index, results_height, total,
+                        ),
+                    };
                     let actual_idx = scroll_offset + visual_row;
                     if actual_idx < total {
                         state.search_focus = crate::app::state::SearchFocus::Results;
                         state.list_state.search_item_index = actual_idx;
+                        state.search_scroll_pin = Some(scroll_offset);
                     }
                 }
             }
@@ -1421,26 +1418,24 @@ fn handle_search_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
 
     // Tabs area (rel_rows 1-2)
     if rel_row >= 1 && rel_row < 3 {
-        let tab_names = ["All", "Artists", "Albums", "Playlists", "Tracks", "Genres"];
-        let tabs_with_enum = [
-            SearchTab::Global,
-            SearchTab::Artists,
-            SearchTab::Albums,
-            SearchTab::Playlists,
-            SearchTab::Tracks,
-            SearchTab::Genres,
-        ];
-
-        let mut x: u16 = 1; // After left border
-        for (i, name) in tab_names.iter().enumerate() {
-            let tab_width = name.len() as u16;
-            if rel_col >= x && rel_col < x + tab_width {
-                state.search_tab = tabs_with_enum[i];
-                return vec![];
-            }
-            x += tab_width;
-            if i < tab_names.len() - 1 {
-                x += 3; // " | " separator
+        // rel_col is relative to popup edge (includes border), inner content starts at 1
+        let inner_col = rel_col.saturating_sub(1);
+        let tab_labels = [" all ", " artists ", " albums ", " playlists ", " tracks ", " genres "];
+        if let Some(tab_idx) = tab_hit_test(inner_col, &tab_labels) {
+            let new_tab = match tab_idx {
+                0 => SearchTab::Global,
+                1 => SearchTab::Artists,
+                2 => SearchTab::Albums,
+                3 => SearchTab::Playlists,
+                4 => SearchTab::Tracks,
+                _ => SearchTab::Genres,
+            };
+            state.search_tab = new_tab;
+            state.search_focus = crate::app::state::SearchFocus::Input;
+            state.list_state.search_item_index = 0;
+            state.search_scroll_pin = None;
+            if !state.search_query.is_empty() {
+                return vec![Action::ExecuteLocalSearch];
             }
         }
         return vec![];
@@ -1486,13 +1481,17 @@ fn handle_search_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
                     let display_selected = entries.iter()
                         .position(|e| *e == Some(state.list_state.search_item_index))
                         .unwrap_or(0);
-                    let scroll_offset = NavigationService::calc_scroll_offset(
-                        display_selected, results_height, entries.len(),
-                    );
+                    let scroll_offset = match state.search_scroll_pin {
+                        Some(pinned) => pinned,
+                        None => NavigationService::calc_scroll_offset(
+                            display_selected, results_height, entries.len(),
+                        ),
+                    };
                     let abs_row = scroll_offset + visual_row;
                     if let Some(Some(idx)) = entries.get(abs_row) {
                         state.search_focus = crate::app::state::SearchFocus::Results;
                         state.list_state.search_item_index = *idx;
+                        state.search_scroll_pin = Some(scroll_offset);
                     }
                 }
                 _ => {
@@ -1504,13 +1503,17 @@ fn handle_search_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
                         SearchTab::Genres => results.genres.len(),
                         _ => 0,
                     };
-                    let scroll_offset = NavigationService::calc_scroll_offset(
-                        state.list_state.search_item_index, results_height, total,
-                    );
+                    let scroll_offset = match state.search_scroll_pin {
+                        Some(pinned) => pinned,
+                        None => NavigationService::calc_scroll_offset(
+                            state.list_state.search_item_index, results_height, total,
+                        ),
+                    };
                     let actual_idx = scroll_offset + visual_row;
                     if actual_idx < total {
                         state.search_focus = crate::app::state::SearchFocus::Results;
                         state.list_state.search_item_index = actual_idx;
+                        state.search_scroll_pin = Some(scroll_offset);
                     }
                 }
             }

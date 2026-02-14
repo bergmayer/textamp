@@ -176,12 +176,7 @@ fn render_artist_list(
     let t = theme();
 
     if picker.filtered_artists.is_empty() {
-        let msg = if picker.query.is_empty() {
-            "Type to filter artists"
-        } else {
-            "No matching artists"
-        };
-        let empty = Paragraph::new(msg)
+        let empty = Paragraph::new("No matching artists")
             .style(Style::default().fg(t.colors.fg_muted))
             .alignment(Alignment::Center);
         frame.render_widget(empty, area);

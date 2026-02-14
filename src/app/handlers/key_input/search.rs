@@ -8,6 +8,9 @@ use crate::app::AppState;
 
 /// Handle search popup keys (Ctrl+F floating dialog).
 pub(super) fn handle_search_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
+    // Clear mouse scroll pin on any keyboard navigation
+    state.search_scroll_pin = None;
+
     match key.code {
         KeyCode::Esc => {
             state.search_query.clear();

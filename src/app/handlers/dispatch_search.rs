@@ -315,10 +315,17 @@ pub async fn dispatch(
 
         // Adventure launcher popup actions
         Action::OpenAdventureLauncher => {
+            let initial_results = SearchResults {
+                artists: state.artists.clone(),
+                albums: vec![],
+                playlists: vec![],
+                genres: vec![],
+                tracks: vec![],
+            };
             state.adventure_launcher = Some(crate::app::state::AdventureLauncherState {
                 step: crate::app::state::AdventureStep::FindStartTrack,
                 query: String::new(),
-                results: None,
+                results: Some(initial_results),
                 focus: SearchFocus::Input,
                 item_index: 0,
                 loading: false,
@@ -413,7 +420,7 @@ pub async fn dispatch(
                 picker.max_artists = count;
                 picker.step = crate::app::state::ArtistRadioPickerStep::SelectArtists;
                 picker.query.clear();
-                picker.filtered_artists.clear();
+                picker.filtered_artists = state.artists.clone();
                 picker.selected_artists.clear();
                 picker.focus = SearchFocus::Input;
                 picker.item_index = 0;
@@ -422,7 +429,7 @@ pub async fn dispatch(
         Action::ArtistRadioPickerSearch => {
             if let Some(ref mut picker) = state.artist_radio_picker {
                 if picker.query.is_empty() {
-                    picker.filtered_artists.clear();
+                    picker.filtered_artists = state.artists.clone();
                 } else {
                     let query = picker.query.to_lowercase();
                     let query_normalized: String = query.chars()
@@ -849,7 +856,13 @@ async fn adventure_launcher_search(
     launcher.drill = crate::app::state::AdventureDrillLevel::Search;
 
     if launcher.query.is_empty() {
-        launcher.results = None;
+        launcher.results = Some(SearchResults {
+            artists: state.artists.clone(),
+            albums: vec![],
+            playlists: vec![],
+            genres: vec![],
+            tracks: vec![],
+        });
         launcher.loading = false;
         return Ok(());
     }
@@ -1044,9 +1057,20 @@ fn adventure_launcher_back(state: &mut AppState) {
                     launcher.step = AdventureStep::FindStartTrack;
                     launcher.start_track = None;
                     launcher.query.clear();
-                    launcher.results = None;
                     launcher.item_index = 0;
                     launcher.focus = SearchFocus::Input;
+                    // Pre-populate with all artists
+                    let _ = launcher;
+                    let artists = state.artists.clone();
+                    if let Some(ref mut l) = state.adventure_launcher {
+                        l.results = Some(SearchResults {
+                            artists,
+                            albums: vec![],
+                            playlists: vec![],
+                            genres: vec![],
+                            tracks: vec![],
+                        });
+                    }
                 }
                 AdventureStep::FindEndTrack => {
                     // Go back to EnterTrackCount

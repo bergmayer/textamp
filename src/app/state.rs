@@ -991,6 +991,8 @@ pub struct AppState {
     /// of this timestamp are ignored to prevent trackpad inertia from
     /// clearing the pin and re-centering the viewport.
     pub browse_click_time: Option<std::time::Instant>,
+    /// Pinned scroll offset for search results after mouse click.
+    pub search_scroll_pin: Option<usize>,
 }
 
 /// Active DJ mode that modifies queue behavior.
@@ -1440,6 +1442,7 @@ impl AppState {
             art_scroll_cooldown: None,
             browse_scroll_pin: None,
             browse_click_time: None,
+            search_scroll_pin: None,
         }
     }
 
@@ -1836,12 +1839,12 @@ impl SearchTab {
 
     pub fn name(&self) -> &'static str {
         match self {
-            SearchTab::Global => "All",
-            SearchTab::Artists => "Artists",
-            SearchTab::Albums => "Albums",
-            SearchTab::Playlists => "Playlists",
-            SearchTab::Tracks => "Tracks",
-            SearchTab::Genres => "Genres",
+            SearchTab::Global => "all",
+            SearchTab::Artists => "artists",
+            SearchTab::Albums => "albums",
+            SearchTab::Playlists => "playlists",
+            SearchTab::Tracks => "tracks",
+            SearchTab::Genres => "genres",
         }
     }
 

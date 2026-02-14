@@ -51,6 +51,12 @@ fn handle_count_step(key: event::KeyEvent, picker: &mut crate::app::state::Artis
 fn handle_select_step(key: event::KeyEvent, picker: &mut crate::app::state::ArtistRadioPickerState) -> Vec<Action> {
     match key.code {
         KeyCode::Esc => {
+            if !picker.query.is_empty() {
+                picker.query.clear();
+                picker.focus = SearchFocus::Input;
+                picker.item_index = 0;
+                return vec![Action::ArtistRadioPickerSearch];
+            }
             vec![Action::CloseArtistRadioPicker]
         }
         KeyCode::Enter => {

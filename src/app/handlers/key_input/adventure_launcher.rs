@@ -197,10 +197,21 @@ fn handle_track_count_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Ac
             launcher.track_count_input = count.to_string();
             launcher.step = AdventureStep::FindEndTrack;
             launcher.query.clear();
-            launcher.results = None;
             launcher.drill = AdventureDrillLevel::Search;
             launcher.item_index = 0;
             launcher.focus = SearchFocus::Input;
+            // Pre-populate with all artists (release borrow to avoid conflict with state.artists)
+            let _ = launcher;
+            let artists = state.artists.clone();
+            if let Some(ref mut l) = state.adventure_launcher {
+                l.results = Some(crate::api::models::SearchResults {
+                    artists,
+                    albums: vec![],
+                    playlists: vec![],
+                    genres: vec![],
+                    tracks: vec![],
+                });
+            }
             vec![]
         }
         KeyCode::Backspace => {
