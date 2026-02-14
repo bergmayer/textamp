@@ -620,9 +620,10 @@ fn miller_hit_test(
         // Use pinned scroll offset if set for this column
         let pinned = state.browse_scroll_pin.and_then(|(pc, po)| if pc == col_idx { Some(po) } else { None });
 
-        // Check if this column has albums and cover art view is active
+        // Check if this column has albums/artists and the appropriate art view is active
         let has_albums = col.items.iter().any(|item| matches!(item, BrowseItem::Album { .. }));
-        if state.album_art_view && has_albums {
+        let has_artists = col.items.iter().any(|item| matches!(item, BrowseItem::Artist { .. }));
+        if (state.album_art_view && has_albums) || (state.artist_art_view && has_artists) {
             // Cover art mode: multi-row items (filter not applied in art mode)
             let total_items = col.items.len();
             let target_visible = 3u16.max((col.items.len() as u16).min(5));
@@ -834,7 +835,7 @@ fn handle_browse_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
     if click_row == 0 {
         if state.browse_category == BrowseCategory::Genres {
             // Genre tab bar: "All | Library | Artist | Album | Mood | Style"
-            let tab_labels = [" All ", " Library ", " Artist ", " Album ", " Mood ", " Style "];
+            let tab_labels = [" all ", " library ", " artist ", " album ", " mood ", " style "];
             if let Some(tab_idx) = tab_hit_test(click_col, &tab_labels) {
                 use crate::app::state::GenreTab;
                 let new_tab = match tab_idx {
@@ -1319,31 +1320,16 @@ fn handle_now_playing_down(click_row: u16, click_col: u16, state: &mut AppState)
                 && click_col >= visualizer_inner_left
                 && click_col < visualizer_inner_right
             {
-                // Tab bar is centered: "Waveform │ Spectrum │ Spectrogram"
-                let inner_width = (visualizer_inner_right - visualizer_inner_left) as usize;
-                let tab_labels = ["Waveform", "Spectrum", "Spectrogram"];
-                let divider = " │ ";
-                let total_text_width: usize = tab_labels.iter().map(|l| l.len()).sum::<usize>()
-                    + divider.len() * (tab_labels.len() - 1);
-                let center_offset = inner_width.saturating_sub(total_text_width) / 2;
-                let rel_col = (click_col - visualizer_inner_left) as usize;
-
-                // Check if click falls on a tab label
-                let mut x = center_offset;
-                for (i, label) in tab_labels.iter().enumerate() {
-                    if rel_col >= x && rel_col < x + label.len() {
-                        let new_tab = match i {
-                            0 => crate::app::state::VisualizerTab::Waveform,
-                            1 => crate::app::state::VisualizerTab::Spectrum,
-                            _ => crate::app::state::VisualizerTab::Spectrogram,
-                        };
-                        state.visualizer_tab = new_tab;
-                        return vec![];
-                    }
-                    x += label.len();
-                    if i < tab_labels.len() - 1 {
-                        x += divider.len();
-                    }
+                // Tab bar uses Tabs widget: " waveform  │  spectrum  │  spectrogram "
+                let rel_col = click_col - visualizer_inner_left;
+                let tab_labels = [" waveform ", " spectrum ", " spectrogram "];
+                if let Some(tab_idx) = tab_hit_test(rel_col, &tab_labels) {
+                    let new_tab = match tab_idx {
+                        0 => crate::app::state::VisualizerTab::Waveform,
+                        1 => crate::app::state::VisualizerTab::Spectrum,
+                        _ => crate::app::state::VisualizerTab::Spectrogram,
+                    };
+                    state.visualizer_tab = new_tab;
                 }
                 return vec![];
             }
@@ -1873,7 +1859,10 @@ fn handle_browse_scroll(up: bool, click_row: u16, click_col: u16, state: &mut Ap
                 let has_albums = nav.columns.get(col_idx)
                     .map(|c| c.items.iter().any(|item| matches!(item, BrowseItem::Album { .. })))
                     .unwrap_or(false);
-                let is_art_scroll = state.album_art_view && has_albums;
+                let has_artists = nav.columns.get(col_idx)
+                    .map(|c| c.items.iter().any(|item| matches!(item, BrowseItem::Artist { .. })))
+                    .unwrap_or(false);
+                let is_art_scroll = (state.album_art_view && has_albums) || (state.artist_art_view && has_artists);
 
                 // Throttle cover art scrolling to prevent trackpad momentum
                 if is_art_scroll {

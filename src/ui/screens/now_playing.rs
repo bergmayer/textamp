@@ -11,7 +11,7 @@ use crate::ui::artwork::ArtworkRenderer;
 use crate::util::format_duration;
 
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
+use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Tabs};
 use ratatui_image::picker::Picker;
 use std::cell::RefCell;
 
@@ -40,6 +40,11 @@ pub fn set_artwork_protocol_type(protocol_type: ratatui_image::picker::ProtocolT
 /// Set the artwork rendering mode and clear caches.
 pub fn set_artwork_mode(mode: crate::app::state::ArtworkMode) {
     ARTWORK_RENDERER.with(|r| r.borrow_mut().set_mode(mode));
+}
+
+/// Restore the artwork renderer's native protocol detected at startup.
+pub fn restore_artwork_native_protocol() {
+    ARTWORK_RENDERER.with(|r| r.borrow_mut().restore_native_protocol());
 }
 
 /// Format "Artist — Album (Year)" for queue display.
@@ -707,27 +712,40 @@ fn render_visualizer_panel(frame: &mut Frame, state: &AppState, area: Rect) {
 fn render_visualizer_tab_bar(frame: &mut Frame, state: &AppState, area: Rect) {
     let t = theme();
     let tabs = [VisualizerTab::Waveform, VisualizerTab::Spectrum, VisualizerTab::Spectrogram];
+    let selected = state.visualizer_tab as usize;
 
-    let mut spans: Vec<Span> = Vec::new();
-    for (i, tab) in tabs.iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::styled(" │ ", Style::default().fg(t.colors.fg_muted)));
-        }
-        let is_active = *tab == state.visualizer_tab;
-        let is_focused = state.visualizer_tab_focused && is_active;
-        let style = if is_focused {
-            Style::default().fg(t.colors.fg_accent).bold().underlined()
-        } else if is_active {
-            Style::default().fg(t.colors.fg_accent).bold()
+    let titles: Vec<Line> = tabs.iter().enumerate().map(|(i, tab)| {
+        if i == selected && state.visualizer_tab_focused {
+            // Focused tab: selection bar style (same as list selection)
+            Line::from(Span::styled(
+                format!(" {} ", tab.name()),
+                Style::default()
+                    .fg(t.colors.selection_text)
+                    .bg(t.colors.selection_bar_bg),
+            ))
+        } else if i == selected {
+            Line::from(Span::styled(
+                format!(" {} ", tab.name()),
+                Style::default()
+                    .fg(t.colors.fg_accent)
+                    .add_modifier(Modifier::BOLD),
+            ))
         } else {
-            Style::default().fg(t.colors.fg_muted)
-        };
-        spans.push(Span::styled(tab.name(), style));
-    }
+            Line::from(Span::styled(
+                format!(" {} ", tab.name()),
+                Style::default().fg(t.colors.fg_muted),
+            ))
+        }
+    }).collect();
 
-    let line = Line::from(spans);
-    let paragraph = Paragraph::new(line).alignment(Alignment::Center);
-    frame.render_widget(paragraph, area);
+    let tab_widget = Tabs::new(titles)
+        .select(selected)
+        .highlight_style(Style::default())
+        .style(Style::default().bg(t.colors.bg_primary).fg(t.colors.fg_muted))
+        .divider(Span::styled(" │ ", Style::default().fg(t.colors.fg_muted)))
+        .padding("", "");
+
+    frame.render_widget(tab_widget, area);
 }
 
 /// Draw waveform seekbar visualization showing full song amplitude profile.

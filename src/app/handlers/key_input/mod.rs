@@ -181,26 +181,8 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
             // Not in genres view - switch to it and reset right panel
             state.browse_category = BrowseCategory::Genres;
             reset_right_panel(state);
-            // For "All" tab, use RefreshGenreView which builds the merged list
-            if state.genre_tab == crate::app::state::GenreTab::All {
-                return vec![Action::RefreshGenreView, Action::SetView(View::Browse), Action::CheckStaleness(crate::app::state::RefreshCategory::Genres)];
-            }
-            // Load the appropriate content based on current type
-            let load_action = match state.genre_content_type {
-                crate::app::state::GenreContentType::Genres => Action::LoadGenres,
-                crate::app::state::GenreContentType::ArtistGenres => Action::LoadArtistGenres,
-                crate::app::state::GenreContentType::AlbumGenres => Action::LoadAlbumGenres,
-                crate::app::state::GenreContentType::Moods => Action::LoadMoods,
-                crate::app::state::GenreContentType::Styles => Action::LoadStyles,
-            };
-            let tier1 = match state.genre_content_type {
-                crate::app::state::GenreContentType::Genres => crate::app::state::RefreshCategory::Genres,
-                crate::app::state::GenreContentType::ArtistGenres => crate::app::state::RefreshCategory::ArtistGenres,
-                crate::app::state::GenreContentType::AlbumGenres => crate::app::state::RefreshCategory::AlbumGenres,
-                crate::app::state::GenreContentType::Moods => crate::app::state::RefreshCategory::Moods,
-                crate::app::state::GenreContentType::Styles => crate::app::state::RefreshCategory::Styles,
-            };
-            return vec![load_action, Action::SetView(View::Browse), Action::CheckStaleness(tier1)];
+            // RefreshGenreView uses cached data when available, only fetches if empty
+            return vec![Action::RefreshGenreView, Action::SetView(View::Browse), Action::CheckStaleness(crate::app::state::RefreshCategory::Genres)];
         }
         (KeyModifiers::CONTROL, KeyCode::Char('n')) => {
             // Ctrl+N = Now Playing (visualizer view)
@@ -876,10 +858,30 @@ pub(crate) fn handle_cycle_view(state: &mut AppState) -> Vec<Action> {
         _ => return vec![],
     };
 
-    // Check first two items: individual artist albums have AllTracks at index 0
+    // Artist column: 4-state cycle (list → shuffled → covers → covers shuffled → list)
+    // First item is AllArtists (pinned), actual Artist items start at index 1
+    let is_artist = state.browse_category == BrowseCategory::Library
+        && state.artist_nav.columns.get(col_idx)
+            .map_or(false, |c| c.items.iter().take(3).any(|i| matches!(i, BrowseItem::Artist { .. })));
+
+    if is_artist {
+        let shuffled = state.artist_nav.columns.get(col_idx).map_or(false, |c| c.is_shuffled());
+        // 4-state cycle: list → shuffled → covers → covers shuffled → list
+        let nav = &mut state.artist_nav;
+        if shuffled {
+            nav.columns[col_idx].unshuffle();
+            nav.truncate_right();
+            vec![Action::ToggleArtistArtView]
+        } else {
+            nav.columns[col_idx].shuffle();
+            nav.truncate_right();
+            vec![]
+        }
+    } else {
+
+    // Check first few items for Album: artist album columns start with ArtistRadio + AllTracks
     let has_album_item = |col: &crate::app::state::BrowseColumn| {
-        col.items.first().map_or(false, |i| matches!(i, BrowseItem::Album { .. }))
-            || col.items.get(1).map_or(false, |i| matches!(i, BrowseItem::Album { .. }))
+        col.items.iter().take(4).any(|i| matches!(i, BrowseItem::Album { .. }))
     };
     let is_album = match state.browse_category {
         BrowseCategory::Library => state.artist_nav.columns.get(col_idx).map_or(false, has_album_item),
@@ -895,6 +897,15 @@ pub(crate) fn handle_cycle_view(state: &mut AppState) -> Vec<Action> {
         _ => return vec![],
     };
 
+    let by_artist = match state.browse_category {
+        BrowseCategory::Library => state.artist_nav.columns.get(col_idx).map_or(false, |c| c.is_sorted_by_artist()),
+        BrowseCategory::Genres => state.genre_nav.columns.get(col_idx).map_or(false, |c| c.is_sorted_by_artist()),
+        _ => false,
+    };
+
+    // Library and Genres album columns get 6-state cycle with by-artist sort
+    let use_artist_sort = is_album && matches!(state.browse_category, BrowseCategory::Library | BrowseCategory::Genres);
+
     // Get mutable nav reference
     let nav = match state.browse_category {
         BrowseCategory::Library => &mut state.artist_nav,
@@ -903,8 +914,27 @@ pub(crate) fn handle_cycle_view(state: &mut AppState) -> Vec<Action> {
         _ => return vec![],
     };
 
-    if is_album {
-        // Album cycle: list → shuffled → covers → covers shuffled → list
+    if use_artist_sort {
+        // 6-state album cycle: list → shuffled → by artist → covers → covers shuffled → covers by artist → list
+        if by_artist {
+            // by artist → covers, or covers by artist → list
+            nav.columns[col_idx].unshuffle();
+            nav.truncate_right();
+            vec![Action::ToggleAlbumArtView]
+        } else if shuffled {
+            // shuffled → by artist, or covers shuffled → covers by artist
+            nav.columns[col_idx].unshuffle();
+            nav.columns[col_idx].sort_by_artist();
+            nav.truncate_right();
+            vec![]
+        } else {
+            // list → shuffled, or covers → covers shuffled
+            nav.columns[col_idx].shuffle();
+            nav.truncate_right();
+            vec![]
+        }
+    } else if is_album {
+        // 4-state album cycle (Playlists): list → shuffled → covers → covers shuffled → list
         if shuffled {
             nav.columns[col_idx].unshuffle();
             nav.truncate_right();
@@ -926,6 +956,8 @@ pub(crate) fn handle_cycle_view(state: &mut AppState) -> Vec<Action> {
             vec![]
         }
     }
+
+    } // close is_artist else
 }
 
 /// Navigate to the album of the currently selected track (Alt+G).

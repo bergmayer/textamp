@@ -812,7 +812,7 @@ mod tests {
 
     fn make_browse_column(title: &str) -> BrowseColumn {
         BrowseColumn::new(title, vec![
-            BrowseItem::Artist { key: "1".into(), title: "A".into(), is_placeholder: false },
+            BrowseItem::Artist { key: "1".into(), title: "A".into(), thumb: None, is_placeholder: false },
         ])
     }
 

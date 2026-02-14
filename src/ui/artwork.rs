@@ -23,6 +23,8 @@ pub struct ArtworkRenderer {
     current_thumb: Option<String>,
     braille_image: Option<DynamicImage>,
     mode: ArtworkMode,
+    /// The protocol type detected at startup (for restoring after Halfblocks override).
+    native_protocol: Option<ratatui_image::picker::ProtocolType>,
 }
 
 impl Default for ArtworkRenderer {
@@ -40,18 +42,21 @@ impl ArtworkRenderer {
             current_thumb: None,
             braille_image: None,
             mode: ArtworkMode::Auto,
+            native_protocol: None,
         }
     }
 
     /// Create with a pre-initialized picker for graphics support.
     pub fn new_with_picker(picker: Picker) -> Self {
-        tracing::info!("Artwork protocol: {:?}", picker.protocol_type());
+        let native = picker.protocol_type();
+        tracing::info!("Artwork protocol: {:?}", native);
         Self {
             picker: Some(picker),
             protocol: None,
             current_thumb: None,
             braille_image: None,
             mode: ArtworkMode::Auto,
+            native_protocol: Some(native),
         }
     }
 
@@ -148,6 +153,15 @@ impl ArtworkRenderer {
         if let Some(ref mut picker) = self.picker {
             picker.set_protocol_type(protocol_type);
             // Clear cached image so it's re-created with the new protocol
+            self.protocol = None;
+            self.current_thumb = None;
+        }
+    }
+
+    /// Restore the native protocol detected at startup and clear cached images.
+    pub fn restore_native_protocol(&mut self) {
+        if let (Some(ref mut picker), Some(native)) = (&mut self.picker, self.native_protocol) {
+            picker.set_protocol_type(native);
             self.protocol = None;
             self.current_thumb = None;
         }
@@ -311,11 +325,13 @@ thread_local! {
     static GRID_PROTOCOLS: RefCell<HashMap<String, StatefulProtocol>> = RefCell::new(HashMap::new());
     static GRID_BRAILLE_IMAGES: RefCell<HashMap<String, DynamicImage>> = RefCell::new(HashMap::new());
     static GRID_ARTWORK_MODE: RefCell<ArtworkMode> = RefCell::new(ArtworkMode::Auto);
+    static GRID_NATIVE_PROTOCOL: RefCell<Option<ratatui_image::picker::ProtocolType>> = RefCell::new(None);
 }
 
 /// Initialize the grid renderer with a Picker clone.
 /// Call once at startup alongside the main artwork renderer init.
 pub fn init_grid_renderer(picker: Picker) {
+    GRID_NATIVE_PROTOCOL.with(|p| *p.borrow_mut() = Some(picker.protocol_type()));
     GRID_PICKER.with(|p| *p.borrow_mut() = Some(picker));
 }
 
@@ -396,6 +412,14 @@ pub fn set_grid_protocol_type(protocol_type: ratatui_image::picker::ProtocolType
         }
     });
     clear_grid_cache();
+}
+
+/// Restore the grid renderer's native protocol detected at startup.
+pub fn restore_grid_native_protocol() {
+    let native = GRID_NATIVE_PROTOCOL.with(|p| *p.borrow());
+    if let Some(protocol_type) = native {
+        set_grid_protocol_type(protocol_type);
+    }
 }
 
 /// Set the grid renderer's artwork mode and clear caches.

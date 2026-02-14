@@ -677,16 +677,20 @@ async fn run_tui_mode(verbose: bool) -> Result<()> {
     } else {
         ratatui_image::picker::Picker::from_query_stdio()
     };
-    if let Ok(mut picker) = picker_result {
+    if let Ok(picker) = picker_result {
+        // Init renderers BEFORE overriding protocol so native type is stored
+        tracing::info!("Native protocol: {:?}, Artwork mode: {:?}", picker.protocol_type(), effective_mode);
+        textamp::ui::artwork::init_grid_renderer(picker.clone());
+        textamp::ui::screens::now_playing::init_artwork_renderer(picker.clone());
+
         // Apply halfblocks if artwork mode requires it
         if effective_mode == textamp::app::state::ArtworkMode::Halfblocks {
-            tracing::info!("Halfblocks artwork mode, using halfblocks protocol");
-            picker.set_protocol_type(ratatui_image::picker::ProtocolType::Halfblocks);
+            tracing::info!("Halfblocks artwork mode, overriding to halfblocks protocol");
+            let hb = ratatui_image::picker::ProtocolType::Halfblocks;
+            textamp::ui::artwork::set_grid_protocol_type(hb);
+            textamp::ui::screens::now_playing::set_artwork_protocol_type(hb);
         }
-        tracing::info!("Image protocol: {:?}, Artwork mode: {:?}", picker.protocol_type(), effective_mode);
-        textamp::ui::artwork::init_grid_renderer(picker.clone());
         textamp::ui::artwork::set_grid_artwork_mode(effective_mode);
-        textamp::ui::screens::now_playing::init_artwork_renderer(picker);
         textamp::ui::screens::now_playing::set_artwork_mode(effective_mode);
     }
 

@@ -195,6 +195,7 @@ pub enum BrowseItem {
     Artist {
         key: String,
         title: String,
+        thumb: Option<String>,
         /// True when Textamp filled in "Unknown Artist" for an empty title.
         is_placeholder: bool,
     },
@@ -290,6 +291,7 @@ impl BrowseItem {
             BrowseItem::Artist {
                 key: a.rating_key.clone(),
                 title: if is_empty { "Unknown Artist".to_string() } else { a.title.clone() },
+                thumb: a.thumb.clone(),
                 is_placeholder: is_empty,
             }
         }).collect();
@@ -379,10 +381,12 @@ pub struct BrowseColumn {
     pub selected_index: usize,
     /// Full Track objects for track columns (used for playback with media info)
     pub tracks: Vec<crate::plex::models::Track>,
-    /// Original items before shuffle (None if not shuffled)
+    /// Original items before shuffle/sort (None if in original order)
     original_items: Option<Vec<BrowseItem>>,
-    /// Original tracks before shuffle (None if not shuffled)
+    /// Original tracks before shuffle/sort (None if in original order)
     original_tracks: Option<Vec<crate::plex::models::Track>>,
+    /// Whether items are currently sorted by artist name
+    sorted_by_artist: bool,
 }
 
 impl BrowseColumn {
@@ -394,6 +398,7 @@ impl BrowseColumn {
             tracks: vec![],
             original_items: None,
             original_tracks: None,
+            sorted_by_artist: false,
         }
     }
 
@@ -406,6 +411,7 @@ impl BrowseColumn {
             tracks,
             original_items: None,
             original_tracks: None,
+            sorted_by_artist: false,
         }
     }
 
@@ -413,9 +419,14 @@ impl BrowseColumn {
         self.items.get(self.selected_index)
     }
 
-    /// Whether this column is currently shuffled.
+    /// Whether this column is currently shuffled (not sorted-by-artist).
     pub fn is_shuffled(&self) -> bool {
-        self.original_items.is_some()
+        self.original_items.is_some() && !self.sorted_by_artist
+    }
+
+    /// Whether items are currently sorted by artist name.
+    pub fn is_sorted_by_artist(&self) -> bool {
+        self.sorted_by_artist
     }
 
     /// Shuffle items (and tracks in parallel). Saves originals for restore.
@@ -423,6 +434,7 @@ impl BrowseColumn {
     /// Placeholder items (is_placeholder: true) are kept at the end.
     pub fn shuffle(&mut self) {
         use rand::seq::SliceRandom;
+        self.sorted_by_artist = false;
         // Save originals (fresh copy each time for re-shuffle)
         self.original_items = Some(self.items.clone());
         self.original_tracks = if self.tracks.is_empty() { None } else { Some(self.tracks.clone()) };
@@ -472,7 +484,7 @@ impl BrowseColumn {
         self.selected_index = 0;
     }
 
-    /// Restore original order.
+    /// Restore original order (clears both shuffle and sort-by-artist state).
     pub fn unshuffle(&mut self) {
         if let Some(items) = self.original_items.take() {
             self.items = items;
@@ -480,6 +492,31 @@ impl BrowseColumn {
         if let Some(tracks) = self.original_tracks.take() {
             self.tracks = tracks;
         }
+        self.sorted_by_artist = false;
+        self.selected_index = 0;
+    }
+
+    /// Sort album items by artist name (case-insensitive), then by year.
+    /// Saves originals for restore. Pinned items at index 0 are excluded.
+    pub fn sort_by_artist(&mut self) {
+        if self.sorted_by_artist { return; }
+        // Save originals if not already saved
+        if self.original_items.is_none() {
+            self.original_items = Some(self.items.clone());
+            self.original_tracks = if self.tracks.is_empty() { None } else { Some(self.tracks.clone()) };
+        }
+        let pinned_start = matches!(self.items.first(), Some(BrowseItem::AllArtists) | Some(BrowseItem::AllTracks { .. }));
+        let start = if pinned_start { 1 } else { 0 };
+        self.items[start..].sort_by(|a, b| {
+            let a_artist = if let BrowseItem::Album { artist, .. } = a { artist.to_lowercase() } else { String::new() };
+            let b_artist = if let BrowseItem::Album { artist, .. } = b { artist.to_lowercase() } else { String::new() };
+            a_artist.cmp(&b_artist).then_with(|| {
+                let a_year = if let BrowseItem::Album { year, .. } = a { *year } else { None };
+                let b_year = if let BrowseItem::Album { year, .. } = b { *year } else { None };
+                a_year.cmp(&b_year)
+            })
+        });
+        self.sorted_by_artist = true;
         self.selected_index = 0;
     }
 
@@ -935,8 +972,10 @@ pub struct AppState {
     pub discovering_players: bool,
     pub remote_playback: RemotePlaybackState,
 
-    // Album art cover view mode (Alt+C toggle in browse)
+    // Album art cover view mode (Alt+V cycle in browse)
     pub album_art_view: bool,
+    /// Artist art cover view mode (independent from album art view).
+    pub artist_art_view: bool,
     /// Artwork rendering mode (Auto / Halfblocks / Braille).
     pub artwork_mode: ArtworkMode,
     pub album_art_cache: HashMap<String, Vec<u8>>,
@@ -1393,6 +1432,7 @@ impl AppState {
             discovering_players: false,
             remote_playback: RemotePlaybackState::default(),
             album_art_view: false,
+            artist_art_view: false,
             artwork_mode: ArtworkMode::Auto,
             album_art_cache: HashMap::new(),
             album_art_pending: std::collections::HashSet::new(),
@@ -1692,9 +1732,9 @@ impl VisualizerTab {
 
     pub fn name(&self) -> &'static str {
         match self {
-            VisualizerTab::Waveform => "Waveform",
-            VisualizerTab::Spectrum => "Spectrum",
-            VisualizerTab::Spectrogram => "Spectrogram",
+            VisualizerTab::Waveform => "waveform",
+            VisualizerTab::Spectrum => "spectrum",
+            VisualizerTab::Spectrogram => "spectrogram",
         }
     }
 }

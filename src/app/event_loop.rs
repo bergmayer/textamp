@@ -454,7 +454,7 @@ impl EventLoop {
             // System
             Quit | ShowError(_) | ClearError | SetStatus(_) | ClearStatus
             | RefreshCategory(_) | CheckStaleness(_) | CycleTheme | LoadArtwork | LoadWaveform
-            | LoadSpectrogram | ToggleAlbumArtView | LoadAlbumArt(_) => {
+            | LoadSpectrogram | ToggleAlbumArtView | ToggleArtistArtView | LoadAlbumArt(_) => {
                 handlers::dispatch_system::dispatch(&self.event_tx, &mut self.config, action, state, client).await?
             }
 

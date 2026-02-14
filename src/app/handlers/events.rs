@@ -1003,7 +1003,7 @@ pub fn handle_app_event(
 
             // Album art loading: lazy-load only for visible items in the focused column
             // Limit concurrent in-flight requests to avoid overwhelming the Plex transcoder
-            if state.album_art_view && state.view == crate::app::state::View::Browse
+            if (state.album_art_view || state.artist_art_view) && state.view == crate::app::state::View::Browse
                 && state.album_art_pending.len() < 4
             {
                 let nav = match state.browse_category {
@@ -1042,6 +1042,13 @@ pub fn handle_app_event(
                                         && !state.album_art_pending.contains(artist_key)
                                     {
                                         to_load.push((artist_key.clone(), thumb.clone()));
+                                    }
+                                }
+                                BrowseItem::Artist { key, thumb: Some(thumb), .. } => {
+                                    if !state.album_art_cache.contains_key(key)
+                                        && !state.album_art_pending.contains(key)
+                                    {
+                                        to_load.push((key.clone(), thumb.clone()));
                                     }
                                 }
                                 _ => {}

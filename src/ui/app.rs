@@ -186,7 +186,7 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
             // Render tab bar
             render_tab_bar(
                 frame, state, tab_area,
-                &["All", "Library", "Artist", "Album", "Mood", "Style"],
+                &["all", "library", "artist", "album", "mood", "style"],
                 state.genre_tab as usize,
                 state.genre_tab_focused,
             );
@@ -552,13 +552,12 @@ fn render_tab_bar(
 
     let titles: Vec<Line> = labels.iter().enumerate().map(|(i, label)| {
         if i == selected && tab_focused {
-            // Focused tab bar: highlight selected tab with inverted colors
+            // Focused tab: selection bar style (same as list selection)
             Line::from(Span::styled(
                 format!(" {} ", label),
                 Style::default()
-                    .fg(t.colors.bg_primary)
-                    .bg(t.colors.fg_accent)
-                    .add_modifier(Modifier::BOLD),
+                    .fg(t.colors.selection_text)
+                    .bg(t.colors.selection_bar_bg),
             ))
         } else if i == selected {
             Line::from(Span::styled(
@@ -665,7 +664,10 @@ fn render_browse_miller_columns(
 
     for (vis_idx, col_idx) in (start_col..effective_columns.min(start_col + max_visible)).enumerate() {
         let col = &nav.columns[col_idx];
-        let is_focused = col_idx == nav.focused_column;
+        // Suppress focus highlight when genre/visualizer tab bar is focused
+        let tab_bar_has_focus = state.genre_tab_focused
+            && state.browse_category == crate::app::state::BrowseCategory::Genres;
+        let is_focused = col_idx == nav.focused_column && !tab_bar_has_focus;
         let is_root = col_idx == 0;
 
         let col_area = Rect {
@@ -682,14 +684,29 @@ fn render_browse_miller_columns(
         let border_color = if is_focused { t.colors.border_focused } else { t.colors.border };
 
         // Show title for all columns
-        let title = if is_root && col.is_shuffled() {
-            format!(" {} (shuffled) ", root_title)
-        } else if is_root {
-            format!(" {} ", root_title)
-        } else if col.is_shuffled() {
-            format!(" {} (shuffled) ", col.title)
+        // Build view mode suffix for column header (only for artist/album columns)
+        let view_suffix = {
+            let col_has_artists = col.items.iter().any(|item| matches!(item, BrowseItem::Artist { .. }));
+            let col_has_albums = col.items.iter().any(|item| matches!(item, BrowseItem::Album { .. }));
+            if col_has_artists || col_has_albums {
+                let is_art = if col_has_artists { state.artist_art_view } else { state.album_art_view };
+                match (col.is_shuffled(), col.is_sorted_by_artist(), is_art) {
+                    (_, true, true) => " (artwork by artist)",
+                    (true, _, true) => " (artwork shuffled)",
+                    (false, false, true) => " (artwork)",
+                    (_, true, false) => " (by artist)",
+                    (true, _, false) => " (shuffled)",
+                    _ => "",
+                }
+            } else {
+                if col.is_shuffled() { " (shuffled)" } else { "" }
+            }
+        };
+
+        let title = if is_root {
+            format!(" {}{} ", root_title, view_suffix)
         } else if !col.title.is_empty() {
-            format!(" {} ", col.title)
+            format!(" {}{} ", col.title, view_suffix)
         } else {
             String::new()
         };
@@ -715,12 +732,15 @@ fn render_browse_miller_columns(
             continue;
         }
 
-        // Check if this column has albums and cover art view is active
+        // Check if this column has albums/artists and the appropriate art view is active
         // Never show album art on Library root column (artists/all-albums sub-modes)
         let has_albums = col.items.iter().any(|item| matches!(item, BrowseItem::Album { .. }));
+        let has_artists = col.items.iter().any(|item| matches!(item, BrowseItem::Artist { .. }));
         let is_library_root = state.browse_category == BrowseCategory::Library && col_idx == 0;
         let is_filter_column = filter_column == Some(col_idx);
-        if state.album_art_view && has_albums && !is_library_root {
+        let show_art = (state.album_art_view && has_albums && !is_library_root)
+            || (state.artist_art_view && has_artists);
+        if show_art {
             let col_filter = if is_filter_column { filter_results } else { None };
             render_album_art_grid(frame, state, col, is_focused, inner, col_area, col_idx, col_filter);
             continue;
@@ -750,7 +770,10 @@ fn render_browse_miller_columns(
                 && state.browse_category == BrowseCategory::Playlists
                 && state.playlist_view_mode == crate::app::state::PlaylistViewMode::TracksByAlbum
                 && col.items.first().map_or(false, |item| matches!(item, BrowseItem::Album { .. }));
-            let is_two_row = is_two_row_track || is_all_artists_albums || is_playlist_album_group;
+            // Genre/mood album columns show artist on 2nd row
+            let is_genre_albums = col.items.first().map_or(false, |item| matches!(item, BrowseItem::Album { .. }))
+                && state.browse_category == BrowseCategory::Genres;
+            let is_two_row = is_two_row_track || is_all_artists_albums || is_playlist_album_group || is_genre_albums;
             let rows_per_item = if is_two_row { 2 } else { 1 };
             let visible_item_count = visible_height / rows_per_item;
 
@@ -1088,6 +1111,7 @@ fn render_album_art_grid(
         let art_key = match item {
             BrowseItem::Album { key, .. } => Some(key.as_str()),
             BrowseItem::AllTracks { artist_key, .. } => Some(artist_key.as_str()),
+            BrowseItem::Artist { key, .. } => Some(key.as_str()),
             _ => None,
         };
         if let Some(key) = art_key {

@@ -45,6 +45,11 @@ fn collect_art_to_load(
                     to_load.push((artist_key.clone(), thumb.clone()));
                 }
             }
+            BrowseItem::Artist { key, thumb: Some(thumb), .. } => {
+                if !cache.contains_key(key) && !pending.contains(key) {
+                    to_load.push((key.clone(), thumb.clone()));
+                }
+            }
             _ => {}
         }
     }
@@ -54,7 +59,7 @@ fn collect_art_to_load(
 /// Collect art for the viewport of the focused album column.
 /// Called after scroll navigation to lazily load art for newly visible items.
 pub fn collect_viewport_art(state: &AppState) -> Vec<(String, String)> {
-    if !state.album_art_view { return vec![]; }
+    if !state.album_art_view && !state.artist_art_view { return vec![]; }
 
     let nav: &crate::miller::MillerState<BrowseColumn> = match state.browse_category {
         crate::app::state::BrowseCategory::Library => &state.artist_nav,
@@ -64,8 +69,8 @@ pub fn collect_viewport_art(state: &AppState) -> Vec<(String, String)> {
 
     let Some(col) = nav.focused() else { return vec![] };
     // Only bother for album columns
-    let has_albums = col.items.iter().any(|item| matches!(item, BrowseItem::Album { .. } | BrowseItem::AllTracks { .. }));
-    if !has_albums { return vec![]; }
+    let has_art_items = col.items.iter().any(|item| matches!(item, BrowseItem::Album { .. } | BrowseItem::AllTracks { .. } | BrowseItem::Artist { .. }));
+    if !has_art_items { return vec![]; }
 
     collect_art_to_load(Some(col), &state.album_art_cache, &state.album_art_pending)
 }
@@ -221,7 +226,7 @@ pub async fn dispatch(
                 return Ok(vec![]);
             }
             let items = BrowseItem::from_albums(&state.albums);
-            let col = BrowseColumn::new("All Artists", items);
+            let col = BrowseColumn::new("all artists", items);
             state.artist_nav.push_column(col);
 
             // Preload album art if in art view (viewport-limited)

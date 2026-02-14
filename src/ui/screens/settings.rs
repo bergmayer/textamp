@@ -1,7 +1,7 @@
 //! Settings screen with Account and About sections.
 
 use crate::app::state::{AppState, ConnectionState, CredentialField, SettingsFocus, SettingsSection};
-use crate::ui::theme::{Theme, ThemeName, theme};
+use crate::ui::theme::{ThemeName, theme};
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
@@ -47,9 +47,9 @@ fn render_sections(frame: &mut Frame, state: &AppState, area: Rect) {
         .iter()
         .map(|section| {
             let is_selected = *section == state.settings_state.section;
-            let prefix = if is_selected { "> " } else { "  " };
+            let prefix = "  ";
             let style = if is_selected {
-                Theme::selected()
+                Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
             } else {
                 Style::default().fg(t.colors.fg_primary)
             };
@@ -127,9 +127,9 @@ fn render_account_content(frame: &mut Frame, state: &AppState, area: Rect) {
         for (i, lib) in state.libraries.iter().enumerate() {
             let is_active = state.active_library.as_ref() == Some(&lib.key);
             let is_selected = is_focused && i == state.settings_state.item_index;
-            let prefix = if is_selected { "> " } else { "  " };
-            let active_marker = if is_active { " *" } else { "" };
-            let style = if is_selected { Theme::selected() } else { Style::default().fg(t.colors.fg_primary) };
+            let prefix = "  ";
+            let active_marker = if is_active { " ♪" } else { "" };
+            let style = if is_selected { Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg) } else { Style::default().fg(t.colors.fg_primary) };
             lines.push(Line::from(Span::styled(
                 format!("{}{}{}", prefix, lib.title, active_marker),
                 style,
@@ -167,8 +167,8 @@ fn render_account_content(frame: &mut Frame, state: &AppState, area: Rect) {
         for (i, label) in action_items.iter().enumerate() {
             let item_idx = lib_count + i;
             let is_selected = is_focused && item_idx == state.settings_state.item_index;
-            let prefix = if is_selected { "> " } else { "  " };
-            let style = if is_selected { Theme::selected() } else { Style::default().fg(t.colors.fg_primary) };
+            let prefix = "  ";
+            let style = if is_selected { Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg) } else { Style::default().fg(t.colors.fg_primary) };
             lines.push(Line::from(Span::styled(
                 format!("{}{}", prefix, label),
                 style,
@@ -178,8 +178,8 @@ fn render_account_content(frame: &mut Frame, state: &AppState, area: Rect) {
     } else {
         // Sign In button (item 0)
         let is_signin_selected = is_focused && state.settings_state.item_index == 0;
-        let signin_prefix = if is_signin_selected { "> " } else { "  " };
-        let signin_style = if is_signin_selected { Theme::selected() } else { Style::default().fg(t.colors.fg_primary) };
+        let signin_prefix = "  ";
+        let signin_style = if is_signin_selected { Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg) } else { Style::default().fg(t.colors.fg_primary) };
         lines.push(Line::from(Span::styled(
             format!("{}Sign In", signin_prefix),
             signin_style,
@@ -352,11 +352,11 @@ fn render_signin_form(frame: &mut Frame, state: &AppState, area: Rect) {
     } else {
         state.settings_state.username_input.clone()
     };
-    let username_prefix = if is_username_selected { "> " } else { "  " };
+    let username_prefix = "  ";
     let username_style = if is_username_editing {
         Style::default().fg(t.colors.fg_accent).add_modifier(ratatui::style::Modifier::BOLD)
     } else if is_username_selected {
-        Theme::selected()
+        Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
     } else {
         Style::default().fg(t.colors.fg_primary)
     };
@@ -375,11 +375,11 @@ fn render_signin_form(frame: &mut Frame, state: &AppState, area: Rect) {
     } else {
         "•".repeat(state.settings_state.password_input.len())
     };
-    let password_prefix = if is_password_selected { "> " } else { "  " };
+    let password_prefix = "  ";
     let password_style = if is_password_editing {
         Style::default().fg(t.colors.fg_accent).add_modifier(ratatui::style::Modifier::BOLD)
     } else if is_password_selected {
-        Theme::selected()
+        Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
     } else {
         Style::default().fg(t.colors.fg_primary)
     };
@@ -390,8 +390,8 @@ fn render_signin_form(frame: &mut Frame, state: &AppState, area: Rect) {
 
     // Sign In button (item index 2)
     let is_signin_selected = is_focused && state.settings_state.item_index == 2;
-    let signin_prefix = if is_signin_selected { "> " } else { "  " };
-    let signin_style = if is_signin_selected { Theme::selected() } else { Style::default().fg(t.colors.fg_primary) };
+    let signin_prefix = "  ";
+    let signin_style = if is_signin_selected { Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg) } else { Style::default().fg(t.colors.fg_primary) };
     let signin_text = if state.settings_state.discovering_servers { "Signing in..." } else { "Sign In" };
     lines.push(Line::from(Span::styled(
         format!("{}{}", signin_prefix, signin_text),
@@ -414,8 +414,8 @@ fn render_signin_form(frame: &mut Frame, state: &AppState, area: Rect) {
         for (i, server) in state.available_servers.iter().enumerate() {
             let server_index = i + 3;
             let is_selected = is_focused && server_index == state.settings_state.item_index;
-            let prefix = if is_selected { "> " } else { "  " };
-            let style = if is_selected { Theme::selected() } else { Style::default().fg(t.colors.fg_primary) };
+            let prefix = "  ";
+            let style = if is_selected { Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg) } else { Style::default().fg(t.colors.fg_primary) };
             lines.push(Line::from(Span::styled(
                 format!("{}{}", prefix, server.name),
                 style,
@@ -466,9 +466,9 @@ fn render_output_content(frame: &mut Frame, state: &AppState, area: Rect) {
     // Item 0: Local
     let is_local = matches!(state.output_target, OutputTarget::Local);
     let is_selected = is_focused && state.settings_state.item_index == 0;
-    let prefix = if is_selected { "> " } else { "  " };
-    let active_marker = if is_local { " *" } else { "" };
-    let style = if is_selected { Theme::selected() } else { Style::default().fg(t.colors.fg_primary) };
+    let prefix = "  ";
+    let active_marker = if is_local { " ♪" } else { "" };
+    let style = if is_selected { Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg) } else { Style::default().fg(t.colors.fg_primary) };
     lines.push(Line::from(Span::styled(
         format!("{}Local{}", prefix, active_marker),
         style,
@@ -482,9 +482,9 @@ fn render_output_content(frame: &mut Frame, state: &AppState, area: Rect) {
             _ => false,
         };
         let is_selected = is_focused && item_idx == state.settings_state.item_index;
-        let prefix = if is_selected { "> " } else { "  " };
-        let active_marker = if is_active { " *" } else { "" };
-        let style = if is_selected { Theme::selected() } else { Style::default().fg(t.colors.fg_primary) };
+        let prefix = "  ";
+        let active_marker = if is_active { " ♪" } else { "" };
+        let style = if is_selected { Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg) } else { Style::default().fg(t.colors.fg_primary) };
         lines.push(Line::from(Span::styled(
             format!("{}{} ({}){}", prefix, player.name, player.product, active_marker),
             style,
@@ -494,8 +494,8 @@ fn render_output_content(frame: &mut Frame, state: &AppState, area: Rect) {
     // Last item: Refresh Players
     let refresh_idx = 1 + state.remote_players.len();
     let is_selected = is_focused && refresh_idx == state.settings_state.item_index;
-    let prefix = if is_selected { "> " } else { "  " };
-    let style = if is_selected { Theme::selected() } else { Style::default().fg(t.colors.fg_primary) };
+    let prefix = "  ";
+    let style = if is_selected { Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg) } else { Style::default().fg(t.colors.fg_primary) };
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         format!("{}Refresh Players", prefix),
@@ -568,9 +568,9 @@ fn render_about_content(frame: &mut Frame, state: &AppState, area: Rect) {
     for (i, theme_name) in ThemeName::all().iter().enumerate() {
         let is_active = *theme_name == state.theme;
         let is_selected = is_focused && i == state.settings_state.item_index;
-        let prefix = if is_selected { "> " } else { "  " };
-        let active_marker = if is_active { " *" } else { "" };
-        let style = if is_selected { Theme::selected() } else { Style::default().fg(t.colors.fg_primary) };
+        let prefix = "  ";
+        let active_marker = if is_active { " ♪" } else { "" };
+        let style = if is_selected { Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg) } else { Style::default().fg(t.colors.fg_primary) };
         lines.push(Line::from(Span::styled(
             format!("{}{}{}", prefix, theme_name.display_name(), active_marker),
             style,
@@ -606,9 +606,9 @@ fn render_about_content(frame: &mut Frame, state: &AppState, area: Rect) {
         let item_idx = theme_count + i;
         let is_active = *mode == state.artwork_mode;
         let is_selected = is_focused && state.settings_state.item_index == item_idx;
-        let prefix = if is_selected { "> " } else { "  " };
-        let active_marker = if is_active { " *" } else { "" };
-        let style = if is_selected { Theme::selected() } else { Style::default().fg(t.colors.fg_primary) };
+        let prefix = "  ";
+        let active_marker = if is_active { " ♪" } else { "" };
+        let style = if is_selected { Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg) } else { Style::default().fg(t.colors.fg_primary) };
         lines.push(Line::from(Span::styled(
             format!("{}{}{}", prefix, mode.name(), active_marker),
             style,

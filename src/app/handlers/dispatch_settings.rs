@@ -403,7 +403,8 @@ pub async fn dispatch(
                                     crate::ui::artwork::set_grid_protocol_type(hb);
                                 }
                                 crate::app::state::ArtworkMode::Auto => {
-                                    // Native protocol requires restart
+                                    crate::ui::screens::now_playing::restore_artwork_native_protocol();
+                                    crate::ui::artwork::restore_grid_native_protocol();
                                 }
                                 crate::app::state::ArtworkMode::Braille => {
                                     // Braille doesn't use picker protocol

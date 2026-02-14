@@ -56,10 +56,11 @@ COMMANDS (Alt+/ to see available commands)
   Ctrl+F          Search popup (floating dialog)
   Alt+E           Add selection to queue (enqueue)
   Alt+V           Cycle view mode (context-dependent)
-                  Albums: list → shuffled → covers → covers shuffled
-                  Playlist tracks: tracks → shuffled → by album → shuffled → covers → covers shuffled
-                  Genres: cycle through tabs (All/Library/Artist/Album/Mood/Style)
-                  Now Playing: cycle visualizer (Waveform→Spectrum→Spectrogram)
+                  Artists: list → shuffled → artwork → artwork shuffled
+                  Albums: list → shuffled → by artist → artwork → artwork shuffled → artwork by artist
+                  Playlist tracks: tracks → shuffled → by album → shuffled → artwork → artwork shuffled
+                  Genres: cycle through tabs (all/library/artist/album/mood/style)
+                  Now Playing: cycle visualizer (waveform→spectrum→spectrogram)
   Alt+M           Show similar albums/tracks
   Alt+G           Go to Album (navigate to track's album in Library)
   Alt+W           Save queue/radio as playlist
@@ -108,7 +109,7 @@ QUEUE (Ctrl+U)
 
 NOW PLAYING (Ctrl+N)
   Album art, track info, and visualizer panel
-  Visualizer tabs Waveform / Spectrum / Spectrogram
+  Visualizer tabs waveform / spectrum / spectrogram
   Tab             Cycle visualizer tab forward
   Shift+Tab       Cycle visualizer tab backward
   Alt+V           Cycle visualizer tab

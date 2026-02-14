@@ -167,6 +167,7 @@ pub enum Action {
     // Artwork
     LoadArtwork,
     ToggleAlbumArtView,
+    ToggleArtistArtView,
     /// Load album art for a batch of albums: Vec<(rating_key, thumb_path)>
     LoadAlbumArt(Vec<(String, String)>),
 
