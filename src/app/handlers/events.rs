@@ -1407,7 +1407,7 @@ pub fn handle_app_event(
             state.station_nav.loading = false;
 
             if tracks.is_empty() {
-                state.set_error("Station returned no tracks (is Sonic Analysis enabled in Plex settings?)".to_string());
+                state.set_error(format!("{}: returned no tracks (check server logs; Sonic Analysis may be required)", station_title));
             } else {
                 // Start playing the station in Radio mode
                 state.playback_mode = PlaybackMode::Radio;

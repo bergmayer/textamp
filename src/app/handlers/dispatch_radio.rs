@@ -3,7 +3,7 @@
 //! ToggleDjMode, DjModeProcess, DjModeTracksReady, DjModeBatchReady.
 
 use crate::app::{Action, AppState, Event};
-use crate::app::state::{PlaybackMode, RadioMode, View};
+use crate::app::state::{DjMode, PlaybackMode, RadioMode, View};
 use crate::api::PlexClient;
 use crate::audio::AudioPlayer;
 
@@ -326,6 +326,16 @@ pub async fn dispatch(
             state.dj_inserting = false;
 
             if tracks.is_empty() {
+                // Show feedback when DJ mode fails to find tracks
+                if let Some(mode) = state.active_dj_mode {
+                    let hint = match mode {
+                        DjMode::Freeze | DjMode::Gemini | DjMode::Stretch =>
+                            format!("{}: no similar tracks found (requires Sonic Analysis)", mode.name()),
+                        _ =>
+                            format!("{}: no matching tracks found", mode.name()),
+                    };
+                    state.set_status(hint);
+                }
                 return Ok(vec![]);
             }
 
