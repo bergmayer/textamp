@@ -9,6 +9,7 @@
 //! - `refresh` — view refresh, stale data detection
 
 mod cache;
+mod compilations;
 mod connection;
 mod navigation;
 mod playback;
@@ -29,6 +30,7 @@ pub use playback::{
     report_playback_stop_to_plex,
 };
 pub use preload::{maybe_start_subfolder_preload, preload_all_library_data, preload_data, SubfolderPreloadResult};
+pub use compilations::detect_compilations;
 pub use refresh::{
     is_viewing_category, check_staleness_on_view_load, current_view_category,
     refresh_current_view, spawn_category_refresh,

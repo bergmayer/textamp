@@ -341,6 +341,16 @@ impl PlexAuth {
     }
 
     /// Get available remote players (devices that provide "player" capability).
+    ///
+    /// Queries the plex.tv Resources API with full client identification headers.
+    ///
+    /// WORKAROUND: Apple TV frequently fails to report `presence: true` via the
+    /// plex.tv cloud API, even when running and reachable on the local network.
+    /// Both Plexamp and textamp are affected — the only reliable fix is toggling
+    /// the Apple TV's "Allow access" setting off and back on. As a workaround,
+    /// we cache Apple TV entries on first successful discovery and inject them
+    /// into future results when they're missing. Remove this once Apple/Plex
+    /// fix the presence reporting.
     pub async fn get_players(&self, token: &str) -> Result<Vec<super::models::RemotePlayer>, ApiError> {
         let url = format!("{}/api/v2/resources", PLEX_TV_URL);
 
@@ -349,8 +359,12 @@ impl PlexAuth {
             .get(&url)
             .header(HEADER_PLEX_TOKEN, token)
             .header(HEADER_PLEX_CLIENT_ID, &self.client_info.client_identifier)
+            .header(HEADER_PLEX_PRODUCT, &self.client_info.product)
+            .header(HEADER_PLEX_VERSION, &self.client_info.version)
+            .header(HEADER_PLEX_DEVICE_NAME, &self.client_info.device_name)
+            .header(HEADER_PLEX_PLATFORM, &self.client_info.platform)
             .header("Accept", "application/json")
-            .query(&[("includeHttps", "1"), ("includeRelay", "1")])
+            .query(&[("includeHttps", "1"), ("includeRelay", "1"), ("includeIPv6", "1")])
             .send()
             .await?;
 
@@ -369,7 +383,33 @@ impl PlexAuth {
             );
         }
 
-        let players = resources
+        // Collect Apple TV entries (present or not) for caching
+        let apple_tvs_from_api: Vec<super::models::RemotePlayer> = resources
+            .iter()
+            .filter(|r| {
+                let is_player = r.provides.contains("player") || r.provides.contains("client");
+                is_player && Self::is_apple_tv(r)
+            })
+            .map(|r| super::models::RemotePlayer {
+                name: r.name.clone(),
+                client_identifier: r.client_identifier.clone(),
+                connections: r.connections.iter()
+                    .map(|c| super::models::ServerConnection {
+                        uri: c.uri.clone(), local: c.local, relay: c.relay,
+                    })
+                    .collect(),
+                owned: r.owned,
+                product: r.product.clone().unwrap_or_default(),
+                platform: r.platform.clone().unwrap_or_default(),
+            })
+            .collect();
+
+        // Cache Apple TV entries if any were found in the API response
+        if !apple_tvs_from_api.is_empty() {
+            Self::save_apple_tv_cache(&apple_tvs_from_api);
+        }
+
+        let mut players: Vec<super::models::RemotePlayer> = resources
             .into_iter()
             .filter(|r| {
                 let is_player = r.provides.contains("player") || r.provides.contains("client");
@@ -394,7 +434,70 @@ impl PlexAuth {
             })
             .collect();
 
+        // If no Apple TV is present in the live results, add cached ones
+        let has_live_apple_tv = players.iter().any(|p| {
+            Self::is_apple_tv_player(p)
+        });
+        if !has_live_apple_tv {
+            if let Some(cached) = Self::load_apple_tv_cache() {
+                for atv in cached {
+                    if !players.iter().any(|p| p.client_identifier == atv.client_identifier) {
+                        tracing::info!("Adding cached Apple TV: {} ({})", atv.name, atv.product);
+                        players.push(atv);
+                    }
+                }
+            }
+        }
+
         Ok(players)
+    }
+
+    /// Check if a ResourceResponse is an Apple TV device.
+    /// Part of the Apple TV presence workaround — see get_players() doc comment.
+    fn is_apple_tv(r: &ResourceResponse) -> bool {
+        let product = r.product.as_deref().unwrap_or("");
+        let platform = r.platform.as_deref().unwrap_or("");
+        let name_lower = r.name.to_lowercase();
+        product.contains("Plex for Apple TV")
+            || platform.contains("tvOS")
+            || name_lower.contains("apple tv")
+    }
+
+    /// Check if a RemotePlayer is an Apple TV device.
+    /// Part of the Apple TV presence workaround — see get_players() doc comment.
+    fn is_apple_tv_player(p: &super::models::RemotePlayer) -> bool {
+        p.product.contains("Plex for Apple TV")
+            || p.platform.contains("tvOS")
+            || p.name.to_lowercase().contains("apple tv")
+    }
+
+    /// Cache path for Apple TV player data.
+    /// Part of the Apple TV presence workaround — see get_players() doc comment.
+    fn apple_tv_cache_path() -> std::path::PathBuf {
+        let paths = crate::config::XdgPaths::new("textamp");
+        paths.cache_dir.join("apple_tv_players.json")
+    }
+
+    /// Save Apple TV players to cache.
+    /// Part of the Apple TV presence workaround — see get_players() doc comment.
+    fn save_apple_tv_cache(players: &[super::models::RemotePlayer]) {
+        let path = Self::apple_tv_cache_path();
+        match serde_json::to_string(players) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(&path, json) {
+                    tracing::warn!("Failed to save Apple TV cache: {}", e);
+                }
+            }
+            Err(e) => tracing::warn!("Failed to serialize Apple TV cache: {}", e),
+        }
+    }
+
+    /// Load cached Apple TV players.
+    /// Part of the Apple TV presence workaround — see get_players() doc comment.
+    fn load_apple_tv_cache() -> Option<Vec<super::models::RemotePlayer>> {
+        let path = Self::apple_tv_cache_path();
+        let data = std::fs::read_to_string(&path).ok()?;
+        serde_json::from_str(&data).ok()
     }
 
     /// Delete stored auth token (logout).

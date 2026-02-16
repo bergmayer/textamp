@@ -311,7 +311,10 @@ pub fn handle_app_event(
                 }
 
                 // Active library valid but no cached data - start full preload
-                let lib_key = state.active_library.clone().unwrap();
+                let lib_key = match state.active_library.clone() {
+                    Some(key) => key,
+                    None => return vec![],
+                };
                 let lib_title = state.libraries.iter()
                     .find(|l| l.key == lib_key)
                     .map(|l| l.title.clone())
@@ -340,7 +343,7 @@ pub fn handle_app_event(
             // Update artist_nav if we're in Artists category
             if state.browse_category == BrowseCategory::Library && !state.artists.is_empty() {
                 let title = state.artist_view_mode.name();
-                let items = crate::app::state::BrowseItem::artist_root_items(&state.artists);
+                let items = state.build_artist_root_items();
                 state.artist_nav.update_root_items(title, items);
             }
             vec![]
@@ -474,27 +477,31 @@ pub fn handle_app_event(
             vec![]
         }
         Event::TrackSearchCompleted { version, tracks } => {
+            use crate::services::search_tracks_with_ranking;
             if version == u64::MAX {
-                // Radio launcher track search result
+                // Radio launcher track search result — re-rank by query
                 if let Some(ref mut launcher) = state.radio_launcher {
+                    let ranked = search_tracks_with_ranking(&tracks, &launcher.query, 50);
                     if let Some(ref mut results) = launcher.results {
-                        results.tracks = tracks;
+                        results.tracks = ranked;
                     }
                     launcher.loading = false;
                 }
             } else if version == u64::MAX - 1 {
-                // Adventure launcher track search result
+                // Adventure launcher track search result — re-rank by query
                 if let Some(ref mut launcher) = state.adventure_launcher {
+                    let ranked = search_tracks_with_ranking(&tracks, &launcher.query, 50);
                     if let Some(ref mut results) = launcher.results {
-                        results.tracks = tracks;
+                        results.tracks = ranked;
                     }
                     launcher.loading = false;
                 }
             } else if version == state.search_track_version {
                 // Only apply results if version matches (not stale)
-                // Merge tracks into existing search results
+                // Re-rank API results using local bucket ranking
+                let ranked = search_tracks_with_ranking(&tracks, &state.search_query, 50);
                 if let Some(ref mut results) = state.search_results {
-                    results.tracks = tracks;
+                    results.tracks = ranked;
                 }
                 state.search_track_loading = false;
             }
@@ -761,7 +768,7 @@ pub fn handle_app_event(
                 tracing::debug!("Artists preloaded: {} items", count);
                 // Update Miller columns (preserves drill-down state)
                 if !state.artists.is_empty() {
-                    let items = crate::app::state::BrowseItem::artist_root_items(&state.artists);
+                    let items = state.build_artist_root_items();
                     state.artist_nav.update_root_items(state.artist_view_mode.name(), items);
                 }
             }
@@ -780,6 +787,22 @@ pub fn handle_app_event(
                 state.albums_total = count as u32;
                 tracing::debug!("Albums preloaded: {} items", count);
             }
+
+            // Spawn background compilation detection if not already done
+            if !state.compilations_detected {
+                let tx = event_tx.clone();
+                let lib_key = library_key.clone();
+                let client_clone = client.clone();
+                let albums_clone = state.albums.clone();
+                let all_artist_keys: std::collections::HashSet<String> = state.artists.iter()
+                    .map(|a| a.rating_key.clone())
+                    .collect();
+
+                tokio::spawn(async move {
+                    helpers::detect_compilations(tx, lib_key, albums_clone, all_artist_keys, client_clone).await;
+                });
+            }
+
             vec![]
         }
         Event::PlaylistsPreloaded { library_key, playlists } => {
@@ -953,6 +976,24 @@ pub fn handle_app_event(
             }
             vec![]
         }
+        Event::CompilationsDetected { library_key, albums, artist_only_keys, track_artist_keys } => {
+            if state.active_library.as_ref() != Some(&library_key) {
+                return vec![];
+            }
+            state.compilation_albums = albums;
+            state.compilation_artist_keys = artist_only_keys;
+            state.compilation_track_artist_keys = track_artist_keys;
+            state.compilations_detected = true;
+            state.cache_dirty = true;
+
+            // Update artist root column if currently viewing Library
+            if !state.compilation_albums.is_empty() || !state.compilation_artist_keys.is_empty() {
+                let items = state.build_artist_root_items();
+                state.artist_nav.update_root_items("artists", items);
+            }
+            vec![]
+        }
+
         Event::Tick => {
             // Clear expired modifier bars
             if let Some(deadline) = state.alt_bar_until {
@@ -1150,7 +1191,7 @@ pub fn handle_app_event(
                 state.artists = cached.artists;
                 state.artists.sort_by(|a, b| helpers::sort_key(&a.title).cmp(&helpers::sort_key(&b.title)));
                 state.artists_total = state.artists.len() as u32;
-                let items = BrowseItem::artist_root_items(&state.artists);
+                let items = state.build_artist_root_items();
                 state.artist_nav.reset(state.artist_view_mode.name(), items);
             }
             if !cached.albums.is_empty() {
@@ -1232,6 +1273,17 @@ pub fn handle_app_event(
                     stations,
                 ));
                 state.station_nav.focused_column = 0;
+            }
+
+            // Compilation detection results
+            if !cached.compilation_albums.is_empty() || !cached.compilation_artist_keys.is_empty() {
+                state.compilation_albums = cached.compilation_albums;
+                state.compilation_artist_keys = cached.compilation_artist_keys;
+                state.compilation_track_artist_keys = cached.compilation_track_artist_keys;
+                state.compilations_detected = true;
+                // Re-build artist root items with compilation data
+                let items = state.build_artist_root_items();
+                state.artist_nav.update_root_items("artists", items);
             }
 
             vec![]
@@ -1359,6 +1411,7 @@ pub fn handle_app_event(
             } else {
                 // Start playing the station in Radio mode
                 state.playback_mode = PlaybackMode::Radio;
+                state.queue_selected.clear();
                 state.radio.clear();
                 state.radio.active_station = Some(crate::app::state::ActiveStation {
                     key: station_key,
@@ -1375,6 +1428,7 @@ pub fn handle_app_event(
                         state.radio.time_travel_decades.len());
                 }
 
+                state.list_state.queue_index = 0;
                 state.view = View::Queue;
                 state.set_status(format!("Playing {} ({} tracks)", station_title, state.radio.tracks.len()));
                 return vec![Action::PlayCurrentRadioTrack];

@@ -3,10 +3,12 @@
 //! Uses the Elm Architecture pattern with a single state struct.
 //! UI modeled after musikcube: Browse (left: categories, right: tracks), Queue, Search, etc.
 
+use std::collections::VecDeque;
+
 use crate::api::models::{Album, Artist, Genre, Library, Playlist, PlexServer, RemotePlayer, Station, Track, SearchResults};
 use crate::miller::{MillerColumn, MillerState};
 use crate::plex::{CachedFolder, CachedPlaylistTracks};
-use crate::services::{FolderNavigationState, WaveformData};
+use crate::services::{FolderNavigationState, WaveformData, MAX_HISTORY_SIZE};
 use crate::ui::theme::ThemeName;
 use std::collections::HashMap;
 
@@ -240,6 +242,14 @@ pub enum BrowseItem {
         artist_name: String,
         thumb: Option<String>,
     },
+    /// "Compilations" entry - pinned in artist root, drills into compilation albums.
+    Compilations,
+    /// "Compilation Tracks" entry - pinned in artist's album column, shows tracks by
+    /// this artist that appear on compilation albums.
+    CompilationTracks {
+        artist_key: String,
+        artist_name: String,
+    },
 }
 
 impl BrowseItem {
@@ -253,6 +263,8 @@ impl BrowseItem {
             BrowseItem::AllTracks { artist_key, .. } => artist_key,
             BrowseItem::AllArtists => "__all_artists__",
             BrowseItem::ArtistRadio { artist_key, .. } => artist_key,
+            BrowseItem::Compilations => "__compilations__",
+            BrowseItem::CompilationTracks { artist_key, .. } => artist_key,
         }
     }
 
@@ -266,11 +278,13 @@ impl BrowseItem {
             BrowseItem::AllTracks { .. } => "► All Tracks",
             BrowseItem::AllArtists => "All Artists",
             BrowseItem::ArtistRadio { .. } => "♪ Artist Radio",
+            BrowseItem::Compilations => "► Compilations",
+            BrowseItem::CompilationTracks { .. } => "► Compilation Tracks",
         }
     }
 
     pub fn is_drillable(&self) -> bool {
-        // AllTracks is drillable (loads tracks column), Track and ArtistRadio are not
+        // AllTracks/Compilations/CompilationTracks are drillable, Track and ArtistRadio are not
         !matches!(self, BrowseItem::Track { .. } | BrowseItem::ArtistRadio { .. })
     }
 
@@ -362,10 +376,40 @@ impl BrowseItem {
         }).collect()
     }
 
-    /// Build artist root items: "► All Artists" pinned at index 0, then artist items.
+    /// Build artist root items: pinned items at top, then artist items.
+    /// `compilation_artist_keys` are hidden (they only appear on compilations).
+    /// `has_compilations` adds a Compilations pinned item.
     pub fn artist_root_items(artists: &[Artist]) -> Vec<BrowseItem> {
         let mut items = vec![BrowseItem::AllArtists];
         items.extend(Self::from_artists(artists));
+        items
+    }
+
+    /// Build artist root items with compilation support:
+    /// - Inserts "Compilations" pinned item after "All Artists" when compilations exist
+    /// - Filters out artists that appear ONLY on compilation albums
+    pub fn artist_root_items_with_compilations(
+        artists: &[Artist],
+        has_compilations: bool,
+        compilation_artist_keys: &std::collections::HashSet<String>,
+    ) -> Vec<BrowseItem> {
+        let mut items = vec![BrowseItem::AllArtists];
+        if has_compilations {
+            items.push(BrowseItem::Compilations);
+        }
+        let artist_items: Vec<BrowseItem> = Self::from_artists(artists)
+            .into_iter()
+            .filter(|item| {
+                if compilation_artist_keys.is_empty() {
+                    return true;
+                }
+                match item {
+                    BrowseItem::Artist { key, .. } => !compilation_artist_keys.contains(key),
+                    _ => true,
+                }
+            })
+            .collect();
+        items.extend(artist_items);
         items
     }
 }
@@ -439,9 +483,12 @@ impl BrowseColumn {
         self.original_items = Some(self.items.clone());
         self.original_tracks = if self.tracks.is_empty() { None } else { Some(self.tracks.clone()) };
 
-        // Check if first item is pinned (AllArtists or AllTracks)
-        let pinned_start = matches!(self.items.first(), Some(BrowseItem::AllArtists) | Some(BrowseItem::AllTracks { .. }));
-        let start = if pinned_start { 1 } else { 0 };
+        // Count pinned items at start (AllArtists, AllTracks, Compilations, CompilationTracks, ArtistRadio)
+        let start = self.items.iter().take_while(|item| {
+            matches!(item, BrowseItem::AllArtists | BrowseItem::AllTracks { .. }
+                | BrowseItem::ArtistRadio { .. } | BrowseItem::Compilations
+                | BrowseItem::CompilationTracks { .. })
+        }).count();
 
         // Find placeholder items pinned at end
         let placeholder_start = self.items.iter().rposition(|item| !item.is_placeholder_item())
@@ -456,9 +503,8 @@ impl BrowseColumn {
 
         let orig_items = self.original_items.as_ref().unwrap();
         let mut new_items: Vec<BrowseItem> = Vec::with_capacity(self.items.len());
-        if pinned_start {
-            new_items.push(orig_items[0].clone());
-        }
+        // Copy pinned items at start (preserve order)
+        new_items.extend(orig_items[..start].iter().cloned());
         new_items.extend(indices.iter().map(|&i| orig_items[i].clone()));
         // Append placeholder tail (unchanged order)
         new_items.extend(orig_items[end..].iter().cloned());
@@ -466,11 +512,8 @@ impl BrowseColumn {
 
         if let Some(ref orig_tracks) = self.original_tracks {
             let mut new_tracks = Vec::with_capacity(orig_tracks.len());
-            if pinned_start {
-                if let Some(t) = orig_tracks.first() {
-                    new_tracks.push(t.clone());
-                }
-            }
+            // Copy pinned track slots at start
+            new_tracks.extend(orig_tracks[..start].iter().cloned());
             new_tracks.extend(indices.iter().filter_map(|&i| orig_tracks.get(i).cloned()));
             // Tracks don't have placeholders, but keep consistent length
             for i in end..orig_tracks.len() {
@@ -505,8 +548,12 @@ impl BrowseColumn {
             self.original_items = Some(self.items.clone());
             self.original_tracks = if self.tracks.is_empty() { None } else { Some(self.tracks.clone()) };
         }
-        let pinned_start = matches!(self.items.first(), Some(BrowseItem::AllArtists) | Some(BrowseItem::AllTracks { .. }));
-        let start = if pinned_start { 1 } else { 0 };
+        // Count how many pinned items are at the start
+        let start = self.items.iter().take_while(|item| {
+            matches!(item, BrowseItem::AllArtists | BrowseItem::AllTracks { .. }
+                | BrowseItem::ArtistRadio { .. } | BrowseItem::Compilations
+                | BrowseItem::CompilationTracks { .. })
+        }).count();
         self.items[start..].sort_by(|a, b| {
             let a_artist = if let BrowseItem::Album { artist, .. } = a { artist.to_lowercase() } else { String::new() };
             let b_artist = if let BrowseItem::Album { artist, .. } = b { artist.to_lowercase() } else { String::new() };
@@ -634,6 +681,7 @@ pub struct ArtistRadioPickerState {
     pub selected_artists: Vec<Artist>,
     pub focus: SearchFocus,
     pub item_index: usize,
+    pub scroll_pin: Option<usize>,
 }
 
 /// Snapshot of queue state for undo.
@@ -642,6 +690,10 @@ pub struct QueueSnapshot {
     pub queue: Vec<Track>,
     pub queue_index: Option<usize>,
     pub description: String,
+    /// Saved radio state for undoing radio-to-queue conversion.
+    pub radio_snapshot: Option<RadioPlaybackState>,
+    /// Saved legacy RadioState (Alt+R) for undo.
+    pub radio_state_snapshot: Option<RadioState>,
 }
 
 /// Artwork rendering mode.
@@ -663,9 +715,9 @@ impl ArtworkMode {
 
     pub fn name(&self) -> &'static str {
         match self {
-            ArtworkMode::Auto => "Auto",
-            ArtworkMode::Halfblocks => "Halfblocks",
-            ArtworkMode::Braille => "Braille",
+            ArtworkMode::Auto => "auto",
+            ArtworkMode::Halfblocks => "halfblocks",
+            ArtworkMode::Braille => "braille",
         }
     }
 
@@ -733,6 +785,16 @@ pub struct AppState {
     pub playlists: Vec<Playlist>,
     pub playlists_loading: bool,
 
+    // Compilation detection
+    /// Albums confirmed as true compilations (multi-artist).
+    pub compilation_albums: Vec<Album>,
+    /// Artist keys that appear ONLY on compilations (no solo albums) — hidden from artist list.
+    pub compilation_artist_keys: std::collections::HashSet<String>,
+    /// All artist keys that appear on any compilation track — used to show "Compilation Tracks" item.
+    pub compilation_track_artist_keys: std::collections::HashSet<String>,
+    /// Whether compilation detection has run for current library.
+    pub compilations_detected: bool,
+
     // Genres, Artist Genres, Album Genres, Moods, and Styles
     pub genres: Vec<Genre>,              // Actual genre tags from files
     pub artist_genres: Vec<Genre>,       // Plex genres at artist level
@@ -775,12 +837,14 @@ pub struct AppState {
     pub playback: PlaybackState,
     pub queue: Vec<Track>,
     pub queue_index: Option<usize>,
+    /// Multi-selected queue track indices (relative to queue vec, not including history)
+    pub queue_selected: std::collections::BTreeSet<usize>,
     /// Original queue order (for restoring after sort/shuffle)
     pub queue_original: Vec<Track>,
     /// Current queue sort mode
     pub queue_sort_mode: QueueSortMode,
-    /// Play history - recently played tracks for scrollback (max ~20)
-    pub play_history: Vec<Track>,
+    /// Play history - recently played tracks for scrollback
+    pub play_history: VecDeque<Track>,
     /// Whether user is currently dragging the seek indicator
     pub seeking_drag: bool,
     /// Consecutive playback errors (for auto-skip with limit)
@@ -841,7 +905,7 @@ pub struct AppState {
     /// Cancel flag for the subfolder preload task (set on library switch).
     pub subfolder_preload_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Whether to keep subfolder cache entries indefinitely (per-library setting).
-    pub keep_folder_cache: bool,
+    pub keep_subfolder_cache: bool,
 
     // Miller column navigation for browse categories
     pub artist_nav: BrowseNavigationState,
@@ -954,7 +1018,7 @@ pub struct AppState {
     /// Saved queue index for shuffle toggle undo
     pub shuffle_undo_index: Option<usize>,
 
-    // Library picker popup state (Ctrl+Alt+S)
+    // Library picker popup state (Alt+S)
     pub library_picker_active: bool,
     pub library_picker_index: usize,
 
@@ -993,6 +1057,12 @@ pub struct AppState {
     pub browse_click_time: Option<std::time::Instant>,
     /// Pinned scroll offset for search results after mouse click.
     pub search_scroll_pin: Option<usize>,
+    /// Pinned scroll offset for station panel after mouse click.
+    pub station_scroll_pin: Option<usize>,
+    /// Pinned scroll offset for queue track list after mouse click.
+    pub queue_scroll_pin: Option<usize>,
+    /// Pinned scroll offset for similar view after mouse click.
+    pub similar_scroll_pin: Option<usize>,
 }
 
 /// Active DJ mode that modifies queue behavior.
@@ -1315,6 +1385,10 @@ impl AppState {
             albums_loading: false,
             playlists: Vec::new(),
             playlists_loading: false,
+            compilation_albums: Vec::new(),
+            compilation_artist_keys: std::collections::HashSet::new(),
+            compilation_track_artist_keys: std::collections::HashSet::new(),
+            compilations_detected: false,
             genres: Vec::new(),
             artist_genres: Vec::new(),
             album_genres: Vec::new(),
@@ -1345,9 +1419,10 @@ impl AppState {
             playback: PlaybackState::default(),
             queue: Vec::new(),
             queue_index: None,
+            queue_selected: std::collections::BTreeSet::new(),
             queue_original: Vec::new(),
             queue_sort_mode: QueueSortMode::default(),
-            play_history: Vec::new(),
+            play_history: VecDeque::new(),
             seeking_drag: false,
             consecutive_playback_errors: 0,
             plex_session_id: None,
@@ -1376,7 +1451,7 @@ impl AppState {
             folder_contents_cache: HashMap::new(),
             subfolder_preload_active: false,
             subfolder_preload_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            keep_folder_cache: false,
+            keep_subfolder_cache: false,
             artist_nav: BrowseNavigationState::new(),
             genre_nav: BrowseNavigationState::new(),
             playlist_nav: BrowseNavigationState::new(),
@@ -1443,10 +1518,48 @@ impl AppState {
             browse_scroll_pin: None,
             browse_click_time: None,
             search_scroll_pin: None,
+            station_scroll_pin: None,
+            queue_scroll_pin: None,
+            similar_scroll_pin: None,
+        }
+    }
+
+    /// Get the BrowseNavigationState for the current browse category.
+    /// Returns None for Folders (which uses FolderNavigationState instead).
+    pub fn browse_nav(&self) -> Option<&BrowseNavigationState> {
+        match self.browse_category {
+            BrowseCategory::Library => Some(&self.artist_nav),
+            BrowseCategory::Genres => Some(&self.genre_nav),
+            BrowseCategory::Playlists => Some(&self.playlist_nav),
+            BrowseCategory::Folders => None,
+        }
+    }
+
+    /// Get a mutable reference to the BrowseNavigationState for the current browse category.
+    /// Returns None for Folders (which uses FolderNavigationState instead).
+    pub fn browse_nav_mut(&mut self) -> Option<&mut BrowseNavigationState> {
+        match self.browse_category {
+            BrowseCategory::Library => Some(&mut self.artist_nav),
+            BrowseCategory::Genres => Some(&mut self.genre_nav),
+            BrowseCategory::Playlists => Some(&mut self.playlist_nav),
+            BrowseCategory::Folders => None,
         }
     }
 
     /// Set an error message to display.
+    /// Build artist root items, using compilation-aware version if compilations are detected.
+    pub fn build_artist_root_items(&self) -> Vec<BrowseItem> {
+        if self.compilations_detected {
+            BrowseItem::artist_root_items_with_compilations(
+                &self.artists,
+                !self.compilation_albums.is_empty(),
+                &self.compilation_artist_keys,
+            )
+        } else {
+            BrowseItem::artist_root_items(&self.artists)
+        }
+    }
+
     pub fn set_error(&mut self, msg: String) {
         self.last_error = Some(msg);
     }
@@ -1466,6 +1579,27 @@ impl AppState {
     pub fn clear_status(&mut self) {
         self.status_message = None;
         self.status_show_time = None;
+    }
+
+    /// Convert radio playback to queue mode, returning a snapshot for undo.
+    pub fn convert_radio_to_queue(&mut self, description: &str) -> QueueSnapshot {
+        let snapshot = QueueSnapshot {
+            queue: self.radio.tracks.clone(),
+            queue_index: self.radio.track_index,
+            description: description.to_string(),
+            radio_snapshot: Some(self.radio.clone()),
+            radio_state_snapshot: Some(self.radio_state.clone()),
+        };
+        // Same conversion pattern as DJ mode (dispatch_radio.rs)
+        self.queue = self.radio.tracks.clone();
+        self.queue_index = self.radio.track_index;
+        self.playback_mode = PlaybackMode::Queue;
+        if let Some(idx) = self.queue_index {
+            self.list_state.queue_index = self.play_history.len() + idx;
+        }
+        self.radio.clear();
+        self.radio_state = RadioState::default();
+        snapshot
     }
 
     /// Whether multiple servers have music libraries available.
@@ -1644,16 +1778,15 @@ impl AppState {
         }
     }
 
-    /// Add a track to play history (keeps last 20).
+    /// Add a track to play history.
     pub fn add_to_history(&mut self, track: Track) {
         // Don't add duplicates consecutively
-        if self.play_history.last().map(|t| &t.rating_key) == Some(&track.rating_key) {
+        if self.play_history.back().map(|t| &t.rating_key) == Some(&track.rating_key) {
             return;
         }
-        self.play_history.push(track);
-        // Keep only last 20
-        if self.play_history.len() > 20 {
-            self.play_history.remove(0);
+        self.play_history.push_back(track);
+        while self.play_history.len() > MAX_HISTORY_SIZE {
+            self.play_history.pop_front();
         }
     }
 }
@@ -2210,6 +2343,8 @@ pub struct AdventureLauncherState {
     pub drill: AdventureDrillLevel,
     pub start_track: Option<Track>,
     pub track_count_input: String,
+    pub scroll_pin: Option<usize>,
+    pub search_tab: SearchTab,
 }
 
 /// List selection states for different views.
@@ -2237,7 +2372,7 @@ impl ListStates {
 pub enum SettingsSection {
     #[default]
     Account,
-    Output,
+    Textamp,
     About,
 }
 
@@ -2245,23 +2380,23 @@ impl SettingsSection {
     pub fn all() -> &'static [SettingsSection] {
         &[
             SettingsSection::Account,
-            SettingsSection::Output,
+            SettingsSection::Textamp,
             SettingsSection::About,
         ]
     }
 
     pub fn name(&self) -> &'static str {
         match self {
-            SettingsSection::Account => "Account",
-            SettingsSection::Output => "Output",
-            SettingsSection::About => "About",
+            SettingsSection::Account => "account",
+            SettingsSection::Textamp => "textamp",
+            SettingsSection::About => "about",
         }
     }
 
     pub fn next(&self) -> Self {
         match self {
-            SettingsSection::Account => SettingsSection::Output,
-            SettingsSection::Output => SettingsSection::About,
+            SettingsSection::Account => SettingsSection::Textamp,
+            SettingsSection::Textamp => SettingsSection::About,
             SettingsSection::About => SettingsSection::Account,
         }
     }
@@ -2269,8 +2404,8 @@ impl SettingsSection {
     pub fn prev(&self) -> Self {
         match self {
             SettingsSection::Account => SettingsSection::About,
-            SettingsSection::Output => SettingsSection::Account,
-            SettingsSection::About => SettingsSection::Output,
+            SettingsSection::Textamp => SettingsSection::Account,
+            SettingsSection::About => SettingsSection::Textamp,
         }
     }
 }

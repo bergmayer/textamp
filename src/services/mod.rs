@@ -28,7 +28,7 @@ pub use adventure::{generate_adventure, generate_adventure_for_library};
 pub use cache_service::{CacheDataSources, CacheSaveConditions, CacheService, CACHE_IDLE_THRESHOLD_SECS, CACHE_SAVE_INTERVAL_SECS};
 pub use folder_service::{FolderColumn, FolderItem, FolderItemType, FolderNavigationState, FolderService};
 pub use library_service::LibraryService;
-pub use list_filter_service::{filter_with_priority, filter_browse_items, filter_folder_items, filter_stations, search_with_ranking, search_albums_with_ranking, DEFAULT_MAX_RESULTS};
+pub use list_filter_service::{filter_with_priority, filter_browse_items, filter_folder_items, filter_stations, search_with_ranking, search_albums_with_ranking, search_tracks_with_ranking, DEFAULT_MAX_RESULTS};
 pub use navigation_service::NavigationService;
 pub use playback_service::{PlaybackService, QueueManager, NavigationResult, MAX_HISTORY_SIZE};
 pub use preload_service::{ConnectionParams, PreloadService};

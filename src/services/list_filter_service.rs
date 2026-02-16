@@ -309,6 +309,77 @@ pub fn search_albums_with_ranking(
     result
 }
 
+/// Search tracks with multi-field priority-based ranking.
+///
+/// Returns cloned tracks in priority order across title and artist fields:
+/// 1. Exact title match
+/// 2. Title starts with query
+/// 3. Artist name starts with query
+/// 4. Any word in title starts with query
+/// 5. Any word in artist name starts with query
+/// 6. Title contains query
+/// 7. Artist name contains query
+/// 8. Normalized contains (either field)
+pub fn search_tracks_with_ranking(
+    tracks: &[crate::api::models::Track],
+    query: &str,
+    max_results: usize,
+) -> Vec<crate::api::models::Track> {
+    if query.is_empty() {
+        return vec![];
+    }
+
+    let query_lower = query.to_lowercase();
+    let query_normalized = normalize_for_search(&query_lower);
+
+    let mut bucket1: Vec<usize> = Vec::new(); // Exact title match
+    let mut bucket2: Vec<usize> = Vec::new(); // Title starts with
+    let mut bucket3: Vec<usize> = Vec::new(); // Artist starts with
+    let mut bucket4: Vec<usize> = Vec::new(); // Any word in title starts with
+    let mut bucket5: Vec<usize> = Vec::new(); // Any word in artist starts with
+    let mut bucket6: Vec<usize> = Vec::new(); // Title contains
+    let mut bucket7: Vec<usize> = Vec::new(); // Artist contains
+    let mut bucket8: Vec<usize> = Vec::new(); // Normalized contains (either)
+
+    for (idx, track) in tracks.iter().enumerate() {
+        let title = track.title.to_lowercase();
+        let artist = track.grandparent_title.as_deref().unwrap_or("").to_lowercase();
+
+        if title == query_lower {
+            bucket1.push(idx);
+        } else if title.starts_with(&query_lower) {
+            bucket2.push(idx);
+        } else if artist.starts_with(&query_lower) {
+            bucket3.push(idx);
+        } else if title.split_whitespace().any(|w| w.starts_with(&query_lower)) {
+            bucket4.push(idx);
+        } else if artist.split_whitespace().any(|w| w.starts_with(&query_lower)) {
+            bucket5.push(idx);
+        } else if title.contains(&query_lower) {
+            bucket6.push(idx);
+        } else if artist.contains(&query_lower) {
+            bucket7.push(idx);
+        } else {
+            let title_norm = normalize_for_search(&title);
+            let artist_norm = normalize_for_search(&artist);
+            if title_norm.contains(&query_normalized) || artist_norm.contains(&query_normalized) {
+                bucket8.push(idx);
+            }
+        }
+    }
+
+    let mut result = Vec::new();
+    for bucket in [bucket1, bucket2, bucket3, bucket4, bucket5, bucket6, bucket7, bucket8] {
+        for idx in bucket {
+            if result.len() >= max_results {
+                return result;
+            }
+            result.push(tracks[idx].clone());
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

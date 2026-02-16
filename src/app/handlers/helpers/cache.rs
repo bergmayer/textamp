@@ -55,8 +55,8 @@ pub fn maybe_save_cache_async(event_tx: &mpsc::Sender<Event>, state: &mut AppSta
                 lib_key, folder_state.library_key);
         }
     }
-    // Keep all subfolder entries if keep_folder_cache, else purge > 32 days
-    cache_data.folder_contents = if state.keep_folder_cache {
+    // Keep all subfolder entries if keep_subfolder_cache, else purge > 32 days
+    cache_data.folder_contents = if state.keep_subfolder_cache {
         state.folder_contents_cache.clone()
     } else {
         state.folder_contents_cache.iter()
@@ -70,6 +70,11 @@ pub fn maybe_save_cache_async(event_tx: &mpsc::Sender<Event>, state: &mut AppSta
     cache_data.moods = state.moods.clone();
     cache_data.styles = state.styles.clone();
     cache_data.stations = state.stations.clone();
+
+    // Compilation detection results
+    cache_data.compilation_albums = state.compilation_albums.clone();
+    cache_data.compilation_artist_keys = state.compilation_artist_keys.clone();
+    cache_data.compilation_track_artist_keys = state.compilation_track_artist_keys.clone();
 
     // Save non-smart playlist tracks to disk cache
     for (key, cached) in &state.playlist_tracks_cache {

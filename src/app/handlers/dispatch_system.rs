@@ -85,8 +85,8 @@ pub async fn dispatch(
                             lib_key, folder_state.library_key);
                     }
                 }
-                // Save cached subfolder contents (keep all if keep_folder_cache, else purge > 32 days)
-                cache_data.folder_contents = if state.keep_folder_cache {
+                // Save cached subfolder contents (keep all if keep_subfolder_cache, else purge > 32 days)
+                cache_data.folder_contents = if state.keep_subfolder_cache {
                     state.folder_contents_cache.clone()
                 } else {
                     state.folder_contents_cache.iter()
@@ -104,6 +104,11 @@ pub async fn dispatch(
 
                 // Stations
                 cache_data.stations = state.stations.clone();
+
+                // Compilation detection results
+                cache_data.compilation_albums = state.compilation_albums.clone();
+                cache_data.compilation_artist_keys = state.compilation_artist_keys.clone();
+                cache_data.compilation_track_artist_keys = state.compilation_track_artist_keys.clone();
 
                 // Save non-smart playlist tracks to disk cache
                 for (key, cached) in &state.playlist_tracks_cache {

@@ -118,6 +118,13 @@ pub enum Event {
     MoodsPreloaded { library_key: String, moods: Vec<Genre> },
     StylesPreloaded { library_key: String, styles: Vec<Genre> },
     StationsPreloaded { library_key: String, stations: Vec<Station> },
+    /// Background compilation detection completed.
+    CompilationsDetected {
+        library_key: String,
+        albums: Vec<Album>,
+        artist_only_keys: std::collections::HashSet<String>,
+        track_artist_keys: std::collections::HashSet<String>,
+    },
     // Library switch (async cache load)
     LibraryCacheLoaded { library_key: String, cached: Box<crate::plex::CacheData> },
     LibraryCacheLoadFailed { library_key: String },

@@ -40,11 +40,11 @@ pub fn available_alt_commands(state: &AppState) -> Vec<AltCommand> {
         cmds.push(AltCommand { key: 'm', label: "similar" });
     }
 
-    // Alt+G album: need a track with album info (Miller columns, folder, or now-playing)
+    // Ctrl+B album: need a track with album info (Miller columns, folder, or now-playing)
     if has_track_with_album(state) || has_miller_album_context(state)
         || has_folder_track_with_album(state) || has_playing_with_album(state)
     {
-        cmds.push(AltCommand { key: 'g', label: "album" });
+        cmds.push(AltCommand { key: 'b', label: "album" });
     }
 
     // Alt+W save: has tracks in queue or radio (in Queue or NowPlaying view)
@@ -58,7 +58,7 @@ pub fn available_alt_commands(state: &AppState) -> Vec<AltCommand> {
 }
 
 /// Check if a command key is currently available.
-pub fn is_alt_command_available(state: &AppState, key: char) -> bool {
+pub fn is_action_command_available(state: &AppState, key: char) -> bool {
     available_alt_commands(state).iter().any(|cmd| cmd.key == key)
 }
 
@@ -121,7 +121,7 @@ fn get_view_cycle_label(state: &AppState) -> Option<&'static str> {
 /// Is there a track highlighted/selected in the current view?
 fn has_track_context(state: &AppState) -> bool {
     match state.view {
-        View::NowPlaying => {
+        View::NowPlaying | View::Queue => {
             let idx = state.list_state.queue_index;
             match state.playback_mode {
                 PlaybackMode::Queue | PlaybackMode::None => {
@@ -132,6 +132,15 @@ fn has_track_context(state: &AppState) -> bool {
             }
         }
         View::Browse => {
+            // Check Miller columns for a Track item
+            if state.browse_nav()
+                .and_then(|n| n.selected_item())
+                .map(|i| matches!(i, BrowseItem::Track { .. }))
+                .unwrap_or(false)
+            {
+                return true;
+            }
+            // Legacy right panel tracks
             matches!(
                 state.right_panel_mode,
                 RightPanelMode::AlbumTracks | RightPanelMode::CategoryTracks
@@ -145,6 +154,10 @@ fn has_track_context(state: &AppState) -> bool {
                 .map(|r| !r.tracks.is_empty())
                 .unwrap_or(false)
         }
+        View::Similar => {
+            state.similar_mode == crate::app::state::SimilarMode::Tracks
+                && !state.similar_tracks.is_empty()
+        }
         _ => false,
     }
 }
@@ -154,13 +167,8 @@ fn has_album_context(state: &AppState) -> bool {
     match state.view {
         View::Browse => {
             // Check Miller columns first
-            let nav = match state.browse_category {
-                BrowseCategory::Library => Some(&state.artist_nav),
-                BrowseCategory::Genres => Some(&state.genre_nav),
-                BrowseCategory::Playlists => Some(&state.playlist_nav),
-                _ => None,
-            };
-            if nav.and_then(|n| n.selected_item())
+            if state.browse_nav()
+                .and_then(|n| n.selected_item())
                 .map(|i| matches!(i, BrowseItem::Album { .. }))
                 .unwrap_or(false)
             {
@@ -212,7 +220,7 @@ fn has_enqueue_context(state: &AppState) -> bool {
 /// Is there a selected track that has album info (parent_rating_key)?
 fn has_track_with_album(state: &AppState) -> bool {
     match state.view {
-        View::NowPlaying => {
+        View::NowPlaying | View::Queue => {
             let idx = state.list_state.queue_index;
             let track = match state.playback_mode {
                 PlaybackMode::Queue | PlaybackMode::None => {
@@ -228,6 +236,19 @@ fn has_track_with_album(state: &AppState) -> bool {
             track.map(|t| t.parent_rating_key.is_some()).unwrap_or(false)
         }
         View::Browse => {
+            // Check Miller columns for a Track item with album info
+            if let Some(nav) = state.browse_nav() {
+                if let Some(col) = nav.columns.get(nav.focused_column) {
+                    if matches!(col.items.get(col.selected_index), Some(BrowseItem::Track { .. })) {
+                        if let Some(track) = col.tracks.get(col.selected_index) {
+                            if track.parent_rating_key.is_some() {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+            // Legacy right panel tracks
             match state.right_panel_mode {
                 RightPanelMode::AlbumTracks | RightPanelMode::CategoryTracks => {
                     state.selected_album_tracks.get(state.list_state.tracks_index)
@@ -236,6 +257,12 @@ fn has_track_with_album(state: &AppState) -> bool {
                 }
                 _ => false,
             }
+        }
+        View::Similar => {
+            state.similar_mode == crate::app::state::SimilarMode::Tracks
+                && state.similar_tracks.get(state.list_state.similar_index)
+                    .map(|t| t.parent_rating_key.is_some())
+                    .unwrap_or(false)
         }
         _ => false,
     }

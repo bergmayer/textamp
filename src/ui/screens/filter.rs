@@ -6,6 +6,7 @@ use crate::app::state::{SearchFocus, SearchTab};
 use crate::app::AppState;
 use crate::api::models::SearchResults;
 use crate::services::NavigationService;
+use crate::ui::layout::centered_rect;
 use crate::ui::theme::theme;
 
 use ratatui::prelude::*;
@@ -15,8 +16,8 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs};
 pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     let t = theme();
 
-    // Popup takes 60% width, 70% height, centered
-    let popup_area = centered_rect(60, 70, area);
+    // Popup takes 50% width, 70% height, centered
+    let popup_area = centered_rect(50, 70, area);
 
     // Clear the area behind the popup
     frame.render_widget(Clear, popup_area);
@@ -364,22 +365,3 @@ fn render_single_section<T, F>(
     frame.render_widget(List::new(list_items), area);
 }
 
-fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
-    let popup_layout = ratatui::layout::Layout::default()
-        .direction(ratatui::layout::Direction::Vertical)
-        .constraints([
-            ratatui::layout::Constraint::Percentage((100 - percent_y) / 2),
-            ratatui::layout::Constraint::Percentage(percent_y),
-            ratatui::layout::Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(area);
-
-    ratatui::layout::Layout::default()
-        .direction(ratatui::layout::Direction::Horizontal)
-        .constraints([
-            ratatui::layout::Constraint::Percentage((100 - percent_x) / 2),
-            ratatui::layout::Constraint::Percentage(percent_x),
-            ratatui::layout::Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(popup_layout[1])[1]
-}

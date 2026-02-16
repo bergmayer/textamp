@@ -9,13 +9,16 @@ use crate::api::models::Track;
 
 /// Handle Queue view keys (track list + stations panel).
 pub(super) fn handle_queue_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
-    // Tab toggles focus between tracks and stations
+    // Tab/Shift+Tab cycles through main views
     if key.code == KeyCode::Tab {
-        state.now_playing_focus = match state.now_playing_focus {
-            NowPlayingFocus::Tracks => NowPlayingFocus::Stations,
-            NowPlayingFocus::Stations => NowPlayingFocus::Tracks,
+        return if key.modifiers.contains(KeyModifiers::SHIFT) {
+            vec![Action::PrevView]
+        } else {
+            vec![Action::NextView]
         };
-        return vec![];
+    }
+    if key.code == KeyCode::BackTab {
+        return vec![Action::PrevView];
     }
 
     // With stations focused, dispatch to station handler
@@ -59,15 +62,9 @@ pub(super) fn handle_now_playing_visualizer_keys(key: event::KeyEvent, state: &m
         }
         KeyCode::F(1) | KeyCode::Char('?') => vec![Action::SetView(View::Help)],
 
-        // Tab cycles visualizer tabs (like genre tabs)
-        KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
-            state.visualizer_tab = state.visualizer_tab.prev();
-            vec![]
-        }
-        KeyCode::Tab => {
-            state.visualizer_tab = state.visualizer_tab.next();
-            vec![]
-        }
+        // Tab/Shift+Tab cycles through main views
+        KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => vec![Action::PrevView],
+        KeyCode::Tab => vec![Action::NextView],
 
         // Up arrow at top: focus the tab bar
         KeyCode::Up => {
@@ -93,6 +90,7 @@ fn handle_station_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action
         KeyCode::F(1) | KeyCode::Char('?') => vec![Action::SetView(View::Help)],
 
         KeyCode::Up => {
+            state.station_scroll_pin = None;
             state.station_nav.move_up();
             // Skip separators
             skip_station_separators(state, true);
@@ -100,6 +98,7 @@ fn handle_station_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action
             vec![]
         }
         KeyCode::Down => {
+            state.station_scroll_pin = None;
             state.station_nav.move_down();
             // Skip separators
             skip_station_separators(state, false);
@@ -107,6 +106,7 @@ fn handle_station_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action
             vec![]
         }
         KeyCode::PageUp => {
+            state.station_scroll_pin = None;
             if let Some(col) = state.station_nav.focused_mut() {
                 col.selected_index = col.selected_index.saturating_sub(10);
             }
@@ -114,6 +114,7 @@ fn handle_station_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action
             vec![]
         }
         KeyCode::PageDown => {
+            state.station_scroll_pin = None;
             if let Some(col) = state.station_nav.focused_mut() {
                 let max = col.stations.len().saturating_sub(1);
                 col.selected_index = (col.selected_index + 10).min(max);
@@ -122,6 +123,7 @@ fn handle_station_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action
             vec![]
         }
         KeyCode::Home => {
+            state.station_scroll_pin = None;
             if let Some(col) = state.station_nav.focused_mut() {
                 col.selected_index = 0;
             }
@@ -129,6 +131,7 @@ fn handle_station_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action
             vec![]
         }
         KeyCode::End => {
+            state.station_scroll_pin = None;
             if let Some(col) = state.station_nav.focused_mut() {
                 col.selected_index = col.stations.len().saturating_sub(1);
             }
@@ -303,16 +306,20 @@ fn handle_queue_track_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Ac
         }
         KeyCode::F(1) | KeyCode::Char('?') => vec![Action::SetView(View::Help)],
 
-        // Tab/Shift+Tab cycles through nav bar views
-        KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => vec![Action::PrevView],
-        KeyCode::Tab => vec![Action::NextView],
-
-        // Shift+Up/Down: move queue track up/down
+        // Shift+Up/Down: move queue track(s) up/down (batch if multi-selected)
         KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
-            vec![Action::MoveQueueTrackUp]
+            if state.queue_selected.is_empty() {
+                vec![Action::MoveQueueTrackUp]
+            } else {
+                vec![Action::MoveSelectedTracksUp]
+            }
         }
         KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
-            vec![Action::MoveQueueTrackDown]
+            if state.queue_selected.is_empty() {
+                vec![Action::MoveQueueTrackDown]
+            } else {
+                vec![Action::MoveSelectedTracksDown]
+            }
         }
 
         // Ctrl+Z: undo last remix
@@ -321,30 +328,36 @@ fn handle_queue_track_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Ac
         }
 
         KeyCode::Up => {
+            state.queue_scroll_pin = None;
             if state.list_state.queue_index > 0 {
                 state.list_state.queue_index -= 1;
             }
             vec![]
         }
         KeyCode::Down => {
+            state.queue_scroll_pin = None;
             let max = get_max_index(state);
             state.list_state.queue_index = (state.list_state.queue_index + 1).min(max);
             vec![]
         }
         KeyCode::PageUp => {
+            state.queue_scroll_pin = None;
             state.list_state.queue_index = state.list_state.queue_index.saturating_sub(10);
             vec![]
         }
         KeyCode::PageDown => {
+            state.queue_scroll_pin = None;
             let max = get_max_index(state);
             state.list_state.queue_index = (state.list_state.queue_index + 10).min(max);
             vec![]
         }
         KeyCode::Home => {
+            state.queue_scroll_pin = None;
             state.list_state.queue_index = 0;
             vec![]
         }
         KeyCode::End => {
+            state.queue_scroll_pin = None;
             let max = get_max_index(state);
             state.list_state.queue_index = max;
             vec![]
@@ -402,11 +415,25 @@ fn handle_queue_track_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Ac
         }
 
         KeyCode::Delete => {
-            // Only allow delete in queue mode
-            if state.playback_mode == PlaybackMode::Queue {
-                vec![Action::RemoveFromQueue(state.list_state.queue_index)]
-            } else {
-                vec![]
+            if !state.queue_selected.is_empty() {
+                return vec![Action::RemoveSelectedFromQueue];
+            }
+            match state.playback_mode {
+                PlaybackMode::Queue | PlaybackMode::None => {
+                    let visual = state.list_state.queue_index;
+                    let history_len = state.play_history.len();
+                    if visual >= history_len {
+                        vec![Action::RemoveFromQueue(visual - history_len)]
+                    } else {
+                        vec![]
+                    }
+                }
+                PlaybackMode::Radio => {
+                    let target_idx = state.list_state.queue_index;
+                    let snapshot = state.convert_radio_to_queue("Delete track (from radio)");
+                    state.queue_undo_snapshot = Some(snapshot);
+                    vec![Action::RemoveFromQueue(target_idx)]
+                }
             }
         }
 

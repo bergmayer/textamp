@@ -3,7 +3,7 @@
 use crossterm::event::{self, KeyCode};
 
 use crate::app::Action;
-use crate::app::state::{AdventureDrillLevel, AdventureStep, SearchFocus};
+use crate::app::state::{AdventureDrillLevel, AdventureStep, SearchFocus, SearchTab};
 use crate::app::AppState;
 
 /// Handle adventure launcher popup keys.
@@ -60,6 +60,7 @@ fn handle_track_finder_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<A
             }
         }
         KeyCode::Down => {
+            launcher.scroll_pin = None;
             match launcher.focus {
                 SearchFocus::Input => {
                     let count = result_count(launcher);
@@ -79,6 +80,7 @@ fn handle_track_finder_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<A
             }
         }
         KeyCode::Up => {
+            launcher.scroll_pin = None;
             match launcher.focus {
                 SearchFocus::Input => vec![],
                 SearchFocus::Results => {
@@ -93,6 +95,22 @@ fn handle_track_finder_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<A
                     vec![]
                 }
             }
+        }
+        KeyCode::Tab => {
+            if matches!(launcher.drill, AdventureDrillLevel::Search) {
+                launcher.search_tab = launcher.search_tab.next();
+                launcher.item_index = 0;
+                launcher.scroll_pin = None;
+            }
+            vec![]
+        }
+        KeyCode::BackTab => {
+            if matches!(launcher.drill, AdventureDrillLevel::Search) {
+                launcher.search_tab = launcher.search_tab.prev();
+                launcher.item_index = 0;
+                launcher.scroll_pin = None;
+            }
+            vec![]
         }
         KeyCode::Backspace => {
             match &launcher.drill {
@@ -128,40 +146,66 @@ fn handle_track_finder_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<A
     }
 }
 
-/// Handle Enter on a result item — drill or select depending on type.
+/// Handle Enter on a result item — drill or select depending on type and tab.
 fn handle_enter_on_result(launcher: &mut crate::app::state::AdventureLauncherState) -> Vec<Action> {
     match &launcher.drill {
         AdventureDrillLevel::Search => {
-            // In search results, determine what kind of item is selected
             if let Some(ref results) = launcher.results {
                 let idx = launcher.item_index;
-                let artist_count = results.artists.len();
-                let album_count = results.albums.len();
 
-                if idx < artist_count {
-                    // Artist → drill into albums
-                    let artist = &results.artists[idx];
-                    return vec![Action::AdventureLauncherDrillArtist {
-                        key: artist.rating_key.clone(),
-                        name: artist.title.clone(),
-                    }];
-                } else if idx < artist_count + album_count {
-                    // Album → drill into tracks
-                    let album = &results.albums[idx - artist_count];
-                    return vec![Action::AdventureLauncherDrillAlbum {
-                        key: album.rating_key.clone(),
-                        title: album.title.clone(),
-                        artist_name: album.artist_name().to_string(),
-                    }];
-                } else {
-                    // Track → select
-                    return vec![Action::AdventureLauncherSelectTrack];
+                // Tab-aware Enter behavior
+                match launcher.search_tab {
+                    SearchTab::Artists => {
+                        if let Some(artist) = results.artists.get(idx) {
+                            return vec![Action::AdventureLauncherDrillArtist {
+                                key: artist.rating_key.clone(),
+                                name: artist.title.clone(),
+                            }];
+                        }
+                    }
+                    SearchTab::Albums => {
+                        if let Some(album) = results.albums.get(idx) {
+                            return vec![Action::AdventureLauncherDrillAlbum {
+                                key: album.rating_key.clone(),
+                                title: album.title.clone(),
+                                artist_name: album.artist_name().to_string(),
+                            }];
+                        }
+                    }
+                    SearchTab::Tracks => {
+                        return vec![Action::AdventureLauncherSelectTrack];
+                    }
+                    SearchTab::Playlists | SearchTab::Genres => {
+                        // Not actionable in adventure mode
+                        return vec![];
+                    }
+                    SearchTab::Global => {
+                        // Global tab: determine type by index offset
+                        let artist_count = results.artists.len();
+                        let album_count = results.albums.len();
+
+                        if idx < artist_count {
+                            let artist = &results.artists[idx];
+                            return vec![Action::AdventureLauncherDrillArtist {
+                                key: artist.rating_key.clone(),
+                                name: artist.title.clone(),
+                            }];
+                        } else if idx < artist_count + album_count {
+                            let album = &results.albums[idx - artist_count];
+                            return vec![Action::AdventureLauncherDrillAlbum {
+                                key: album.rating_key.clone(),
+                                title: album.title.clone(),
+                                artist_name: album.artist_name().to_string(),
+                            }];
+                        } else {
+                            return vec![Action::AdventureLauncherSelectTrack];
+                        }
+                    }
                 }
             }
             vec![]
         }
         AdventureDrillLevel::ArtistAlbums { albums, artist_name, .. } => {
-            // Album selected → drill into tracks
             if let Some(album) = albums.get(launcher.item_index) {
                 vec![Action::AdventureLauncherDrillAlbum {
                     key: album.rating_key.clone(),
@@ -173,7 +217,6 @@ fn handle_enter_on_result(launcher: &mut crate::app::state::AdventureLauncherSta
             }
         }
         AdventureDrillLevel::AlbumTracks { .. } => {
-            // Track selected → select it
             vec![Action::AdventureLauncherSelectTrack]
         }
     }
@@ -200,18 +243,8 @@ fn handle_track_count_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Ac
             launcher.drill = AdventureDrillLevel::Search;
             launcher.item_index = 0;
             launcher.focus = SearchFocus::Input;
-            // Pre-populate with all artists (release borrow to avoid conflict with state.artists)
-            let _ = launcher;
-            let artists = state.artists.clone();
-            if let Some(ref mut l) = state.adventure_launcher {
-                l.results = Some(crate::api::models::SearchResults {
-                    artists,
-                    albums: vec![],
-                    playlists: vec![],
-                    genres: vec![],
-                    tracks: vec![],
-                });
-            }
+            launcher.results = None;
+            launcher.search_tab = SearchTab::default();
             vec![]
         }
         KeyCode::Backspace => {
@@ -228,12 +261,19 @@ fn handle_track_count_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Ac
     }
 }
 
-/// Count total selectable items for the current drill level.
+/// Count total selectable items for the current drill level (tab-aware).
 fn result_count(launcher: &crate::app::state::AdventureLauncherState) -> usize {
     match &launcher.drill {
         AdventureDrillLevel::Search => {
             if let Some(ref results) = launcher.results {
-                results.artists.len() + results.albums.len() + results.tracks.len()
+                match launcher.search_tab {
+                    SearchTab::Global => results.artists.len() + results.albums.len() + results.tracks.len(),
+                    SearchTab::Artists => results.artists.len(),
+                    SearchTab::Albums => results.albums.len(),
+                    SearchTab::Tracks => results.tracks.len(),
+                    SearchTab::Playlists => results.playlists.len(),
+                    SearchTab::Genres => results.genres.len(),
+                }
             } else {
                 0
             }

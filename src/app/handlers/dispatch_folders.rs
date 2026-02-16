@@ -313,18 +313,29 @@ pub async fn dispatch(
                                     0
                                 };
 
-                                state.queue = tracks;
-                                state.queue_index = Some(start_idx);
-                                state.playback_mode = PlaybackMode::Queue;
+                                if state.playback_mode == PlaybackMode::Radio {
+                                    state.radio.clear();
+                                }
                                 if let Some(current) = state.current_track().cloned() {
                                     helpers::report_playback_stop_to_plex(
                                         &current, state.playback.position_ms, true,
                                         state.plex_session_id.clone(), client,
                                     );
                                 }
+                                // Move played tracks to history
+                                if let Some(qi) = state.queue_index {
+                                    if qi < state.queue.len() {
+                                        let played: Vec<crate::api::models::Track> = state.queue.drain(..=qi).collect();
+                                        state.play_history.extend(played);
+                                    }
+                                }
+                                state.queue.splice(0..0, tracks);
+                                state.queue_index = Some(start_idx);
+                                state.playback_mode = PlaybackMode::Queue;
                                 state.plex_session_id = Some(helpers::generate_plex_session_id());
                                 state.queue_original.clear();
                                 state.queue_sort_mode = crate::app::state::QueueSortMode::QueueOrder;
+                                state.list_state.queue_index = state.play_history.len();
                                 audio.track_cache.flush();
                                 helpers::play_current_track(event_tx, state, client, audio).await;
                             }
@@ -359,18 +370,28 @@ pub async fn dispatch(
                                             0
                                         };
 
-                                        state.queue = tracks;
-                                        state.queue_index = Some(start_idx);
-                                        state.playback_mode = PlaybackMode::Queue;
+                                        if state.playback_mode == PlaybackMode::Radio {
+                                            state.radio.clear();
+                                        }
                                         if let Some(current) = state.current_track().cloned() {
                                             helpers::report_playback_stop_to_plex(
                                                 &current, state.playback.position_ms, true,
                                                 state.plex_session_id.clone(), client,
                                             );
                                         }
+                                        if let Some(qi) = state.queue_index {
+                                            if qi < state.queue.len() {
+                                                let played: Vec<crate::api::models::Track> = state.queue.drain(..=qi).collect();
+                                                state.play_history.extend(played);
+                                            }
+                                        }
+                                        state.queue.splice(0..0, tracks);
+                                        state.queue_index = Some(start_idx);
+                                        state.playback_mode = PlaybackMode::Queue;
                                         state.plex_session_id = Some(helpers::generate_plex_session_id());
                                         state.queue_original.clear();
                                         state.queue_sort_mode = crate::app::state::QueueSortMode::QueueOrder;
+                                        state.list_state.queue_index = state.play_history.len();
                                         audio.track_cache.flush();
                                         helpers::play_current_track(event_tx, state, client, audio).await;
                                     }

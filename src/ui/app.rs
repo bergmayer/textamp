@@ -45,29 +45,22 @@ pub fn render(frame: &mut Frame, state: &AppState) {
 
     // Render search popup if active (floating dialog)
     if state.search_popup_active {
-        render_search_popup(frame, state);
+        screens::filter::render(frame, state, frame.area());
     }
-
-    // Popup area: center within queue right panel when on Queue view
-    let popup_area = if state.view == View::Queue {
-        queue_right_panel(frame)
-    } else {
-        frame.area()
-    };
 
     // Render radio launcher popup if active
     if state.radio_launcher.is_some() {
-        screens::radio_launcher::render(frame, state, popup_area);
+        screens::radio_launcher::render(frame, state, frame.area());
     }
 
     // Render adventure launcher popup if active
     if state.adventure_launcher.is_some() {
-        screens::adventure_launcher::render(frame, state, popup_area);
+        screens::adventure_launcher::render(frame, state, frame.area());
     }
 
     // Render artist radio picker popup if active
     if state.artist_radio_picker.is_some() {
-        screens::artist_radio_picker::render(frame, state, popup_area);
+        screens::artist_radio_picker::render(frame, state, frame.area());
     }
 
     // Render library picker popup if active
@@ -237,20 +230,6 @@ fn render_queue(frame: &mut Frame, state: &AppState) {
 
 /// Compute the queue right panel (track list) area for popup centering.
 /// Replicates the layout calculation from render_queue_mode.
-fn queue_right_panel(frame: &Frame) -> Rect {
-    let layout = FullScreenLayout::new(frame.area());
-    let area = layout.content;
-    let art_height = (area.height * 40 / 100).max(8);
-    let art_width = (art_height * 2).min(area.width * 40 / 100).max(25);
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(art_width),
-            Constraint::Min(40),
-        ])
-        .split(area)[1]
-}
-
 fn render_now_playing(frame: &mut Frame, state: &AppState) {
     let layout = FullScreenLayout::new(frame.area());
 
@@ -1258,12 +1237,11 @@ fn render_shortcuts(frame: &mut Frame, state: &AppState, area: Rect) {
     let show_alt_bar = state.alt_bar_until.is_some();
 
     if show_ctrl_alt_bar {
-        // Ctrl+Alt bar: global station shortcuts
+        // Alt bar: global station shortcuts
         let shortcuts: Vec<(&str, &str)> = vec![
-            ("^⌥A", "play track album"),
-            ("^⌥L", "library radio"),
-            ("^⌥R", "random album"),
-            ("^⌥S", "switch library"),
+            ("⌥L", "library radio"),
+            ("⌥R", "random album"),
+            ("⌥S", "switch library"),
         ];
 
         for (i, (key, label)) in shortcuts.iter().enumerate() {
@@ -1280,7 +1258,7 @@ fn render_shortcuts(frame: &mut Frame, state: &AppState, area: Rect) {
             ));
         }
     } else if show_alt_bar {
-        // Alt bar: contextual command shortcuts (only available commands shown)
+        // Ctrl action bar: contextual command shortcuts (only available commands shown)
         let alt_cmds = crate::app::available_alt_commands(state);
 
         if alt_cmds.is_empty() {
@@ -1293,7 +1271,7 @@ fn render_shortcuts(frame: &mut Frame, state: &AppState, area: Rect) {
                 if i > 0 {
                     spans.push(Span::styled("|", Style::default().fg(t.colors.fg_muted).bg(t.colors.bg_secondary)));
                 }
-                let key_str = format!(" ⌥{} ", cmd.key.to_ascii_uppercase());
+                let key_str = format!(" ^{} ", cmd.key.to_ascii_uppercase());
                 spans.push(Span::styled(
                     key_str,
                     Style::default().fg(t.colors.shortcut_key).bg(t.colors.bg_secondary),
@@ -1343,16 +1321,7 @@ fn render_shortcuts(frame: &mut Frame, state: &AppState, area: Rect) {
 }
 
 /// Render the search popup as a floating dialog.
-fn render_search_popup(frame: &mut Frame, state: &AppState) {
-    // Use 80% width and 70% height for the search popup
-    let area = centered_rect(80, 70, frame.area());
-
-    // Render the search screen content inside the popup area
-    // (filter.rs handles its own Clear and background)
-    screens::filter::render(frame, state, area);
-}
-
-/// Render the library picker popup (Ctrl+Alt+S).
+/// Render the library picker popup (Alt+S).
 fn render_library_picker(frame: &mut Frame, state: &AppState) {
     let t = theme();
     let area = centered_rect(50, 30, frame.area());
@@ -1480,7 +1449,7 @@ fn render_input_dialog(frame: &mut Frame, dialog: &InputDialog) {
         .split(inner);
 
     // Input field with cursor
-    let input_text = format!("{}█", dialog.input);
+    let input_text = format!("{}▋", dialog.input);
     let input = Paragraph::new(input_text)
         .style(Style::default().fg(t.colors.fg_primary));
     frame.render_widget(input, chunks[1]);

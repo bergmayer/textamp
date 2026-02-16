@@ -35,6 +35,10 @@ pub async fn dispatch(
     match action {
         Action::SetView(view) => {
             state.view = view;
+            // Clear multi-select when leaving Queue view
+            if view != View::Queue {
+                state.queue_selected.clear();
+            }
             // Load stations when entering Queue view if not already loaded
             if view == View::Queue
                 && state.station_nav.columns.is_empty()
@@ -49,8 +53,9 @@ pub async fn dispatch(
             }
         }
         Action::NextView => {
-            // Tab: cycle through nav bar views
-            // Order: Library → Playlists → Genres → Folders → Queue → Now Playing → Library
+            // Tab: cycle through main views only
+            // Order: Library → Playlists → Queue → Now Playing → Library
+            // Genre/Folder categories are accessed via Ctrl+G / Ctrl+O, not Tab.
             if state.view == View::NowPlaying {
                 // From Now Playing, go to Library
                 state.view = View::Browse;
@@ -59,18 +64,12 @@ pub async fn dispatch(
                 // From Queue, go to Now Playing
                 state.view = View::NowPlaying;
             } else if state.view == View::Browse {
-                // Cycle through browse categories, then to Queue
                 match state.browse_category {
                     BrowseCategory::Library => {
                         follow_ups.push(Action::SetCategory(BrowseCategory::Playlists));
                     }
-                    BrowseCategory::Playlists => {
-                        follow_ups.push(Action::SetCategory(BrowseCategory::Genres));
-                    }
-                    BrowseCategory::Genres => {
-                        follow_ups.push(Action::SetCategory(BrowseCategory::Folders));
-                    }
-                    BrowseCategory::Folders => {
+                    _ => {
+                        // From Playlists, Genres, or Folders → Queue
                         state.view = View::Queue;
                     }
                 }
@@ -80,29 +79,23 @@ pub async fn dispatch(
             }
         }
         Action::PrevView => {
-            // Shift+Tab: cycle backwards through nav bar views
-            // Order: Library ← Playlists ← Genres ← Folders ← Queue ← Now Playing ← Library
+            // Shift+Tab: cycle backwards through main views
+            // Order: Library ← Playlists ← Queue ← Now Playing ← Library
             if state.view == View::NowPlaying {
                 // From Now Playing, go to Queue
                 state.view = View::Queue;
             } else if state.view == View::Queue {
-                // From Queue, go to Folders
+                // From Queue, go to Playlists
                 state.view = View::Browse;
-                follow_ups.push(Action::SetCategory(BrowseCategory::Folders));
+                follow_ups.push(Action::SetCategory(BrowseCategory::Playlists));
             } else if state.view == View::Browse {
-                // Cycle backwards through browse categories, or to Now Playing
                 match state.browse_category {
                     BrowseCategory::Library => {
                         state.view = View::NowPlaying;
                     }
-                    BrowseCategory::Playlists => {
+                    _ => {
+                        // From Playlists, Genres, or Folders → Library
                         follow_ups.push(Action::SetCategory(BrowseCategory::Library));
-                    }
-                    BrowseCategory::Genres => {
-                        follow_ups.push(Action::SetCategory(BrowseCategory::Playlists));
-                    }
-                    BrowseCategory::Folders => {
-                        follow_ups.push(Action::SetCategory(BrowseCategory::Genres));
                     }
                 }
             } else {

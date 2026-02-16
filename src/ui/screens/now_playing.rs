@@ -86,17 +86,19 @@ pub fn render_queue_mode(frame: &mut Frame, state: &AppState, area: Rect) {
         ])
         .split(area);
 
-    // Left column: artwork on top, stations below
+    // Left column: artwork on top, clear button, stations below
     let left_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(art_height),
+            Constraint::Length(1),
             Constraint::Min(4),
         ])
         .split(chunks[0]);
 
     render_artwork(frame, state, left_chunks[0]);
-    render_station_panel(frame, state, left_chunks[1]);
+    render_clear_button(frame, state, left_chunks[1]);
+    render_station_panel(frame, state, left_chunks[2]);
     render_track_list(frame, state, chunks[1]);
 }
 
@@ -145,6 +147,18 @@ fn render_artwork_placeholder(frame: &mut Frame, area: Rect, message: &str) {
         height: 1,
     };
     frame.render_widget(placeholder, centered);
+}
+
+/// Render the "Clear" button row between artwork and stations.
+fn render_clear_button(frame: &mut Frame, state: &AppState, area: Rect) {
+    let t = theme();
+    let has_tracks = !state.queue.is_empty() || !state.radio.tracks.is_empty();
+    let fg = if has_tracks { t.colors.fg_muted } else { t.colors.bg_secondary };
+    let label = " ✕ Clear ";
+    let paragraph = Paragraph::new(label)
+        .style(Style::default().fg(fg).bg(t.colors.bg_primary))
+        .alignment(Alignment::Center);
+    frame.render_widget(paragraph, area);
 }
 
 /// Render the stations panel below artwork in queue mode.
@@ -206,7 +220,10 @@ fn render_station_panel(frame: &mut Frame, state: &AppState, area: Rect) {
     let total_items = col.stations.len();
     let max_text_width = inner.width.saturating_sub(3) as usize;
 
-    let scroll_offset = NavigationService::calc_scroll_offset(selected_idx, visible_height, total_items);
+    let scroll_offset = match state.station_scroll_pin {
+        Some(pinned) => pinned,
+        None => NavigationService::calc_scroll_offset(selected_idx, visible_height, total_items),
+    };
 
     // Determine active station key and active DJ mode for visual indicators
     let active_station_key = state.radio.active_station.as_ref().map(|s| s.key.as_str());
@@ -360,7 +377,10 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
 
     // Calculate scroll offset - center on selected item in current tracks
     let display_selected = history_len + selected_idx;
-    let scroll_offset = NavigationService::calc_scroll_offset(display_selected, visible_item_count, total_display);
+    let scroll_offset = match state.queue_scroll_pin {
+        Some(pinned) => pinned,
+        None => NavigationService::calc_scroll_offset(display_selected, visible_item_count, total_display),
+    };
 
     let mut items: Vec<ListItem> = Vec::new();
 
@@ -395,8 +415,9 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
 
         let is_current = current_idx == Some(i);
         let is_selected = i == selected_idx;
+        let is_multi_selected = state.queue_selected.contains(&i);
 
-        let prefix = if is_current { "♪ " } else { "  " };
+        let prefix = if is_current { "♪ " } else if is_multi_selected { "● " } else { "  " };
 
         // Title with empty fallback
         let track_title = if track.title.is_empty() {
@@ -443,11 +464,17 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
         };
 
         let tracks_focused = state.now_playing_focus == NowPlayingFocus::Tracks;
-        let (line1_fg, line2_fg, item_bg) = if is_current && !is_selected {
+        let (line1_fg, line2_fg, item_bg) = if is_current && !is_selected && !is_multi_selected {
             (
                 Style::default().fg(t.colors.fg_accent).bold(),
                 Style::default().fg(t.colors.fg_accent),
                 Style::default(),
+            )
+        } else if is_multi_selected && !is_selected {
+            (
+                Style::default().fg(t.colors.fg_accent),
+                Style::default().fg(t.colors.fg_accent),
+                Style::default().bg(t.colors.bg_secondary),
             )
         } else if is_selected && tracks_focused {
             (
@@ -522,7 +549,7 @@ pub fn render_visualizer_mode(frame: &mut Frame, state: &AppState, area: Rect) {
     );
 
     // Check if we should show artwork (need enough width)
-    let show_artwork = state.artwork_data.is_some() && area.width > 50;
+    let show_artwork = area.width > 50;
 
     if show_artwork {
         // Top panel takes 40% of height (min 12) for artwork + track info

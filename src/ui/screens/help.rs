@@ -27,7 +27,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     let help_text = r#"
 NAVIGATION
   Arrow keys      Navigate lists
-  Tab             Next view (Library→Playlists→Genres→Folders→Queue→Now Playing)
+  Tab             Next view (Library→Playlists→Queue→Now Playing)
   Shift+Tab       Previous view
   Shift+Down      Cycle modes within category (e.g., Library→Album Artists)
   Shift+Up        Cycle modes backwards
@@ -43,7 +43,7 @@ NAVIGATION
 CATEGORIES (Ctrl+key - works from any view)
   Ctrl+L          Library (cycles: artists/album artists)
   Ctrl+P          Playlists
-  Ctrl+G          Genres (Tab to switch: All/Library/Artist/Album/Mood/Style)
+  Ctrl+G          Genres (Left/Right or Ctrl+V to switch tabs)
   Ctrl+O          Folders
   Ctrl+U          Queue (track list with stations panel)
   Ctrl+N          Now Playing (visualizer: waveform/spectrum/spectrogram)
@@ -54,22 +54,21 @@ VIEWS
 
 COMMANDS (Alt+/ to see available commands)
   Ctrl+F          Search popup (floating dialog)
-  Alt+E           Add selection to queue (enqueue)
-  Alt+V           Cycle view mode (context-dependent)
+  Ctrl+E          Add selection to queue (enqueue)
+  Ctrl+V          Cycle view mode (context-dependent)
                   Artists: list → shuffled → artwork → artwork shuffled
                   Albums: list → shuffled → by artist → artwork → artwork shuffled → artwork by artist
                   Playlist tracks: tracks → shuffled → by album → shuffled → artwork → artwork shuffled
                   Genres: cycle through tabs (all/library/artist/album/mood/style)
                   Now Playing: cycle visualizer (waveform→spectrum→spectrogram)
-  Alt+M           Show similar albums/tracks
-  Alt+G           Go to Album (navigate to track's album in Library)
-  Alt+W           Save queue/radio as playlist
+  Ctrl+M          Show similar albums/tracks
+  Ctrl+B          Go to Album (navigate to track's album in Library)
+  Ctrl+W          Save queue/radio as playlist
 
-STATIONS & SHORTCUTS (Alt+/ twice to see available shortcuts)
-  Ctrl+Alt+A      Play track album (play album of current track)
-  Ctrl+Alt+L      Library Radio (station based on your library)
-  Ctrl+Alt+R      Random Album Radio (shuffled albums)
-  Ctrl+Alt+S      Quick library switcher
+STATIONS (Alt+/ twice to see available shortcuts)
+  Alt+L           Library Radio (station based on your library)
+  Alt+R           Random Album Radio (shuffled albums)
+  Alt+S           Quick library switcher
 
 SEARCH POPUP (Ctrl+F)
   Type to search library (instant local search)
@@ -96,12 +95,11 @@ PLAYBACK
 QUEUE (Ctrl+U)
   Left panel: artwork + station browser
   Right panel: current queue or radio tracks
-  Tab             Toggle focus: track list / stations
   Left/Right      Switch focus between panels
-  Del             Remove track from queue
-  Shift+Up/Down   Move selected track up/down in queue
-  Ctrl+Z          Undo last queue remix
-  Alt+W           Save queue/radio as playlist
+  Del             Remove track from queue (radio auto-converts to queue)
+  Shift+Up/Down   Move selected track up/down (radio auto-converts to queue)
+  Ctrl+Z          Undo last remix/edit (restores radio if applicable)
+  Ctrl+W          Save queue/radio as playlist
   Enter on playing track → opens Now Playing view
   Stations panel  Browse Plex radio stations, DJ modes, and remix tools
                   Enter/Right     Drill into category or play station
@@ -110,9 +108,7 @@ QUEUE (Ctrl+U)
 NOW PLAYING (Ctrl+N)
   Album art, track info, and visualizer panel
   Visualizer tabs waveform / spectrum / spectrogram
-  Tab             Cycle visualizer tab forward
-  Shift+Tab       Cycle visualizer tab backward
-  Alt+V           Cycle visualizer tab
+  Ctrl+V          Cycle visualizer tab
   Up              Focus tab bar (then Left/Right to switch, Down to return)
   Left/Right      Seek ±1 second
   Esc             Return to Queue view
@@ -121,8 +117,8 @@ ARTIST RADIO
   In Library, drill into an artist to see "Artist Radio" above "All Tracks".
   Press Enter to start Plex radio seeded from that artist.
   Multi-artist radio: select "Artist Radio" in the stations panel to open
-  the picker. Enter count (2-12), filter and select artists, press Tab to
-  launch blended radio from multiple artists.
+  the picker. Enter count (2-12), search and select artists with Enter.
+  Auto-launches when all artists are selected.
 
 SONIC ADVENTURE (Alt+A or via stations panel)
   Creates a sonic bridge between two tracks using Plex sonic analysis.
@@ -132,7 +128,8 @@ SONIC ADVENTURE (Alt+A or via stations panel)
     3. Enter length (5-100 tracks)
     4. Adventure replaces queue, starts playing
   Stations panel: "Sonic Adventure" item provides a self-contained UI
-  Tracks can be selected from Browse or Search (Tracks tab)
+  with tabbed search (All/Artists/Albums/Tracks/Playlists/Genres).
+  Drill into artists/albums to find tracks, or select directly from Tracks tab.
 
 DJ MODES (via stations panel)
   Guest DJ modes that modify playback while active.
@@ -158,7 +155,8 @@ DJ MODES (via stations panel)
 QUEUE REMIX (via stations panel)
   One-time operations that modify the entire queue at once.
   Available in the Remix section of the stations panel.
-  Ctrl+Z undoes the last remix operation.
+  If a radio station is playing, remix auto-converts to queue first.
+  Ctrl+Z undoes the last remix (restores radio if it was auto-converted).
 
     Remix: Gemini   Insert similar tracks between each queue pair
     Remix: Twofer   Insert same-artist tracks between each queue pair
@@ -169,25 +167,23 @@ PLAYLISTS (Ctrl+P)
   Miller columns navigation (drill down into playlists)
 
 GENRES (Ctrl+G)
-  Tab             Focus tab bar (All / Library / Artist / Album / Mood / Style)
+  Up (at top)     Focus tab bar (All / Library / Artist / Album / Mood / Style)
   Left/Right      Switch tabs (when tab bar focused)
   Down/Enter      Return to content from tab bar
-  Up (at top)     Focus tab bar
   All tab         Merged list of all genre types with type suffix
 
 FOLDERS (Ctrl+O)
   ♪ icon shows currently playing track
 
 SETTINGS (F2)
-  F2              Account, libraries, playback, output, themes
-  Output section  Select playback target (local or remote Plex player)
-                  Remote players: Apple TV, Plexamp on phone, etc.
-                  Audio plays on remote device; textamp acts as controller
-  About section   Themes, artwork mode (Auto / Halfblocks / Braille)
-                  Braille: 2x4 dot-art rendering for Apple Terminal
+  F2              account, textamp, about sections
+  textamp section themes, artwork mode, playback output (local/remote)
+                  remote players: Apple TV, Plexamp on phone, etc.
+                  braille: 2x4 dot-art rendering for Apple Terminal
+  about section   version, credits, graphics info
 
 GENERAL
-  F5              Refresh current view (updates cache)
+  F5              Refresh current view / album tracks (updates cache)
   Ctrl+Q          Quit
 "#;
 

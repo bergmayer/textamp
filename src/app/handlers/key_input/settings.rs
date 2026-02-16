@@ -162,14 +162,15 @@ pub(super) fn handle_settings_keys(key: event::KeyEvent, state: &mut AppState, c
                                 0 // Sign In(0)
                             }
                         }
-                        SettingsSection::Output => {
-                            // Local(0), remote players(1..N), Refresh(N+1)
-                            1 + state.remote_players.len()
+                        SettingsSection::Textamp => {
+                            // Themes (0..T-1) + Artwork modes (T..T+A-1) + Local(T+A) + remotes(T+A+1..T+A+R) + Refresh(T+A+R+1)
+                            let theme_count = crate::ui::theme::ThemeName::all().len();
+                            let artwork_count = crate::app::state::ArtworkMode::all().len();
+                            theme_count + artwork_count + 1 + state.remote_players.len()
                         }
                         SettingsSection::About => {
-                            // Themes (0..N-1) + Artwork modes (N..N+2)
-                            crate::ui::theme::ThemeName::all().len()
-                                + crate::app::state::ArtworkMode::all().len() - 1
+                            // Display-only, no selectable items
+                            0
                         }
                     };
                     if state.settings_state.item_index < max_index {

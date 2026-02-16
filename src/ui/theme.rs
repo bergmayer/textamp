@@ -34,10 +34,10 @@ impl ThemeName {
     /// Display name for the theme.
     pub fn display_name(&self) -> &'static str {
         match self {
-            ThemeName::Dark => "Dark",
-            ThemeName::SolarizedDark => "Solarized Dark",
-            ThemeName::SolarizedLight => "Solarized Light",
-            ThemeName::Borland => "Borland",
+            ThemeName::Dark => "dark",
+            ThemeName::SolarizedDark => "solarized dark",
+            ThemeName::SolarizedLight => "solarized light",
+            ThemeName::Borland => "borland",
         }
     }
 

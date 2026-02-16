@@ -1,7 +1,7 @@
 //! Miller column dispatch handlers for all *ForMiller and *FromMiller actions.
 
 use crate::app::{Action, AppState, Event};
-use crate::app::state::{BrowseColumn, BrowseItem, PlaybackMode, View};
+use crate::app::state::{BrowseCategory, BrowseColumn, BrowseItem, PlaybackMode, View};
 use crate::api::PlexClient;
 use crate::audio::AudioPlayer;
 
@@ -61,10 +61,9 @@ fn collect_art_to_load(
 pub fn collect_viewport_art(state: &AppState) -> Vec<(String, String)> {
     if !state.album_art_view && !state.artist_art_view { return vec![]; }
 
-    let nav: &crate::miller::MillerState<BrowseColumn> = match state.browse_category {
-        crate::app::state::BrowseCategory::Library => &state.artist_nav,
-        crate::app::state::BrowseCategory::Genres => &state.genre_nav,
-        _ => return vec![],
+    let nav = match state.browse_nav() {
+        Some(n) => n,
+        None => return vec![],
     };
 
     let Some(col) = nav.focused() else { return vec![] };
@@ -111,6 +110,16 @@ pub async fn dispatch(
                     };
                     // Then add albums
                     let mut items = vec![artist_radio, all_tracks];
+
+                    // Add "Compilation Tracks" if this artist appears on any compilation albums.
+                    // We check compilation_track_artist_keys (all artist keys found on compilation tracks).
+                    if state.compilations_detected && state.compilation_track_artist_keys.contains(&artist_key) {
+                        items.push(BrowseItem::CompilationTracks {
+                            artist_key: artist_key.clone(),
+                            artist_name: state.selected_artist_name.clone(),
+                        });
+                    }
+
                     items.extend(BrowseItem::from_albums(&albums));
 
                     let title = state.selected_artist_name.clone();
@@ -246,11 +255,21 @@ pub async fn dispatch(
             if let Some(col) = state.artist_nav.columns.get(column_index) {
                 let tracks = helpers::collect_tracks_from_column(col);
                 if !tracks.is_empty() {
+                    if state.playback_mode == PlaybackMode::Radio {
+                        state.radio.clear();
+                    }
+                    // Move played tracks to history
+                    if let Some(qi) = state.queue_index {
+                        if qi < state.queue.len() {
+                            let played: Vec<crate::api::models::Track> = state.queue.drain(..=qi).collect();
+                            state.play_history.extend(played);
+                        }
+                    }
                     audio.track_cache.flush();
-                    state.queue.clear();
-                    state.queue.extend(tracks);
+                    state.queue.splice(0..0, tracks);
                     state.queue_index = Some(track_index);
                     state.playback_mode = PlaybackMode::Queue;
+                    state.list_state.queue_index = state.play_history.len();
                     state.view = View::NowPlaying;
                     helpers::play_current_track(event_tx, state, client, audio).await;
                 }
@@ -344,11 +363,20 @@ pub async fn dispatch(
             if let Some(col) = state.genre_nav.columns.get(column_index) {
                 let tracks = helpers::collect_tracks_from_column(col);
                 if !tracks.is_empty() {
+                    if state.playback_mode == PlaybackMode::Radio {
+                        state.radio.clear();
+                    }
+                    if let Some(qi) = state.queue_index {
+                        if qi < state.queue.len() {
+                            let played: Vec<crate::api::models::Track> = state.queue.drain(..=qi).collect();
+                            state.play_history.extend(played);
+                        }
+                    }
                     audio.track_cache.flush();
-                    state.queue.clear();
-                    state.queue.extend(tracks);
+                    state.queue.splice(0..0, tracks);
                     state.queue_index = Some(track_index);
                     state.playback_mode = PlaybackMode::Queue;
+                    state.list_state.queue_index = state.play_history.len();
                     state.view = View::NowPlaying;
                     helpers::play_current_track(event_tx, state, client, audio).await;
                 }
@@ -396,11 +424,20 @@ pub async fn dispatch(
             if let Some(col) = state.playlist_nav.columns.get(column_index) {
                 let tracks = helpers::collect_tracks_from_column(col);
                 if !tracks.is_empty() {
+                    if state.playback_mode == PlaybackMode::Radio {
+                        state.radio.clear();
+                    }
+                    if let Some(qi) = state.queue_index {
+                        if qi < state.queue.len() {
+                            let played: Vec<crate::api::models::Track> = state.queue.drain(..=qi).collect();
+                            state.play_history.extend(played);
+                        }
+                    }
                     audio.track_cache.flush();
-                    state.queue.clear();
-                    state.queue.extend(tracks);
+                    state.queue.splice(0..0, tracks);
                     state.queue_index = Some(track_index);
                     state.playback_mode = PlaybackMode::Queue;
+                    state.list_state.queue_index = state.play_history.len();
                     state.view = View::NowPlaying;
                     helpers::play_current_track(event_tx, state, client, audio).await;
                 }
@@ -411,13 +448,89 @@ pub async fn dispatch(
             // Build queue from all album groups flattened (in album order)
             let tracks: Vec<_> = state.playlist_album_groups.iter().flatten().cloned().collect();
             if !tracks.is_empty() && track_index < tracks.len() {
+                if state.playback_mode == PlaybackMode::Radio {
+                    state.radio.clear();
+                }
+                if let Some(qi) = state.queue_index {
+                    if qi < state.queue.len() {
+                        let played: Vec<crate::api::models::Track> = state.queue.drain(..=qi).collect();
+                        state.play_history.extend(played);
+                    }
+                }
                 audio.track_cache.flush();
-                state.queue.clear();
-                state.queue.extend(tracks);
+                state.queue.splice(0..0, tracks);
                 state.queue_index = Some(track_index);
                 state.playback_mode = PlaybackMode::Queue;
+                state.list_state.queue_index = state.play_history.len();
                 state.view = View::NowPlaying;
                 helpers::play_current_track(event_tx, state, client, audio).await;
+            }
+        }
+
+        Action::LoadCompilationsForMiller => {
+            // Push a new column with compilation albums
+            let items = BrowseItem::from_albums(&state.compilation_albums);
+            let col = BrowseColumn::new("Compilations", items);
+            state.artist_nav.push_column(col);
+
+            // Batch load album art for visible items
+            let art_batch = collect_viewport_art(state);
+            if !art_batch.is_empty() {
+                return Ok(vec![Action::LoadAlbumArt(art_batch)]);
+            }
+        }
+
+        Action::LoadCompilationTracksForMiller { artist_key, artist_name } => {
+            // Load tracks from all compilation albums where this artist is the track artist
+            let mut all_tracks = Vec::new();
+            for album in &state.compilation_albums {
+                match client.get_album_tracks(&album.rating_key).await {
+                    Ok(tracks) => {
+                        for track in tracks {
+                            if track.grandparent_rating_key.as_deref() == Some(&artist_key)
+                                || track.artist_name().to_lowercase() == artist_name.to_lowercase()
+                            {
+                                all_tracks.push(track);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!("Failed to load compilation tracks from {}: {}", album.rating_key, e);
+                    }
+                }
+            }
+
+            let items = BrowseItem::from_tracks(&all_tracks);
+            let title = format!("Compilations: {}", artist_name);
+            let col = BrowseColumn::new_with_tracks(title, items, all_tracks);
+            state.artist_nav.push_column(col);
+        }
+
+        Action::RefreshAlbumTracks { album_key } => {
+            // Refresh album tracks in the currently focused Miller column.
+            // Works for both artist_nav and genre_nav.
+            match client.get_album_tracks(&album_key).await {
+                Ok(tracks) => {
+                    let items = BrowseItem::from_tracks(&tracks);
+
+                    // Determine which nav owns the focused track column
+                    let nav = if state.browse_category == BrowseCategory::Genres {
+                        &mut state.genre_nav
+                    } else {
+                        &mut state.artist_nav
+                    };
+
+                    if let Some(col) = nav.columns.get_mut(nav.focused_column) {
+                        let old_idx = col.selected_index;
+                        col.items = items;
+                        col.tracks = tracks;
+                        col.selected_index = old_idx.min(col.items.len().saturating_sub(1));
+                    }
+                    state.set_status("Album tracks refreshed".to_string());
+                }
+                Err(e) => {
+                    state.set_error(format!("Failed to refresh album tracks: {}", e));
+                }
             }
         }
 

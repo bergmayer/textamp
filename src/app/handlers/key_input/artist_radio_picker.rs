@@ -27,7 +27,7 @@ fn handle_count_step(key: event::KeyEvent, picker: &mut crate::app::state::Artis
         }
         KeyCode::Enter => {
             let count = picker.count_input.parse::<usize>().unwrap_or(0);
-            if count >= 2 && count <= 12 {
+            if count >= 1 && count <= 12 {
                 vec![Action::ArtistRadioPickerSetCount]
             } else {
                 vec![]
@@ -70,12 +70,13 @@ fn handle_select_step(key: event::KeyEvent, picker: &mut crate::app::state::Arti
                     vec![]
                 }
                 SearchFocus::Results => {
-                    // Toggle artist selection
+                    // Toggle artist selection, then auto-launch if max reached
                     vec![Action::ArtistRadioPickerToggleArtist]
                 }
             }
         }
         KeyCode::Down => {
+            picker.scroll_pin = None;
             match picker.focus {
                 SearchFocus::Input => {
                     if !picker.filtered_artists.is_empty() {
@@ -94,6 +95,7 @@ fn handle_select_step(key: event::KeyEvent, picker: &mut crate::app::state::Arti
             }
         }
         KeyCode::Up => {
+            picker.scroll_pin = None;
             match picker.focus {
                 SearchFocus::Input => vec![],
                 SearchFocus::Results => {

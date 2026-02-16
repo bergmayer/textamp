@@ -18,12 +18,12 @@ pub(super) fn handle_similar_keys(key: event::KeyEvent, state: &mut AppState) ->
         }
         KeyCode::F(1) | KeyCode::Char('?') => vec![Action::SetView(View::Help)],
 
-        KeyCode::Up => vec![Action::ListUp],
-        KeyCode::Down => vec![Action::ListDown],
-        KeyCode::PageUp => vec![Action::ListPageUp],
-        KeyCode::PageDown => vec![Action::ListPageDown],
-        KeyCode::Home => vec![Action::ListTop],
-        KeyCode::End => vec![Action::ListBottom],
+        KeyCode::Up => { state.similar_scroll_pin = None; vec![Action::ListUp] }
+        KeyCode::Down => { state.similar_scroll_pin = None; vec![Action::ListDown] }
+        KeyCode::PageUp => { state.similar_scroll_pin = None; vec![Action::ListPageUp] }
+        KeyCode::PageDown => { state.similar_scroll_pin = None; vec![Action::ListPageDown] }
+        KeyCode::Home => { state.similar_scroll_pin = None; vec![Action::ListTop] }
+        KeyCode::End => { state.similar_scroll_pin = None; vec![Action::ListBottom] }
 
         KeyCode::Enter => {
             match state.similar_mode {
@@ -46,16 +46,10 @@ pub(super) fn handle_similar_keys(key: event::KeyEvent, state: &mut AppState) ->
                     }
                 }
                 SimilarMode::Tracks => {
-                    // Play selected track and queue remaining similar tracks
+                    // Play just the selected similar track
                     let idx = state.list_state.similar_index;
-                    if idx < state.similar_tracks.len() {
-                        state.queue = state.similar_tracks[idx..].to_vec();
-                        state.queue_index = Some(0);
-                        if let Some(track) = state.queue.first().cloned() {
-                            vec![Action::PlayTrack(track)]
-                        } else {
-                            vec![]
-                        }
+                    if let Some(track) = state.similar_tracks.get(idx).cloned() {
+                        vec![Action::PlayTrack(track)]
                     } else {
                         vec![]
                     }

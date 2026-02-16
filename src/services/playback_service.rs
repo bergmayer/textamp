@@ -13,6 +13,8 @@
 //! - iOS (SwiftUI)
 //! - Web (Svelte/React)
 
+use std::collections::VecDeque;
+
 use crate::api::models::Track;
 
 /// Maximum number of tracks in play history.
@@ -37,7 +39,7 @@ pub enum NavigationResult {
 pub struct QueueManager {
     tracks: Vec<Track>,
     current_index: Option<usize>,
-    history: Vec<Track>,
+    history: VecDeque<Track>,
 }
 
 impl QueueManager {
@@ -70,7 +72,7 @@ impl QueueManager {
     }
 
     /// Get the play history.
-    pub fn history(&self) -> &[Track] {
+    pub fn history(&self) -> &VecDeque<Track> {
         &self.history
     }
 
@@ -221,15 +223,15 @@ impl QueueManager {
     /// Add a track to play history.
     fn add_to_history(&mut self, track: Track) {
         // Don't add duplicates of the most recent track
-        if self.history.last().map(|t| &t.rating_key) == Some(&track.rating_key) {
+        if self.history.back().map(|t| &t.rating_key) == Some(&track.rating_key) {
             return;
         }
 
-        self.history.push(track);
+        self.history.push_back(track);
 
         // Trim to max size
         while self.history.len() > MAX_HISTORY_SIZE {
-            self.history.remove(0);
+            self.history.pop_front();
         }
     }
 
@@ -305,7 +307,7 @@ impl PlaybackService {
     pub fn next_track(
         queue: &[Track],
         queue_index: &mut Option<usize>,
-        history: &mut Vec<Track>,
+        history: &mut VecDeque<Track>,
     ) -> NavigationResult {
         if queue.is_empty() {
             return NavigationResult::Empty;
@@ -334,7 +336,7 @@ impl PlaybackService {
     pub fn previous_track(
         queue: &[Track],
         queue_index: &mut Option<usize>,
-        _history: &mut Vec<Track>,
+        _history: &mut VecDeque<Track>,
     ) -> NavigationResult {
         if queue.is_empty() {
             return NavigationResult::Empty;
@@ -364,15 +366,15 @@ impl PlaybackService {
     }
 
     /// Add a track to play history.
-    pub fn add_to_history(history: &mut Vec<Track>, track: Track) {
-        if history.last().map(|t| &t.rating_key) == Some(&track.rating_key) {
+    pub fn add_to_history(history: &mut VecDeque<Track>, track: Track) {
+        if history.back().map(|t| &t.rating_key) == Some(&track.rating_key) {
             return;
         }
 
-        history.push(track);
+        history.push_back(track);
 
         while history.len() > MAX_HISTORY_SIZE {
-            history.remove(0);
+            history.pop_front();
         }
     }
 
@@ -548,7 +550,7 @@ mod tests {
             make_track("3", "Track 3"),
         ];
         let mut queue_index = Some(0);
-        let mut history = Vec::new();
+        let mut history = VecDeque::new();
 
         match PlaybackService::next_track(&queue, &mut queue_index, &mut history) {
             NavigationResult::Track(t) => assert_eq!(t.title, "Track 2"),

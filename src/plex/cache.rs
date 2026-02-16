@@ -20,7 +20,7 @@
 
 use super::models::{Album, Artist, FolderItem, Genre, Playlist, Station, Track};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -136,6 +136,14 @@ pub struct CacheData {
     // Stations
     #[serde(default)]
     pub stations: Vec<Station>,
+
+    // Compilation detection results
+    #[serde(default)]
+    pub compilation_albums: Vec<Album>,
+    #[serde(default)]
+    pub compilation_artist_keys: HashSet<String>,
+    #[serde(default)]
+    pub compilation_track_artist_keys: HashSet<String>,
 
     // Per-category refresh timestamps (category display_name -> epoch secs)
     #[serde(default)]

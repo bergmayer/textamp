@@ -478,7 +478,9 @@ impl EventLoop {
             | LoadArtistAllTracksForMiller { .. } | LoadAllAlbumsForMiller | PlayTrackFromMiller { .. }
             | LoadGenreAlbumsForMiller { .. } | LoadGenreTracksForMiller { .. }
             | PlayGenreTrackFromMiller { .. } | LoadPlaylistTracksForMiller { .. }
-            | PlayPlaylistTrackFromMiller { .. } | PlayPlaylistAlbumGroupTrack { .. } => {
+            | PlayPlaylistTrackFromMiller { .. } | PlayPlaylistAlbumGroupTrack { .. }
+            | RefreshAlbumTracks { .. }
+            | LoadCompilationsForMiller | LoadCompilationTracksForMiller { .. } => {
                 handlers::dispatch_miller::dispatch(&self.event_tx, action, state, client, audio).await?
             }
 
@@ -497,7 +499,9 @@ impl EventLoop {
             | ToggleQueueShuffle
             | RemixGemini | RemixTwofer | RemixStretch
             | RemixShuffle | RemixUndoShuffle | UndoLastRemix
-            | MoveQueueTrackUp | MoveQueueTrackDown | RemixBatchReady(_) => {
+            | MoveQueueTrackUp | MoveQueueTrackDown
+            | MoveSelectedTracksUp | MoveSelectedTracksDown | RemoveSelectedFromQueue
+            | RemixBatchReady(_) => {
                 handlers::dispatch_queue::dispatch(&self.event_tx, action, state, client, audio).await?
             }
 
@@ -551,7 +555,7 @@ impl EventLoop {
             | SelectServer(_) | SelectLibrary(_) | SelectLibraryOnServer(_, _)
             | SaveSettings | ClearCache
             | ClearLibraryCache | ClearArtworkCache | ClearSubfolderCache
-            | StartSubfolderCrawl | StopSubfolderCrawl | ToggleKeepFolderCache
+            | StartSubfolderCrawl | StopSubfolderCrawl | ToggleKeepSubfolderCache
             | DiscoverPlayers | SetOutputTarget(_)
             | StartAdventure | SetAdventureStart(_) | SetAdventureEnd(_)
             | SetAdventureLength(_) | CancelAdventure | AdventureComplete(_)

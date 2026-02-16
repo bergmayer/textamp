@@ -734,6 +734,7 @@ async fn dispatch_dj_stretch(
 }
 
 /// DJ Freeze: sonically similar tracks to the current one.
+/// Tries increasing maxDistance (0.25 → 0.5 → 0.75) if initial results are empty.
 async fn dispatch_dj_freeze(
     client: &PlexClient,
     current_track: &crate::api::models::Track,
@@ -741,13 +742,30 @@ async fn dispatch_dj_freeze(
     used_artists: &std::collections::HashSet<String>,
     used_albums: &std::collections::HashSet<String>,
 ) -> Vec<crate::api::models::Track> {
-    match client.get_similar_tracks(&current_track.rating_key, SIMILAR_TRACKS_FETCH_LIMIT).await {
-        Ok(tracks) => pick_diverse(tracks, DJ_INSERT_COUNT, history, used_artists, used_albums),
-        Err(e) => {
-            tracing::warn!("DJ Freeze: similar tracks failed: {}", e);
-            vec![]
+    let distances = [0.25f32, 0.5, 0.75];
+    for &distance in &distances {
+        let result = client.get_similar_tracks_with_distance(
+            &current_track.rating_key, SIMILAR_TRACKS_FETCH_LIMIT, distance
+        ).await;
+        match result {
+            Ok(tracks) => {
+                let picked = pick_diverse(tracks, DJ_INSERT_COUNT, history, used_artists, used_albums);
+                if !picked.is_empty() {
+                    if distance > 0.25 {
+                        tracing::info!("DJ Freeze: found tracks at maxDistance={}", distance);
+                    }
+                    return picked;
+                }
+                tracing::debug!("DJ Freeze: no diverse tracks at maxDistance={}, widening", distance);
+            }
+            Err(e) => {
+                tracing::warn!("DJ Freeze: similar tracks failed at maxDistance={}: {}", distance, e);
+                return vec![];
+            }
         }
     }
+    tracing::warn!("DJ Freeze: no tracks found at any distance");
+    vec![]
 }
 
 /// DJ Contempo: tracks from the same era/decade.

@@ -5,13 +5,14 @@
 //! 2. Enter track count (5-100)
 //! 3. Find end track (same search + drill)
 
-use crate::app::state::{AdventureDrillLevel, AdventureLauncherState, AdventureStep, SearchFocus};
+use crate::app::state::{AdventureDrillLevel, AdventureLauncherState, AdventureStep, SearchFocus, SearchTab};
 use crate::app::AppState;
 use crate::services::NavigationService;
+use crate::ui::layout::centered_rect;
 use crate::ui::theme::theme;
 
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs};
 
 /// Render the adventure launcher popup as an overlay.
 pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
@@ -34,7 +35,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
 fn render_track_finder(frame: &mut Frame, launcher: &AdventureLauncherState, area: Rect) {
     let t = theme();
 
-    let popup_area = centered_rect(60, 70, area);
+    let popup_area = centered_rect(50, 70, area);
     frame.render_widget(Clear, popup_area);
 
     let title = match launcher.step {
@@ -65,39 +66,83 @@ fn render_track_finder(frame: &mut Frame, launcher: &AdventureLauncherState, are
     }
 }
 
-/// Render the search level: instructions + search input + results.
+/// Render the search level: tabs + search input + results.
 fn render_search_level(frame: &mut Frame, launcher: &AdventureLauncherState, area: Rect) {
     let t = theme();
 
     let chunks = ratatui::layout::Layout::default()
         .direction(ratatui::layout::Direction::Vertical)
         .constraints([
-            ratatui::layout::Constraint::Length(2), // instructions
+            ratatui::layout::Constraint::Length(2), // tabs + step hint
             ratatui::layout::Constraint::Length(3), // search input
             ratatui::layout::Constraint::Min(3),    // results
         ])
         .split(area);
 
-    // Instructions
+    // Tab bar + step hint
+    let tab_hint_chunks = ratatui::layout::Layout::default()
+        .direction(ratatui::layout::Direction::Vertical)
+        .constraints([
+            ratatui::layout::Constraint::Length(1), // tabs
+            ratatui::layout::Constraint::Length(1), // step hint
+        ])
+        .split(chunks[0]);
+
+    render_adventure_tabs(frame, launcher, tab_hint_chunks[0]);
+
     let step_hint = match launcher.step {
         AdventureStep::FindStartTrack => "Step 1/3: Search for a track to START the adventure.",
         AdventureStep::FindEndTrack => "Step 3/3: Search for a track to END the adventure.",
         _ => "",
     };
-    let instructions = Paragraph::new(vec![
-        Line::from(Span::styled(step_hint, Style::default().fg(t.colors.fg_muted))),
-        Line::from(Span::styled(
-            "Select an artist or album to browse, or pick a track directly.",
-            Style::default().fg(t.colors.fg_muted).italic(),
-        )),
-    ]);
-    frame.render_widget(instructions, chunks[0]);
+    let hint = Paragraph::new(Span::styled(step_hint, Style::default().fg(t.colors.fg_muted)));
+    frame.render_widget(hint, tab_hint_chunks[1]);
 
     // Search input
     render_search_input(frame, &launcher.query, launcher.focus == SearchFocus::Input, chunks[1]);
 
     // Results
     render_search_results(frame, launcher, chunks[2]);
+}
+
+/// Render the tab bar for adventure launcher search.
+fn render_adventure_tabs(frame: &mut Frame, launcher: &AdventureLauncherState, area: Rect) {
+    let t = theme();
+
+    let labels = SearchTab::all();
+    let selected_idx = match launcher.search_tab {
+        SearchTab::Global => 0,
+        SearchTab::Artists => 1,
+        SearchTab::Albums => 2,
+        SearchTab::Playlists => 3,
+        SearchTab::Tracks => 4,
+        SearchTab::Genres => 5,
+    };
+
+    let titles: Vec<Line> = labels.iter().enumerate().map(|(i, tab)| {
+        if i == selected_idx {
+            Line::from(Span::styled(
+                format!(" {} ", tab.name()),
+                Style::default()
+                    .fg(t.colors.fg_accent)
+                    .add_modifier(Modifier::BOLD),
+            ))
+        } else {
+            Line::from(Span::styled(
+                format!(" {} ", tab.name()),
+                Style::default().fg(t.colors.fg_muted),
+            ))
+        }
+    }).collect();
+
+    let tabs = Tabs::new(titles)
+        .select(selected_idx)
+        .highlight_style(Style::default())
+        .style(Style::default().bg(t.colors.bg_primary).fg(t.colors.fg_muted))
+        .divider(Span::styled(" │ ", Style::default().fg(t.colors.fg_muted)))
+        .padding("", "");
+
+    frame.render_widget(tabs, area);
 }
 
 /// Render the artist albums drill level.
@@ -137,7 +182,10 @@ fn render_artist_albums_level(
 
     let is_focused = launcher.focus == SearchFocus::Results;
     let visible_height = chunks[1].height as usize;
-    let scroll_offset = NavigationService::calc_scroll_offset(launcher.item_index, visible_height, albums.len());
+    let scroll_offset = match launcher.scroll_pin {
+        Some(pinned) => pinned,
+        None => NavigationService::calc_scroll_offset(launcher.item_index, visible_height, albums.len()),
+    };
 
     let items: Vec<ListItem> = albums.iter()
         .enumerate()
@@ -208,7 +256,10 @@ fn render_album_tracks_level(
 
     let is_focused = launcher.focus == SearchFocus::Results;
     let visible_height = chunks[1].height as usize;
-    let scroll_offset = NavigationService::calc_scroll_offset(launcher.item_index, visible_height, tracks.len());
+    let scroll_offset = match launcher.scroll_pin {
+        Some(pinned) => pinned,
+        None => NavigationService::calc_scroll_offset(launcher.item_index, visible_height, tracks.len()),
+    };
 
     let items: Vec<ListItem> = tracks.iter()
         .enumerate()
@@ -258,7 +309,7 @@ fn render_search_input(frame: &mut Frame, query: &str, is_focused: bool, area: R
     frame.render_widget(input, input_inner);
 }
 
-/// Render search results with section headers (Artists, Albums, Tracks).
+/// Render search results (tab-aware: Global shows all with headers, other tabs show per-category).
 fn render_search_results(frame: &mut Frame, launcher: &AdventureLauncherState, area: Rect) {
     let t = theme();
 
@@ -280,79 +331,156 @@ fn render_search_results(frame: &mut Frame, launcher: &AdventureLauncherState, a
         }
     };
 
-    let has_any = !results.artists.is_empty() || !results.albums.is_empty() || !results.tracks.is_empty();
-    if !has_any {
-        let msg = if launcher.loading { "Searching..." } else { "No matches found" };
-        let empty = Paragraph::new(msg)
+    let is_focused = launcher.focus == SearchFocus::Results;
+    let selected_idx = launcher.item_index;
+    let visible_height = area.height as usize;
+
+    match launcher.search_tab {
+        SearchTab::Global => {
+            // Global tab: show all results with section headers
+            let has_any = !results.artists.is_empty() || !results.albums.is_empty() || !results.tracks.is_empty();
+            if !has_any {
+                let msg = if launcher.loading { "Searching..." } else { "No matches found" };
+                let empty = Paragraph::new(msg)
+                    .style(Style::default().fg(t.colors.fg_muted))
+                    .alignment(Alignment::Center);
+                frame.render_widget(empty, area);
+                return;
+            }
+
+            let mut entries: Vec<(String, bool, Option<usize>)> = Vec::new();
+            let mut global_idx: usize = 0;
+
+            if !results.artists.is_empty() {
+                entries.push((format!("── Artists ({}) ──", results.artists.len()), true, None));
+                for a in &results.artists {
+                    entries.push((format!("  {}", a.title), false, Some(global_idx)));
+                    global_idx += 1;
+                }
+            }
+            if !results.albums.is_empty() {
+                entries.push((format!("── Albums ({}) ──", results.albums.len()), true, None));
+                for a in &results.albums {
+                    let artist = a.artist_name();
+                    let text = if let Some(year) = a.year {
+                        format!("  {} ({}) - {}", a.title, year, artist)
+                    } else {
+                        format!("  {} - {}", a.title, artist)
+                    };
+                    entries.push((text, false, Some(global_idx)));
+                    global_idx += 1;
+                }
+            }
+            if !results.tracks.is_empty() {
+                entries.push((format!("── Tracks ({}) ──", results.tracks.len()), true, None));
+                for tr in &results.tracks {
+                    entries.push((format!("  {} - {}", tr.title, tr.artist_name()), false, Some(global_idx)));
+                    global_idx += 1;
+                }
+            }
+
+            let display_selected = entries.iter()
+                .position(|(_, _, idx)| *idx == Some(selected_idx))
+                .unwrap_or(0);
+            let scroll_offset = match launcher.scroll_pin {
+                Some(pinned) => pinned,
+                None => NavigationService::calc_scroll_offset(display_selected, visible_height, entries.len()),
+            };
+
+            let items: Vec<ListItem> = entries.iter()
+                .skip(scroll_offset)
+                .take(visible_height)
+                .map(|(text, is_header, sel_idx)| {
+                    if *is_header {
+                        ListItem::new(text.as_str())
+                            .style(Style::default().fg(t.colors.fg_accent))
+                    } else {
+                        let is_selected = is_focused && *sel_idx == Some(selected_idx);
+                        let style = if is_selected {
+                            Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
+                        } else {
+                            Style::default().fg(t.colors.fg_primary)
+                        };
+                        ListItem::new(text.as_str()).style(style)
+                    }
+                })
+                .collect();
+
+            frame.render_widget(List::new(items), area);
+        }
+        SearchTab::Artists => {
+            render_simple_list(frame, &results.artists, |a| a.title.clone(), selected_idx, is_focused, visible_height, launcher.scroll_pin, area);
+        }
+        SearchTab::Albums => {
+            render_simple_list(frame, &results.albums, |a| {
+                let artist = a.artist_name();
+                if let Some(year) = a.year {
+                    format!("{} ({}) - {}", a.title, year, artist)
+                } else {
+                    format!("{} - {}", a.title, artist)
+                }
+            }, selected_idx, is_focused, visible_height, launcher.scroll_pin, area);
+        }
+        SearchTab::Tracks => {
+            render_simple_list(frame, &results.tracks, |tr| {
+                format!("{} - {}", tr.title, tr.artist_name())
+            }, selected_idx, is_focused, visible_height, launcher.scroll_pin, area);
+        }
+        SearchTab::Playlists => {
+            render_simple_list(frame, &results.playlists, |p| p.title.clone(), selected_idx, is_focused, visible_height, launcher.scroll_pin, area);
+        }
+        SearchTab::Genres => {
+            render_simple_list(frame, &results.genres, |g| g.title.clone(), selected_idx, is_focused, visible_height, launcher.scroll_pin, area);
+        }
+    }
+}
+
+/// Render a simple list of items (no section headers) for per-tab views.
+fn render_simple_list<T, F>(
+    frame: &mut Frame,
+    items: &[T],
+    format_fn: F,
+    selected_idx: usize,
+    is_focused: bool,
+    visible_height: usize,
+    scroll_pin: Option<usize>,
+    area: Rect,
+)
+where
+    F: Fn(&T) -> String,
+{
+    let t = theme();
+
+    if items.is_empty() {
+        let empty = Paragraph::new("No matches")
             .style(Style::default().fg(t.colors.fg_muted))
             .alignment(Alignment::Center);
         frame.render_widget(empty, area);
         return;
     }
 
-    let is_focused = launcher.focus == SearchFocus::Results;
-    let selected_idx = launcher.item_index;
+    let scroll_offset = match scroll_pin {
+        Some(pinned) => pinned,
+        None => NavigationService::calc_scroll_offset(selected_idx, visible_height, items.len()),
+    };
 
-    // Build flat list with section headers
-    let mut entries: Vec<(String, bool, Option<usize>)> = Vec::new();
-    let mut global_idx: usize = 0;
-
-    if !results.artists.is_empty() {
-        entries.push((format!("── Artists ({}) ──", results.artists.len()), true, None));
-        for a in &results.artists {
-            entries.push((format!("  {}", a.title), false, Some(global_idx)));
-            global_idx += 1;
-        }
-    }
-
-    if !results.albums.is_empty() {
-        entries.push((format!("── Albums ({}) ──", results.albums.len()), true, None));
-        for a in &results.albums {
-            let artist = a.artist_name();
-            let text = if let Some(year) = a.year {
-                format!("  {} ({}) - {}", a.title, year, artist)
-            } else {
-                format!("  {} - {}", a.title, artist)
-            };
-            entries.push((text, false, Some(global_idx)));
-            global_idx += 1;
-        }
-    }
-
-    if !results.tracks.is_empty() {
-        entries.push((format!("── Tracks ({}) ──", results.tracks.len()), true, None));
-        for tr in &results.tracks {
-            entries.push((format!("  {} - {}", tr.title, tr.artist_name()), false, Some(global_idx)));
-            global_idx += 1;
-        }
-    }
-
-    let visible_height = area.height as usize;
-    let display_selected = entries.iter()
-        .position(|(_, _, idx)| *idx == Some(selected_idx))
-        .unwrap_or(0);
-    let scroll_offset = NavigationService::calc_scroll_offset(display_selected, visible_height, entries.len());
-
-    let items: Vec<ListItem> = entries.iter()
+    let list_items: Vec<ListItem> = items.iter()
+        .enumerate()
         .skip(scroll_offset)
         .take(visible_height)
-        .map(|(text, is_header, sel_idx)| {
-            if *is_header {
-                ListItem::new(text.as_str())
-                    .style(Style::default().fg(t.colors.fg_accent))
+        .map(|(i, item)| {
+            let is_selected = is_focused && i == selected_idx;
+            let text = format!("  {}", format_fn(item));
+            let style = if is_selected {
+                Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
             } else {
-                let is_selected = is_focused && *sel_idx == Some(selected_idx);
-                let style = if is_selected {
-                    Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
-                } else {
-                    Style::default().fg(t.colors.fg_primary)
-                };
-                ListItem::new(text.as_str()).style(style)
-            }
+                Style::default().fg(t.colors.fg_primary)
+            };
+            ListItem::new(text).style(style)
         })
         .collect();
 
-    frame.render_widget(List::new(items), area);
+    frame.render_widget(List::new(list_items), area);
 }
 
 /// Render step 2: track count input.
@@ -421,22 +549,3 @@ fn format_duration(ms: u64) -> String {
     format!("{}:{:02}", m, s)
 }
 
-fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
-    let popup_layout = ratatui::layout::Layout::default()
-        .direction(ratatui::layout::Direction::Vertical)
-        .constraints([
-            ratatui::layout::Constraint::Percentage((100 - percent_y) / 2),
-            ratatui::layout::Constraint::Percentage(percent_y),
-            ratatui::layout::Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(area);
-
-    ratatui::layout::Layout::default()
-        .direction(ratatui::layout::Direction::Horizontal)
-        .constraints([
-            ratatui::layout::Constraint::Percentage((100 - percent_x) / 2),
-            ratatui::layout::Constraint::Percentage(percent_x),
-            ratatui::layout::Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(popup_layout[1])[1]
-}

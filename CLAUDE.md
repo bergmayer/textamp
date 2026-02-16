@@ -12,6 +12,8 @@ When making any functionality changes to the app, always update all relevant:
 - Layout diagrams in code comments
 - README.md if applicable
 
+Clicking an item to highlight it should never recenter/scroll the view. Use the `scroll_pin` pattern to preserve viewport position on click — set pin on click, clear on keyboard navigation.
+
 ## Architecture
 
 ### Layer Separation (Critical for Portability)
@@ -157,7 +159,7 @@ The app checks XDG environment variables first, then falls back to platform defa
 ### Cache Settings
 
 - **Library cache**: ~19MB per library
-  - Per-category timestamps: each of the 13 RefreshCategory variants tracks its own age
+  - Per-category timestamps: each of the 11 RefreshCategory variants tracks its own age
   - Tier 1 (72h): Active category refreshed on view navigation if >72h old
   - Tier 2 (32d): Other categories refreshed on view navigation if >32 days old
   - Manual refresh: F5 refreshes current view

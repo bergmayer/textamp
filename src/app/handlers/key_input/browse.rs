@@ -72,8 +72,8 @@ pub(super) fn handle_browse_keys(key: event::KeyEvent, state: &mut AppState) -> 
         return vec![Action::ActivateListFilter];
     }
 
-    // Tab/Shift+Tab navigates linearly through all sections and sub-tabs:
-    // Library → Playlists → Genres(All) → Genres(Library) → ... → Genres(Style) → Folders → Now Playing
+    // Tab/Shift+Tab navigates through main views:
+    // Library → Playlists → Queue → Now Playing
     match key.code {
         KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
             return tab_navigate_prev(state);
@@ -406,6 +406,12 @@ pub(super) fn handle_artist_browse_keys(key: event::KeyEvent, state: &mut AppSta
                 BrowseItem::AllTracks { artist_key, artist_name, .. } => {
                     state.selected_album_title = format!("All tracks by {}", artist_name);
                     vec![Action::LoadArtistAllTracksForMiller { artist_key }]
+                }
+                BrowseItem::Compilations => {
+                    vec![Action::LoadCompilationsForMiller]
+                }
+                BrowseItem::CompilationTracks { artist_key, artist_name } => {
+                    vec![Action::LoadCompilationTracksForMiller { artist_key, artist_name }]
                 }
                 BrowseItem::Track { .. } if key.code == KeyCode::Enter => {
                     if let Some(col) = state.artist_nav.focused() {
@@ -910,69 +916,39 @@ mod tests {
     }
 }
 
-/// Navigate forward through all sections and sub-tabs.
-/// Order: Library → Playlists → Genres(All) → ... → Genres(Style) → Folders → Now Playing
+/// Navigate forward through main views.
+/// Order: Library → Playlists → Queue → Now Playing → Library
+/// Genre/Folder categories are accessed via Ctrl+G / Ctrl+O, not Tab.
 fn tab_navigate_next(state: &mut AppState) -> Vec<Action> {
-    use crate::app::state::{GenreTab, View};
+    use crate::app::state::View;
 
     match state.browse_category {
         BrowseCategory::Library => {
             // Library → Playlists
-            return vec![Action::SetCategory(BrowseCategory::Playlists)];
+            vec![Action::SetCategory(BrowseCategory::Playlists)]
         }
-        BrowseCategory::Playlists => {
-            // Playlists → Genres (All)
-            return vec![Action::SetGenreTab(GenreTab::All), Action::SetCategory(BrowseCategory::Genres)];
-        }
-        BrowseCategory::Genres => {
-            match state.genre_tab {
-                GenreTab::Style => {
-                    // Last genre tab → Folders
-                    return vec![Action::SetCategory(BrowseCategory::Folders)];
-                }
-                _ => {
-                    // Advance to next genre tab
-                    return vec![Action::SetGenreTab(state.genre_tab.next())];
-                }
-            }
-        }
-        BrowseCategory::Folders => {
-            // Folders → Now Playing
-            state.view = View::NowPlaying;
-            return vec![];
+        BrowseCategory::Playlists | BrowseCategory::Genres | BrowseCategory::Folders => {
+            // Any other browse category → Queue
+            state.view = View::Queue;
+            vec![]
         }
     }
 }
 
-/// Navigate backward through all sections and sub-tabs.
+/// Navigate backward through main views.
+/// Order: Library ← Playlists ← Queue ← Now Playing ← Library
 fn tab_navigate_prev(state: &mut AppState) -> Vec<Action> {
-    use crate::app::state::{GenreTab, View};
+    use crate::app::state::View;
 
     match state.browse_category {
         BrowseCategory::Library => {
             // Library (first) → wrap to Now Playing
             state.view = View::NowPlaying;
-            return vec![];
+            vec![]
         }
-        BrowseCategory::Playlists => {
-            // Playlists → Library
-            return vec![Action::SetCategory(BrowseCategory::Library)];
-        }
-        BrowseCategory::Genres => {
-            match state.genre_tab {
-                GenreTab::All => {
-                    // First genre tab → Playlists
-                    return vec![Action::SetCategory(BrowseCategory::Playlists)];
-                }
-                _ => {
-                    // Go to previous genre tab
-                    return vec![Action::SetGenreTab(state.genre_tab.prev())];
-                }
-            }
-        }
-        BrowseCategory::Folders => {
-            // Folders → Genres (Style, last tab)
-            return vec![Action::SetGenreTab(GenreTab::Style), Action::SetCategory(BrowseCategory::Genres)];
+        BrowseCategory::Playlists | BrowseCategory::Genres | BrowseCategory::Folders => {
+            // Any other browse category → Library
+            vec![Action::SetCategory(BrowseCategory::Library)]
         }
     }
 }

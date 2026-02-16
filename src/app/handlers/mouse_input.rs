@@ -35,6 +35,22 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
         return vec![];
     }
 
+    // Artist radio picker popup intercepts mouse clicks when active
+    if state.artist_radio_picker.is_some() {
+        if let crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) = event.kind {
+            return handle_artist_radio_picker_click(click_row, click_col, state);
+        }
+        return vec![];
+    }
+
+    // Adventure launcher popup intercepts mouse clicks when active
+    if state.adventure_launcher.is_some() {
+        if let crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) = event.kind {
+            return handle_adventure_launcher_click(click_row, click_col, state);
+        }
+        return vec![];
+    }
+
     match event.kind {
         // Left click
         MouseEventKind::Down(MouseButton::Left) => {
@@ -57,7 +73,7 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
                     return handle_browse_click(click_row, click_col, state);
                 }
                 View::Queue | View::NowPlaying => {
-                    return handle_now_playing_down(click_row, click_col, state);
+                    return handle_now_playing_down(click_row, click_col, event.modifiers, state);
                 }
                 View::Search => {
                     return handle_search_click(click_row, click_col, state);
@@ -68,7 +84,9 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
                 View::Help => {
                     return handle_help_click(click_row, state);
                 }
-                _ => {}
+                View::Similar => {
+                    return handle_similar_click(click_row, state);
+                }
             }
         }
 
@@ -185,17 +203,108 @@ fn handle_library_picker_mouse(event: crossterm::event::MouseEvent, state: &mut 
     vec![]
 }
 
+/// Shared: handle a click in the search tab bar area.
+/// Returns actions if a tab was clicked, or empty vec otherwise.
+fn handle_search_tab_click(rel_col: u16, state: &mut AppState) -> Vec<Action> {
+    let tab_labels = [" all ", " artists ", " albums ", " playlists ", " tracks ", " genres "];
+    if let Some(tab_idx) = tab_hit_test(rel_col, &tab_labels) {
+        let new_tab = match tab_idx {
+            0 => SearchTab::Global,
+            1 => SearchTab::Artists,
+            2 => SearchTab::Albums,
+            3 => SearchTab::Playlists,
+            4 => SearchTab::Tracks,
+            _ => SearchTab::Genres,
+        };
+        state.search_tab = new_tab;
+        state.search_focus = crate::app::state::SearchFocus::Input;
+        state.list_state.search_item_index = 0;
+        state.search_scroll_pin = None;
+        if !state.search_query.is_empty() {
+            return vec![Action::ExecuteLocalSearch];
+        }
+    }
+    vec![]
+}
+
+/// Shared: handle a click in the search results area.
+fn handle_search_result_click(visual_row: usize, results_height: usize, state: &mut AppState) {
+    use crate::services::NavigationService;
+
+    if visual_row >= results_height {
+        return;
+    }
+
+    let Some(ref results) = state.search_results else { return };
+
+    match state.search_tab {
+        SearchTab::Global => {
+            let section_counts = [
+                results.artists.len(),
+                results.albums.len(),
+                results.playlists.len(),
+                results.genres.len(),
+                results.tracks.len(),
+            ];
+            let mut entries: Vec<Option<usize>> = Vec::new();
+            let mut global_idx: usize = 0;
+            for &count in &section_counts {
+                if count > 0 {
+                    entries.push(None); // section header
+                    for _ in 0..count {
+                        entries.push(Some(global_idx));
+                        global_idx += 1;
+                    }
+                }
+            }
+            let display_selected = entries.iter()
+                .position(|e| *e == Some(state.list_state.search_item_index))
+                .unwrap_or(0);
+            let scroll_offset = match state.search_scroll_pin {
+                Some(pinned) => pinned,
+                None => NavigationService::calc_scroll_offset(
+                    display_selected, results_height, entries.len(),
+                ),
+            };
+            let abs_row = scroll_offset + visual_row;
+            if let Some(Some(idx)) = entries.get(abs_row) {
+                state.search_focus = crate::app::state::SearchFocus::Results;
+                state.list_state.search_item_index = *idx;
+                state.search_scroll_pin = Some(scroll_offset);
+            }
+        }
+        _ => {
+            let total = match state.search_tab {
+                SearchTab::Artists => results.artists.len(),
+                SearchTab::Albums => results.albums.len(),
+                SearchTab::Playlists => results.playlists.len(),
+                SearchTab::Tracks => results.tracks.len(),
+                SearchTab::Genres => results.genres.len(),
+                _ => 0,
+            };
+            let scroll_offset = match state.search_scroll_pin {
+                Some(pinned) => pinned,
+                None => NavigationService::calc_scroll_offset(
+                    state.list_state.search_item_index, results_height, total,
+                ),
+            };
+            let actual_idx = scroll_offset + visual_row;
+            if actual_idx < total {
+                state.search_focus = crate::app::state::SearchFocus::Results;
+                state.list_state.search_item_index = actual_idx;
+                state.search_scroll_pin = Some(scroll_offset);
+            }
+        }
+    }
+}
+
 /// Handle mouse click when the search popup is active.
 fn handle_search_popup_click(click_row: u16, click_col: u16, state: &mut AppState) -> Vec<Action> {
     use ratatui::layout::Rect;
 
-    // Replicate the double-centering from render_search_popup + filter::render.
-    // Step 1: render_search_popup does centered_rect(80, 70, frame.area())
+    // Match the single centered_rect(50, 70, frame.area()) used by filter::render
     let frame_area = Rect::new(0, 0, state.terminal_width, state.terminal_height);
-    let outer = centered_rect(80, 70, frame_area);
-
-    // Step 2: filter::render does centered_rect(60, 70, outer)
-    let popup = centered_rect(60, 70, outer);
+    let popup = centered_rect(50, 70, frame_area);
 
     // Check if click is outside popup — close it
     if click_row < popup.y || click_row >= popup.y + popup.height
@@ -220,108 +329,24 @@ fn handle_search_popup_click(click_row: u16, click_col: u16, state: &mut AppStat
     // Layout inside popup: tabs (2 rows) | search input (3 rows) | results
     // Tabs are at rel_row 0-1
     if rel_row < 2 {
-        let tab_labels = [" all ", " artists ", " albums ", " playlists ", " tracks ", " genres "];
-        if let Some(tab_idx) = tab_hit_test(rel_col, &tab_labels) {
-            let new_tab = match tab_idx {
-                0 => SearchTab::Global,
-                1 => SearchTab::Artists,
-                2 => SearchTab::Albums,
-                3 => SearchTab::Playlists,
-                4 => SearchTab::Tracks,
-                _ => SearchTab::Genres,
-            };
-            state.search_tab = new_tab;
-            state.search_focus = crate::app::state::SearchFocus::Input;
-            state.list_state.search_item_index = 0;
-            state.search_scroll_pin = None;
-            if !state.search_query.is_empty() {
-                return vec![Action::ExecuteLocalSearch];
-            }
+        let actions = handle_search_tab_click(rel_col, state);
+        if !actions.is_empty() {
+            return actions;
         }
         return vec![];
     }
 
     // Search input area: rel_row 2-4
     if rel_row >= 2 && rel_row < 5 {
-        // Click on search input — focus it
         state.search_focus = crate::app::state::SearchFocus::Input;
         return vec![];
     }
 
     // Results area: rel_row 5+ (tabs=2 + search_input=3)
     if rel_row >= 5 {
-        use crate::services::NavigationService;
-
         let visual_row = (rel_row - 5) as usize;
-        // Results visible height: popup inner height minus tabs and search
         let results_height = popup.height.saturating_sub(2 + 2 + 3) as usize;
-
-        if visual_row >= results_height {
-            return vec![];
-        }
-
-        if let Some(ref results) = state.search_results {
-            match state.search_tab {
-                SearchTab::Global => {
-                    // All tab: map visual row accounting for section headers and scroll
-                    let section_counts = [
-                        results.artists.len(),
-                        results.albums.len(),
-                        results.playlists.len(),
-                        results.genres.len(),
-                        results.tracks.len(),
-                    ];
-                    let mut entries: Vec<Option<usize>> = Vec::new();
-                    let mut global_idx: usize = 0;
-                    for &count in &section_counts {
-                        if count > 0 {
-                            entries.push(None); // section header
-                            for _ in 0..count {
-                                entries.push(Some(global_idx));
-                                global_idx += 1;
-                            }
-                        }
-                    }
-                    let display_selected = entries.iter()
-                        .position(|e| *e == Some(state.list_state.search_item_index))
-                        .unwrap_or(0);
-                    let scroll_offset = match state.search_scroll_pin {
-                        Some(pinned) => pinned,
-                        None => NavigationService::calc_scroll_offset(
-                            display_selected, results_height, entries.len(),
-                        ),
-                    };
-                    let abs_row = scroll_offset + visual_row;
-                    if let Some(Some(idx)) = entries.get(abs_row) {
-                        state.search_focus = crate::app::state::SearchFocus::Results;
-                        state.list_state.search_item_index = *idx;
-                        state.search_scroll_pin = Some(scroll_offset);
-                    }
-                }
-                _ => {
-                    let total = match state.search_tab {
-                        SearchTab::Artists => results.artists.len(),
-                        SearchTab::Albums => results.albums.len(),
-                        SearchTab::Playlists => results.playlists.len(),
-                        SearchTab::Tracks => results.tracks.len(),
-                        SearchTab::Genres => results.genres.len(),
-                        _ => 0,
-                    };
-                    let scroll_offset = match state.search_scroll_pin {
-                        Some(pinned) => pinned,
-                        None => NavigationService::calc_scroll_offset(
-                            state.list_state.search_item_index, results_height, total,
-                        ),
-                    };
-                    let actual_idx = scroll_offset + visual_row;
-                    if actual_idx < total {
-                        state.search_focus = crate::app::state::SearchFocus::Results;
-                        state.list_state.search_item_index = actual_idx;
-                        state.search_scroll_pin = Some(scroll_offset);
-                    }
-                }
-            }
-        }
+        handle_search_result_click(visual_row, results_height, state);
     }
 
     vec![]
@@ -994,6 +1019,12 @@ fn browse_drill_down_action(item: BrowseItem, col_idx: usize, item_idx: usize, s
                 BrowseItem::AllArtists => {
                     vec![Action::LoadAllAlbumsForMiller]
                 }
+                BrowseItem::Compilations => {
+                    vec![Action::LoadCompilationsForMiller]
+                }
+                BrowseItem::CompilationTracks { artist_key, artist_name } => {
+                    vec![Action::LoadCompilationTracksForMiller { artist_key, artist_name }]
+                }
                 BrowseItem::Track { .. } => {
                     vec![Action::PlayTrackFromMiller { column_index: col_idx, track_index: item_idx }]
                 }
@@ -1078,7 +1109,9 @@ fn handle_folder_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
     use crate::services::FolderItemType;
 
     if let Some((col_idx, item_idx, scroll_offset)) = folder_hit_test(click_col, click_row, state) {
-        let folder_state = state.folder_state.as_mut().unwrap();
+        let Some(folder_state) = state.folder_state.as_mut() else {
+            return vec![];
+        };
 
         // If clicking a different column, change focus
         if col_idx != folder_state.focused_column {
@@ -1161,7 +1194,7 @@ fn handle_folder_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
 }
 
 /// Handle mouse down in Queue or NowPlaying view.
-fn handle_now_playing_down(click_row: u16, click_col: u16, state: &mut AppState) -> Vec<Action> {
+fn handle_now_playing_down(click_row: u16, click_col: u16, modifiers: crossterm::event::KeyModifiers, state: &mut AppState) -> Vec<Action> {
     use crate::app::state::NowPlayingFocus;
 
     match state.view {
@@ -1172,11 +1205,17 @@ fn handle_now_playing_down(click_row: u16, click_col: u16, state: &mut AppState)
             let art_height = (content_height * 40 / 100).max(8);
             let art_width = (art_height * 2).min(state.terminal_width * 40 / 100).max(25);
 
-            // Click in station panel area (left column, below artwork)
-            if click_col < art_width && click_row >= art_height {
+            // Click on clear button row (left column, between artwork and stations)
+            if click_col < art_width && click_row == art_height {
+                return vec![Action::ClearQueue];
+            }
+
+            // Click in station panel area (left column, below artwork + clear button)
+            let station_top = art_height + 1;
+            if click_col < art_width && click_row >= station_top {
                 state.now_playing_focus = NowPlayingFocus::Stations;
                 // Map click to station item (accounting for border)
-                let inner_top = art_height + 1;
+                let inner_top = station_top + 1;
                 let inner_bottom = content_height.saturating_sub(1);
                 if click_row >= inner_top && click_row < inner_bottom {
                     let click_offset = (click_row - inner_top) as usize;
@@ -1227,6 +1266,13 @@ fn handle_now_playing_down(click_row: u16, click_col: u16, state: &mut AppState)
                                 return vec![Action::PlayStation(station.key.clone())];
                             }
                         } else {
+                            // Pin scroll offset before changing selection to prevent viewport jump
+                            if let Some(col) = state.station_nav.focused() {
+                                let current_offset = helpers::calc_scroll_offset(
+                                    col.selected_index, visible_height, col.stations.len(),
+                                );
+                                state.station_scroll_pin = Some(current_offset);
+                            }
                             if let Some(col) = state.station_nav.focused_mut() {
                                 col.selected_index = idx;
                             }
@@ -1265,10 +1311,31 @@ fn handle_now_playing_down(click_row: u16, click_col: u16, state: &mut AppState)
                 // display_selected = history_len + queue_index
                 let selected = state.list_state.queue_index;
                 let display_selected = history_len + selected;
-                let scroll_offset = helpers::calc_scroll_offset(display_selected, visible_item_count, total_len);
+                let scroll_offset = match state.queue_scroll_pin {
+                    Some(pinned) => pinned,
+                    None => helpers::calc_scroll_offset(display_selected, visible_item_count, total_len),
+                };
                 let actual_idx = item_row + scroll_offset;
 
                 if actual_idx < total_len {
+                    // Shift+Click: toggle multi-select (queue items only)
+                    if modifiers.contains(crossterm::event::KeyModifiers::SHIFT) && actual_idx >= history_len {
+                        let queue_idx = actual_idx - history_len;
+                        if state.queue_selected.contains(&queue_idx) {
+                            state.queue_selected.remove(&queue_idx);
+                        } else {
+                            state.queue_selected.insert(queue_idx);
+                        }
+                        state.queue_scroll_pin = Some(scroll_offset);
+                        state.list_state.queue_index = actual_idx;
+                        return vec![];
+                    }
+
+                    // Normal click: clear multi-select
+                    if !state.queue_selected.is_empty() {
+                        state.queue_selected.clear();
+                    }
+
                     let current = state.list_state.queue_index;
                     if current == actual_idx {
                         // Double-click: if this is the currently playing track, switch to NowPlaying view
@@ -1287,6 +1354,7 @@ fn handle_now_playing_down(click_row: u16, click_col: u16, state: &mut AppState)
                             };
                         }
                     }
+                    state.queue_scroll_pin = Some(scroll_offset);
                     state.list_state.queue_index = actual_idx;
                 }
             }
@@ -1391,11 +1459,10 @@ fn handle_visualizer_drag(click_col: u16, state: &AppState) -> Vec<Action> {
 /// Handle click in Search view.
 fn handle_search_click(click_row: u16, click_col: u16, state: &mut AppState) -> Vec<Action> {
     use ratatui::layout::Rect;
-    use crate::services::NavigationService;
 
     // Use the same layout calculation as the renderer for accurate bounds
     let content_area = Rect::new(0, 0, state.terminal_width, state.terminal_height.saturating_sub(3));
-    let popup_area = centered_rect(60, 70, content_area);
+    let popup_area = centered_rect(50, 70, content_area);
 
     // Check if click is within popup
     if click_row < popup_area.y || click_row >= popup_area.y + popup_area.height {
@@ -1418,106 +1485,19 @@ fn handle_search_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
 
     // Tabs area (rel_rows 1-2)
     if rel_row >= 1 && rel_row < 3 {
-        // rel_col is relative to popup edge (includes border), inner content starts at 1
         let inner_col = rel_col.saturating_sub(1);
-        let tab_labels = [" all ", " artists ", " albums ", " playlists ", " tracks ", " genres "];
-        if let Some(tab_idx) = tab_hit_test(inner_col, &tab_labels) {
-            let new_tab = match tab_idx {
-                0 => SearchTab::Global,
-                1 => SearchTab::Artists,
-                2 => SearchTab::Albums,
-                3 => SearchTab::Playlists,
-                4 => SearchTab::Tracks,
-                _ => SearchTab::Genres,
-            };
-            state.search_tab = new_tab;
-            state.search_focus = crate::app::state::SearchFocus::Input;
-            state.list_state.search_item_index = 0;
-            state.search_scroll_pin = None;
-            if !state.search_query.is_empty() {
-                return vec![Action::ExecuteLocalSearch];
-            }
+        let actions = handle_search_tab_click(inner_col, state);
+        if !actions.is_empty() {
+            return actions;
         }
         return vec![];
     }
 
     // Results area starts at rel_row 6 (border=1 + tabs=2 + search=3)
-    let results_start_row = 6u16;
-    // Visible results height: popup inner height minus tabs and search
-    let results_height = popup_area.height.saturating_sub(2 + 2 + 3) as usize;
-
-    if rel_row >= results_start_row {
-        let visual_row = (rel_row - results_start_row) as usize;
-        if visual_row >= results_height {
-            return vec![];
-        }
-
-        if let Some(ref results) = state.search_results {
-            match state.search_tab {
-                SearchTab::Global => {
-                    // All tab: build entry map accounting for section headers
-                    // Each non-empty section adds 1 header row before its items
-                    let section_counts = [
-                        results.artists.len(),
-                        results.albums.len(),
-                        results.playlists.len(),
-                        results.genres.len(),
-                        results.tracks.len(),
-                    ];
-                    // Build flat list: (is_header, selectable_global_idx)
-                    let mut entries: Vec<Option<usize>> = Vec::new();
-                    let mut global_idx: usize = 0;
-                    for &count in &section_counts {
-                        if count > 0 {
-                            entries.push(None); // header
-                            for _ in 0..count {
-                                entries.push(Some(global_idx));
-                                global_idx += 1;
-                            }
-                        }
-                    }
-
-                    // Find display position of current selection for scroll offset
-                    let display_selected = entries.iter()
-                        .position(|e| *e == Some(state.list_state.search_item_index))
-                        .unwrap_or(0);
-                    let scroll_offset = match state.search_scroll_pin {
-                        Some(pinned) => pinned,
-                        None => NavigationService::calc_scroll_offset(
-                            display_selected, results_height, entries.len(),
-                        ),
-                    };
-                    let abs_row = scroll_offset + visual_row;
-                    if let Some(Some(idx)) = entries.get(abs_row) {
-                        state.search_focus = crate::app::state::SearchFocus::Results;
-                        state.list_state.search_item_index = *idx;
-                        state.search_scroll_pin = Some(scroll_offset);
-                    }
-                }
-                _ => {
-                    let total = match state.search_tab {
-                        SearchTab::Artists => results.artists.len(),
-                        SearchTab::Albums => results.albums.len(),
-                        SearchTab::Playlists => results.playlists.len(),
-                        SearchTab::Tracks => results.tracks.len(),
-                        SearchTab::Genres => results.genres.len(),
-                        _ => 0,
-                    };
-                    let scroll_offset = match state.search_scroll_pin {
-                        Some(pinned) => pinned,
-                        None => NavigationService::calc_scroll_offset(
-                            state.list_state.search_item_index, results_height, total,
-                        ),
-                    };
-                    let actual_idx = scroll_offset + visual_row;
-                    if actual_idx < total {
-                        state.search_focus = crate::app::state::SearchFocus::Results;
-                        state.list_state.search_item_index = actual_idx;
-                        state.search_scroll_pin = Some(scroll_offset);
-                    }
-                }
-            }
-        }
+    if rel_row >= 6 {
+        let visual_row = (rel_row - 6) as usize;
+        let results_height = popup_area.height.saturating_sub(2 + 2 + 3) as usize;
+        handle_search_result_click(visual_row, results_height, state);
     }
 
     vec![]
@@ -1695,43 +1675,56 @@ fn settings_visual_row_to_item(visual_row: usize, state: &AppState) -> Option<us
                 }
             }
         }
-        SettingsSection::Output => {
-            // Row 0: "Playback output:" header
-            // Row 1: Local → item 0
-            // Row 2..N+1: Remote players → items 1..N
-            // Row N+2: blank
-            // Row N+3: Refresh Players → item N+1
+        SettingsSection::Textamp => {
+            // Row 0: "theme:" header
+            // Row 1..T: theme items (items 0..T-1)
+            // Row T+1: blank
+            // Row T+2: "enter: apply theme" help
+            // Row T+3: blank
+            // Row T+4: "graphics:" header
+            // Row T+5: protocol line
+            // Row T+6: "artwork:" header
+            // Row T+7..T+7+A-1: artwork mode items (items T..T+A-1)
+            // Row T+7+A: blank
+            // Row T+7+A+1: "playback output:" header
+            // Row T+7+A+2: local (item T+A)
+            // Row T+7+A+3..T+7+A+2+R: remote players (items T+A+1..T+A+R)
+            // Row T+7+A+3+R: blank
+            // Row T+7+A+4+R: refresh players (item T+A+R+1)
+            let theme_count = crate::ui::theme::ThemeName::all().len();
+            let artwork_count = crate::app::state::ArtworkMode::all().len();
+            let output_offset = theme_count + artwork_count;
             let player_count = state.remote_players.len();
-            if visual_row == 1 {
-                Some(0) // Local
-            } else if visual_row >= 2 && visual_row < 2 + player_count {
-                Some(visual_row - 1) // Remote player (1-based)
-            } else if visual_row == 2 + player_count + 1 {
-                Some(1 + player_count) // Refresh Players
-            } else {
-                None
+
+            // Theme items: rows 1..theme_count
+            if visual_row >= 1 && visual_row < 1 + theme_count {
+                Some(visual_row - 1)
+            }
+            // Artwork items: starts at row theme_count + 7 (after blank + help + blank + graphics: + protocol + artwork:)
+            else {
+                let artwork_start = 1 + theme_count + 6; // themes + blank + help + blank + graphics: + protocol + artwork:
+                if visual_row >= artwork_start && visual_row < artwork_start + artwork_count {
+                    Some(theme_count + (visual_row - artwork_start))
+                }
+                // Output items: after artwork + blank + "playback output:" header
+                else {
+                    let local_row = artwork_start + artwork_count + 2; // blank + header
+                    if visual_row == local_row {
+                        Some(output_offset) // Local
+                    } else if visual_row > local_row && visual_row <= local_row + player_count {
+                        Some(output_offset + (visual_row - local_row)) // Remote player
+                    } else if visual_row == local_row + player_count + 2 {
+                        // blank + refresh players
+                        Some(output_offset + 1 + player_count) // Refresh Players
+                    } else {
+                        None
+                    }
+                }
             }
         }
         SettingsSection::About => {
-            // Logo lines + blank + version + description + author + url + blank + "Theme:" header
-            // Theme items are selectable, followed by blank + "Enter:" + blank + "Graphics:" + protocol + "Artwork:" + modes
-            let logo_lines = crate::ui::screens::settings::ansi_logo_line_count();
-            // logo + blank + version + description + author + url + blank + "Theme:" = logo + 7
-            let theme_start = logo_lines + 7;
-            let theme_count = crate::ui::theme::ThemeName::all().len();
-            if visual_row >= theme_start && visual_row < theme_start + theme_count {
-                Some(visual_row - theme_start)
-            } else {
-                // After themes: blank + "Enter:" + blank + "Graphics:" + protocol + "Artwork:" header + mode items
-                let artwork_header_row = theme_start + theme_count + 5;
-                let artwork_items_start = artwork_header_row + 1;
-                let mode_count = crate::app::state::ArtworkMode::all().len();
-                if visual_row >= artwork_items_start && visual_row < artwork_items_start + mode_count {
-                    Some(theme_count + (visual_row - artwork_items_start))
-                } else {
-                    None
-                }
-            }
+            // Display-only section, no selectable items
+            None
         }
     }
 }
@@ -1742,6 +1735,70 @@ fn handle_help_click(click_row: u16, state: &mut AppState) -> Vec<Action> {
     // Could implement click-to-scroll-to-position but for now just acknowledge the click
     let _ = click_row;
     let _ = state;
+    vec![]
+}
+
+/// Handle click in Similar view.
+fn handle_similar_click(click_row: u16, state: &mut AppState) -> Vec<Action> {
+    use crate::app::state::SimilarMode;
+
+    // Layout: border row at top (row 0), items start at row 1, border at bottom
+    let content_height = state.terminal_height.saturating_sub(3); // nav bar + transport + shortcut
+    if click_row == 0 || click_row >= content_height {
+        return vec![];
+    }
+
+    let inner_row = (click_row - 1) as usize; // offset by top border
+    let visible_height = content_height.saturating_sub(2) as usize; // minus top+bottom borders
+
+    let total = match state.similar_mode {
+        SimilarMode::Albums => state.similar_albums.len(),
+        SimilarMode::Tracks => state.similar_tracks.len(),
+    };
+
+    if total == 0 {
+        return vec![];
+    }
+
+    let scroll_offset = match state.similar_scroll_pin {
+        Some(pinned) => pinned,
+        None => helpers::calc_scroll_offset(state.list_state.similar_index, visible_height, total),
+    };
+    let clicked_idx = scroll_offset + inner_row;
+
+    if clicked_idx >= total {
+        return vec![];
+    }
+
+    if state.list_state.similar_index == clicked_idx {
+        // Double-click: activate (same as Enter)
+        match state.similar_mode {
+            SimilarMode::Albums => {
+                if let Some(album) = state.similar_albums.get(clicked_idx).cloned() {
+                    state.pending_album_key = Some(album.rating_key.clone());
+                    state.selected_album_title = album.title.clone();
+                    state.selected_artist_name = album.artist_name().to_string();
+                    state.view = View::Browse;
+                    state.browse_category = BrowseCategory::Library;
+                    if let Some(artist_key) = &album.parent_rating_key {
+                        if let Some(idx) = state.artists.iter().position(|a| &a.rating_key == artist_key) {
+                            state.list_state.artists_index = idx;
+                        }
+                    }
+                    return vec![Action::LoadArtistAlbums];
+                }
+            }
+            SimilarMode::Tracks => {
+                if let Some(track) = state.similar_tracks.get(clicked_idx).cloned() {
+                    return vec![Action::PlayTrack(track)];
+                }
+            }
+        }
+    } else {
+        state.similar_scroll_pin = Some(scroll_offset);
+        state.list_state.similar_index = clicked_idx;
+    }
+
     vec![]
 }
 
@@ -1757,7 +1814,8 @@ fn handle_scroll(up: bool, click_row: u16, click_col: u16, state: &mut AppState)
             let art_height = (content_height * 40 / 100).max(8);
             let art_width = (art_height * 2).min(state.terminal_width * 40 / 100).max(25);
 
-            if click_col < art_width && click_row >= art_height {
+            let station_top = art_height + 1; // +1 for clear button row
+            if click_col < art_width && click_row >= station_top {
                 // Station panel scroll
                 let delta: i32 = if up { -1 } else { 1 };
                 if let Some(col) = state.station_nav.focused_mut() {
@@ -1770,6 +1828,7 @@ fn handle_scroll(up: bool, click_row: u16, click_col: u16, state: &mut AppState)
             }
 
             // Scroll queue (includes play history + current tracks)
+            state.queue_scroll_pin = None;
             let delta: i32 = if up { -1 } else { 1 };
             let tracks_len = if state.playback_mode == PlaybackMode::Radio {
                 state.radio.tracks.len()
@@ -1789,6 +1848,17 @@ fn handle_scroll(up: bool, click_row: u16, click_col: u16, state: &mut AppState)
             let delta: i32 = if up { -1 } else { 1 };
             let new_scroll = (state.help_scroll as i32 + delta).max(0) as u16;
             state.help_scroll = new_scroll;
+        }
+        View::Similar => {
+            state.similar_scroll_pin = None;
+            let delta: i32 = if up { -1 } else { 1 };
+            let total = match state.similar_mode {
+                crate::app::state::SimilarMode::Albums => state.similar_albums.len(),
+                crate::app::state::SimilarMode::Tracks => state.similar_tracks.len(),
+            };
+            let max = total.saturating_sub(1);
+            let new_idx = (state.list_state.similar_index as i32 + delta).clamp(0, max as i32) as usize;
+            state.list_state.similar_index = new_idx;
         }
         _ => {}
     }
@@ -1932,6 +2002,244 @@ fn handle_browse_scroll(up: bool, click_row: u16, click_col: u16, state: &mut Ap
     let art_batch = super::dispatch_miller::collect_viewport_art(state);
     if !art_batch.is_empty() {
         return vec![Action::LoadAlbumArt(art_batch)];
+    }
+    vec![]
+}
+
+/// Handle mouse click when the artist radio picker popup is active.
+fn handle_artist_radio_picker_click(click_row: u16, click_col: u16, state: &mut AppState) -> Vec<Action> {
+    use ratatui::layout::Rect;
+    use crate::app::state::{ArtistRadioPickerStep, SearchFocus};
+
+    let frame_area = Rect::new(0, 0, state.terminal_width, state.terminal_height);
+    let popup = centered_rect(50, 70, frame_area);
+
+    // Click outside popup — close
+    if click_row < popup.y || click_row >= popup.y + popup.height
+        || click_col < popup.x || click_col >= popup.x + popup.width
+    {
+        return vec![Action::CloseArtistRadioPicker];
+    }
+
+    let picker = match &state.artist_radio_picker {
+        Some(p) => p,
+        None => return vec![],
+    };
+
+    // Only handle clicks in SelectArtists step (results list)
+    if !matches!(picker.step, ArtistRadioPickerStep::SelectArtists) {
+        return vec![];
+    }
+
+    // Inner area (inside border)
+    let inner_y = popup.y + 1;
+    let inner_height = popup.height.saturating_sub(2);
+
+    // Layout: selected (2) + input (3) + results (rest)
+    let results_y = inner_y + 2 + 3;
+    let results_height = inner_height.saturating_sub(5) as usize;
+
+    if click_row < results_y || click_row >= results_y + results_height as u16 {
+        return vec![];
+    }
+
+    let click_offset = (click_row - results_y) as usize;
+    let total = picker.filtered_artists.len();
+    let scroll_offset = match picker.scroll_pin {
+        Some(pinned) => pinned,
+        None => helpers::calc_scroll_offset(picker.item_index, results_height, total),
+    };
+
+    let clicked_idx = scroll_offset + click_offset;
+    if clicked_idx >= total {
+        return vec![];
+    }
+
+    let already_selected = picker.item_index == clicked_idx && picker.focus == SearchFocus::Results;
+
+    if already_selected {
+        // Second click on same item — toggle selection
+        return vec![Action::ArtistRadioPickerToggleArtist];
+    }
+
+    // First click — highlight (set scroll pin)
+    if let Some(ref mut picker) = state.artist_radio_picker {
+        picker.scroll_pin = Some(scroll_offset);
+        picker.item_index = clicked_idx;
+        picker.focus = SearchFocus::Results;
+    }
+    vec![]
+}
+
+/// Handle mouse click when the adventure launcher popup is active.
+fn handle_adventure_launcher_click(click_row: u16, click_col: u16, state: &mut AppState) -> Vec<Action> {
+    use ratatui::layout::Rect;
+    use crate::app::state::{SearchFocus, AdventureDrillLevel};
+
+    let frame_area = Rect::new(0, 0, state.terminal_width, state.terminal_height);
+    let popup = centered_rect(50, 70, frame_area);
+
+    // Click outside popup — close
+    if click_row < popup.y || click_row >= popup.y + popup.height
+        || click_col < popup.x || click_col >= popup.x + popup.width
+    {
+        return vec![Action::CloseAdventureLauncher];
+    }
+
+    let launcher = match &state.adventure_launcher {
+        Some(l) => l,
+        None => return vec![],
+    };
+
+    // Inner area (inside border)
+    let inner_y = popup.y + 1;
+    let inner_height = popup.height.saturating_sub(2);
+
+    // Layout depends on drill level
+    let (results_y, results_height) = match &launcher.drill {
+        AdventureDrillLevel::Search => {
+            // search input (3) + results (rest)
+            let ry = inner_y + 3;
+            let rh = inner_height.saturating_sub(3) as usize;
+            (ry, rh)
+        }
+        AdventureDrillLevel::ArtistAlbums { .. } => {
+            // breadcrumb (1) + album list (rest)
+            let ry = inner_y + 1;
+            let rh = inner_height.saturating_sub(1) as usize;
+            (ry, rh)
+        }
+        AdventureDrillLevel::AlbumTracks { .. } => {
+            // breadcrumb (1) + track list (rest)
+            let ry = inner_y + 1;
+            let rh = inner_height.saturating_sub(1) as usize;
+            (ry, rh)
+        }
+    };
+
+    if click_row < results_y || click_row >= results_y + results_height as u16 {
+        return vec![];
+    }
+
+    let click_offset = (click_row - results_y) as usize;
+    let total = match &launcher.drill {
+        AdventureDrillLevel::Search => {
+            if let Some(ref results) = launcher.results {
+                results.artists.len() + results.albums.len() + results.tracks.len()
+            } else {
+                0
+            }
+        }
+        AdventureDrillLevel::ArtistAlbums { albums, .. } => albums.len(),
+        AdventureDrillLevel::AlbumTracks { tracks, .. } => tracks.len(),
+    };
+
+    let scroll_offset = match launcher.scroll_pin {
+        Some(pinned) => pinned,
+        None => helpers::calc_scroll_offset(launcher.item_index, results_height, total),
+    };
+
+    let clicked_display_idx = scroll_offset + click_offset;
+
+    // For Search level with section headers, we need to map display index to item index
+    let clicked_item_idx = if matches!(launcher.drill, AdventureDrillLevel::Search) {
+        if let Some(ref results) = launcher.results {
+            let mut item_idx = 0usize;
+            let mut display_idx = 0usize;
+            // Artists section
+            if !results.artists.is_empty() {
+                if display_idx == clicked_display_idx { return vec![]; } // clicked header
+                display_idx += 1;
+                for _ in &results.artists {
+                    if display_idx == clicked_display_idx { break; }
+                    display_idx += 1;
+                    item_idx += 1;
+                }
+                if display_idx == clicked_display_idx { Some(item_idx) } else { None }
+            } else { None }
+            .or_else(|| {
+                if !results.albums.is_empty() {
+                    if display_idx == clicked_display_idx { return None; } // header
+                    display_idx += 1;
+                    for _ in &results.albums {
+                        if display_idx == clicked_display_idx { return Some(item_idx); }
+                        display_idx += 1;
+                        item_idx += 1;
+                    }
+                }
+                None
+            })
+            .or_else(|| {
+                if !results.tracks.is_empty() {
+                    if display_idx == clicked_display_idx { return None; } // header
+                    display_idx += 1;
+                    for _ in &results.tracks {
+                        if display_idx == clicked_display_idx { return Some(item_idx); }
+                        display_idx += 1;
+                        item_idx += 1;
+                    }
+                }
+                None
+            })
+        } else {
+            None
+        }
+    } else {
+        if clicked_display_idx < total { Some(clicked_display_idx) } else { None }
+    };
+
+    let Some(item_idx) = clicked_item_idx else {
+        return vec![];
+    };
+
+    let already_selected = launcher.item_index == item_idx && launcher.focus == SearchFocus::Results;
+
+    if already_selected {
+        // Second click — same as Enter: drill into artist/album or select track
+        match &launcher.drill {
+            AdventureDrillLevel::Search => {
+                if let Some(ref results) = launcher.results {
+                    let artist_count = results.artists.len();
+                    let album_count = results.albums.len();
+                    if item_idx < artist_count {
+                        let artist = &results.artists[item_idx];
+                        return vec![Action::AdventureLauncherDrillArtist {
+                            key: artist.rating_key.clone(),
+                            name: artist.title.clone(),
+                        }];
+                    } else if item_idx < artist_count + album_count {
+                        let album = &results.albums[item_idx - artist_count];
+                        return vec![Action::AdventureLauncherDrillAlbum {
+                            key: album.rating_key.clone(),
+                            title: album.title.clone(),
+                            artist_name: album.artist_name().to_string(),
+                        }];
+                    } else {
+                        return vec![Action::AdventureLauncherSelectTrack];
+                    }
+                }
+            }
+            AdventureDrillLevel::ArtistAlbums { albums, artist_name, .. } => {
+                if let Some(album) = albums.get(item_idx) {
+                    return vec![Action::AdventureLauncherDrillAlbum {
+                        key: album.rating_key.clone(),
+                        title: album.title.clone(),
+                        artist_name: artist_name.clone(),
+                    }];
+                }
+            }
+            AdventureDrillLevel::AlbumTracks { .. } => {
+                return vec![Action::AdventureLauncherSelectTrack];
+            }
+        }
+        return vec![];
+    }
+
+    // First click — highlight (set scroll pin)
+    if let Some(ref mut launcher) = state.adventure_launcher {
+        launcher.scroll_pin = Some(scroll_offset);
+        launcher.item_index = item_idx;
+        launcher.focus = SearchFocus::Results;
     }
     vec![]
 }

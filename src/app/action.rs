@@ -11,7 +11,7 @@ pub enum Action {
     // Navigation (musikcube-style)
     SetView(View),
     SetCategory(BrowseCategory),
-    NextView,   // Tab: cycle Library→Playlists→Genres→Folders→NowPlaying
+    NextView,   // Tab: cycle Library→Playlists→Queue→NowPlaying
     PrevView,   // Shift+Tab: cycle backwards
     NextMode,   // Shift+Down: cycle modes within current category
     PrevMode,   // Shift+Up: cycle modes backwards
@@ -55,14 +55,14 @@ pub enum Action {
     PlayTrack(Track),
     PlayTrackFromCategory(usize),
     PlayAlbum { rating_key: String },  // Load album tracks and play them
-    EnqueueSelection,  // Alt+Q: Add current selection to end of queue
+    EnqueueSelection,  // Ctrl+E: Add current selection to queue
     EnqueueAlbum { rating_key: String, title: String },  // Load album tracks and add to queue
     ClearQueue,
     RemoveFromQueue(usize),
     ToggleQueueShuffle,
     ToggleBrowseShuffle,
     JumpToQueueIndex(usize),      // Jump to and play a specific queue index
-    PromptSavePlaylist,           // Alt+P: Prompt user for playlist name
+    PromptSavePlaylist,           // Ctrl+W: Prompt user for playlist name
     SaveQueueAsPlaylist(String),  // Save queue with given name
 
     // Genres, Artist Genres, Album Genres, Moods, and Styles
@@ -117,7 +117,7 @@ pub enum Action {
     ClearSubfolderCache,    // Clear subfolder cache entries
     StartSubfolderCrawl,    // Manual subfolder crawl for current library
     StopSubfolderCrawl,     // Cancel active subfolder crawl
-    ToggleKeepFolderCache,  // Toggle per-library keep_folder_cache setting
+    ToggleKeepSubfolderCache,  // Toggle per-library keep_subfolder_cache setting
 
     // Folder navigation
     LoadFolderRoot,
@@ -134,6 +134,8 @@ pub enum Action {
     LoadArtistAllTracksForMiller { artist_key: String },  // Load all tracks by artist (from "All Tracks" entry)
     LoadAllAlbumsForMiller,  // Load all albums as a Miller column (from "All Artists" entry)
     PlayTrackFromMiller { column_index: usize, track_index: usize },
+    LoadCompilationsForMiller,  // Load compilation albums into a new Miller column
+    LoadCompilationTracksForMiller { artist_key: String, artist_name: String },  // Load compilation tracks for an artist
 
     // Miller column navigation for Genres view
     LoadGenreAlbumsForMiller { genre_key: String },
@@ -183,6 +185,8 @@ pub enum Action {
     ClearStatus,
     Refresh,
     RefreshCategory(crate::app::state::RefreshCategory),
+    /// Refresh album tracks in the current Miller column (F5 when viewing album tracks).
+    RefreshAlbumTracks { album_key: String },
     /// Check cache staleness on view navigation (tier-1: 72h for this category, tier-2: 32d for all others).
     CheckStaleness(crate::app::state::RefreshCategory),
 
@@ -230,7 +234,7 @@ pub enum Action {
     AdventureLauncherSelectTrack,
     AdventureLauncherBack,
 
-    // Library picker popup (Ctrl+Alt+S)
+    // Library picker popup (Alt+S)
     OpenLibraryPicker,
     CloseLibraryPicker,
 
@@ -250,6 +254,9 @@ pub enum Action {
     UndoLastRemix,
     MoveQueueTrackUp,
     MoveQueueTrackDown,
+    MoveSelectedTracksUp,
+    MoveSelectedTracksDown,
+    RemoveSelectedFromQueue,
     /// Batch result from remix: Vec<(original_queue_index, tracks_to_insert_after)>
     RemixBatchReady(Vec<(usize, Vec<Track>)>),
 

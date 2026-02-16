@@ -34,8 +34,8 @@ impl Default for Config {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LibrarySettings {
     /// Keep subfolder cache entries indefinitely (don't purge at 32 days).
-    #[serde(default)]
-    pub keep_folder_cache: bool,
+    #[serde(default, alias = "keep_folder_cache")]
+    pub keep_subfolder_cache: bool,
 }
 
 /// Libraries configuration.

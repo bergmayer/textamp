@@ -68,7 +68,10 @@ fn render_albums(frame: &mut Frame, state: &AppState, inner: Rect, area: Rect) {
     let visible_height = inner.height as usize;
     let total = state.similar_albums.len();
 
-    let scroll_offset = NavigationService::calc_scroll_offset(selected_idx, visible_height, total);
+    let scroll_offset = match state.similar_scroll_pin {
+        Some(pinned) => pinned,
+        None => NavigationService::calc_scroll_offset(selected_idx, visible_height, total),
+    };
 
     let items: Vec<ListItem> = state
         .similar_albums
@@ -129,7 +132,10 @@ fn render_tracks(frame: &mut Frame, state: &AppState, inner: Rect, area: Rect) {
     let visible_height = inner.height as usize;
     let total = state.similar_tracks.len();
 
-    let scroll_offset = NavigationService::calc_scroll_offset(selected_idx, visible_height, total);
+    let scroll_offset = match state.similar_scroll_pin {
+        Some(pinned) => pinned,
+        None => NavigationService::calc_scroll_offset(selected_idx, visible_height, total),
+    };
 
     let items: Vec<ListItem> = state
         .similar_tracks

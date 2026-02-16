@@ -55,12 +55,26 @@ pub struct Album {
     pub loudness_analysis_version: Option<u32>,
     #[serde(default, deserialize_with = "from_str_or_num_opt")]
     pub last_viewed_at: Option<i64>,
+    /// Album subtype from Plex (e.g., "compilation" for compilation albums).
+    #[serde(default)]
+    pub subtype: Option<String>,
 }
 
 impl Album {
     /// Get track count (leaf_count in Plex API).
     pub fn track_count(&self) -> u32 {
         self.leaf_count.unwrap_or(0)
+    }
+
+    /// Whether this album is a candidate for being a compilation.
+    /// Returns true if the Plex subtype is "compilation" or the artist name
+    /// matches common compilation artist names.
+    pub fn is_compilation_candidate(&self) -> bool {
+        if self.subtype.as_deref() == Some("compilation") {
+            return true;
+        }
+        let name = self.artist_name().to_lowercase();
+        name == "various artists" || name == "various"
     }
 
     /// Get artist name (handles None and empty string).
@@ -91,6 +105,7 @@ impl Album {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0)),
+            subtype: None,
         })
     }
 }

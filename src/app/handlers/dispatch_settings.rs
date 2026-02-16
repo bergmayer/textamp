@@ -60,6 +60,10 @@ pub async fn dispatch(
             state.moods.clear();
             state.styles.clear();
             state.stations.clear();
+            state.compilation_albums.clear();
+            state.compilation_artist_keys.clear();
+            state.compilation_track_artist_keys.clear();
+            state.compilations_detected = false;
 
             state.selected_artist_albums.clear();
             state.selected_album_tracks.clear();
@@ -214,21 +218,7 @@ pub async fn dispatch(
 
             // Auto-discover remote players if connected and list is empty
             if state.remote_players.is_empty() && !state.discovering_players {
-                if let Some(stored) = PlexAuth::load_token() {
-                    state.discovering_players = true;
-                    let event_tx_clone = event_tx.clone();
-                    tokio::spawn(async move {
-                        let auth = PlexAuth::from_stored_auth(&stored);
-                        match auth.get_players(&stored.token).await {
-                            Ok(players) => {
-                                let _ = event_tx_clone.send(Event::PlayersDiscovered(players)).await;
-                            }
-                            Err(e) => {
-                                let _ = event_tx_clone.send(Event::PlayerDiscoveryFailed(e.to_string())).await;
-                            }
-                        }
-                    });
-                }
+                follow_ups.push(Action::DiscoverPlayers);
             }
 
             // Get username from connection state first (most reliable), then StoredAuth, then config
@@ -331,7 +321,7 @@ pub async fn dispatch(
                                         follow_ups.push(Action::StartSubfolderCrawl);
                                     }
                                 }
-                                4 => follow_ups.push(Action::ToggleKeepFolderCache),
+                                4 => follow_ups.push(Action::ToggleKeepSubfolderCache),
                                 5 => follow_ups.push(Action::Logout),
                                 _ => {}
                             }
@@ -344,39 +334,15 @@ pub async fn dispatch(
                         }
                     }
                 }
-                SettingsSection::Output => {
-                    let idx = state.settings_state.item_index;
-                    let refresh_idx = 1 + state.remote_players.len();
-                    if idx == 0 {
-                        // Local
-                        follow_ups.push(Action::SetOutputTarget(crate::app::state::OutputTarget::Local));
-                    } else if idx <= state.remote_players.len() {
-                        // Remote player
-                        if let Some(player) = state.remote_players.get(idx - 1) {
-                            // Get direct URI (prefer local connections)
-                            let uri = player.connections.iter().find(|c| c.local)
-                                .or_else(|| player.connections.iter().find(|c| !c.relay))
-                                .or(player.connections.first())
-                                .map(|c| c.uri.clone());
-                            tracing::info!(
-                                "Selecting remote player: {} (id={}, product={}, uri={:?})",
-                                player.name, player.client_identifier, player.product, uri
-                            );
-                            follow_ups.push(Action::SetOutputTarget(crate::app::state::OutputTarget::Remote {
-                                player_id: player.client_identifier.clone(),
-                                player_name: player.name.clone(),
-                                player_uri: uri,
-                            }));
-                        }
-                    } else if idx == refresh_idx {
-                        follow_ups.push(Action::DiscoverPlayers);
-                    }
-                }
-                SettingsSection::About => {
+                SettingsSection::Textamp => {
                     let theme_count = crate::ui::theme::ThemeName::all().len();
-                    if state.settings_state.item_index < theme_count {
+                    let artwork_count = crate::app::state::ArtworkMode::all().len();
+                    let output_offset = theme_count + artwork_count;
+                    let idx = state.settings_state.item_index;
+
+                    if idx < theme_count {
                         // Apply selected theme
-                        if let Some(theme_name) = crate::ui::theme::ThemeName::all().get(state.settings_state.item_index) {
+                        if let Some(theme_name) = crate::ui::theme::ThemeName::all().get(idx) {
                             state.theme = *theme_name;
                             crate::ui::theme::set_theme(state.theme);
                             state.set_status(format!("Theme: {}", state.theme.display_name()));
@@ -386,11 +352,9 @@ pub async fn dispatch(
                                 tracing::warn!("Failed to save theme preference: {}", e);
                             }
                         }
-                    } else if state.settings_state.item_index >= theme_count
-                        && state.settings_state.item_index < theme_count + crate::app::state::ArtworkMode::all().len()
-                    {
+                    } else if idx >= theme_count && idx < output_offset {
                         // Select artwork mode
-                        let mode_idx = state.settings_state.item_index - theme_count;
+                        let mode_idx = idx - theme_count;
                         if let Some(&mode) = crate::app::state::ArtworkMode::all().get(mode_idx) {
                             state.artwork_mode = mode;
                             crate::ui::screens::now_playing::set_artwork_mode(mode);
@@ -418,7 +382,34 @@ pub async fn dispatch(
                                 tracing::warn!("Failed to save artwork_mode preference: {}", e);
                             }
                         }
+                    } else if idx == output_offset {
+                        // Local output
+                        follow_ups.push(Action::SetOutputTarget(crate::app::state::OutputTarget::Local));
+                    } else if idx <= output_offset + state.remote_players.len() {
+                        // Remote player
+                        let player_idx = idx - output_offset - 1;
+                        if let Some(player) = state.remote_players.get(player_idx) {
+                            let uri = player.connections.iter().find(|c| c.local)
+                                .or_else(|| player.connections.iter().find(|c| !c.relay))
+                                .or(player.connections.first())
+                                .map(|c| c.uri.clone());
+                            tracing::info!(
+                                "Selecting remote player: {} (id={}, product={}, uri={:?})",
+                                player.name, player.client_identifier, player.product, uri
+                            );
+                            follow_ups.push(Action::SetOutputTarget(crate::app::state::OutputTarget::Remote {
+                                player_id: player.client_identifier.clone(),
+                                player_name: player.name.clone(),
+                                player_uri: uri,
+                            }));
+                        }
+                    } else {
+                        // Refresh players (last item)
+                        follow_ups.push(Action::DiscoverPlayers);
                     }
+                }
+                SettingsSection::About => {
+                    // Display-only section, no selectable items
                 }
             }
         }
@@ -564,9 +555,9 @@ pub async fn dispatch(
             // Switch to the selected library
             if state.active_library.as_ref() != Some(&lib_key) {
                 state.active_library = Some(lib_key.clone());
-                state.keep_folder_cache = config.libraries.per_library
+                state.keep_subfolder_cache = config.libraries.per_library
                     .get(lib_key.as_str())
-                    .map(|s| s.keep_folder_cache)
+                    .map(|s| s.keep_subfolder_cache)
                     .unwrap_or(false);
 
                 // Clear all current data and UI state
@@ -579,7 +570,11 @@ pub async fn dispatch(
                 state.moods.clear();
                 state.styles.clear();
                 state.stations.clear();
-    
+                state.compilation_albums.clear();
+                state.compilation_artist_keys.clear();
+                state.compilation_track_artist_keys.clear();
+                state.compilations_detected = false;
+
                 state.selected_artist_albums.clear();
                 state.selected_album_tracks.clear();
                 state.folder_state = None;
@@ -700,7 +695,11 @@ pub async fn dispatch(
                     state.moods.clear();
                     state.styles.clear();
                     state.stations.clear();
-        
+                    state.compilation_albums.clear();
+                    state.compilation_artist_keys.clear();
+                    state.compilation_track_artist_keys.clear();
+                    state.compilations_detected = false;
+
                     state.selected_artist_albums.clear();
                     state.selected_album_tracks.clear();
                     state.folder_state = None;
@@ -773,9 +772,9 @@ pub async fn dispatch(
                     // Update server tracking
                     state.active_server_id = Some(server_id);
                     state.active_library = Some(lib_key.clone());
-                    state.keep_folder_cache = config.libraries.per_library
+                    state.keep_subfolder_cache = config.libraries.per_library
                         .get(lib_key.as_str())
-                        .map(|s| s.keep_folder_cache)
+                        .map(|s| s.keep_subfolder_cache)
                         .unwrap_or(false);
 
                     // Persist the new server info
@@ -872,7 +871,11 @@ pub async fn dispatch(
                         state.moods.clear();
                         state.styles.clear();
                         state.stations.clear();
-            
+                        state.compilation_albums.clear();
+                        state.compilation_artist_keys.clear();
+                        state.compilation_track_artist_keys.clear();
+                        state.compilations_detected = false;
+
                         state.playlist_tracks_cache.clear();
                         state.category_timestamps.clear();
                         state.cache_dirty = true;
@@ -947,18 +950,18 @@ pub async fn dispatch(
             state.subfolder_preload_active = false;
             state.set_status("Subfolder crawl stopped".to_string());
         }
-        Action::ToggleKeepFolderCache => {
+        Action::ToggleKeepSubfolderCache => {
             if let Some(lib_key) = state.active_library.clone() {
-                state.keep_folder_cache = !state.keep_folder_cache;
+                state.keep_subfolder_cache = !state.keep_subfolder_cache;
                 let entry = config.libraries.per_library.entry(lib_key).or_default();
-                entry.keep_folder_cache = state.keep_folder_cache;
+                entry.keep_subfolder_cache = state.keep_subfolder_cache;
                 if let Err(e) = crate::config::save_config(config) {
-                    tracing::warn!("Failed to save keep_folder_cache preference: {}", e);
+                    tracing::warn!("Failed to save keep_subfolder_cache preference: {}", e);
                 }
-                state.set_status(if state.keep_folder_cache {
-                    "Subfolder cache: keep indefinitely".to_string()
+                state.set_status(if state.keep_subfolder_cache {
+                    "subfolder cache: keep indefinitely".to_string()
                 } else {
-                    "Subfolder cache: purge after 32 days".to_string()
+                    "subfolder cache: purge after 32 days".to_string()
                 });
             }
         }
@@ -1097,7 +1100,7 @@ pub async fn dispatch(
                         state.queue_original.clear();
                         state.queue_sort_mode = QueueSortMode::QueueOrder;
                         state.playback_mode = PlaybackMode::Queue;
-                        state.view = View::NowPlaying;
+                        state.view = View::Queue;
 
                         // Start playback
                         helpers::play_current_track(event_tx, state, client, audio).await;
@@ -1132,7 +1135,7 @@ pub async fn dispatch(
             state.queue_original.clear();
             state.queue_sort_mode = QueueSortMode::QueueOrder;
             state.playback_mode = PlaybackMode::Queue;
-            state.view = View::NowPlaying;
+            state.view = View::Queue;
             helpers::play_current_track(event_tx, state, client, audio).await;
         }
         Action::AdventureError(msg) => {
@@ -1151,10 +1154,12 @@ pub async fn dispatch(
             let count = tracks.len();
             state.queue = tracks;
             state.queue_index = Some(0);
+            state.queue_selected.clear();
             state.queue_original.clear();
             state.queue_sort_mode = QueueSortMode::QueueOrder;
             state.playback_mode = PlaybackMode::Queue;
-            state.view = View::NowPlaying;
+            state.list_state.queue_index = 0;
+            state.view = View::Queue;
             state.set_status(format!("Artist radio: {} tracks", count));
             helpers::play_current_track(event_tx, state, client, audio).await;
         }

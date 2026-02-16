@@ -322,7 +322,7 @@ pub async fn dispatch(
             }
             // Reset artist_nav with new data
             let title = state.artist_view_mode.name();
-            let items = BrowseItem::artist_root_items(&state.artists);
+            let items = state.build_artist_root_items();
             state.artist_nav.reset(title, items);
         }
         Action::CycleGenreTab => {
@@ -360,7 +360,7 @@ pub async fn dispatch(
                 LibrarySubMode::Normal => {
                     // Reset to normal artist list
                     let title = state.artist_view_mode.name();
-                    let items = BrowseItem::artist_root_items(&state.artists);
+                    let items = state.build_artist_root_items();
                     state.artist_nav.reset(title, items);
                 }
                 LibrarySubMode::AllByArtist => {

@@ -603,24 +603,13 @@ impl PlexClient {
         Ok(response.media_container.directory)
     }
 
-    /// Get albums in a specific artist genre.
+    /// Get albums in a specific artist genre (delegates to get_genre_albums).
     pub async fn get_artist_genre_albums(
         &self,
         library_key: &str,
         genre_filter: &str,
     ) -> Result<Vec<Album>, ApiError> {
-        tracing::info!("get_artist_genre_albums: library_key={}, genre_filter={}", library_key, genre_filter);
-
-        if genre_filter.is_empty() {
-            return Err(ApiError::ParseError("Empty genre filter".to_string()));
-        }
-
-        let genre_id = Self::extract_filter_id(genre_filter, "genre=");
-        let encoded = urlencoding::encode(genre_id);
-        let path = format!("{}/{}/all?type={}&genre={}", EP_LIBRARY_SECTIONS, library_key, TYPE_ALBUM, encoded);
-        tracing::info!("get_artist_genre_albums: fetching from {}", path);
-        let response: AlbumsResponse = self.get(&path).await?;
-        Ok(response.media_container.metadata)
+        self.get_genre_albums(library_key, genre_filter).await
     }
 
     // ========================================================================
@@ -637,24 +626,13 @@ impl PlexClient {
         Ok(response.media_container.directory)
     }
 
-    /// Get albums in a specific album genre.
+    /// Get albums in a specific album genre (delegates to get_genre_albums).
     pub async fn get_album_genre_albums(
         &self,
         library_key: &str,
         genre_filter: &str,
     ) -> Result<Vec<Album>, ApiError> {
-        tracing::info!("get_album_genre_albums: library_key={}, genre_filter={}", library_key, genre_filter);
-
-        if genre_filter.is_empty() {
-            return Err(ApiError::ParseError("Empty genre filter".to_string()));
-        }
-
-        let genre_id = Self::extract_filter_id(genre_filter, "genre=");
-        let encoded = urlencoding::encode(genre_id);
-        let path = format!("{}/{}/all?type={}&genre={}", EP_LIBRARY_SECTIONS, library_key, TYPE_ALBUM, encoded);
-        tracing::info!("get_album_genre_albums: fetching from {}", path);
-        let response: AlbumsResponse = self.get(&path).await?;
-        Ok(response.media_container.metadata)
+        self.get_genre_albums(library_key, genre_filter).await
     }
 
     // ========================================================================
@@ -1965,6 +1943,7 @@ impl PlexClient {
             filter
         }
     }
+
 }
 
 // ============================================================================

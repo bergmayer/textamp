@@ -78,7 +78,7 @@ fn render_content(frame: &mut Frame, state: &AppState, area: Rect) {
 
     match state.settings_state.section {
         SettingsSection::Account => render_account_content(frame, state, inner),
-        SettingsSection::Output => render_output_content(frame, state, inner),
+        SettingsSection::Textamp => render_textamp_content(frame, state, inner),
         SettingsSection::About => render_about_content(frame, state, inner),
     }
 }
@@ -99,16 +99,16 @@ fn render_account_content(frame: &mut Frame, state: &AppState, area: Rect) {
     match &state.connection {
         ConnectionState::Connected { username, has_plex_pass } => {
             lines.push(Line::from(Span::styled(
-                format!("Signed in as {}", username),
+                format!("signed in as {}", username),
                 Style::default().fg(t.colors.fg_primary),
             )));
-            let plex_pass_text = if *has_plex_pass { "Plex Pass: Active" } else { "Plex Pass: Inactive" };
+            let plex_pass_text = if *has_plex_pass { "plex pass: active" } else { "plex pass: inactive" };
             let plex_pass_color = if *has_plex_pass { t.colors.fg_accent } else { t.colors.fg_muted };
             lines.push(Line::from(Span::styled(plex_pass_text, Style::default().fg(plex_pass_color))));
         }
         _ => {
             lines.push(Line::from(Span::styled(
-                "Not signed in",
+                "not signed in",
                 Style::default().fg(t.colors.fg_muted),
             )));
         }
@@ -119,7 +119,7 @@ fn render_account_content(frame: &mut Frame, state: &AppState, area: Rect) {
     let lib_count = state.libraries.len();
 
     lines.push(Line::from(Span::styled(
-        "Music libraries:",
+        "music libraries:",
         Style::default().fg(t.colors.fg_accent),
     )));
 
@@ -147,22 +147,22 @@ fn render_account_content(frame: &mut Frame, state: &AppState, area: Rect) {
     // Action buttons / Sign In
     if connected {
         let crawl_label = if state.subfolder_preload_active {
-            "Stop Subfolder Crawl"
+            "stop subfolder crawl"
         } else {
-            "Start Subfolder Crawl"
+            "start subfolder crawl"
         };
-        let keep_cache_label = if state.keep_folder_cache {
-            "Keep Folder Cache: On"
+        let keep_cache_label = if state.keep_subfolder_cache {
+            "keep subfolder cache: on"
         } else {
-            "Keep Folder Cache: Off"
+            "keep subfolder cache: off"
         };
         let action_items = [
-            "Clear Library Cache & Reload",
-            "Clear Artwork Cache",
-            "Clear Subfolder Cache",
+            "clear library cache & reload",
+            "clear artwork cache",
+            "clear subfolder cache",
             crawl_label,
             keep_cache_label,
-            "Sign Out",
+            "sign out",
         ];
         for (i, label) in action_items.iter().enumerate() {
             let item_idx = lib_count + i;
@@ -181,7 +181,7 @@ fn render_account_content(frame: &mut Frame, state: &AppState, area: Rect) {
         let signin_prefix = "  ";
         let signin_style = if is_signin_selected { Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg) } else { Style::default().fg(t.colors.fg_primary) };
         lines.push(Line::from(Span::styled(
-            format!("{}Sign In", signin_prefix),
+            format!("{}sign in", signin_prefix),
             signin_style,
         )));
     }
@@ -194,12 +194,12 @@ fn render_account_content(frame: &mut Frame, state: &AppState, area: Rect) {
 
         if let Some(server) = server_info {
             lines.push(Line::from(Span::styled(
-                format!("Server: {}", server.name),
+                format!("server: {}", server.name),
                 Style::default().fg(t.colors.fg_accent),
             )));
         } else {
             lines.push(Line::from(Span::styled(
-                "Server:",
+                "server:",
                 Style::default().fg(t.colors.fg_accent),
             )));
         }
@@ -223,7 +223,7 @@ fn render_account_content(frame: &mut Frame, state: &AppState, area: Rect) {
         )));
     } else {
         lines.push(Line::from(Span::styled(
-            "Server: (not connected)",
+            "server: (not connected)",
             Style::default().fg(t.colors.fg_accent),
         )));
     }
@@ -231,7 +231,7 @@ fn render_account_content(frame: &mut Frame, state: &AppState, area: Rect) {
     // Cache status (always shown)
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "Cache:",
+        "cache:",
         Style::default().fg(t.colors.fg_accent),
     )));
 
@@ -301,7 +301,7 @@ fn render_account_content(frame: &mut Frame, state: &AppState, area: Rect) {
                 .map(|c| c.display_name())
                 .collect();
             lines.push(Line::from(Span::styled(
-                format!("  Refreshing: {}", categories.join(", ")),
+                format!("  refreshing: {}", categories.join(", ")),
                 Style::default().fg(t.colors.fg_accent),
             )));
         }
@@ -316,7 +316,7 @@ fn render_account_content(frame: &mut Frame, state: &AppState, area: Rect) {
                 format!("{} B", art_bytes)
             };
             lines.push(Line::from(Span::styled(
-                format!("  Artwork: {} images, {}", art_count, size_text),
+                format!("  artwork: {} images, {}", art_count, size_text),
                 Style::default().fg(t.colors.fg_muted),
             )));
         }
@@ -338,7 +338,7 @@ fn render_signin_form(frame: &mut Frame, state: &AppState, area: Rect) {
     let is_focused = state.settings_state.focus == SettingsFocus::Content;
 
     lines.push(Line::from(Span::styled(
-        "Sign In:",
+        "sign in:",
         Style::default().fg(t.colors.fg_accent),
     )));
 
@@ -346,7 +346,7 @@ fn render_signin_form(frame: &mut Frame, state: &AppState, area: Rect) {
     let is_username_selected = is_focused && state.settings_state.item_index == 0;
     let is_username_editing = state.settings_state.editing_credential == Some(CredentialField::Username);
     let username_display = if is_username_editing {
-        format!("{}█", state.settings_state.username_input)
+        format!("{}▋", state.settings_state.username_input)
     } else if state.settings_state.username_input.is_empty() {
         "(enter username)".to_string()
     } else {
@@ -361,7 +361,7 @@ fn render_signin_form(frame: &mut Frame, state: &AppState, area: Rect) {
         Style::default().fg(t.colors.fg_primary)
     };
     lines.push(Line::from(Span::styled(
-        format!("{}Username: {}", username_prefix, username_display),
+        format!("{}username: {}", username_prefix, username_display),
         username_style,
     )));
 
@@ -369,7 +369,7 @@ fn render_signin_form(frame: &mut Frame, state: &AppState, area: Rect) {
     let is_password_selected = is_focused && state.settings_state.item_index == 1;
     let is_password_editing = state.settings_state.editing_credential == Some(CredentialField::Password);
     let password_display = if is_password_editing {
-        format!("{}█", "•".repeat(state.settings_state.password_input.len()))
+        format!("{}▋", "•".repeat(state.settings_state.password_input.len()))
     } else if state.settings_state.password_input.is_empty() {
         "(enter password)".to_string()
     } else {
@@ -384,7 +384,7 @@ fn render_signin_form(frame: &mut Frame, state: &AppState, area: Rect) {
         Style::default().fg(t.colors.fg_primary)
     };
     lines.push(Line::from(Span::styled(
-        format!("{}Password: {}", password_prefix, password_display),
+        format!("{}password: {}", password_prefix, password_display),
         password_style,
     )));
 
@@ -392,7 +392,7 @@ fn render_signin_form(frame: &mut Frame, state: &AppState, area: Rect) {
     let is_signin_selected = is_focused && state.settings_state.item_index == 2;
     let signin_prefix = "  ";
     let signin_style = if is_signin_selected { Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg) } else { Style::default().fg(t.colors.fg_primary) };
-    let signin_text = if state.settings_state.discovering_servers { "Signing in..." } else { "Sign In" };
+    let signin_text = if state.settings_state.discovering_servers { "signing in..." } else { "sign in" };
     lines.push(Line::from(Span::styled(
         format!("{}{}", signin_prefix, signin_text),
         signin_style,
@@ -401,7 +401,7 @@ fn render_signin_form(frame: &mut Frame, state: &AppState, area: Rect) {
     // Available servers
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "Available servers:",
+        "available servers:",
         Style::default().fg(t.colors.fg_accent),
     )));
 
@@ -427,22 +427,22 @@ fn render_signin_form(frame: &mut Frame, state: &AppState, area: Rect) {
     lines.push(Line::from(""));
     if state.settings_state.editing_credential.is_some() {
         lines.push(Line::from(Span::styled(
-            "Type to enter | Enter: done | Esc: cancel",
+            "type to enter | enter: done | esc: cancel",
             Style::default().fg(t.colors.fg_muted),
         )));
     } else if is_focused && state.settings_state.item_index <= 1 {
         lines.push(Line::from(Span::styled(
-            "Enter: edit field | Esc: cancel sign-in",
+            "enter: edit field | esc: cancel sign-in",
             Style::default().fg(t.colors.fg_muted),
         )));
     } else if is_focused && state.settings_state.item_index == 2 {
         lines.push(Line::from(Span::styled(
-            "Enter: sign in (password is not stored) | Esc: cancel",
+            "enter: sign in (password is not stored) | esc: cancel",
             Style::default().fg(t.colors.fg_muted),
         )));
     } else if is_focused && state.settings_state.item_index >= 3 {
         lines.push(Line::from(Span::styled(
-            "Enter: connect to server | Esc: cancel",
+            "enter: connect to server | esc: cancel",
             Style::default().fg(t.colors.fg_muted),
         )));
     }
@@ -451,32 +451,94 @@ fn render_signin_form(frame: &mut Frame, state: &AppState, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
-fn render_output_content(frame: &mut Frame, state: &AppState, area: Rect) {
+fn render_textamp_content(frame: &mut Frame, state: &AppState, area: Rect) {
     use crate::app::state::OutputTarget;
 
     let t = theme();
     let is_focused = state.settings_state.focus == SettingsFocus::Content;
     let mut lines = vec![];
 
+    // Theme selection
     lines.push(Line::from(Span::styled(
-        "Playback output:",
+        "theme:",
         Style::default().fg(t.colors.fg_accent),
     )));
 
-    // Item 0: Local
+    let theme_count = ThemeName::all().len();
+    for (i, theme_name) in ThemeName::all().iter().enumerate() {
+        let is_active = *theme_name == state.theme;
+        let is_selected = is_focused && i == state.settings_state.item_index;
+        let prefix = "  ";
+        let active_marker = if is_active { " ♪" } else { "" };
+        let style = if is_selected { Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg) } else { Style::default().fg(t.colors.fg_primary) };
+        lines.push(Line::from(Span::styled(
+            format!("{}{}{}", prefix, theme_name.display_name(), active_marker),
+            style,
+        )));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "enter: apply theme",
+        Style::default().fg(t.colors.fg_muted),
+    )));
+
+    // Graphics info
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "graphics:",
+        Style::default().fg(t.colors.fg_accent),
+    )));
+    let protocol = crate::ui::screens::now_playing::artwork_protocol_name();
+    lines.push(Line::from(Span::styled(
+        format!("  protocol: {} | terminal: {}x{}", protocol, state.terminal_width, state.terminal_height),
+        Style::default().fg(t.colors.fg_muted),
+    )));
+
+    // Artwork mode selector
+    lines.push(Line::from(Span::styled(
+        "artwork:",
+        Style::default().fg(t.colors.fg_accent),
+    )));
+
+    let artwork_modes = crate::app::state::ArtworkMode::all();
+    for (i, mode) in artwork_modes.iter().enumerate() {
+        let item_idx = theme_count + i;
+        let is_active = *mode == state.artwork_mode;
+        let is_selected = is_focused && state.settings_state.item_index == item_idx;
+        let prefix = "  ";
+        let active_marker = if is_active { " ♪" } else { "" };
+        let style = if is_selected { Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg) } else { Style::default().fg(t.colors.fg_primary) };
+        lines.push(Line::from(Span::styled(
+            format!("{}{}{}", prefix, mode.name(), active_marker),
+            style,
+        )));
+    }
+
+    // Playback output
+    let output_offset = theme_count + artwork_modes.len();
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "playback output:",
+        Style::default().fg(t.colors.fg_accent),
+    )));
+
+    // Local output
     let is_local = matches!(state.output_target, OutputTarget::Local);
-    let is_selected = is_focused && state.settings_state.item_index == 0;
+    let local_idx = output_offset;
+    let is_selected = is_focused && state.settings_state.item_index == local_idx;
     let prefix = "  ";
     let active_marker = if is_local { " ♪" } else { "" };
     let style = if is_selected { Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg) } else { Style::default().fg(t.colors.fg_primary) };
     lines.push(Line::from(Span::styled(
-        format!("{}Local{}", prefix, active_marker),
+        format!("{}local{}", prefix, active_marker),
         style,
     )));
 
-    // Items 1..N: Remote players
+    // Remote players
     for (i, player) in state.remote_players.iter().enumerate() {
-        let item_idx = i + 1;
+        let item_idx = output_offset + 1 + i;
         let is_active = match &state.output_target {
             OutputTarget::Remote { player_id, .. } => *player_id == player.client_identifier,
             _ => false,
@@ -491,20 +553,20 @@ fn render_output_content(frame: &mut Frame, state: &AppState, area: Rect) {
         )));
     }
 
-    // Last item: Refresh Players
-    let refresh_idx = 1 + state.remote_players.len();
+    // Refresh players
+    let refresh_idx = output_offset + 1 + state.remote_players.len();
     let is_selected = is_focused && refresh_idx == state.settings_state.item_index;
     let prefix = "  ";
     let style = if is_selected { Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg) } else { Style::default().fg(t.colors.fg_primary) };
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        format!("{}Refresh Players", prefix),
+        format!("{}refresh players", prefix),
         style,
     )));
 
     if state.discovering_players {
         lines.push(Line::from(Span::styled(
-            "  Discovering...",
+            "  discovering...",
             Style::default().fg(t.colors.fg_muted),
         )));
     }
@@ -512,7 +574,7 @@ fn render_output_content(frame: &mut Frame, state: &AppState, area: Rect) {
     // Help text
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "Enter: select output | Per-session only (not saved)",
+        "enter: select output | per-session only (not saved)",
         Style::default().fg(t.colors.fg_muted),
     )));
 
@@ -535,22 +597,21 @@ fn format_duration(d: std::time::Duration) -> String {
 }
 
 fn render_about_content(frame: &mut Frame, state: &AppState, area: Rect) {
-    let is_focused = state.settings_state.focus == SettingsFocus::Content;
     let t = theme();
 
     let mut lines = parse_ansi_logo(t.colors.bg_primary);
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        format!("Version {}", env!("CARGO_PKG_VERSION")),
+        format!("version {}", env!("CARGO_PKG_VERSION")),
         Style::default().fg(t.colors.fg_primary),
     )));
     lines.push(Line::from(Span::styled(
-        "A keyboard-driven TUI client for Plex Music",
+        "a keyboard-driven TUI for Plex music",
         Style::default().fg(t.colors.fg_muted),
     )));
     lines.push(Line::from(Span::styled(
-        "Author: John Bergmayer | License: MIT",
+        "author: John Bergmayer | license: MIT",
         Style::default().fg(t.colors.fg_primary),
     )));
     lines.push(Line::from(Span::styled(
@@ -558,71 +619,20 @@ fn render_about_content(frame: &mut Frame, state: &AppState, area: Rect) {
         Style::default().fg(t.colors.fg_accent),
     )));
 
-    // Theme selection
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "Theme:",
-        Style::default().fg(t.colors.fg_accent),
-    )));
-
-    for (i, theme_name) in ThemeName::all().iter().enumerate() {
-        let is_active = *theme_name == state.theme;
-        let is_selected = is_focused && i == state.settings_state.item_index;
-        let prefix = "  ";
-        let active_marker = if is_active { " ♪" } else { "" };
-        let style = if is_selected { Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg) } else { Style::default().fg(t.colors.fg_primary) };
-        lines.push(Line::from(Span::styled(
-            format!("{}{}{}", prefix, theme_name.display_name(), active_marker),
-            style,
-        )));
-    }
-
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "Enter: apply theme",
-        Style::default().fg(t.colors.fg_muted),
-    )));
-
     // Graphics info
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "Graphics:",
+        "graphics:",
         Style::default().fg(t.colors.fg_accent),
     )));
     let protocol = crate::ui::screens::now_playing::artwork_protocol_name();
     lines.push(Line::from(Span::styled(
-        format!("  Protocol: {} | Terminal: {}x{}", protocol, state.terminal_width, state.terminal_height),
+        format!("  protocol: {} | terminal: {}x{}", protocol, state.terminal_width, state.terminal_height),
         Style::default().fg(t.colors.fg_muted),
     )));
 
-    // Artwork mode selector (selectable items after themes)
-    lines.push(Line::from(Span::styled(
-        "Artwork:",
-        Style::default().fg(t.colors.fg_accent),
-    )));
-
-    let theme_count = ThemeName::all().len();
-    for (i, mode) in crate::app::state::ArtworkMode::all().iter().enumerate() {
-        let item_idx = theme_count + i;
-        let is_active = *mode == state.artwork_mode;
-        let is_selected = is_focused && state.settings_state.item_index == item_idx;
-        let prefix = "  ";
-        let active_marker = if is_active { " ♪" } else { "" };
-        let style = if is_selected { Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg) } else { Style::default().fg(t.colors.fg_primary) };
-        lines.push(Line::from(Span::styled(
-            format!("{}{}{}", prefix, mode.name(), active_marker),
-            style,
-        )));
-    }
-
     let paragraph = Paragraph::new(lines);
     frame.render_widget(paragraph, area);
-}
-
-/// Count lines in the ANSI logo (used by mouse hit-testing).
-pub(crate) fn ansi_logo_line_count() -> usize {
-    let raw = include_str!("../../../textamp_clean.ansi");
-    raw.lines().filter(|l| !l.is_empty()).count()
 }
 
 /// Parse the embedded ANSI art logo, replacing black with the theme background.

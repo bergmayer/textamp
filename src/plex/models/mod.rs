@@ -96,7 +96,7 @@ pub struct ServerConnection {
 }
 
 /// A remote Plex player device (Apple TV, Plexamp on phone, etc.).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemotePlayer {
     pub name: String,
     pub client_identifier: String,

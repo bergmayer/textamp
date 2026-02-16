@@ -1,12 +1,20 @@
 //! Playback helpers: track playing, Plex reporting, radio fetching.
 
 use crate::app::{AppState, Event};
-use crate::app::state::{PlayStatus, PlaybackMode, View};
+use crate::app::state::{PlayStatus, PlaybackMode};
 use crate::api::PlexClient;
-use crate::api::models::Track;
+use crate::api::models::{Artist, Track};
 use crate::audio::{AudioEvent, AudioPlayer};
 use crate::audio::cache;
 use tokio::sync::mpsc;
+
+/// Look up artist artwork as a fallback when a track has no thumb.
+fn find_artist_thumb(track: &Track, artists: &[Artist]) -> Option<String> {
+    let artist_key = track.grandparent_rating_key.as_ref()?;
+    artists.iter()
+        .find(|a| a.rating_key == *artist_key)
+        .and_then(|a| a.thumb.clone())
+}
 
 /// Compute the list of upcoming tracks to pre-fetch from current state.
 pub fn get_upcoming_tracks(state: &AppState) -> Vec<Track> {
@@ -53,7 +61,7 @@ fn audio_event_adapter(event_tx: &mpsc::Sender<Event>) -> mpsc::Sender<AudioEven
     audio_tx
 }
 
-/// Play a track, setting up queue context.
+/// Play a track, prepending it to the queue and preserving upcoming tracks.
 pub async fn play_track(
     event_tx: &mpsc::Sender<Event>,
     track: Track,
@@ -69,25 +77,32 @@ pub async fn play_track(
     // Generate new session ID for this playback context
     state.plex_session_id = Some(generate_plex_session_id());
 
-    if state.view == View::NowPlaying || state.view == View::Similar {
-        if state.playback_mode == PlaybackMode::Radio {
-            state.radio.clear();
-        }
-        state.queue_original.clear();
-        state.queue_sort_mode = crate::app::state::QueueSortMode::QueueOrder;
-        state.playback_mode = PlaybackMode::Queue;
-        play_current_track(event_tx, state, client, audio).await;
-    } else {
-        if state.playback_mode == PlaybackMode::Radio {
-            state.radio.clear();
-        }
-        state.queue = vec![track];
-        state.queue_index = Some(0);
-        state.queue_original.clear();
-        state.queue_sort_mode = crate::app::state::QueueSortMode::QueueOrder;
-        state.playback_mode = PlaybackMode::Queue;
-        play_current_track(event_tx, state, client, audio).await;
+    // Clear radio state if switching from radio mode
+    if state.playback_mode == PlaybackMode::Radio {
+        state.radio.clear();
     }
+
+    // Move played tracks (including current) to history, preserve upcoming
+    if let Some(qi) = state.queue_index {
+        if qi < state.queue.len() {
+            let played: Vec<Track> = state.queue.drain(..=qi).collect();
+            state.play_history.extend(played);
+        }
+    }
+
+    // Prepend new track at front of queue
+    state.queue.insert(0, track);
+    state.queue_index = Some(0);
+    state.queue_selected.clear();
+    state.queue_original.clear();
+    state.queue_sort_mode = crate::app::state::QueueSortMode::QueueOrder;
+    state.playback_mode = PlaybackMode::Queue;
+
+    // Scroll queue view to top
+    state.list_state.queue_index = state.play_history.len();
+
+    audio.track_cache.flush();
+    play_current_track(event_tx, state, client, audio).await;
 }
 
 /// Helper to collect tracks from a Miller column for playback.
@@ -196,6 +211,49 @@ pub async fn play_current_track(
                             }
                             Err(_) => {
                                 tracing::warn!("Artwork loading timed out");
+                                let _ = event_tx.send(Event::ArtworkFailed {
+                                    thumb_path: thumb_path_owned,
+                                }).await;
+                            }
+                        }
+                    });
+                } else {
+                    state.artwork_loading = false;
+                    state.artwork_data = None;
+                }
+            } else {
+                state.artwork_loading = false;
+            }
+        } else if let Some(artist_thumb) = find_artist_thumb(&track, &state.artists) {
+            if state.artwork_thumb.as_deref() != Some(&artist_thumb) {
+                if let Some(server_url) = client.server_url() {
+                    state.artwork_loading = true;
+                    let thumb_path_owned = artist_thumb.clone();
+                    let event_tx = event_tx.clone();
+                    let server_url = server_url.to_string();
+                    let token = client.token().map(|s| s.to_string());
+                    let client_id = client.client_identifier().to_string();
+
+                    tokio::spawn(async move {
+                        let client = crate::api::PlexClient::new_with_url(&server_url, token.as_deref(), &client_id);
+                        match tokio::time::timeout(
+                            std::time::Duration::from_secs(5),
+                            client.fetch_artwork(&thumb_path_owned, 600)
+                        ).await {
+                            Ok(Ok(data)) => {
+                                let _ = event_tx.send(Event::ArtworkLoaded {
+                                    thumb_path: thumb_path_owned,
+                                    data,
+                                }).await;
+                            }
+                            Ok(Err(e)) => {
+                                tracing::warn!("Failed to load artist artwork: {}", e);
+                                let _ = event_tx.send(Event::ArtworkFailed {
+                                    thumb_path: thumb_path_owned,
+                                }).await;
+                            }
+                            Err(_) => {
+                                tracing::warn!("Artist artwork loading timed out");
                                 let _ = event_tx.send(Event::ArtworkFailed {
                                     thumb_path: thumb_path_owned,
                                 }).await;
@@ -489,6 +547,37 @@ async fn play_current_track_remote(
                     });
                 }
             }
+        } else if let Some(artist_thumb) = find_artist_thumb(&track, &state.artists) {
+            if state.artwork_thumb.as_deref() != Some(&artist_thumb) {
+                if let Some(server_url) = client.server_url() {
+                    state.artwork_loading = true;
+                    let thumb_path_owned = artist_thumb.clone();
+                    let event_tx_clone = event_tx.clone();
+                    let server_url = server_url.to_string();
+                    let token = client.token().map(|s| s.to_string());
+                    let client_id = client.client_identifier().to_string();
+
+                    tokio::spawn(async move {
+                        let client = crate::api::PlexClient::new_with_url(&server_url, token.as_deref(), &client_id);
+                        match tokio::time::timeout(
+                            std::time::Duration::from_secs(5),
+                            client.fetch_artwork(&thumb_path_owned, 600)
+                        ).await {
+                            Ok(Ok(data)) => {
+                                let _ = event_tx_clone.send(Event::ArtworkLoaded {
+                                    thumb_path: thumb_path_owned,
+                                    data,
+                                }).await;
+                            }
+                            _ => {
+                                let _ = event_tx_clone.send(Event::ArtworkFailed {
+                                    thumb_path: thumb_path_owned,
+                                }).await;
+                            }
+                        }
+                    });
+                }
+            }
         } else {
             state.artwork_thumb = None;
             state.artwork_data = None;
@@ -523,7 +612,9 @@ async fn play_current_track_remote(
         state.playback.playback_started_at = Some(std::time::Instant::now());
 
         // Report to Plex server
-        report_playback_to_plex(event_tx, &state.current_track().cloned().unwrap(), state.plex_session_id.clone(), client);
-        state.last_progress_report = Some(std::time::Instant::now());
+        if let Some(track) = state.current_track().cloned() {
+            report_playback_to_plex(event_tx, &track, state.plex_session_id.clone(), client);
+            state.last_progress_report = Some(std::time::Instant::now());
+        }
     }
 }

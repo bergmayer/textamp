@@ -49,9 +49,9 @@ pub async fn dispatch(
             // If we have a saved library key, load from cache immediately (no network)
             if let Some(ref lib_key) = saved_key {
                 state.active_library = Some(lib_key.clone());
-                state.keep_folder_cache = config.libraries.per_library
+                state.keep_subfolder_cache = config.libraries.per_library
                     .get(lib_key.as_str())
-                    .map(|s| s.keep_folder_cache)
+                    .map(|s| s.keep_subfolder_cache)
                     .unwrap_or(false);
 
                 if let Some(cache) = LibraryCache::new() {
@@ -403,7 +403,7 @@ fn load_from_cache(state: &mut AppState, cached: CacheData, lib_key: &str, lib_t
         state.artists = cached.artists;
         state.artists.sort_by(|a, b| helpers::sort_key(&a.title).cmp(&helpers::sort_key(&b.title)));
         state.artists_total = state.artists.len() as u32;
-        let items = BrowseItem::artist_root_items(&state.artists);
+        let items = state.build_artist_root_items();
         state.artist_nav.reset(state.artist_view_mode.name(), items);
     }
     if !cached.albums.is_empty() {
@@ -479,6 +479,17 @@ fn load_from_cache(state: &mut AppState, cached: CacheData, lib_key: &str, lib_t
             stations,
         ));
         state.station_nav.focused_column = 0;
+    }
+
+    // Compilation detection results
+    if !cached.compilation_albums.is_empty() || !cached.compilation_artist_keys.is_empty() {
+        state.compilation_albums = cached.compilation_albums;
+        state.compilation_artist_keys = cached.compilation_artist_keys;
+        state.compilation_track_artist_keys = cached.compilation_track_artist_keys;
+        state.compilations_detected = true;
+        // Re-build artist root items with compilation data
+        let items = state.build_artist_root_items();
+        state.artist_nav.update_root_items(state.artist_view_mode.name(), items);
     }
 
 }

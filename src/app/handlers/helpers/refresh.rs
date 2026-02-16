@@ -26,6 +26,52 @@ pub fn refresh_current_view(state: &mut AppState) -> Vec<Action> {
         }
     }
 
+    // Check if we're viewing album tracks in a Miller column — refresh just that album
+    if state.view == View::Browse {
+        let album_key = match state.browse_category {
+            BrowseCategory::Library => {
+                // Check if focused column contains tracks loaded from an album
+                // (depth >= 2: root artists → albums → tracks)
+                if state.artist_nav.focused_column >= 2 {
+                    state.artist_nav.focused().and_then(|col| {
+                        if col.items.iter().any(|i| matches!(i, crate::app::state::BrowseItem::Track { .. })) && !col.tracks.is_empty() {
+                            // The album key is on the parent column's selected item
+                            state.artist_nav.columns.get(state.artist_nav.focused_column - 1)
+                                .and_then(|parent| parent.selected_item())
+                                .map(|item| item.key().to_string())
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                }
+            }
+            BrowseCategory::Genres => {
+                // Genre nav: root genres → albums → tracks (depth >= 2)
+                if state.genre_nav.focused_column >= 2 {
+                    state.genre_nav.focused().and_then(|col| {
+                        if col.items.iter().any(|i| matches!(i, crate::app::state::BrowseItem::Track { .. })) && !col.tracks.is_empty() {
+                            state.genre_nav.columns.get(state.genre_nav.focused_column - 1)
+                                .and_then(|parent| parent.selected_item())
+                                .map(|item| item.key().to_string())
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+
+        if let Some(key) = album_key {
+            state.set_status("Refreshing album tracks...".to_string());
+            return vec![Action::RefreshAlbumTracks { album_key: key }];
+        }
+    }
+
     let category = match state.view {
         View::Browse => match state.browse_category {
             BrowseCategory::Library => Some(RefreshCategory::Artists),

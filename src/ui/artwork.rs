@@ -69,12 +69,12 @@ impl ArtworkRenderer {
     pub fn protocol_name(&self) -> &'static str {
         match &self.picker {
             Some(picker) => match picker.protocol_type() {
-                ratatui_image::picker::ProtocolType::Halfblocks => "Halfblocks",
-                ratatui_image::picker::ProtocolType::Sixel => "Sixel",
-                ratatui_image::picker::ProtocolType::Kitty => "Kitty",
-                ratatui_image::picker::ProtocolType::Iterm2 => "iTerm2",
+                ratatui_image::picker::ProtocolType::Halfblocks => "halfblocks",
+                ratatui_image::picker::ProtocolType::Sixel => "sixel",
+                ratatui_image::picker::ProtocolType::Kitty => "kitty",
+                ratatui_image::picker::ProtocolType::Iterm2 => "iterm2",
             },
-            None => "None",
+            None => "none",
         }
     }
 

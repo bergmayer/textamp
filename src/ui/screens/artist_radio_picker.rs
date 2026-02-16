@@ -7,6 +7,7 @@
 use crate::app::state::{ArtistRadioPickerStep, SearchFocus};
 use crate::app::AppState;
 use crate::services::NavigationService;
+use crate::ui::layout::centered_rect;
 use crate::ui::theme::theme;
 
 use ratatui::prelude::*;
@@ -18,8 +19,8 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         Some(p) => p,
         None => return,
     };
-    // Popup takes 60% width, 70% height, centered
-    let popup_area = centered_rect(60, 70, area);
+    // Popup takes 50% width, 70% height, centered
+    let popup_area = centered_rect(50, 70, area);
 
     // Clear the area behind the popup
     frame.render_widget(Clear, popup_area);
@@ -58,7 +59,7 @@ fn render_count_step(
     // Instructions
     let instructions = Paragraph::new(vec![
         Line::from(Span::styled(
-            "How many artists to blend? (2-12)",
+            "How many artists to blend? (1-12)",
             Style::default().fg(t.colors.fg_muted),
         )),
         Line::from(Span::styled(
@@ -124,10 +125,13 @@ fn render_select_step(
     } else {
         selected_names.join(", ")
     };
-    let hint = if picker.selected_artists.len() == picker.max_artists {
-        "Press Tab to launch"
+    let remaining = picker.max_artists - picker.selected_artists.len();
+    let hint = if remaining == 0 {
+        "Press Tab to launch".to_string()
+    } else if remaining == 1 {
+        "Enter to select (auto-launches on final)".to_string()
     } else {
-        "Enter to toggle selection"
+        format!("Enter to select ({} remaining)", remaining)
     };
     let selected_display = Paragraph::new(vec![
         Line::from(Span::styled(
@@ -187,7 +191,10 @@ fn render_artist_list(
     let selected_idx = picker.item_index;
     let visible_height = area.height as usize;
     let total = picker.filtered_artists.len();
-    let scroll_offset = NavigationService::calc_scroll_offset(selected_idx, visible_height, total);
+    let scroll_offset = match picker.scroll_pin {
+        Some(pinned) => pinned,
+        None => NavigationService::calc_scroll_offset(selected_idx, visible_height, total),
+    };
 
     // Build set of selected artist keys for quick lookup
     let selected_keys: std::collections::HashSet<&str> = picker.selected_artists.iter()
@@ -219,22 +226,3 @@ fn render_artist_list(
     frame.render_widget(List::new(items), area);
 }
 
-fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
-    let popup_layout = ratatui::layout::Layout::default()
-        .direction(ratatui::layout::Direction::Vertical)
-        .constraints([
-            ratatui::layout::Constraint::Percentage((100 - percent_y) / 2),
-            ratatui::layout::Constraint::Percentage(percent_y),
-            ratatui::layout::Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(area);
-
-    ratatui::layout::Layout::default()
-        .direction(ratatui::layout::Direction::Horizontal)
-        .constraints([
-            ratatui::layout::Constraint::Percentage((100 - percent_x) / 2),
-            ratatui::layout::Constraint::Percentage(percent_x),
-            ratatui::layout::Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(popup_layout[1])[1]
-}

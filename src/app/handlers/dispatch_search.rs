@@ -12,6 +12,31 @@ use crate::api::models::SearchResults;
 use anyhow::Result;
 use tokio::sync::mpsc;
 
+/// Max results per category in launcher/radio search.
+const SEARCH_RESULT_LIMIT: usize = 20;
+/// Max results in artist radio picker filter.
+const ARTIST_PICKER_LIMIT: usize = 50;
+
+/// Normalize a query string for fuzzy matching (lowercase, alphanumeric + whitespace only).
+fn normalize_query(query: &str) -> (String, String) {
+    let lower = query.to_lowercase();
+    let normalized: String = lower.chars()
+        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .collect();
+    (lower, normalized)
+}
+
+/// Check if a title fuzzy-matches a query (exact lowercase or normalized match).
+fn fuzzy_matches(title: &str, query: &str, query_normalized: &str) -> bool {
+    let lower = title.to_lowercase();
+    lower.contains(query) || {
+        let norm: String = lower.chars()
+            .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+            .collect();
+        norm.contains(query_normalized)
+    }
+}
+
 
 /// Dispatch search and filter actions. Returns follow-up actions.
 pub async fn dispatch(
@@ -38,19 +63,17 @@ pub async fn dispatch(
             let playlists = search_with_ranking(&state.playlists, &query, |p| &p.title, 50);
             let genres = search_with_ranking(&state.genres, &query, |g| &g.title, 50);
 
-            // Check if we need track results (Global or Tracks tab)
-            let need_tracks = matches!(state.search_tab, SearchTab::Global | SearchTab::Tracks);
-
-            // Store local results immediately
+            // Store local results immediately (tracks filled async by API)
             state.search_results = Some(SearchResults {
                 artists,
                 albums,
                 playlists,
                 genres,
-                tracks: vec![], // Tracks will be filled by API search
+                tracks: vec![],
             });
 
-            // For tracks, fire async API search with debounce
+            // Fire async API search for tracks with debounce
+            let need_tracks = matches!(state.search_tab, SearchTab::Global | SearchTab::Tracks);
             if need_tracks && state.search_query.len() >= 2 {
                 state.search_track_version = state.search_track_version.wrapping_add(1);
                 let version = state.search_track_version;
@@ -240,32 +263,19 @@ pub async fn dispatch(
                     launcher.results = None;
                     launcher.loading = false;
                 } else {
-                    let query = launcher.query.to_lowercase();
-                    let query_normalized: String = query.chars()
-                        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
-                        .collect();
+                    let (query, query_normalized) = normalize_query(&launcher.query);
 
                     let artists: Vec<_> = state.artists.iter()
-                        .filter(|a| {
-                            let title = a.title.to_lowercase();
-                            title.contains(&query) || {
-                                let norm: String = title.chars().filter(|c| c.is_alphanumeric() || c.is_whitespace()).collect();
-                                norm.contains(&query_normalized)
-                            }
-                        })
-                        .take(20)
+                        .filter(|a| fuzzy_matches(&a.title, &query, &query_normalized))
+                        .take(SEARCH_RESULT_LIMIT)
                         .cloned()
                         .collect();
                     let albums: Vec<_> = state.albums.iter()
                         .filter(|a| {
-                            let title = a.title.to_lowercase();
-                            let artist = a.artist_name().to_lowercase();
-                            title.contains(&query) || artist.contains(&query) || {
-                                let norm: String = title.chars().filter(|c| c.is_alphanumeric() || c.is_whitespace()).collect();
-                                norm.contains(&query_normalized)
-                            }
+                            fuzzy_matches(&a.title, &query, &query_normalized)
+                                || a.artist_name().to_lowercase().contains(&query)
                         })
-                        .take(20)
+                        .take(SEARCH_RESULT_LIMIT)
                         .cloned()
                         .collect();
 
@@ -315,23 +325,18 @@ pub async fn dispatch(
 
         // Adventure launcher popup actions
         Action::OpenAdventureLauncher => {
-            let initial_results = SearchResults {
-                artists: state.artists.clone(),
-                albums: vec![],
-                playlists: vec![],
-                genres: vec![],
-                tracks: vec![],
-            };
             state.adventure_launcher = Some(crate::app::state::AdventureLauncherState {
                 step: crate::app::state::AdventureStep::FindStartTrack,
                 query: String::new(),
-                results: Some(initial_results),
+                results: None,
                 focus: SearchFocus::Input,
                 item_index: 0,
                 loading: false,
                 drill: crate::app::state::AdventureDrillLevel::Search,
                 start_track: None,
                 track_count_input: String::new(),
+                scroll_pin: None,
+                search_tab: crate::app::state::SearchTab::default(),
             });
         }
         Action::CloseAdventureLauncher => {
@@ -409,6 +414,7 @@ pub async fn dispatch(
                 selected_artists: vec![],
                 focus: SearchFocus::Input,
                 item_index: 0,
+                scroll_pin: None,
             });
         }
         Action::CloseArtistRadioPicker => {
@@ -416,7 +422,7 @@ pub async fn dispatch(
         }
         Action::ArtistRadioPickerSetCount => {
             if let Some(ref mut picker) = state.artist_radio_picker {
-                let count = picker.count_input.parse::<usize>().unwrap_or(0).clamp(2, 12);
+                let count = picker.count_input.parse::<usize>().unwrap_or(0).clamp(1, 12);
                 picker.max_artists = count;
                 picker.step = crate::app::state::ArtistRadioPickerStep::SelectArtists;
                 picker.query.clear();
@@ -431,22 +437,11 @@ pub async fn dispatch(
                 if picker.query.is_empty() {
                     picker.filtered_artists = state.artists.clone();
                 } else {
-                    let query = picker.query.to_lowercase();
-                    let query_normalized: String = query.chars()
-                        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
-                        .collect();
+                    let (query, query_normalized) = normalize_query(&picker.query);
 
                     picker.filtered_artists = state.artists.iter()
-                        .filter(|a| {
-                            let title = a.title.to_lowercase();
-                            title.contains(&query) || {
-                                let norm: String = title.chars()
-                                    .filter(|c| c.is_alphanumeric() || c.is_whitespace())
-                                    .collect();
-                                norm.contains(&query_normalized)
-                            }
-                        })
-                        .take(50)
+                        .filter(|a| fuzzy_matches(&a.title, &query, &query_normalized))
+                        .take(ARTIST_PICKER_LIMIT)
                         .cloned()
                         .collect();
                 }
@@ -459,7 +454,23 @@ pub async fn dispatch(
                     if let Some(pos) = picker.selected_artists.iter().position(|a| a.rating_key == artist.rating_key) {
                         picker.selected_artists.remove(pos);
                     } else if picker.selected_artists.len() < picker.max_artists {
+                        let added_key = artist.rating_key.clone();
                         picker.selected_artists.push(artist);
+
+                        // Auto-launch if max artists reached
+                        if picker.selected_artists.len() == picker.max_artists {
+                            follow_ups.push(Action::ArtistRadioPickerLaunch);
+                        } else {
+                            // Clear query and re-populate with all artists, position near selected
+                            picker.query.clear();
+                            picker.filtered_artists = state.artists.clone();
+                            picker.focus = SearchFocus::Input;
+                            // Position item_index at the just-added artist in the full list
+                            picker.item_index = picker.filtered_artists.iter()
+                                .position(|a| a.rating_key == added_key)
+                                .unwrap_or(0);
+                            picker.scroll_pin = None;
+                        }
                     }
                 }
             }
@@ -841,7 +852,7 @@ async fn execute_list_filter(
     Ok(())
 }
 
-/// Adventure launcher: perform search (local artists/albums + async tracks).
+/// Adventure launcher: perform search (local artists/albums + async API tracks).
 async fn adventure_launcher_search(
     event_tx: &mpsc::Sender<Event>,
     state: &mut AppState,
@@ -856,46 +867,20 @@ async fn adventure_launcher_search(
     launcher.drill = crate::app::state::AdventureDrillLevel::Search;
 
     if launcher.query.is_empty() {
-        launcher.results = Some(SearchResults {
-            artists: state.artists.clone(),
-            albums: vec![],
-            playlists: vec![],
-            genres: vec![],
-            tracks: vec![],
-        });
+        launcher.results = None;
         launcher.loading = false;
         return Ok(());
     }
 
+    // Local ranked search for artists, albums, playlists, genres
+    use crate::services::{search_with_ranking, search_albums_with_ranking};
     let query = launcher.query.to_lowercase();
-    let query_normalized: String = query.chars()
-        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
-        .collect();
+    let artists = search_with_ranking(&state.artists, &query, |a| &a.title, SEARCH_RESULT_LIMIT);
+    let albums = search_albums_with_ranking(&state.albums, &query, SEARCH_RESULT_LIMIT);
+    let playlists = search_with_ranking(&state.playlists, &query, |p| &p.title, SEARCH_RESULT_LIMIT);
+    let genres = search_with_ranking(&state.genres, &query, |g| &g.title, SEARCH_RESULT_LIMIT);
 
-    let artists: Vec<_> = state.artists.iter()
-        .filter(|a| {
-            let title = a.title.to_lowercase();
-            title.contains(&query) || {
-                let norm: String = title.chars().filter(|c| c.is_alphanumeric() || c.is_whitespace()).collect();
-                norm.contains(&query_normalized)
-            }
-        })
-        .take(20)
-        .cloned()
-        .collect();
-    let albums: Vec<_> = state.albums.iter()
-        .filter(|a| {
-            let title = a.title.to_lowercase();
-            let artist = a.artist_name().to_lowercase();
-            title.contains(&query) || artist.contains(&query) || {
-                let norm: String = title.chars().filter(|c| c.is_alphanumeric() || c.is_whitespace()).collect();
-                norm.contains(&query_normalized)
-            }
-        })
-        .take(20)
-        .cloned()
-        .collect();
-
+    // Async API search for tracks
     let need_tracks = launcher.query.len() >= 2;
     if need_tracks {
         launcher.loading = true;
@@ -923,8 +908,8 @@ async fn adventure_launcher_search(
     launcher.results = Some(SearchResults {
         artists,
         albums,
-        playlists: vec![],
-        genres: vec![],
+        playlists,
+        genres,
         tracks: vec![],
     });
     launcher.loading = need_tracks;
@@ -953,16 +938,23 @@ async fn adventure_launcher_select_track(
             tracks.get(launcher.item_index).cloned()
         }
         AdventureDrillLevel::Search => {
-            // In search mode, must be a track from search results
+            // Tab-aware track selection
             if let Some(ref results) = launcher.results {
-                // Resolve global index to find if it's a track
                 let idx = launcher.item_index;
-                let artist_count = results.artists.len();
-                let album_count = results.albums.len();
-                if idx >= artist_count + album_count {
-                    results.tracks.get(idx - artist_count - album_count).cloned()
-                } else {
-                    None
+                match launcher.search_tab {
+                    crate::app::state::SearchTab::Tracks => {
+                        results.tracks.get(idx).cloned()
+                    }
+                    crate::app::state::SearchTab::Global => {
+                        let artist_count = results.artists.len();
+                        let album_count = results.albums.len();
+                        if idx >= artist_count + album_count {
+                            results.tracks.get(idx - artist_count - album_count).cloned()
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None
                 }
             } else {
                 None
