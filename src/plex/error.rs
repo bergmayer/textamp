@@ -40,3 +40,15 @@ pub enum ApiError {
     #[error("Invalid header value: {0}")]
     InvalidHeader(String),
 }
+
+impl ApiError {
+    /// Returns true if the error indicates the server is unreachable
+    /// (connection refused, timeout, DNS failure, etc.).
+    pub fn is_connection_error(&self) -> bool {
+        match self {
+            ApiError::Http(e) => e.is_connect() || e.is_timeout(),
+            ApiError::NoServerSelected => true,
+            _ => false,
+        }
+    }
+}

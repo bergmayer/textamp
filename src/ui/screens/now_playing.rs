@@ -86,19 +86,17 @@ pub fn render_queue_mode(frame: &mut Frame, state: &AppState, area: Rect) {
         ])
         .split(area);
 
-    // Left column: artwork on top, clear button, stations below
+    // Left column: artwork on top, stations below
     let left_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(art_height),
-            Constraint::Length(1),
             Constraint::Min(4),
         ])
         .split(chunks[0]);
 
     render_artwork(frame, state, left_chunks[0]);
-    render_clear_button(frame, state, left_chunks[1]);
-    render_station_panel(frame, state, left_chunks[2]);
+    render_station_panel(frame, state, left_chunks[1]);
     render_track_list(frame, state, chunks[1]);
 }
 
@@ -149,17 +147,6 @@ fn render_artwork_placeholder(frame: &mut Frame, area: Rect, message: &str) {
     frame.render_widget(placeholder, centered);
 }
 
-/// Render the "Clear" button row between artwork and stations.
-fn render_clear_button(frame: &mut Frame, state: &AppState, area: Rect) {
-    let t = theme();
-    let has_tracks = !state.queue.is_empty() || !state.radio.tracks.is_empty();
-    let fg = if has_tracks { t.colors.fg_muted } else { t.colors.bg_secondary };
-    let label = " ✕ Clear ";
-    let paragraph = Paragraph::new(label)
-        .style(Style::default().fg(fg).bg(t.colors.bg_primary))
-        .alignment(Alignment::Center);
-    frame.render_widget(paragraph, area);
-}
 
 /// Render the stations panel below artwork in queue mode.
 fn render_station_panel(frame: &mut Frame, state: &AppState, area: Rect) {
@@ -255,10 +242,8 @@ fn render_station_panel(frame: &mut Frame, state: &AppState, area: Rect) {
 
             // Build display text with prefix
             // Active DJ modes and active shuffle get a dot indicator
-            let prefix = if is_active_station {
+            let prefix = if is_active_station || is_active_dj || is_active_shuffle {
                 "\u{266a} " // ♪
-            } else if is_active_dj || is_active_shuffle {
-                "\u{25cf} " // ●
             } else {
                 ""
             };
@@ -552,11 +537,11 @@ pub fn render_visualizer_mode(frame: &mut Frame, state: &AppState, area: Rect) {
     let show_artwork = area.width > 50;
 
     if show_artwork {
-        // Top panel takes 40% of height (min 12) for artwork + track info
-        let top_height = (area.height * 40 / 100).max(12);
+        // Top panel: match queue artwork sizing (40% of height)
+        let top_height = (area.height * 40 / 100).max(8);
         // Artwork width matches height for square image (2:1 char aspect ratio),
-        // capped at 50% of total width
-        let art_width = (top_height * 2).min(area.width * 50 / 100).max(24);
+        // capped at 40% of total width
+        let art_width = (top_height * 2).min(area.width * 40 / 100).max(25);
 
         // Layout with artwork: top row has art + info, bottom has waveform
         let chunks = Layout::default()

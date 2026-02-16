@@ -241,7 +241,7 @@ pub enum Action {
     // DJ modes
     ToggleDjMode(crate::app::state::DjMode),
     DjModeProcess,
-    DjModeTracksReady(Vec<Track>, bool), // (tracks, insert_next)
+    DjModeTracksReady(Vec<Track>, bool, Option<String>), // (tracks, insert_next, error)
     /// Batch result from inserter DJ modes: Vec<(original_queue_index, tracks_to_insert_after)>
     DjModeBatchReady(Vec<(usize, Vec<Track>)>),
 

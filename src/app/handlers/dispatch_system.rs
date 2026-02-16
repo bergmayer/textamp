@@ -109,6 +109,8 @@ pub async fn dispatch(
                 cache_data.compilation_albums = state.compilation_albums.clone();
                 cache_data.compilation_artist_keys = state.compilation_artist_keys.clone();
                 cache_data.compilation_track_artist_keys = state.compilation_track_artist_keys.clone();
+                cache_data.artist_compilation_map = state.artist_compilation_map.clone();
+                cache_data.single_artist_compilations = state.single_artist_compilations.clone();
 
                 // Save non-smart playlist tracks to disk cache
                 for (key, cached) in &state.playlist_tracks_cache {

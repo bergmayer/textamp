@@ -111,16 +111,64 @@ pub async fn dispatch(
                     // Then add albums
                     let mut items = vec![artist_radio, all_tracks];
 
-                    // Add "Compilation Tracks" if this artist appears on any compilation albums.
-                    // We check compilation_track_artist_keys (all artist keys found on compilation tracks).
-                    if state.compilations_detected && state.compilation_track_artist_keys.contains(&artist_key) {
-                        items.push(BrowseItem::CompilationTracks {
-                            artist_key: artist_key.clone(),
-                            artist_name: state.selected_artist_name.clone(),
-                        });
+                    // Start with albums from API, then merge any from preloaded
+                    // state.albums that the API missed (e.g. compilation-subtype
+                    // albums that Plex hides from /children endpoint)
+                    let mut all_albums = albums;
+                    {
+                        let api_keys: std::collections::HashSet<&str> = all_albums.iter()
+                            .map(|a| a.rating_key.as_str())
+                            .collect();
+                        let missing: Vec<_> = state.albums.iter()
+                            .filter(|a| a.parent_rating_key.as_deref() == Some(&artist_key)
+                                && !api_keys.contains(a.rating_key.as_str()))
+                            .cloned()
+                            .collect();
+                        if !missing.is_empty() {
+                            tracing::debug!("Merging {} albums from preload that API didn't return for artist {}", missing.len(), artist_key);
+                            all_albums.extend(missing);
+                        }
                     }
 
-                    items.extend(BrowseItem::from_albums(&albums));
+                    items.extend(BrowseItem::from_albums(&all_albums));
+
+                    if state.compilations_detected {
+                        // Append single-artist compilations whose parent is NOT
+                        // this artist (detected via track analysis)
+                        if let Some(solo_comps) = state.single_artist_compilations.get(&artist_key) {
+                            let existing_keys: std::collections::HashSet<&str> = all_albums.iter()
+                                .map(|a| a.rating_key.as_str())
+                                .collect();
+                            let new_comps: Vec<_> = solo_comps.iter()
+                                .filter(|a| !existing_keys.contains(a.rating_key.as_str()))
+                                .cloned()
+                                .collect();
+                            if !new_comps.is_empty() {
+                                items.extend(BrowseItem::from_albums(&new_comps));
+                            }
+                        }
+
+                        // Append multi-artist compilation albums this artist appears on
+                        if let Some(comp_album_keys) = state.artist_compilation_map.get(&artist_key) {
+                            let comp_items: Vec<BrowseItem> = comp_album_keys.iter()
+                                .filter_map(|key| {
+                                    state.compilation_albums.iter()
+                                        .find(|a| a.rating_key == *key)
+                                        .map(|a| BrowseItem::Album {
+                                            key: a.rating_key.clone(),
+                                            title: a.title.clone(),
+                                            artist: a.artist_name().to_string(),
+                                            year: a.year,
+                                            thumb: a.thumb.clone(),
+                                            is_placeholder: false,
+                                        })
+                                })
+                                .collect();
+                            if !comp_items.is_empty() {
+                                items.extend(comp_items);
+                            }
+                        }
+                    }
 
                     let title = state.selected_artist_name.clone();
                     let col = BrowseColumn::new(title, items);

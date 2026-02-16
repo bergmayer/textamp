@@ -77,8 +77,10 @@ pub async fn play_track(
     // Generate new session ID for this playback context
     state.plex_session_id = Some(generate_plex_session_id());
 
-    // Clear radio state if switching from radio mode
+    // Migrate radio tracks to queue before clearing radio mode
     if state.playback_mode == PlaybackMode::Radio {
+        state.queue = state.radio.tracks.clone();
+        state.queue_index = state.radio.track_index;
         state.radio.clear();
     }
 
@@ -139,6 +141,7 @@ pub fn collect_tracks_from_column(col: &crate::app::state::BrowseColumn) -> Vec<
                     key: String::new(),
                     parent_thumb: None,
                     grandparent_thumb: None,
+                    original_title: None,
                 })
             } else {
                 None

@@ -22,6 +22,29 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
     let transport_row = state.terminal_height.saturating_sub(3);
     let shortcuts_row = state.terminal_height.saturating_sub(1);
 
+    // Confirm dialog intercepts mouse clicks when active
+    if state.confirm_dialog.is_some() {
+        if let crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) = event.kind {
+            let frame_area = ratatui::layout::Rect::new(0, 0, state.terminal_width, state.terminal_height);
+            if let Some(dialog) = state.confirm_dialog.as_ref() {
+                if let Some(yes) = crate::ui::confirm_dialog_hit_test(dialog, frame_area, click_col, click_row) {
+                    let dialog = state.confirm_dialog.take().unwrap();
+                    if yes {
+                        use crate::app::state::ConfirmAction;
+                        return match dialog.on_confirm {
+                            ConfirmAction::RefreshCache => helpers::refresh_current_view(state),
+                            ConfirmAction::ClearLibraryCache => vec![Action::ClearLibraryCache],
+                            ConfirmAction::ClearArtworkCache => vec![Action::ClearArtworkCache],
+                            ConfirmAction::ClearSubfolderCache => vec![Action::ClearSubfolderCache],
+                        };
+                    }
+                    return vec![];
+                }
+            }
+        }
+        return vec![];
+    }
+
     // Library picker popup intercepts all mouse events when active
     if state.library_picker_active {
         return handle_library_picker_mouse(event, state);
@@ -353,15 +376,13 @@ fn handle_search_popup_click(click_row: u16, click_col: u16, state: &mut AppStat
 }
 
 /// Handle click on the shortcut bar at the bottom.
-fn handle_shortcut_bar_click(click_col: u16, state: &AppState) -> Vec<Action> {
-    // Shortcut bar items (must match render_shortcuts in ui/app.rs):
-    // ^L library | ^P playlists | ^G genres | ^O folders | ^N queue
-    //
-    // These are centered, so we need to calculate positions based on terminal width.
-    // Each item is roughly: " ^X label " with separators "|"
-    //
-    // Clicking an already-active item cycles its mode (like the keyboard shortcut does).
+fn handle_shortcut_bar_click(click_col: u16, state: &mut AppState) -> Vec<Action> {
+    // If the alt bar is showing, handle clicks on alt bar items (bottom row = commands)
+    if state.alt_bar_until.is_some() {
+        return handle_alt_bar_row_click(click_col, state, false);
+    }
 
+    // Default nav bar: shortcut items
     let shortcuts: [(&str, &str, usize); 6] = [
         ("^L", "library", 0),                       // Library
         ("^P", "playlists", 1),                     // Playlists
@@ -397,7 +418,115 @@ fn handle_shortcut_bar_click(click_col: u16, state: &AppState) -> Vec<Action> {
         }
     }
 
+    // Clicked blank space — show alt bar for 6 seconds
+    state.alt_bar_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(6));
     vec![]
+}
+
+/// Handle click on an alt bar row (top = function keys, bottom = contextual commands).
+fn handle_alt_bar_row_click(click_col: u16, state: &mut AppState, is_top_row: bool) -> Vec<Action> {
+    use crate::app::handlers::key_input::{available_alt_commands, CommandModifier};
+
+    let alt_cmds = available_alt_commands(state);
+    if alt_cmds.is_empty() {
+        state.alt_bar_until = None;
+        return vec![];
+    }
+
+    // Filter commands for this row (same split as render_alt_bar_row)
+    let filtered: Vec<&crate::app::handlers::key_input::AltCommand> = alt_cmds.iter()
+        .filter(|cmd| {
+            if is_top_row {
+                cmd.display_key.is_some()
+            } else {
+                cmd.display_key.is_none()
+            }
+        })
+        .collect();
+
+    if filtered.is_empty() {
+        state.alt_bar_until = None;
+        return vec![];
+    }
+
+    // Calculate item positions (matches render_alt_bar_row layout)
+    let mut total_width: u16 = 0;
+    let mut item_ranges: Vec<(u16, u16, usize)> = Vec::new();
+
+    for (i, cmd) in filtered.iter().enumerate() {
+        let separator_width: u16 = if i > 0 { 1 } else { 0 };
+        let key_str_len = if let Some(dk) = cmd.display_key {
+            dk.len() as u16 + 2
+        } else {
+            match cmd.modifier {
+                CommandModifier::Ctrl => 4,
+                CommandModifier::Alt => 4,
+                CommandModifier::None => cmd.key.len_utf8() as u16 + 2,
+            }
+        };
+        let label_len = cmd.label.len() as u16 + 1;
+        let item_width = key_str_len + label_len;
+
+        let start = total_width + separator_width;
+        let end = start + item_width;
+        item_ranges.push((start, end, i));
+        total_width = end;
+    }
+
+    let center_offset = state.terminal_width.saturating_sub(total_width) / 2;
+
+    for (start, end, idx) in item_ranges {
+        let abs_start = center_offset + start;
+        let abs_end = center_offset + end;
+        if click_col >= abs_start && click_col < abs_end {
+            state.alt_bar_until = None;
+            return alt_bar_item_action(filtered[idx], state);
+        }
+    }
+
+    // Clicked outside any item — dismiss the bar
+    state.alt_bar_until = None;
+    vec![]
+}
+
+/// Map a clicked alt bar command to an action.
+fn alt_bar_item_action(cmd: &crate::app::handlers::key_input::AltCommand, state: &mut AppState) -> Vec<Action> {
+    use crate::app::handlers::key_input::CommandModifier;
+    match (cmd.modifier, cmd.key) {
+        (CommandModifier::Ctrl, 'e') => vec![Action::EnqueueSelection],
+        (CommandModifier::Ctrl, 'v') => super::key_input::handle_cycle_view(state),
+        (CommandModifier::Ctrl, 'm') => super::key_input::get_similar_action(state),
+        (CommandModifier::Ctrl, 'b') => super::key_input::navigate_to_album(state),
+        (CommandModifier::Ctrl, 'w') => vec![Action::PromptSavePlaylist],
+        (CommandModifier::Ctrl, 'x') => vec![Action::ClearQueue],
+        (CommandModifier::Alt, 'l') => {
+            if let Some(ref lib_key) = state.active_library {
+                let key = format!("/library/sections/{}/stations/library", lib_key);
+                vec![Action::PlayStation(key)]
+            } else {
+                vec![]
+            }
+        }
+        (CommandModifier::Alt, 'r') => {
+            if let Some(ref lib_key) = state.active_library {
+                let key = format!("/library/sections/{}/stations/randomAlbum", lib_key);
+                vec![Action::PlayStation(key)]
+            } else {
+                vec![]
+            }
+        }
+        (CommandModifier::Alt, 's') => vec![Action::OpenLibraryPicker],
+        (CommandModifier::None, _) => {
+            // Function keys
+            match cmd.display_key {
+                Some("F1") => vec![Action::SetView(View::Help)],
+                Some("F2") => vec![Action::OpenSettings],
+                Some("F5") => helpers::refresh_current_view(state),
+                _ => vec![],
+            }
+        }
+        _ => vec![],
+    }
 }
 
 /// Return the action for clicking a shortcut bar item (with cycling support).
@@ -434,6 +563,11 @@ fn shortcut_bar_action(idx: usize, _state: &AppState) -> Vec<Action> {
 
 /// Handle mouse down on the transport bar.
 fn handle_transport_down(click_col: u16, state: &mut AppState) -> Vec<Action> {
+    // When alt bar is showing, the transport row becomes the top row (function keys)
+    if state.alt_bar_until.is_some() {
+        return handle_alt_bar_row_click(click_col, state, true);
+    }
+
     // Transport bar layout (controls on left):
     // [⏸] [MM:SS] [━━━●───────] [MM:SS] [ │ ] [track info...] [...] [🔍]
     // ^0  ^2      ^8           ^28      ^34                          ^end
@@ -1205,13 +1339,8 @@ fn handle_now_playing_down(click_row: u16, click_col: u16, modifiers: crossterm:
             let art_height = (content_height * 40 / 100).max(8);
             let art_width = (art_height * 2).min(state.terminal_width * 40 / 100).max(25);
 
-            // Click on clear button row (left column, between artwork and stations)
-            if click_col < art_width && click_row == art_height {
-                return vec![Action::ClearQueue];
-            }
-
-            // Click in station panel area (left column, below artwork + clear button)
-            let station_top = art_height + 1;
+            // Click in station panel area (left column, below artwork)
+            let station_top = art_height;
             if click_col < art_width && click_row >= station_top {
                 state.now_playing_focus = NowPlayingFocus::Stations;
                 // Map click to station item (accounting for border)
@@ -1238,6 +1367,9 @@ fn handle_now_playing_down(click_row: u16, click_col: u16, modifiers: crossterm:
                         if already_selected {
                             // Click already-selected: drill down / play (same as Enter)
                             if let Some(station) = state.station_nav.selected_station().cloned() {
+                                if station.is_separator() {
+                                    return vec![];
+                                }
                                 if station.key.starts_with("action:") {
                                     return match station.key.as_str() {
                                         "action:adventure" => vec![Action::OpenAdventureLauncher],
@@ -1259,6 +1391,12 @@ fn handle_now_playing_down(click_row: u16, click_col: u16, modifiers: crossterm:
                                         }
                                         _ => vec![],
                                     };
+                                }
+                                if station.is_dj_mode() {
+                                    if let Some(mode) = crate::app::state::DjMode::from_key(&station.key) {
+                                        return vec![Action::ToggleDjMode(mode)];
+                                    }
+                                    return vec![];
                                 }
                                 if station.is_category() {
                                     return vec![Action::DrillIntoStation(station.key.clone(), station.title.clone())];
@@ -1804,6 +1942,15 @@ fn handle_similar_click(click_row: u16, state: &mut AppState) -> Vec<Action> {
 
 /// Handle scroll wheel events.
 fn handle_scroll(up: bool, click_row: u16, click_col: u16, state: &mut AppState) -> Vec<Action> {
+    // Coalesce rapid scroll events (normal mouse wheel can fire multiple events per tick)
+    let now = std::time::Instant::now();
+    if let Some(last) = state.scroll_cooldown {
+        if now.duration_since(last).as_millis() < 50 {
+            return vec![];
+        }
+    }
+    state.scroll_cooldown = Some(now);
+
     match state.view {
         View::Browse => {
             return handle_browse_scroll(up, click_row, click_col, state);
@@ -1814,7 +1961,7 @@ fn handle_scroll(up: bool, click_row: u16, click_col: u16, state: &mut AppState)
             let art_height = (content_height * 40 / 100).max(8);
             let art_width = (art_height * 2).min(state.terminal_width * 40 / 100).max(25);
 
-            let station_top = art_height + 1; // +1 for clear button row
+            let station_top = art_height;
             if click_col < art_width && click_row >= station_top {
                 // Station panel scroll
                 let delta: i32 = if up { -1 } else { 1 };

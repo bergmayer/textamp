@@ -743,6 +743,7 @@ impl PlexClient {
                     thumb: None,
                     parent_thumb: None,
                     grandparent_thumb: None,
+                    original_title: None,
                     media: meta
                         .media
                         .into_iter()
@@ -802,6 +803,7 @@ impl PlexClient {
                     thumb: None,
                     parent_thumb: None,
                     grandparent_thumb: None,
+                    original_title: None,
                     media: meta
                         .media
                         .into_iter()
@@ -1693,11 +1695,15 @@ impl PlexClient {
             EP_LIBRARY_METADATA, rating_key, limit, max_distance
         );
 
-        let response: TracksResponse = self.get(&path).await?;
+        tracing::info!("Sonic similarity request: {}", path);
+        let response: TracksResponse = self.get(&path).await.map_err(|e| {
+            tracing::warn!("Sonic similarity request failed for key={}: {}", rating_key, e);
+            e
+        })?;
         let tracks = response.media_container.metadata;
 
         tracing::info!(
-            "get_similar_tracks_with_distance for {} (maxDistance={}) found {} tracks",
+            "Sonic similarity for key={} (maxDistance={}) returned {} tracks",
             rating_key, max_distance, tracks.len()
         );
 

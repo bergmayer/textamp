@@ -307,6 +307,10 @@ pub fn handle_app_event(
                 // Cache was loaded and fresh — no API refresh needed
                 if !state.artists.is_empty() {
                     tracing::info!("Library already loaded from cache, skipping reload");
+
+                    // Trigger compilation detection if not already done (e.g., old cache without compilation data)
+                    helpers::maybe_detect_compilations(event_tx, state, client);
+
                     return vec![];
                 }
 
@@ -622,6 +626,8 @@ pub fn handle_app_event(
                     message: "This track may have been removed. Refresh cache?".to_string(),
                     on_confirm: crate::app::state::ConfirmAction::RefreshCache,
                 });
+            } else if let crate::app::state::OutputTarget::Remote { ref player_name, .. } = state.output_target {
+                state.set_error(format!("Playback failed — {} may not be running", player_name));
             } else {
                 state.set_error("Playback stopped after multiple consecutive errors".to_string());
             }
@@ -772,6 +778,8 @@ pub fn handle_app_event(
                     state.artist_nav.update_root_items(state.artist_view_mode.name(), items);
                 }
             }
+            // Artists now loaded — try compilation detection (needs both artists + albums)
+            helpers::maybe_detect_compilations(event_tx, state, client);
             vec![]
         }
         Event::AlbumsPreloaded { library_key, mut albums } => {
@@ -789,19 +797,7 @@ pub fn handle_app_event(
             }
 
             // Spawn background compilation detection if not already done
-            if !state.compilations_detected {
-                let tx = event_tx.clone();
-                let lib_key = library_key.clone();
-                let client_clone = client.clone();
-                let albums_clone = state.albums.clone();
-                let all_artist_keys: std::collections::HashSet<String> = state.artists.iter()
-                    .map(|a| a.rating_key.clone())
-                    .collect();
-
-                tokio::spawn(async move {
-                    helpers::detect_compilations(tx, lib_key, albums_clone, all_artist_keys, client_clone).await;
-                });
-            }
+            helpers::maybe_detect_compilations(event_tx, state, client);
 
             vec![]
         }
@@ -976,13 +972,15 @@ pub fn handle_app_event(
             }
             vec![]
         }
-        Event::CompilationsDetected { library_key, albums, artist_only_keys, track_artist_keys } => {
+        Event::CompilationsDetected { library_key, albums, artist_only_keys, track_artist_keys, artist_compilation_map, single_artist_compilations } => {
             if state.active_library.as_ref() != Some(&library_key) {
                 return vec![];
             }
             state.compilation_albums = albums;
             state.compilation_artist_keys = artist_only_keys;
             state.compilation_track_artist_keys = track_artist_keys;
+            state.artist_compilation_map = artist_compilation_map;
+            state.single_artist_compilations = single_artist_compilations;
             state.compilations_detected = true;
             state.cache_dirty = true;
 
@@ -999,11 +997,6 @@ pub fn handle_app_event(
             if let Some(deadline) = state.alt_bar_until {
                 if std::time::Instant::now() >= deadline {
                     state.alt_bar_until = None;
-                }
-            }
-            if let Some(deadline) = state.ctrl_alt_bar_until {
-                if std::time::Instant::now() >= deadline {
-                    state.ctrl_alt_bar_until = None;
                 }
             }
 
@@ -1280,6 +1273,8 @@ pub fn handle_app_event(
                 state.compilation_albums = cached.compilation_albums;
                 state.compilation_artist_keys = cached.compilation_artist_keys;
                 state.compilation_track_artist_keys = cached.compilation_track_artist_keys;
+                state.artist_compilation_map = cached.artist_compilation_map;
+                state.single_artist_compilations = cached.single_artist_compilations;
                 state.compilations_detected = true;
                 // Re-build artist root items with compilation data
                 let items = state.build_artist_root_items();
@@ -1520,8 +1515,8 @@ pub fn handle_app_event(
         }
 
         // DJ mode tracks ready (continuous modes)
-        Event::DjTracksReady { tracks, insert_next } => {
-            vec![Action::DjModeTracksReady(tracks, insert_next)]
+        Event::DjTracksReady { tracks, insert_next, error } => {
+            vec![Action::DjModeTracksReady(tracks, insert_next, error)]
         }
         // DJ mode batch ready (inserter modes)
         Event::DjBatchReady { inserts } => {

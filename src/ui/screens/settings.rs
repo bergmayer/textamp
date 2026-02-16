@@ -127,11 +127,10 @@ fn render_account_content(frame: &mut Frame, state: &AppState, area: Rect) {
         for (i, lib) in state.libraries.iter().enumerate() {
             let is_active = state.active_library.as_ref() == Some(&lib.key);
             let is_selected = is_focused && i == state.settings_state.item_index;
-            let prefix = "  ";
-            let active_marker = if is_active { " ♪" } else { "" };
+            let prefix = if is_active { "  ♪ " } else { "  " };
             let style = if is_selected { Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg) } else { Style::default().fg(t.colors.fg_primary) };
             lines.push(Line::from(Span::styled(
-                format!("{}{}{}", prefix, lib.title, active_marker),
+                format!("{}{}", prefix, lib.title),
                 style,
             )));
         }
@@ -468,11 +467,10 @@ fn render_textamp_content(frame: &mut Frame, state: &AppState, area: Rect) {
     for (i, theme_name) in ThemeName::all().iter().enumerate() {
         let is_active = *theme_name == state.theme;
         let is_selected = is_focused && i == state.settings_state.item_index;
-        let prefix = "  ";
-        let active_marker = if is_active { " ♪" } else { "" };
+        let prefix = if is_active { "  ♪ " } else { "  " };
         let style = if is_selected { Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg) } else { Style::default().fg(t.colors.fg_primary) };
         lines.push(Line::from(Span::styled(
-            format!("{}{}{}", prefix, theme_name.display_name(), active_marker),
+            format!("{}{}", prefix, theme_name.display_name()),
             style,
         )));
     }
@@ -506,11 +504,10 @@ fn render_textamp_content(frame: &mut Frame, state: &AppState, area: Rect) {
         let item_idx = theme_count + i;
         let is_active = *mode == state.artwork_mode;
         let is_selected = is_focused && state.settings_state.item_index == item_idx;
-        let prefix = "  ";
-        let active_marker = if is_active { " ♪" } else { "" };
+        let prefix = if is_active { "  ♪ " } else { "  " };
         let style = if is_selected { Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg) } else { Style::default().fg(t.colors.fg_primary) };
         lines.push(Line::from(Span::styled(
-            format!("{}{}{}", prefix, mode.name(), active_marker),
+            format!("{}{}", prefix, mode.name()),
             style,
         )));
     }
@@ -528,11 +525,10 @@ fn render_textamp_content(frame: &mut Frame, state: &AppState, area: Rect) {
     let is_local = matches!(state.output_target, OutputTarget::Local);
     let local_idx = output_offset;
     let is_selected = is_focused && state.settings_state.item_index == local_idx;
-    let prefix = "  ";
-    let active_marker = if is_local { " ♪" } else { "" };
+    let prefix = if is_local { "  ♪ " } else { "  " };
     let style = if is_selected { Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg) } else { Style::default().fg(t.colors.fg_primary) };
     lines.push(Line::from(Span::styled(
-        format!("{}local{}", prefix, active_marker),
+        format!("{}local", prefix),
         style,
     )));
 
@@ -544,11 +540,10 @@ fn render_textamp_content(frame: &mut Frame, state: &AppState, area: Rect) {
             _ => false,
         };
         let is_selected = is_focused && item_idx == state.settings_state.item_index;
-        let prefix = "  ";
-        let active_marker = if is_active { " ♪" } else { "" };
+        let prefix = if is_active { "  ♪ " } else { "  " };
         let style = if is_selected { Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg) } else { Style::default().fg(t.colors.fg_primary) };
         lines.push(Line::from(Span::styled(
-            format!("{}{} ({}){}", prefix, player.name, player.product, active_marker),
+            format!("{}{} ({})", prefix, player.name, player.product),
             style,
         )));
     }

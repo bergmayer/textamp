@@ -66,6 +66,9 @@ pub async fn dispatch(
                             let lib_title = "Music".to_string();
                             load_from_cache(state, cached, lib_key, &lib_title);
 
+                            // Trigger compilation detection if cache had no compilation data
+                            helpers::maybe_detect_compilations(event_tx, state, client);
+
                             // Use two-tier staleness check for the current view
                             if let Some(tier1_cat) = helpers::current_view_category(state) {
                                 helpers::check_staleness_on_view_load(event_tx, state, client, tier1_cat);
@@ -486,6 +489,8 @@ fn load_from_cache(state: &mut AppState, cached: CacheData, lib_key: &str, lib_t
         state.compilation_albums = cached.compilation_albums;
         state.compilation_artist_keys = cached.compilation_artist_keys;
         state.compilation_track_artist_keys = cached.compilation_track_artist_keys;
+        state.artist_compilation_map = cached.artist_compilation_map;
+        state.single_artist_compilations = cached.single_artist_compilations;
         state.compilations_detected = true;
         // Re-build artist root items with compilation data
         let items = state.build_artist_root_items();

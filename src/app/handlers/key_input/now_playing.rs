@@ -302,7 +302,13 @@ fn handle_queue_track_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Ac
 
     match key.code {
         KeyCode::Esc => {
-            vec![Action::SetView(View::Browse)]
+            // If items are multi-selected, clear selection
+            if !state.queue_selected.is_empty() {
+                state.queue_selected.clear();
+                return vec![];
+            }
+            // Otherwise ESC does nothing in queue (use Ctrl+shortcuts to navigate)
+            vec![]
         }
         KeyCode::F(1) | KeyCode::Char('?') => vec![Action::SetView(View::Help)],
 

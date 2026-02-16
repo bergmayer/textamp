@@ -144,6 +144,9 @@ pub struct Track {
     pub parent_thumb: Option<String>,
     #[serde(default)]
     pub grandparent_thumb: Option<String>,
+    /// Track-level artist name (used by Plex for compilation tracks).
+    #[serde(default)]
+    pub original_title: Option<String>,
 }
 
 impl Track {

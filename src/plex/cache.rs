@@ -144,6 +144,10 @@ pub struct CacheData {
     pub compilation_artist_keys: HashSet<String>,
     #[serde(default)]
     pub compilation_track_artist_keys: HashSet<String>,
+    #[serde(default)]
+    pub artist_compilation_map: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    pub single_artist_compilations: HashMap<String, Vec<Album>>,
 
     // Per-category refresh timestamps (category display_name -> epoch secs)
     #[serde(default)]

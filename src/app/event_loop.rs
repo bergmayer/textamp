@@ -379,6 +379,12 @@ impl EventLoop {
                             }).await;
                         } else {
                             tracing::warn!("Background: no working connections found for any server");
+                            let server_name = stored_bg.server_name.clone()
+                                .or_else(|| servers.first().map(|s| s.name.clone()))
+                                .unwrap_or_else(|| "Server".to_string());
+                            let _ = event_tx_bg.send(Event::ServerConnectionFailed {
+                                server_name,
+                            }).await;
                         }
                     });
                     return;
@@ -544,7 +550,7 @@ impl EventLoop {
             | PlayCurrentRadioTrack
             | StartPlexRadio { .. }
             | PlayStation(_) | DrillIntoStation(_, _) | NavigateStationsBack
-            | ToggleDjMode(_) | DjModeProcess | DjModeTracksReady(_, _)
+            | ToggleDjMode(_) | DjModeProcess | DjModeTracksReady(_, _, _)
             | DjModeBatchReady(_) => {
                 handlers::dispatch_radio::dispatch(&self.event_tx, action, state, client, audio).await?
             }

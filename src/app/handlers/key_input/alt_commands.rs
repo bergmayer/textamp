@@ -1,4 +1,4 @@
-//! Alt command availability — single source of truth for both the shortcut bar
+//! Contextual command availability — single source of truth for both the shortcut bar
 //! display and the key handler dispatch.
 
 use crate::app::state::{
@@ -7,11 +7,22 @@ use crate::app::state::{
 };
 use crate::app::AppState;
 
-/// An available Alt command shown in the shortcut bar.
+/// Modifier key for a shortcut command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandModifier {
+    Ctrl,
+    Alt,
+    None,
+}
+
+/// An available command shown in the shortcut bar.
 #[derive(Debug, Clone)]
 pub struct AltCommand {
+    pub modifier: CommandModifier,
     pub key: char,
     pub label: &'static str,
+    /// Display string for the key (e.g., "^E", "⌥L", "F1"). Overrides modifier+key when set.
+    pub display_key: Option<&'static str>,
 }
 
 /// Returns the list of Alt commands available in the current state.
@@ -25,41 +36,66 @@ pub fn available_alt_commands(state: &AppState) -> Vec<AltCommand> {
     let has_album = has_album_context(state);
     let has_playing = state.current_track().is_some();
 
-    // Alt+E enqueue: need a track or album that can be enqueued (not from Queue or Now Playing)
+    // Ctrl+E enqueue: need a track or album that can be enqueued (not from Queue or Now Playing)
     if state.view != View::Queue && state.view != View::NowPlaying && (has_track || has_album || has_enqueue_context(state)) {
-        cmds.push(AltCommand { key: 'e', label: "enqueue" });
+        cmds.push(AltCommand { modifier: CommandModifier::Ctrl, key: 'e', label: "enqueue", display_key: None });
     }
 
-    // Alt+V view cycle: context-dependent cycling (albums, playlist tracks, genre tabs)
+    // Ctrl+V view cycle: context-dependent cycling (albums, playlist tracks, genre tabs)
     if let Some(label) = get_view_cycle_label(state) {
-        cmds.push(AltCommand { key: 'v', label });
+        cmds.push(AltCommand { modifier: CommandModifier::Ctrl, key: 'v', label, display_key: None });
     }
 
-    // Alt+M similar: need a track or album in context, or something playing
+    // Ctrl+M similar: need a track or album in context, or something playing
     if has_track || has_album || has_playing {
-        cmds.push(AltCommand { key: 'm', label: "similar" });
+        cmds.push(AltCommand { modifier: CommandModifier::Ctrl, key: 'm', label: "similar", display_key: None });
     }
 
     // Ctrl+B album: need a track with album info (Miller columns, folder, or now-playing)
     if has_track_with_album(state) || has_miller_album_context(state)
         || has_folder_track_with_album(state) || has_playing_with_album(state)
     {
-        cmds.push(AltCommand { key: 'b', label: "album" });
+        cmds.push(AltCommand { modifier: CommandModifier::Ctrl, key: 'b', label: "album", display_key: None });
     }
 
-    // Alt+W save: has tracks in queue or radio (in Queue or NowPlaying view)
+    // Ctrl+W save: has tracks in queue or radio (in Queue or NowPlaying view)
     if (state.view == View::Queue || state.view == View::NowPlaying)
         && (!state.queue.is_empty() || !state.radio.tracks.is_empty())
     {
-        cmds.push(AltCommand { key: 'w', label: "save" });
+        cmds.push(AltCommand { modifier: CommandModifier::Ctrl, key: 'w', label: "save", display_key: None });
     }
+
+    // Ctrl+X clear: has tracks in queue or radio (in Queue or NowPlaying view)
+    if (state.view == View::Queue || state.view == View::NowPlaying)
+        && (!state.queue.is_empty() || !state.radio.tracks.is_empty())
+    {
+        cmds.push(AltCommand { modifier: CommandModifier::Ctrl, key: 'x', label: "clear", display_key: None });
+    }
+
+    // Alt global commands
+    if state.active_library.is_some() {
+        cmds.push(AltCommand { modifier: CommandModifier::Alt, key: 'l', label: "library radio", display_key: None });
+        cmds.push(AltCommand { modifier: CommandModifier::Alt, key: 'r', label: "random album", display_key: None });
+    }
+    if !state.libraries.is_empty() {
+        cmds.push(AltCommand { modifier: CommandModifier::Alt, key: 's', label: "switch library", display_key: None });
+    }
+
+    // Function key commands (always available)
+    if state.view != View::Help {
+        cmds.push(AltCommand { modifier: CommandModifier::None, key: '\0', label: "help", display_key: Some("F1") });
+    }
+    if state.view != View::Settings {
+        cmds.push(AltCommand { modifier: CommandModifier::None, key: '\0', label: "settings", display_key: Some("F2") });
+    }
+    cmds.push(AltCommand { modifier: CommandModifier::None, key: '\0', label: "refresh", display_key: Some("F5") });
 
     cmds
 }
 
-/// Check if a command key is currently available.
+/// Check if a Ctrl+key command is currently available.
 pub fn is_action_command_available(state: &AppState, key: char) -> bool {
-    available_alt_commands(state).iter().any(|cmd| cmd.key == key)
+    available_alt_commands(state).iter().any(|cmd| cmd.modifier == CommandModifier::Ctrl && cmd.key == key)
 }
 
 // --- Context helpers ---

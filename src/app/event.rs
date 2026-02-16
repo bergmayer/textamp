@@ -124,6 +124,10 @@ pub enum Event {
         albums: Vec<Album>,
         artist_only_keys: std::collections::HashSet<String>,
         track_artist_keys: std::collections::HashSet<String>,
+        /// Maps artist_key → Vec<album_rating_key> for compilation appearances.
+        artist_compilation_map: std::collections::HashMap<String, Vec<String>>,
+        /// Single-artist "compilations" mapped to actual artist key.
+        single_artist_compilations: std::collections::HashMap<String, Vec<Album>>,
     },
     // Library switch (async cache load)
     LibraryCacheLoaded { library_key: String, cached: Box<crate::plex::CacheData> },
@@ -173,7 +177,7 @@ pub enum Event {
     },
 
     // DJ mode
-    DjTracksReady { tracks: Vec<Track>, insert_next: bool },
+    DjTracksReady { tracks: Vec<Track>, insert_next: bool, error: Option<String> },
     /// Batch result from inserter DJ modes: (original_queue_index, tracks_to_insert_after)
     DjBatchReady { inserts: Vec<(usize, Vec<Track>)> },
 

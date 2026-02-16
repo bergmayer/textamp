@@ -18,7 +18,7 @@ mod settings;
 
 // Re-export public items used by other handler modules.
 pub use browse::{update_filter_column_selection, get_filter_drilldown_actions, truncate_filter_right_columns};
-pub use self::alt_commands::{AltCommand, available_alt_commands};
+pub use self::alt_commands::{AltCommand, CommandModifier, available_alt_commands};
 
 mod alt_commands;
 
@@ -48,31 +48,24 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
     state.browse_click_time = None;
 
     // Track modifier bar display.
-    // Alt+/ (or Alt+?) cycles: off → Alt bar → Ctrl+Alt bar → off
-    // Any non-Alt key immediately dismisses both bars.
+    // Alt+/ or Ctrl+/ toggles the contextual shortcut bar on/off.
+    // Any non-modifier key immediately dismisses it.
     let has_alt = key.modifiers.contains(KeyModifiers::ALT);
+    let has_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let is_help_key = matches!(key.code, KeyCode::Char('?') | KeyCode::Char('/'));
     let bar_duration = std::time::Duration::from_secs(4);
 
-    if is_help_key && has_alt {
-        // Alt+/ or Alt+? — cycle: off → alt bar → ctrl+alt bar → off
-        if state.ctrl_alt_bar_until.is_some() {
-            // Ctrl+Alt bar showing → dismiss both
-            state.ctrl_alt_bar_until = None;
+    if is_help_key && (has_alt || has_ctrl) {
+        // Alt+/ or Ctrl+/ — toggle shortcut bar
+        if state.alt_bar_until.is_some() {
             state.alt_bar_until = None;
-        } else if state.alt_bar_until.is_some() {
-            // Alt bar showing → switch to ctrl+alt bar
-            state.alt_bar_until = None;
-            state.ctrl_alt_bar_until = Some(std::time::Instant::now() + bar_duration);
         } else {
-            // Nothing showing → show alt bar
             state.alt_bar_until = Some(std::time::Instant::now() + bar_duration);
         }
         return vec![];
-    } else if !has_alt {
-        // Non-Alt key: dismiss both bars immediately
+    } else if !has_alt && !has_ctrl {
+        // Non-modifier key: dismiss bar immediately
         state.alt_bar_until = None;
-        state.ctrl_alt_bar_until = None;
     }
 
     // Clear error on any key
@@ -315,6 +308,9 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
         }
         (KeyModifiers::CONTROL, KeyCode::Char('w')) if alt_commands::is_action_command_available(state, 'w') => {
             return vec![Action::PromptSavePlaylist];
+        }
+        (KeyModifiers::CONTROL, KeyCode::Char('x')) if alt_commands::is_action_command_available(state, 'x') => {
+            return vec![Action::ClearQueue];
         }
         // Alt shortcuts (station/global commands)
         (KeyModifiers::ALT, KeyCode::Char('l')) => {
@@ -568,7 +564,7 @@ fn handle_auth_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
 /// Get the similar albums/tracks action based on current context.
 ///
 /// Priority: highlighted track → highlighted album → now-playing track.
-fn get_similar_action(state: &mut AppState) -> Vec<Action> {
+pub(crate) fn get_similar_action(state: &mut AppState) -> Vec<Action> {
     // Store current view so we can return to it
     state.previous_view = Some(state.view);
 
@@ -922,7 +918,7 @@ pub(crate) fn handle_cycle_view(state: &mut AppState) -> Vec<Action> {
 /// Priority:
 /// - In Library view: skip Miller/folder context (you're already there), use now-playing track
 /// - Otherwise: highlighted track → Miller/folder album context → now-playing track
-fn navigate_to_album(state: &mut AppState) -> Vec<Action> {
+pub(crate) fn navigate_to_album(state: &mut AppState) -> Vec<Action> {
     let in_library = state.view == View::Browse && state.browse_category == BrowseCategory::Library;
 
     let (album_key, artist_key, album_title, artist_name) = if in_library {

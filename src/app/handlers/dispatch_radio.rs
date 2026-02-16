@@ -89,6 +89,26 @@ pub async fn dispatch(
             state.view = View::Queue;
             state.set_status(format!("Starting radio: {}...", title));
 
+            // Pre-load artist artwork for the radio display
+            let artist_thumb = state.artists.iter()
+                .find(|a| a.rating_key == key)
+                .and_then(|a| a.thumb.clone());
+            if let Some(ref thumb) = artist_thumb {
+                let art_tx = event_tx.clone();
+                let art_client = client.clone();
+                let thumb_path = thumb.clone();
+                tokio::spawn(async move {
+                    match art_client.fetch_artwork(&thumb_path, 300).await {
+                        Ok(data) => {
+                            let _ = art_tx.send(Event::ArtworkLoaded { thumb_path, data }).await;
+                        }
+                        Err(e) => {
+                            tracing::debug!("Failed to load artist artwork for radio: {}", e);
+                        }
+                    }
+                });
+            }
+
             let tx = event_tx.clone();
             let mut client_clone = client.clone();
             let rk = key.clone();
@@ -289,6 +309,11 @@ pub async fn dispatch(
             helpers::play_current_track(event_tx, state, client, audio).await;
         }
         Action::ToggleDjMode(mode) => {
+            tracing::info!("ToggleDjMode: {:?}, current_mode={:?}, playback_mode={:?}, queue_len={}, queue_index={:?}, current_track={}",
+                mode, state.active_dj_mode, state.playback_mode,
+                state.queue.len(), state.queue_index,
+                state.current_track().map(|t| t.title.as_str()).unwrap_or("None"));
+
             if state.active_dj_mode == Some(mode) {
                 // Same mode active → deactivate
                 state.active_dj_mode = None;
@@ -299,11 +324,12 @@ pub async fn dispatch(
             } else {
                 // DJ + Station mutual exclusivity: convert radio to queue if active
                 if state.playback_mode == PlaybackMode::Radio {
+                    tracing::info!("DJ mode: converting radio to queue (radio.tracks={}, radio.track_index={:?})",
+                        state.radio.tracks.len(), state.radio.track_index);
                     state.queue = state.radio.tracks.clone();
                     state.queue_index = state.radio.track_index;
                     state.playback_mode = PlaybackMode::Queue;
                     state.radio.clear();
-                    tracing::info!("DJ mode activated: converted radio to queue");
                 }
 
                 // Activate new mode (or switch from a different one)
@@ -321,13 +347,15 @@ pub async fn dispatch(
             // Only for continuous modes (Freeze, Contempo, Groupie)
             dispatch_dj_continuous(event_tx, state, client).await;
         }
-        Action::DjModeTracksReady(tracks, _insert_next) => {
+        Action::DjModeTracksReady(tracks, _insert_next, error) => {
             // Insert DJ-picked tracks right after the current track position.
             state.dj_inserting = false;
 
             if tracks.is_empty() {
-                // Show feedback when DJ mode fails to find tracks
-                if let Some(mode) = state.active_dj_mode {
+                // Show specific error or generic hint
+                if let Some(err_msg) = error {
+                    state.set_error(err_msg);
+                } else if let Some(mode) = state.active_dj_mode {
                     let hint = match mode {
                         DjMode::Freeze | DjMode::Gemini | DjMode::Stretch =>
                             format!("{}: no similar tracks found (requires Sonic Analysis)", mode.name()),
@@ -544,20 +572,34 @@ async fn dispatch_dj_continuous(
 
     let mode = match state.active_dj_mode {
         Some(m) => m,
-        None => return,
+        None => {
+            tracing::warn!("dispatch_dj_continuous: no active DJ mode");
+            return;
+        }
     };
+
+    tracing::info!("dispatch_dj_continuous: mode={:?}, playback_mode={:?}, queue_len={}, queue_index={:?}",
+        mode, state.playback_mode, state.queue.len(), state.queue_index);
 
     // Interleaving modes: skip insertion when the last track was DJ-inserted
     // (let the next original queue track play through)
     if mode.is_interleaving() && state.dj_last_was_inserted {
         state.dj_last_was_inserted = false;
-        tracing::debug!("{}: skipping (last was DJ-inserted, letting original play)", mode.name());
+        tracing::info!("{}: skipping (last was DJ-inserted, letting original play)", mode.name());
         return;
     }
 
     let current_track = match state.current_track().cloned() {
-        Some(t) => t,
-        None => return,
+        Some(t) => {
+            tracing::info!("{}: seed track = {} (key={})", mode.name(), t.title, t.rating_key);
+            t
+        }
+        None => {
+            tracing::warn!("{}: no current track, cannot process DJ mode", mode.name());
+            state.set_status(format!("{}: no track playing", mode.name()));
+            state.dj_inserting = false;
+            return;
+        }
     };
 
     // Get the next track in queue (needed for Twofer and Stretch)
@@ -582,6 +624,7 @@ async fn dispatch_dj_continuous(
     let lib_key = state.active_library.clone();
 
     tokio::spawn(async move {
+        tracing::info!("{}: spawning async task for track key={}", mode.name(), current_track.rating_key);
         let result: Vec<crate::api::models::Track> = match mode {
             DjMode::Gemini => {
                 dispatch_dj_gemini(&client_clone, &current_track, &history, &used_artists, &used_albums).await
@@ -603,8 +646,9 @@ async fn dispatch_dj_continuous(
             }
         };
 
+        tracing::info!("{}: async task completed, {} tracks found", mode.name(), result.len());
         // Always send the event, even if empty — this ensures dj_inserting gets cleared
-        let _ = tx.send(Event::DjTracksReady { tracks: result, insert_next: true }).await;
+        let _ = tx.send(Event::DjTracksReady { tracks: result, insert_next: true, error: None }).await;
     });
 }
 
@@ -745,6 +789,7 @@ async fn dispatch_dj_stretch(
 
 /// DJ Freeze: sonically similar tracks to the current one.
 /// Tries increasing maxDistance (0.25 → 0.5 → 0.75) if initial results are empty.
+/// Used when the probe call was not made (non-Freeze modes that fall back here won't use this).
 async fn dispatch_dj_freeze(
     client: &PlexClient,
     current_track: &crate::api::models::Track,

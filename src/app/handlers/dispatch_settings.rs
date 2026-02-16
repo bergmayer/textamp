@@ -63,6 +63,8 @@ pub async fn dispatch(
             state.compilation_albums.clear();
             state.compilation_artist_keys.clear();
             state.compilation_track_artist_keys.clear();
+            state.artist_compilation_map.clear();
+            state.single_artist_compilations.clear();
             state.compilations_detected = false;
 
             state.selected_artist_albums.clear();

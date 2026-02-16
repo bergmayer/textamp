@@ -275,11 +275,11 @@ impl BrowseItem {
             BrowseItem::Track { title, .. } => title,
             BrowseItem::Genre { title, .. } => title,
             BrowseItem::Playlist { title, .. } => title,
-            BrowseItem::AllTracks { .. } => "► All Tracks",
+            BrowseItem::AllTracks { .. } => "All Tracks",
             BrowseItem::AllArtists => "All Artists",
-            BrowseItem::ArtistRadio { .. } => "♪ Artist Radio",
-            BrowseItem::Compilations => "► Compilations",
-            BrowseItem::CompilationTracks { .. } => "► Compilation Tracks",
+            BrowseItem::ArtistRadio { .. } => "Artist Radio",
+            BrowseItem::Compilations => "Compilations",
+            BrowseItem::CompilationTracks { .. } => "Compilation Tracks",
         }
     }
 
@@ -792,6 +792,11 @@ pub struct AppState {
     pub compilation_artist_keys: std::collections::HashSet<String>,
     /// All artist keys that appear on any compilation track — used to show "Compilation Tracks" item.
     pub compilation_track_artist_keys: std::collections::HashSet<String>,
+    /// Maps artist_key → Vec<album_rating_key> for compilation appearances.
+    pub artist_compilation_map: std::collections::HashMap<String, Vec<String>>,
+    /// Single-artist "compilations" (greatest hits etc.) mapped to their actual artist.
+    /// Maps artist_key → Vec<Album> so they can appear as normal albums under that artist.
+    pub single_artist_compilations: std::collections::HashMap<String, Vec<Album>>,
     /// Whether compilation detection has run for current library.
     pub compilations_detected: bool,
 
@@ -878,7 +883,6 @@ pub struct AppState {
     // Modifier bar display: shows Alt or Ctrl+Alt bar until this deadline.
     // Set on any Alt+key / Ctrl+Alt+key press; cleared on non-modifier keypress or timeout.
     pub alt_bar_until: Option<std::time::Instant>,
-    pub ctrl_alt_bar_until: Option<std::time::Instant>,
 
     // Unified search/filter tab
     pub search_tab: SearchTab,
@@ -1048,6 +1052,8 @@ pub struct AppState {
     pub artwork_cache_stats: Option<(usize, u64)>,
     /// Scroll cooldown for cover art mode (prevents trackpad momentum).
     pub art_scroll_cooldown: Option<std::time::Instant>,
+    /// General scroll cooldown (coalesces multiple scroll events per mouse wheel tick).
+    pub scroll_cooldown: Option<std::time::Instant>,
     /// Pinned scroll offset after mouse click to prevent viewport jumping.
     /// (col_idx, scroll_offset) — renderer uses this instead of calc_scroll_offset.
     pub browse_scroll_pin: Option<(usize, usize)>,
@@ -1388,6 +1394,8 @@ impl AppState {
             compilation_albums: Vec::new(),
             compilation_artist_keys: std::collections::HashSet::new(),
             compilation_track_artist_keys: std::collections::HashSet::new(),
+            artist_compilation_map: std::collections::HashMap::new(),
+            single_artist_compilations: std::collections::HashMap::new(),
             compilations_detected: false,
             genres: Vec::new(),
             artist_genres: Vec::new(),
@@ -1441,7 +1449,6 @@ impl AppState {
             status_show_time: None,
             input_dialog: None,
             alt_bar_until: None,
-            ctrl_alt_bar_until: None,
             search_tab: SearchTab::default(),
             terminal_width: 80,
             terminal_height: 24,
@@ -1515,6 +1522,7 @@ impl AppState {
             album_art_pending: std::collections::HashSet::new(),
             artwork_cache_stats: None,
             art_scroll_cooldown: None,
+            scroll_cooldown: None,
             browse_scroll_pin: None,
             browse_click_time: None,
             search_scroll_pin: None,

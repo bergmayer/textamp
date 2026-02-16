@@ -52,7 +52,7 @@ VIEWS
   F1 / ?          This help screen
   F2              Settings
 
-COMMANDS (Alt+/ to see available commands)
+COMMANDS (Alt+/ or Ctrl+/ to see available commands)
   Ctrl+F          Search popup (floating dialog)
   Ctrl+E          Add selection to queue (enqueue)
   Ctrl+V          Cycle view mode (context-dependent)
@@ -64,8 +64,7 @@ COMMANDS (Alt+/ to see available commands)
   Ctrl+M          Show similar albums/tracks
   Ctrl+B          Go to Album (navigate to track's album in Library)
   Ctrl+W          Save queue/radio as playlist
-
-STATIONS (Alt+/ twice to see available shortcuts)
+  Ctrl+X          Clear queue/radio
   Alt+L           Library Radio (station based on your library)
   Alt+R           Random Album Radio (shuffled albums)
   Alt+S           Quick library switcher

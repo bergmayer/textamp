@@ -752,7 +752,19 @@ fn render_browse_miller_columns(
             // Genre/mood album columns show artist on 2nd row
             let is_genre_albums = col.items.first().map_or(false, |item| matches!(item, BrowseItem::Album { .. }))
                 && state.browse_category == BrowseCategory::Genres;
-            let is_two_row = is_two_row_track || is_all_artists_albums || is_playlist_album_group || is_genre_albums;
+            // Compilation album track columns use 2-row display (shows per-track artist)
+            let is_compilation_album_tracks = col.items.first().map_or(false, |item| matches!(item, BrowseItem::Track { .. }))
+                && col_idx > 0
+                && nav.columns.get(col_idx - 1)
+                    .and_then(|parent| parent.selected_item())
+                    .map_or(false, |parent_item| {
+                        if let BrowseItem::Album { key, .. } = parent_item {
+                            state.compilation_albums.iter().any(|a| a.rating_key == *key)
+                        } else {
+                            false
+                        }
+                    });
+            let is_two_row = is_two_row_track || is_all_artists_albums || is_playlist_album_group || is_genre_albums || is_compilation_album_tracks;
             let rows_per_item = if is_two_row { 2 } else { 1 };
             let visible_item_count = visible_height / rows_per_item;
 
@@ -802,10 +814,15 @@ fn render_browse_miller_columns(
                         let is_now_playing = matches!(item, BrowseItem::Track { key, .. } if current_track_key == Some(key.as_str()));
 
                         // Prefix based on item type
+                        let is_pinned = matches!(item,
+                            BrowseItem::AllArtists | BrowseItem::Compilations |
+                            BrowseItem::AllTracks { .. } | BrowseItem::ArtistRadio { .. } |
+                            BrowseItem::CompilationTracks { .. }
+                        );
                         let prefix = match item {
                             BrowseItem::Track { .. } if is_now_playing => "♪ ",
                             BrowseItem::Track { .. } => "  ",
-                            BrowseItem::AllArtists => "  ", // No arrow for AllArtists
+                            _ if is_pinned => "  ", // No arrow for pinned items
                             _ => "▸ ", // Drillable items get arrow
                         };
 
@@ -934,18 +951,19 @@ fn render_browse_miller_columns(
                                 // Non-track/album item in a two-row column (handle gracefully)
                                 let style = if is_selected {
                                     Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
+                                } else if is_pinned {
+                                    Style::default().fg(t.colors.fg_accent)
                                 } else {
                                     Style::default().fg(t.colors.fg_primary)
                                 };
                                 ListItem::new(format!("{}{}", prefix, display_text)).style(style)
                             }
                         } else {
-                            let is_all_artists = matches!(item, BrowseItem::AllArtists);
                             let style = if is_now_playing {
                                 Style::default().fg(t.colors.fg_accent).add_modifier(ratatui::style::Modifier::BOLD)
                             } else if is_selected {
                                 Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
-                            } else if is_all_artists {
+                            } else if is_pinned {
                                 Style::default().fg(t.colors.fg_accent)
                             } else {
                                 Style::default().fg(t.colors.fg_primary)
@@ -1179,6 +1197,11 @@ fn render_album_art_grid(
 }
 /// Render the transport bar (now playing info).
 fn render_transport(frame: &mut Frame, state: &AppState, area: Rect) {
+    // When alt bar is active, use the transport area for alt bar top row (function keys)
+    if state.alt_bar_until.is_some() {
+        render_alt_bar_row(frame, state, area, true);
+        return;
+    }
     widgets::transport::render(frame, state, area);
 }
 
@@ -1207,108 +1230,64 @@ fn render_shortcuts(frame: &mut Frame, state: &AppState, area: Rect) {
         return;
     }
 
-    // Library name indicator (left-aligned, under transport time)
-    // When multiple servers exist, show "Library (Server)" format
-    if let Some(lib_name) = state.active_library.as_ref()
-        .and_then(|key| state.libraries.iter().find(|l| &l.key == key))
-    {
-        let label = if state.has_multiple_servers() {
-            if let Some(server_name) = state.active_server_name() {
-                format!(" [{} ({})]", lib_name.title, server_name)
-            } else {
-                format!(" [{}]", lib_name.title)
-            }
-        } else {
-            format!(" [{}]", lib_name.title)
-        };
-        let lib_label = Paragraph::new(
-            Span::styled(
-                label,
-                Style::default().fg(t.colors.fg_accent_dim).bg(t.colors.bg_secondary),
-            )
-        ).style(Style::default().bg(t.colors.bg_secondary));
-        frame.render_widget(lib_label, area);
-    }
-
-    // Three bar modes based on held modifier keys
-    let mut spans: Vec<Span> = Vec::new();
-
-    let show_ctrl_alt_bar = state.ctrl_alt_bar_until.is_some();
     let show_alt_bar = state.alt_bar_until.is_some();
 
-    if show_ctrl_alt_bar {
-        // Alt bar: global station shortcuts
-        let shortcuts: Vec<(&str, &str)> = vec![
-            ("⌥L", "library radio"),
-            ("⌥R", "random album"),
-            ("⌥S", "switch library"),
-        ];
-
-        for (i, (key, label)) in shortcuts.iter().enumerate() {
-            if i > 0 {
-                spans.push(Span::styled("|", Style::default().fg(t.colors.fg_muted).bg(t.colors.bg_secondary)));
-            }
-            spans.push(Span::styled(
-                format!(" {} ", key),
-                Style::default().fg(t.colors.shortcut_key).bg(t.colors.bg_secondary),
-            ));
-            spans.push(Span::styled(
-                format!("{} ", label),
-                Style::default().fg(t.colors.shortcut_text).bg(t.colors.bg_secondary),
-            ));
+    // Library name indicator (left-aligned) — hidden when alt bar is active
+    if !show_alt_bar {
+        if let Some(lib_name) = state.active_library.as_ref()
+            .and_then(|key| state.libraries.iter().find(|l| &l.key == key))
+        {
+            let label = if state.has_multiple_servers() {
+                if let Some(server_name) = state.active_server_name() {
+                    format!(" [{} ({})]", lib_name.title, server_name)
+                } else {
+                    format!(" [{}]", lib_name.title)
+                }
+            } else {
+                format!(" [{}]", lib_name.title)
+            };
+            let lib_label = Paragraph::new(
+                Span::styled(
+                    label,
+                    Style::default().fg(t.colors.fg_accent_dim).bg(t.colors.bg_secondary),
+                )
+            ).style(Style::default().bg(t.colors.bg_secondary));
+            frame.render_widget(lib_label, area);
         }
-    } else if show_alt_bar {
-        // Ctrl action bar: contextual command shortcuts (only available commands shown)
-        let alt_cmds = crate::app::available_alt_commands(state);
+    }
 
-        if alt_cmds.is_empty() {
+    if show_alt_bar {
+        // Alt bar bottom row (commands) — top row is rendered in render_transport
+        render_alt_bar_row(frame, state, area, false);
+        return;
+    }
+
+    // Default: navigation shortcuts
+    let mut spans: Vec<Span> = Vec::new();
+    let shortcuts: Vec<(&str, &str, bool)> = vec![
+        ("^L", "library", state.view == View::Browse && state.browse_category == BrowseCategory::Library),
+        ("^P", "playlists", state.view == View::Browse && state.browse_category == BrowseCategory::Playlists),
+        ("^G", "genres", state.view == View::Browse && state.browse_category == BrowseCategory::Genres),
+        ("^O", "folders", state.view == View::Browse && state.browse_category == BrowseCategory::Folders),
+        ("^U", "queue", state.view == View::Queue),
+        ("^N", "now playing", state.view == View::NowPlaying),
+    ];
+
+    for (i, (key, label, is_current)) in shortcuts.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("|", Style::default().fg(t.colors.fg_muted).bg(t.colors.bg_secondary)));
+        }
+
+        if *is_current {
             spans.push(Span::styled(
-                " no commands available ",
-                Style::default().fg(t.colors.fg_muted).bg(t.colors.bg_secondary),
+                format!(" {} {} ", key, label),
+                Style::default().fg(t.colors.fg_accent).bg(t.colors.bg_secondary).add_modifier(ratatui::style::Modifier::BOLD),
             ));
         } else {
-            for (i, cmd) in alt_cmds.iter().enumerate() {
-                if i > 0 {
-                    spans.push(Span::styled("|", Style::default().fg(t.colors.fg_muted).bg(t.colors.bg_secondary)));
-                }
-                let key_str = format!(" ^{} ", cmd.key.to_ascii_uppercase());
-                spans.push(Span::styled(
-                    key_str,
-                    Style::default().fg(t.colors.shortcut_key).bg(t.colors.bg_secondary),
-                ));
-                spans.push(Span::styled(
-                    format!("{} ", cmd.label),
-                    Style::default().fg(t.colors.shortcut_text).bg(t.colors.bg_secondary),
-                ));
-            }
-        }
-    } else {
-        // Default: navigation shortcuts
-        let shortcuts: Vec<(&str, &str, bool)> = vec![
-            ("^L", "library", state.view == View::Browse && state.browse_category == BrowseCategory::Library),
-            ("^P", "playlists", state.view == View::Browse && state.browse_category == BrowseCategory::Playlists),
-            ("^G", "genres", state.view == View::Browse && state.browse_category == BrowseCategory::Genres),
-            ("^O", "folders", state.view == View::Browse && state.browse_category == BrowseCategory::Folders),
-            ("^U", "queue", state.view == View::Queue),
-            ("^N", "now playing", state.view == View::NowPlaying),
-        ];
-
-        for (i, (key, label, is_current)) in shortcuts.iter().enumerate() {
-            if i > 0 {
-                spans.push(Span::styled("|", Style::default().fg(t.colors.fg_muted).bg(t.colors.bg_secondary)));
-            }
-
-            if *is_current {
-                spans.push(Span::styled(
-                    format!(" {} {} ", key, label),
-                    Style::default().fg(t.colors.fg_accent).bg(t.colors.bg_secondary).add_modifier(ratatui::style::Modifier::BOLD),
-                ));
-            } else {
-                spans.push(Span::styled(
-                    format!(" {} {} ", key, label),
-                    Style::default().fg(t.colors.shortcut_key).bg(t.colors.bg_secondary),
-                ));
-            }
+            spans.push(Span::styled(
+                format!(" {} {} ", key, label),
+                Style::default().fg(t.colors.shortcut_key).bg(t.colors.bg_secondary),
+            ));
         }
     }
 
@@ -1317,6 +1296,63 @@ fn render_shortcuts(frame: &mut Frame, state: &AppState, area: Rect) {
         .style(Style::default().bg(t.colors.bg_secondary))
         .alignment(Alignment::Center);
 
+    frame.render_widget(paragraph, area);
+}
+
+/// Render one row of the alt bar (top = function keys, bottom = contextual commands).
+fn render_alt_bar_row(frame: &mut Frame, state: &AppState, area: Rect, is_top_row: bool) {
+    let t = theme();
+    let alt_cmds = crate::app::available_alt_commands(state);
+
+    let mut spans: Vec<Span> = Vec::new();
+
+    // Split commands: function keys (display_key set) go on top, others on bottom
+    let filtered: Vec<&crate::app::AltCommand> = alt_cmds.iter()
+        .filter(|cmd| {
+            if is_top_row {
+                cmd.display_key.is_some()
+            } else {
+                cmd.display_key.is_none()
+            }
+        })
+        .collect();
+
+    if filtered.is_empty() {
+        if !is_top_row {
+            spans.push(Span::styled(
+                " no commands available ",
+                Style::default().fg(t.colors.fg_muted).bg(t.colors.bg_secondary),
+            ));
+        }
+    } else {
+        for (i, cmd) in filtered.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::styled(" | ", Style::default().fg(t.colors.fg_muted).bg(t.colors.bg_secondary)));
+            }
+            let key_str = if let Some(dk) = cmd.display_key {
+                format!(" {} ", dk)
+            } else {
+                match cmd.modifier {
+                    crate::app::CommandModifier::Ctrl => format!(" ^{} ", cmd.key.to_ascii_uppercase()),
+                    crate::app::CommandModifier::Alt => format!(" \u{2325}{} ", cmd.key.to_ascii_uppercase()),
+                    crate::app::CommandModifier::None => format!(" {} ", cmd.key.to_ascii_uppercase()),
+                }
+            };
+            spans.push(Span::styled(
+                key_str,
+                Style::default().fg(t.colors.shortcut_key).bg(t.colors.bg_secondary),
+            ));
+            spans.push(Span::styled(
+                format!("{} ", cmd.label),
+                Style::default().fg(t.colors.shortcut_text).bg(t.colors.bg_secondary),
+            ));
+        }
+    }
+
+    let line = Line::from(spans);
+    let paragraph = Paragraph::new(line)
+        .style(Style::default().bg(t.colors.bg_secondary))
+        .alignment(Alignment::Center);
     frame.render_widget(paragraph, area);
 }
 
@@ -1474,13 +1510,57 @@ fn render_confirm_dialog(frame: &mut Frame, dialog: &ConfirmDialog) {
         .border_style(Style::default().fg(t.colors.border_focused))
         .style(Style::default().bg(t.colors.bg_primary));
 
-    let text = format!("{}\n\n[Y] Yes  [N] No", dialog.message);
-    let paragraph = Paragraph::new(text)
-        .style(Style::default().fg(t.colors.fg_primary))
-        .wrap(Wrap { trim: true })
-        .block(block);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
 
-    frame.render_widget(paragraph, area);
+    // Message
+    let msg = Paragraph::new(dialog.message.as_str())
+        .style(Style::default().fg(t.colors.fg_primary))
+        .wrap(Wrap { trim: true });
+    let msg_area = Rect { height: inner.height.saturating_sub(2), ..inner };
+    frame.render_widget(msg, msg_area);
+
+    // Button row at bottom of inner area
+    let btn_y = inner.y + inner.height.saturating_sub(1);
+    let yes_text = "  Yes  ";
+    let no_text = "  No  ";
+    let yes_x = inner.x + 1;
+    let no_x = yes_x + yes_text.len() as u16 + 2;
+
+    let yes_area = Rect { x: yes_x, y: btn_y, width: yes_text.len() as u16, height: 1 };
+    let no_area = Rect { x: no_x, y: btn_y, width: no_text.len() as u16, height: 1 };
+
+    let yes_span = Paragraph::new(yes_text)
+        .style(Style::default().fg(t.colors.bg_primary).bg(t.colors.fg_accent));
+    let no_span = Paragraph::new(no_text)
+        .style(Style::default().fg(t.colors.bg_primary).bg(t.colors.fg_muted));
+
+    frame.render_widget(yes_span, yes_area);
+    frame.render_widget(no_span, no_area);
+}
+
+/// Check if a mouse click hit a confirm dialog button. Returns Some(true) for Yes, Some(false) for No, None for miss.
+pub fn confirm_dialog_hit_test(dialog: &ConfirmDialog, frame_area: Rect, col: u16, row: u16) -> Option<bool> {
+    let area = centered_rect(50, 25, frame_area);
+    let block = Block::default().borders(Borders::ALL);
+    let inner = block.inner(area);
+
+    let btn_y = inner.y + inner.height.saturating_sub(1);
+    if row != btn_y { return None; }
+
+    let yes_text = "  Yes  ";
+    let no_text = "  No  ";
+    let yes_x = inner.x + 1;
+    let no_x = yes_x + yes_text.len() as u16 + 2;
+
+    let _ = dialog; // used for lifetime/future extensibility
+    if col >= yes_x && col < yes_x + yes_text.len() as u16 {
+        Some(true)
+    } else if col >= no_x && col < no_x + no_text.len() as u16 {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 fn render_toast(frame: &mut Frame, message: &str, area: Rect) {
