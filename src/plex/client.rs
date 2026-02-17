@@ -485,20 +485,21 @@ impl PlexClient {
 
     /// Create a new playlist from track keys.
     pub async fn create_playlist(
-        &self,
+        &mut self,
         title: &str,
         track_keys: &[String],
         _library_key: &str,
     ) -> Result<(), ApiError> {
-        let server = self.require_server()?;
-        let token = self.require_token()?;
+        let server = self.require_server()?.to_string();
+        let token = self.require_token()?.to_string();
+        let machine_id = self.get_server_machine_id().await?;
 
         let uri = track_keys
             .iter()
             .map(|key| {
                 format!(
                     "server://{}/com.plexapp.plugins.library{}/{}",
-                    self.client_info.client_identifier, EP_LIBRARY_METADATA, key
+                    machine_id, EP_LIBRARY_METADATA, key
                 )
             })
             .collect::<Vec<_>>()

@@ -42,14 +42,6 @@ pub async fn dispatch(
                     state.radio.clear();
                 }
 
-                // Move played tracks (including current) to history
-                if let Some(qi) = state.queue_index {
-                    if qi < state.queue.len() {
-                        let played: Vec<Track> = state.queue.drain(..=qi).collect();
-                        state.play_history.extend(played);
-                    }
-                }
-
                 // Prepend new tracks at front of queue
                 let new_tracks: Vec<Track> = state.selected_album_tracks[idx..].to_vec();
                 state.queue.splice(0..0, new_tracks);
@@ -57,7 +49,7 @@ pub async fn dispatch(
                 state.queue_original.clear();
                 state.queue_sort_mode = QueueSortMode::QueueOrder;
                 state.playback_mode = PlaybackMode::Queue;
-                state.list_state.queue_index = state.play_history.len();
+                state.list_state.queue_index = 0;
                 audio.track_cache.flush();
                 helpers::play_current_track(event_tx, state, client, audio).await;
             }
@@ -104,8 +96,6 @@ pub async fn dispatch(
                             state.queue_index = state.radio.track_index;
                             state.playback_mode = PlaybackMode::Queue;
                             state.radio.clear();
-                            // Clear play history when switching from radio to manual queue
-                            state.play_history.clear();
                             if let Some(idx) = state.queue_index {
                                 state.list_state.queue_index = idx;
                             }
@@ -132,8 +122,6 @@ pub async fn dispatch(
                             state.queue_index = state.radio.track_index;
                             state.playback_mode = PlaybackMode::Queue;
                             state.radio.clear();
-                            // Clear play history when switching from radio to manual queue
-                            state.play_history.clear();
                             if let Some(idx) = state.queue_index {
                                 state.list_state.queue_index = idx;
                             }
@@ -156,8 +144,6 @@ pub async fn dispatch(
                 state.queue_index = state.radio.track_index;
                 state.playback_mode = PlaybackMode::Queue;
                 state.radio.clear();
-                // Clear play history when switching from radio to manual queue
-                state.play_history.clear();
                 if let Some(idx) = state.queue_index {
                     state.list_state.queue_index = idx;
                 }
@@ -232,8 +218,6 @@ pub async fn dispatch(
                     state.queue_sort_mode = QueueSortMode::QueueOrder;
                 }
             }
-            // Also clear play history (Ctrl+X clears everything)
-            state.play_history.clear();
             state.list_state.queue_index = 0;
             audio.stop();
             audio.track_cache.flush();
@@ -275,7 +259,7 @@ pub async fn dispatch(
                         state.queue = shuffled;
                         state.queue_index = new_idx; // always Some(0)
                         state.queue_sort_mode = QueueSortMode::Shuffle;
-                        state.list_state.queue_index = state.play_history.len();
+                        state.list_state.queue_index = 0;
                     }
                     QueueSortMode::Shuffle => {
                         let current_key = state.current_track().map(|t| t.rating_key.clone());
@@ -285,7 +269,7 @@ pub async fn dispatch(
                             state.queue_index = state.queue.iter().position(|t| t.rating_key == key);
                         }
                         if let Some(idx) = state.queue_index {
-                            state.list_state.queue_index = state.play_history.len() + idx;
+                            state.list_state.queue_index = idx;
                         }
                     }
                 }
@@ -310,8 +294,8 @@ pub async fn dispatch(
                         };
                     }
                 }
-                // Adjust list selection (visual index includes history offset)
-                let max_visual = state.play_history.len() + state.queue.len().saturating_sub(1);
+                // Adjust list selection
+                let max_visual = state.queue.len().saturating_sub(1);
                 if state.list_state.queue_index > max_visual {
                     state.list_state.queue_index = max_visual;
                 }
@@ -321,7 +305,7 @@ pub async fn dispatch(
             // Jump to and play a specific track in the queue
             if idx < state.queue.len() {
                 state.queue_index = Some(idx);
-                state.list_state.queue_index = state.play_history.len() + idx;
+                state.list_state.queue_index = idx;
                 if let Some(track) = state.queue.get(idx).cloned() {
                     follow_ups.push(Action::PlayTrack(track));
                 }
@@ -431,7 +415,6 @@ pub async fn dispatch(
                     state.queue_index = state.radio.track_index;
                     state.playback_mode = PlaybackMode::Queue;
                     state.radio.clear();
-                    state.play_history.clear();
                     if let Some(idx) = state.queue_index {
                         state.list_state.queue_index = idx;
                     }
@@ -674,7 +657,7 @@ pub async fn dispatch(
             );
             state.queue = shuffled;
             state.queue_index = new_idx;
-            state.list_state.queue_index = state.play_history.len();
+            state.list_state.queue_index = 0;
             state.set_status("Queue shuffled".to_string());
         }
         Action::RemixUndoShuffle => {
@@ -689,7 +672,7 @@ pub async fn dispatch(
                     }
                 }
                 if let Some(idx) = state.queue_index {
-                    state.list_state.queue_index = state.play_history.len() + idx;
+                    state.list_state.queue_index = idx;
                 }
                 state.set_status("Shuffle undone".to_string());
             } else {
@@ -717,7 +700,7 @@ pub async fn dispatch(
                     state.queue = snapshot.queue;
                     state.queue_index = snapshot.queue_index;
                     if let Some(idx) = state.queue_index {
-                        state.list_state.queue_index = state.play_history.len() + idx;
+                        state.list_state.queue_index = idx;
                     }
                     state.set_status(format!("Undid {}", snapshot.description));
                 }
@@ -732,10 +715,7 @@ pub async fn dispatch(
                 let snapshot = state.convert_radio_to_queue("Move track (from radio)");
                 state.queue_undo_snapshot = Some(snapshot);
             }
-            let visual = state.list_state.queue_index;
-            let history_len = state.play_history.len();
-            if visual < history_len { return Ok(vec![]); }
-            let idx = visual - history_len;
+            let idx = state.list_state.queue_index;
             if idx == 0 || idx >= state.queue.len() { return Ok(vec![]); }
 
             state.queue.swap(idx, idx - 1);
@@ -799,7 +779,7 @@ pub async fn dispatch(
                 }
             }
             state.queue_selected = new_selected;
-            let max = (state.play_history.len() + state.queue.len()).saturating_sub(1);
+            let max = state.queue.len().saturating_sub(1);
             state.list_state.queue_index = (state.list_state.queue_index + 1).min(max);
         }
         Action::RemoveSelectedFromQueue => {
@@ -823,7 +803,7 @@ pub async fn dispatch(
             }
             state.queue_selected.clear();
             // Adjust visual index
-            let max = (state.play_history.len() + state.queue.len()).saturating_sub(1);
+            let max = state.queue.len().saturating_sub(1);
             if state.list_state.queue_index > max {
                 state.list_state.queue_index = max;
             }
@@ -833,10 +813,7 @@ pub async fn dispatch(
                 let snapshot = state.convert_radio_to_queue("Move track (from radio)");
                 state.queue_undo_snapshot = Some(snapshot);
             }
-            let visual = state.list_state.queue_index;
-            let history_len = state.play_history.len();
-            if visual < history_len { return Ok(vec![]); }
-            let idx = visual - history_len;
+            let idx = state.list_state.queue_index;
             if idx + 1 >= state.queue.len() { return Ok(vec![]); }
 
             state.queue.swap(idx, idx + 1);
@@ -949,6 +926,9 @@ fn spawn_remix_batch(
     let client_clone = client.clone();
     let library_key = state.active_library.clone();
 
+    // For Doppelganger: collect artist aliases to exclude same artist and all their aliases
+    let artist_aliases = state.artist_aliases.clone();
+
     tokio::spawn(async move {
         let mut inserts: Vec<(usize, Vec<Track>)> = Vec::new();
         let mut history: Vec<String> = Vec::new();
@@ -967,7 +947,7 @@ fn spawn_remix_batch(
                 let _ = tx.send(Event::RemixBatchReady { inserts }).await;
             }
             Action::RemixDoppelganger => {
-                let replacements = remix_doppelganger_batch(&client_clone, tracks_with_indices).await;
+                let replacements = remix_doppelganger_batch(&client_clone, tracks_with_indices, &artist_aliases).await;
                 let _ = tx.send(Event::RemixDoppelgangerReady { replacements }).await;
             }
             _ => {
@@ -1199,9 +1179,11 @@ fn pick_diverse_remix(
 }
 
 /// Remix Doppelganger: replace each track with the most sonically similar track by a different artist.
+/// For single-artist playlists, excludes the artist AND all their aliases.
 async fn remix_doppelganger_batch(
     client: &PlexClient,
     tracks_with_indices: Vec<(usize, Track)>,
+    artist_aliases: &std::collections::HashMap<String, std::collections::HashSet<String>>,
 ) -> Vec<(usize, Track)> {
     use futures::stream::{self, StreamExt};
 
@@ -1211,6 +1193,25 @@ async fn remix_doppelganger_batch(
             t.grandparent_rating_key.as_ref().map(|a| (*idx, a.clone()))
         })
         .collect();
+
+    // Collect all unique artists in the queue
+    let queue_artist_keys: std::collections::HashSet<String> = original_artists.values().cloned().collect();
+
+    // Build set of ALL artists to exclude (queue artists + all their aliases)
+    let mut excluded_artists: std::collections::HashSet<String> = queue_artist_keys.clone();
+    for artist_key in &queue_artist_keys {
+        // Add aliases of this artist
+        if let Some(aliases) = artist_aliases.get(artist_key) {
+            excluded_artists.extend(aliases.iter().cloned());
+        }
+        // Also check if this artist IS an alias of someone else
+        for (main_artist, aliases) in artist_aliases {
+            if aliases.contains(artist_key) {
+                excluded_artists.insert(main_artist.clone());
+                excluded_artists.extend(aliases.iter().cloned());
+            }
+        }
+    }
 
     // Collect original track keys to avoid picking them
     let mut used_keys: std::collections::HashSet<String> = tracks_with_indices.iter()
@@ -1238,21 +1239,19 @@ async fn remix_doppelganger_batch(
     for (original_idx, result) in fetch_results {
         match result {
             Ok(similar) => {
-                let original_artist = original_artists.get(&original_idx).map(|s| s.as_str()).unwrap_or("");
-
-                // Phase 1: Pick the most similar track by a DIFFERENT artist, not already used
+                // Phase 1: Pick the most similar track NOT by any excluded artist, not already used
                 let pick = similar.iter().find(|t| {
                     let artist = t.grandparent_rating_key.as_deref().unwrap_or("");
                     !used_keys.contains(&t.rating_key)
                         && !artist.is_empty()
-                        && artist != original_artist
+                        && !excluded_artists.contains(artist)
                 });
 
-                // Phase 2: Relax — any different-artist track
+                // Phase 2: Relax — any track not by excluded artist (allow reuse)
                 let pick = pick.or_else(|| {
                     similar.iter().find(|t| {
                         let artist = t.grandparent_rating_key.as_deref().unwrap_or("");
-                        !artist.is_empty() && artist != original_artist
+                        !artist.is_empty() && !excluded_artists.contains(artist)
                     })
                 });
 
@@ -1335,7 +1334,6 @@ fn enqueue_search_result(state: &mut AppState) -> Vec<Action> {
                     state.queue_index = state.radio.track_index;
                     state.playback_mode = PlaybackMode::Queue;
                     state.radio.clear();
-                    state.play_history.clear();
                     if let Some(idx) = state.queue_index {
                         state.list_state.queue_index = idx;
                     }

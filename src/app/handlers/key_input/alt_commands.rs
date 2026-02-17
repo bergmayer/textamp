@@ -157,10 +157,7 @@ fn has_track_context(state: &AppState) -> bool {
         View::NowPlaying | View::Queue => {
             let idx = state.list_state.queue_index;
             match state.playback_mode {
-                PlaybackMode::Queue | PlaybackMode::None => {
-                    let history_len = state.play_history.len();
-                    idx < history_len || idx - history_len < state.queue.len()
-                }
+                PlaybackMode::Queue | PlaybackMode::None => idx < state.queue.len(),
                 PlaybackMode::Radio => idx < state.radio.tracks.len(),
             }
         }
@@ -256,14 +253,7 @@ fn has_track_with_album(state: &AppState) -> bool {
         View::NowPlaying | View::Queue => {
             let idx = state.list_state.queue_index;
             let track = match state.playback_mode {
-                PlaybackMode::Queue | PlaybackMode::None => {
-                    let history_len = state.play_history.len();
-                    if idx < history_len {
-                        state.play_history.get(idx)
-                    } else {
-                        state.queue.get(idx - history_len)
-                    }
-                }
+                PlaybackMode::Queue | PlaybackMode::None => state.queue.get(idx),
                 PlaybackMode::Radio => state.radio.tracks.get(idx),
             };
             track.map(|t| t.parent_rating_key.is_some()).unwrap_or(false)

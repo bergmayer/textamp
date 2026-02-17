@@ -330,7 +330,7 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
         PlaybackMode::Queue | PlaybackMode::None => (&state.queue, state.queue_index),
     };
 
-    if tracks.is_empty() && state.play_history.is_empty() {
+    if tracks.is_empty() {
         let msg = match state.playback_mode {
             PlaybackMode::Radio => "Station starting...",
             _ => "Queue is empty. Play a track to start.",
@@ -350,12 +350,9 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
     let max_text_width = inner.width.saturating_sub(4) as usize;
     let subtitle_width = (inner.width as usize).saturating_sub(7);
 
-    // Build combined list: history (dimmed) + current tracks
-    let history_len = state.play_history.len();
-    let total_display = history_len + tracks.len();
+    let total_display = tracks.len();
 
     // Calculate scroll offset - center on selected item
-    // selected_idx is already a visual index (includes history offset)
     let scroll_offset = match state.queue_scroll_pin {
         Some(pinned) => pinned,
         None => NavigationService::calc_scroll_offset(selected_idx, visible_item_count, total_display),
@@ -363,37 +360,14 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
 
     let mut items: Vec<ListItem> = Vec::new();
 
-    // Add history items (shown dimmed, above current tracks)
-    for (i, track) in state.play_history.iter().enumerate() {
+    // Add tracks
+    for (i, track) in tracks.iter().enumerate() {
         if i < scroll_offset || i >= scroll_offset + visible_item_count {
             continue;
         }
 
-        let track_title = if track.title.is_empty() {
-            track.file_name().unwrap_or("Unknown Track")
-        } else {
-            &track.title
-        };
-        let title_display = crate::util::truncate_middle(track_title, max_text_width);
-        let subtitle = format_artist_album(track);
-        let subtitle_display = crate::util::truncate_middle(&subtitle, subtitle_width);
-
-        let text = Text::from(vec![
-            Line::from(Span::styled(format!("  {}", title_display), Style::default().fg(t.colors.fg_muted))),
-            Line::from(Span::styled(format!("     {}", subtitle_display), Style::default().fg(t.colors.fg_muted))),
-        ]);
-        items.push(ListItem::new(text));
-    }
-
-    // Add current tracks
-    for (i, track) in tracks.iter().enumerate() {
-        let display_i = history_len + i;
-        if display_i < scroll_offset || display_i >= scroll_offset + visible_item_count {
-            continue;
-        }
-
         let is_current = current_idx == Some(i);
-        let is_selected = display_i == selected_idx;
+        let is_selected = i == selected_idx;
         let is_multi_selected = state.queue_selected.contains(&i);
 
         let prefix = if is_current { "♪ " } else if is_multi_selected { "● " } else { "  " };
@@ -507,7 +481,7 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
     };
 
     let footer = if tracks.is_empty() {
-        format!("History: {} | {}", history_len, mode_indicator)
+        mode_indicator.to_string()
     } else {
         format!("{}/{} | {}", selected_idx + 1, tracks.len(), mode_indicator)
     };

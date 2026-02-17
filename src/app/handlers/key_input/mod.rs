@@ -264,10 +264,8 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
         // Ctrl+Shift+Up/Down: multi-select in Queue view, volume elsewhere
         (mods, KeyCode::Up) if mods == KeyModifiers::CONTROL | KeyModifiers::SHIFT && state.view == View::Queue => {
             // Toggle current item into queue_selected, then move cursor up
-            let visual = state.list_state.queue_index;
-            let history_len = state.play_history.len();
-            if visual >= history_len {
-                let queue_idx = visual - history_len;
+            let queue_idx = state.list_state.queue_index;
+            if queue_idx < state.queue.len() {
                 if state.queue_selected.contains(&queue_idx) {
                     state.queue_selected.remove(&queue_idx);
                 } else {
@@ -280,17 +278,15 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
             return vec![];
         }
         (mods, KeyCode::Down) if mods == KeyModifiers::CONTROL | KeyModifiers::SHIFT && state.view == View::Queue => {
-            let visual = state.list_state.queue_index;
-            let history_len = state.play_history.len();
-            if visual >= history_len {
-                let queue_idx = visual - history_len;
+            let queue_idx = state.list_state.queue_index;
+            if queue_idx < state.queue.len() {
                 if state.queue_selected.contains(&queue_idx) {
                     state.queue_selected.remove(&queue_idx);
                 } else {
                     state.queue_selected.insert(queue_idx);
                 }
             }
-            let max = (state.play_history.len() + state.queue.len()).saturating_sub(1);
+            let max = state.queue.len().saturating_sub(1);
             state.list_state.queue_index = (state.list_state.queue_index + 1).min(max);
             return vec![];
         }
@@ -907,13 +903,7 @@ fn get_selected_track(state: &AppState) -> Option<Track> {
             let idx = state.list_state.queue_index;
             match state.playback_mode {
                 PlaybackMode::Queue | PlaybackMode::None => {
-                    // Account for play history offset
-                    let history_len = state.play_history.len();
-                    if idx < history_len {
-                        state.play_history.get(idx).cloned()
-                    } else {
-                        state.queue.get(idx - history_len).cloned()
-                    }
+                    state.queue.get(idx).cloned()
                 }
                 PlaybackMode::Radio => {
                     state.radio.tracks.get(idx).cloned()

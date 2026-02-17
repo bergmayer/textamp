@@ -2115,7 +2115,7 @@ impl AppState {
         self.queue_index = self.radio.track_index;
         self.playback_mode = PlaybackMode::Queue;
         if let Some(idx) = self.queue_index {
-            self.list_state.queue_index = self.play_history.len() + idx;
+            self.list_state.queue_index = idx;
         }
         self.radio.clear();
         self.radio_state = RadioState::default();

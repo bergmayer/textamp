@@ -291,12 +291,10 @@ fn skip_station_separators(state: &mut AppState, going_up: bool) {
 
 /// Handle track list keys in the Queue view.
 fn handle_queue_track_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
-    // Get the max index based on current mode (visual index, includes play_history)
+    // Get the max index based on current mode
     let get_max_index = |state: &AppState| -> usize {
         match state.playback_mode {
-            PlaybackMode::Queue | PlaybackMode::None => {
-                (state.play_history.len() + state.queue.len()).saturating_sub(1)
-            }
+            PlaybackMode::Queue | PlaybackMode::None => state.queue.len().saturating_sub(1),
             PlaybackMode::Radio => state.radio.tracks.len().saturating_sub(1),
         }
     };
@@ -374,13 +372,7 @@ fn handle_queue_track_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Ac
             // If the selected track is already playing, switch to NowPlaying view
             let is_current = match state.playback_mode {
                 PlaybackMode::Queue | PlaybackMode::None => {
-                    let visual = state.list_state.queue_index;
-                    let history_len = state.play_history.len();
-                    if visual >= history_len {
-                        state.queue_index == Some(visual - history_len)
-                    } else {
-                        false // history items are not "now playing"
-                    }
+                    state.queue_index == Some(state.list_state.queue_index)
                 }
                 PlaybackMode::Radio => state.radio.track_index == Some(state.list_state.queue_index),
             };
@@ -391,23 +383,12 @@ fn handle_queue_track_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Ac
             // Play selected item from queue or radio
             match state.playback_mode {
                 PlaybackMode::Queue | PlaybackMode::None => {
-                    let visual = state.list_state.queue_index;
-                    let history_len = state.play_history.len();
-                    if visual >= history_len {
-                        let queue_idx = visual - history_len;
-                        if let Some(track) = state.queue.get(queue_idx).cloned() {
-                            state.queue_index = Some(queue_idx);
-                            vec![Action::PlayTrack(track)]
-                        } else {
-                            vec![]
-                        }
+                    let queue_idx = state.list_state.queue_index;
+                    if let Some(track) = state.queue.get(queue_idx).cloned() {
+                        state.queue_index = Some(queue_idx);
+                        vec![Action::PlayTrack(track)]
                     } else {
-                        // Playing from history: replay the history track
-                        if let Some(track) = state.play_history.get(visual).cloned() {
-                            vec![Action::PlayTrack(track)]
-                        } else {
-                            vec![]
-                        }
+                        vec![]
                     }
                 }
                 PlaybackMode::Radio => {
@@ -427,13 +408,7 @@ fn handle_queue_track_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Ac
             }
             match state.playback_mode {
                 PlaybackMode::Queue | PlaybackMode::None => {
-                    let visual = state.list_state.queue_index;
-                    let history_len = state.play_history.len();
-                    if visual >= history_len {
-                        vec![Action::RemoveFromQueue(visual - history_len)]
-                    } else {
-                        vec![]
-                    }
+                    vec![Action::RemoveFromQueue(state.list_state.queue_index)]
                 }
                 PlaybackMode::Radio => {
                     let target_idx = state.list_state.queue_index;
@@ -462,7 +437,7 @@ fn handle_queue_track_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Ac
                     .map(|ch| ch.to_ascii_lowercase() == letter_lower)
                     .unwrap_or(false)
             }) {
-                state.list_state.queue_index = state.play_history.len() + idx;
+                state.list_state.queue_index = idx;
             }
             vec![]
         }

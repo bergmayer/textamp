@@ -84,14 +84,6 @@ pub async fn play_track(
         state.radio.clear();
     }
 
-    // Move played tracks (including current) to history, preserve upcoming
-    if let Some(qi) = state.queue_index {
-        if qi < state.queue.len() {
-            let played: Vec<Track> = state.queue.drain(..=qi).collect();
-            state.play_history.extend(played);
-        }
-    }
-
     // Prepend new track at front of queue
     state.queue.insert(0, track);
     state.queue_index = Some(0);
@@ -101,7 +93,7 @@ pub async fn play_track(
     state.playback_mode = PlaybackMode::Queue;
 
     // Scroll queue view to top
-    state.list_state.queue_index = state.play_history.len();
+    state.list_state.queue_index = 0;
 
     audio.track_cache.flush();
     play_current_track(event_tx, state, client, audio).await;
@@ -130,12 +122,6 @@ pub async fn queue_and_play(
     if state.playback_mode == PlaybackMode::Radio {
         state.radio.clear();
     }
-    if let Some(qi) = state.queue_index {
-        if qi < state.queue.len() {
-            let played: Vec<Track> = state.queue.drain(..=qi).collect();
-            state.play_history.extend(played);
-        }
-    }
     audio.track_cache.flush();
     state.queue.splice(0..0, tracks);
     state.queue_index = Some(play_idx);
@@ -143,7 +129,7 @@ pub async fn queue_and_play(
     state.queue_original.clear();
     state.queue_sort_mode = crate::app::state::QueueSortMode::QueueOrder;
     state.playback_mode = PlaybackMode::Queue;
-    state.list_state.queue_index = state.play_history.len();
+    state.list_state.queue_index = play_idx;
     state.set_view(View::Queue);
     play_current_track(event_tx, state, client, audio).await;
 }

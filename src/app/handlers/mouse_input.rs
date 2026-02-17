@@ -1687,32 +1687,28 @@ fn handle_now_playing_down(click_row: u16, click_col: u16, modifiers: crossterm:
                 let content_height_usize = content_height.saturating_sub(2) as usize;
                 let visible_item_count = content_height_usize / 2;
 
-                // Combined list: play_history + queue tracks
-                let history_len = state.play_history.len();
+                // Track list
                 let tracks_len = if state.playback_mode == PlaybackMode::Radio {
                     state.radio.tracks.len()
                 } else {
                     state.queue.len()
                 };
-                let total_len = history_len + tracks_len;
 
-                // Match the renderer's scroll offset calculation:
-                // list_state.queue_index is already a visual index (includes history offset)
+                // Match the renderer's scroll offset calculation
                 let selected = state.list_state.queue_index;
                 let scroll_offset = match state.queue_scroll_pin {
                     Some(pinned) => pinned,
-                    None => helpers::calc_scroll_offset(selected, visible_item_count, total_len),
+                    None => helpers::calc_scroll_offset(selected, visible_item_count, tracks_len),
                 };
                 let actual_idx = item_row + scroll_offset;
 
-                if actual_idx < total_len {
-                    // Shift+Click: toggle multi-select (queue items only)
-                    if modifiers.contains(crossterm::event::KeyModifiers::SHIFT) && actual_idx >= history_len {
-                        let queue_idx = actual_idx - history_len;
-                        if state.queue_selected.contains(&queue_idx) {
-                            state.queue_selected.remove(&queue_idx);
+                if actual_idx < tracks_len {
+                    // Shift+Click: toggle multi-select
+                    if modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
+                        if state.queue_selected.contains(&actual_idx) {
+                            state.queue_selected.remove(&actual_idx);
                         } else {
-                            state.queue_selected.insert(queue_idx);
+                            state.queue_selected.insert(actual_idx);
                         }
                         state.queue_scroll_pin = Some(scroll_offset);
                         state.list_state.queue_index = actual_idx;
@@ -2256,8 +2252,7 @@ fn handle_scroll(up: bool, click_row: u16, click_col: u16, state: &mut AppState)
             } else {
                 state.queue.len()
             };
-            let total = state.play_history.len() + tracks_len;
-            let max = total.saturating_sub(1);
+            let max = tracks_len.saturating_sub(1);
             let new_idx = (state.list_state.queue_index as i32 + delta).clamp(0, max as i32) as usize;
             state.list_state.queue_index = new_idx;
         }
@@ -2991,27 +2986,24 @@ fn try_queue_scrollbar_click(
     let track_list_y = 0u16;
     let track_list_height = content_height;
 
-    let history_len = state.play_history.len();
     let tracks_len = if state.playback_mode == PlaybackMode::Radio {
         state.radio.tracks.len()
     } else {
         state.queue.len()
     };
-    let total_items = history_len + tracks_len;
 
     // 2-row items
     let inner_height = content_height.saturating_sub(2) as usize;
     let visible_items = inner_height / 2;
-    // list_state.queue_index is already a visual index (includes history offset)
     let selected = state.list_state.queue_index;
-    let scroll_offset = state.queue_scroll_pin.unwrap_or_else(|| helpers::calc_scroll_offset(selected, visible_items, total_items));
+    let scroll_offset = state.queue_scroll_pin.unwrap_or_else(|| helpers::calc_scroll_offset(selected, visible_items, tracks_len));
 
     if let Some((track_y_start, track_height, thumb_pos, thumb_size, _)) =
-        scrollbar_hit_test_bordered(click_col, click_row, track_list_x, track_list_width, track_list_y, track_list_height, total_items, visible_items, scroll_offset)
+        scrollbar_hit_test_bordered(click_col, click_row, track_list_x, track_list_width, track_list_y, track_list_height, tracks_len, visible_items, scroll_offset)
     {
         let new_offset = start_scrollbar_drag(
             click_row, track_y_start, track_height, thumb_pos, thumb_size,
-            total_items, visible_items, ScrollbarView::Queue, 0, state,
+            tracks_len, visible_items, ScrollbarView::Queue, 0, state,
         );
         state.queue_scroll_pin = Some(new_offset);
         return Some(vec![]);
