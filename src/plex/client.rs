@@ -494,12 +494,16 @@ impl PlexClient {
         let token = self.require_token()?.to_string();
         let machine_id = self.get_server_machine_id().await?;
 
+        // Plex playlist items use library:// scheme with URL-encoded paths
+        // Format: library://{machine_id}/item/%2Flibrary%2Fmetadata%2F{key}
         let uri = track_keys
             .iter()
             .map(|key| {
+                let path = format!("/library/metadata/{}", key);
                 format!(
-                    "server://{}/com.plexapp.plugins.library{}/{}",
-                    machine_id, EP_LIBRARY_METADATA, key
+                    "library://{}/item/{}",
+                    machine_id,
+                    urlencoding::encode(&path)
                 )
             })
             .collect::<Vec<_>>()
@@ -515,6 +519,7 @@ impl PlexClient {
 
         let url = format!("{}{}", server, path);
         tracing::debug!("Creating playlist: POST {}", url);
+        tracing::debug!("Playlist URI: {}", uri);
 
         let response = self
             .http

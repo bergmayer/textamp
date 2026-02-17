@@ -156,11 +156,17 @@ pub async fn dispatch(
             // Enqueue the selected search result (at end of queue)
             let follow_up = enqueue_search_result(state);
             follow_ups.extend(follow_up);
+            // Close search popup and navigate to queue
+            state.search_popup_active = false;
+            state.set_view(View::Queue);
         }
         Action::EnqueueSearchResultNext => {
-            // Shift+Enter: enqueue search result after current track
+            // Ctrl+E: enqueue search result at TOP of queue and start playing
             let follow_up = enqueue_search_result_next(state);
             follow_ups.extend(follow_up);
+            // Close search popup and navigate to queue
+            state.search_popup_active = false;
+            state.set_view(View::Queue);
         }
         Action::EnqueueAlbumNext { rating_key, title } => {
             // Shift+Enter: Insert album tracks at TOP of queue and start playing
@@ -556,6 +562,8 @@ pub async fn dispatch(
                 state.radio.tracks.iter().collect()
             };
 
+            tracing::info!("SaveQueueAsPlaylist: name='{}', track_count={}", name, tracks.len());
+
             if tracks.is_empty() {
                 state.set_error("No tracks to save".to_string());
             } else if name.trim().is_empty() {
@@ -563,21 +571,31 @@ pub async fn dispatch(
             } else if let Some(ref library_key) = state.active_library {
                 let track_keys: Vec<String> = tracks.iter()
                     .map(|t| t.rating_key.clone())
+                    .filter(|k| !k.is_empty())  // Filter out any empty keys
                     .collect();
-                let track_count = track_keys.len();
-                let name_clone = name.clone();
-                let library_key_clone = library_key.clone();
 
-                state.set_status(format!("Saving playlist \"{}\"...", name));
+                if track_keys.is_empty() {
+                    state.set_error("No valid track keys to save".to_string());
+                    tracing::error!("SaveQueueAsPlaylist: All track keys were empty!");
+                } else {
+                    let track_count = track_keys.len();
+                    let name_clone = name.clone();
+                    let library_key_clone = library_key.clone();
 
-                match client.create_playlist(&name_clone, &track_keys, &library_key_clone).await {
-                    Ok(()) => {
-                        state.set_status(format!("Saved \"{}\" ({} tracks)", name_clone, track_count));
-                        // Refresh playlists so the new one appears
-                        state.playlists_loading = true;
-                    }
-                    Err(e) => {
-                        state.set_error(format!("Failed to save playlist: {}", e));
+                    tracing::info!("SaveQueueAsPlaylist: Saving {} tracks with keys: {:?}",
+                        track_count, &track_keys[..track_keys.len().min(5)]);
+
+                    state.set_status(format!("Saving playlist \"{}\"...", name));
+
+                    match client.create_playlist(&name_clone, &track_keys, &library_key_clone).await {
+                        Ok(()) => {
+                            state.set_status(format!("Saved \"{}\" ({} tracks)", name_clone, track_count));
+                            // Refresh playlists so the new one appears
+                            state.playlists_loading = true;
+                        }
+                        Err(e) => {
+                            state.set_error(format!("Failed to save playlist: {}", e));
+                        }
                     }
                 }
             } else {
@@ -1179,7 +1197,8 @@ fn pick_diverse_remix(
 }
 
 /// Remix Doppelganger: replace each track with the most sonically similar track by a different artist.
-/// For single-artist playlists, excludes the artist AND all their aliases.
+/// Excludes tracks by the same album artist (grandparent_rating_key) AND same track artist name.
+/// For compilation tracks, the track artist (original_title) is checked separately from album artist.
 async fn remix_doppelganger_batch(
     client: &PlexClient,
     tracks_with_indices: Vec<(usize, Track)>,
@@ -1194,21 +1213,27 @@ async fn remix_doppelganger_batch(
         })
         .collect();
 
-    // Collect all unique artists in the queue
+    // Collect all unique album artist keys in the queue
     let queue_artist_keys: std::collections::HashSet<String> = original_artists.values().cloned().collect();
 
-    // Build set of ALL artists to exclude (queue artists + all their aliases)
-    let mut excluded_artists: std::collections::HashSet<String> = queue_artist_keys.clone();
+    // Collect all unique track artist NAMES (lowercase for case-insensitive matching)
+    // This catches compilation tracks where original_title differs from album artist
+    let queue_artist_names: std::collections::HashSet<String> = tracks_with_indices.iter()
+        .map(|(_, t)| t.track_artist().to_lowercase())
+        .collect();
+
+    // Build set of ALL artist KEYS to exclude (queue artists + all their aliases)
+    let mut excluded_artist_keys: std::collections::HashSet<String> = queue_artist_keys.clone();
     for artist_key in &queue_artist_keys {
         // Add aliases of this artist
         if let Some(aliases) = artist_aliases.get(artist_key) {
-            excluded_artists.extend(aliases.iter().cloned());
+            excluded_artist_keys.extend(aliases.iter().cloned());
         }
         // Also check if this artist IS an alias of someone else
         for (main_artist, aliases) in artist_aliases {
             if aliases.contains(artist_key) {
-                excluded_artists.insert(main_artist.clone());
-                excluded_artists.extend(aliases.iter().cloned());
+                excluded_artist_keys.insert(main_artist.clone());
+                excluded_artist_keys.extend(aliases.iter().cloned());
             }
         }
     }
@@ -1236,23 +1261,32 @@ async fn remix_doppelganger_batch(
 
     let mut replacements: Vec<(usize, Track)> = Vec::new();
 
+    // Helper to check if a candidate track should be excluded
+    let is_excluded = |t: &Track| -> bool {
+        // Check album artist key
+        let album_artist_key = t.grandparent_rating_key.as_deref().unwrap_or("");
+        if !album_artist_key.is_empty() && excluded_artist_keys.contains(album_artist_key) {
+            return true;
+        }
+        // Check track artist name (handles compilations)
+        let track_artist_name = t.track_artist().to_lowercase();
+        if queue_artist_names.contains(&track_artist_name) {
+            return true;
+        }
+        false
+    };
+
     for (original_idx, result) in fetch_results {
         match result {
             Ok(similar) => {
                 // Phase 1: Pick the most similar track NOT by any excluded artist, not already used
                 let pick = similar.iter().find(|t| {
-                    let artist = t.grandparent_rating_key.as_deref().unwrap_or("");
-                    !used_keys.contains(&t.rating_key)
-                        && !artist.is_empty()
-                        && !excluded_artists.contains(artist)
+                    !used_keys.contains(&t.rating_key) && !is_excluded(t)
                 });
 
                 // Phase 2: Relax — any track not by excluded artist (allow reuse)
                 let pick = pick.or_else(|| {
-                    similar.iter().find(|t| {
-                        let artist = t.grandparent_rating_key.as_deref().unwrap_or("");
-                        !artist.is_empty() && !excluded_artists.contains(artist)
-                    })
+                    similar.iter().find(|t| !is_excluded(t))
                 });
 
                 if let Some(pick) = pick {
@@ -1267,18 +1301,18 @@ async fn remix_doppelganger_batch(
     }
 
     // Post-processing: enforce consecutive-artist diversity (max 2 in a row)
-    // Build a position-sorted list for checking
+    // Use track_artist() for consistency with compilation handling
     replacements.sort_by_key(|(idx, _)| *idx);
     if replacements.len() > 2 {
         for i in 2..replacements.len() {
-            let artist_i = replacements[i].1.grandparent_rating_key.as_deref().unwrap_or("");
-            let artist_prev = replacements[i - 1].1.grandparent_rating_key.as_deref().unwrap_or("");
-            let artist_prev2 = replacements[i - 2].1.grandparent_rating_key.as_deref().unwrap_or("");
+            let artist_i = replacements[i].1.track_artist().to_lowercase();
+            let artist_prev = replacements[i - 1].1.track_artist().to_lowercase();
+            let artist_prev2 = replacements[i - 2].1.track_artist().to_lowercase();
 
             if !artist_i.is_empty() && artist_i == artist_prev && artist_i == artist_prev2 {
                 // Try to swap with next non-same-artist entry
                 if let Some(swap_idx) = (i + 1..replacements.len()).find(|&j| {
-                    replacements[j].1.grandparent_rating_key.as_deref().unwrap_or("") != artist_i
+                    replacements[j].1.track_artist().to_lowercase() != artist_i
                 }) {
                     replacements.swap(i, swap_idx);
                     // Also swap the queue indices so the right tracks go to the right positions
