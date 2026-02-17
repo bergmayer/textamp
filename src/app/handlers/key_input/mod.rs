@@ -300,7 +300,12 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
         (KeyModifiers::SHIFT, KeyCode::Left) => return vec![Action::SeekRelative(-10000)],
         (KeyModifiers::SHIFT, KeyCode::Right) => return vec![Action::SeekRelative(10000)],
         // Action commands (Ctrl+key) — gated by availability check
+        // Ctrl+E: Add to TOP of queue and play
         (KeyModifiers::CONTROL, KeyCode::Char('e')) if alt_commands::is_action_command_available(state, 'e') => {
+            return vec![Action::EnqueueSelectionNext];
+        }
+        // Ctrl+Shift+E: Add to END of queue
+        (mods, KeyCode::Char('e')) | (mods, KeyCode::Char('E')) if mods == KeyModifiers::CONTROL | KeyModifiers::SHIFT && alt_commands::is_action_command_available(state, 'e') => {
             return vec![Action::EnqueueSelection];
         }
         (KeyModifiers::CONTROL, KeyCode::Char('v')) if alt_commands::is_action_command_available(state, 'v') => {

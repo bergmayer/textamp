@@ -47,6 +47,12 @@ pub fn restore_artwork_native_protocol() {
     ARTWORK_RENDERER.with(|r| r.borrow_mut().restore_native_protocol());
 }
 
+/// Clear the artwork cache to force re-rendering on next frame.
+/// Call this when transitioning from a view that overlaid the artwork (e.g., Similar popup).
+pub fn clear_artwork_cache() {
+    ARTWORK_RENDERER.with(|r| r.borrow_mut().clear());
+}
+
 /// Format "Artist — Album (Year)" for queue display.
 /// Uses helper methods that handle empty/None fields with fallbacks.
 fn format_artist_album(track: &crate::api::models::Track) -> String {

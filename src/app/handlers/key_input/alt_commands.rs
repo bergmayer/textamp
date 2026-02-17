@@ -37,8 +37,9 @@ pub fn available_alt_commands(state: &AppState) -> Vec<AltCommand> {
     let has_playing = state.current_track().is_some();
 
     // Ctrl+E enqueue: need a track or album that can be enqueued (not from Queue or Now Playing)
+    // Ctrl+E adds to TOP and plays, Ctrl+Shift+E adds to END
     if state.view != View::Queue && state.view != View::NowPlaying && (has_track || has_album || has_enqueue_context(state)) {
-        cmds.push(AltCommand { modifier: CommandModifier::Ctrl, key: 'e', label: "enqueue", display_key: None });
+        cmds.push(AltCommand { modifier: CommandModifier::Ctrl, key: 'e', label: "add+play", display_key: None });
     }
 
     // Ctrl+V view cycle: context-dependent cycling (albums, playlist tracks, genre tabs)

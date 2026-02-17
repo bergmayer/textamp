@@ -13,25 +13,10 @@ use crossterm::event::{self, KeyCode, KeyModifiers};
 
 use crate::app::Action;
 use crate::app::state::{
-    BrowseCategory, BrowseItem, Focus, RightPanelMode, View,
+    BrowseCategory, Focus, RightPanelMode, View,
 };
 use crate::app::AppState;
 use super::super::helpers;
-
-/// Play+enqueue a browse item (Shift+Enter): Artist → all tracks, Album → album tracks.
-/// Track items are NOT handled here — they fall through to the Enter handler which uses
-/// PlayTrackFromMiller with single_track=false (track + following).
-fn play_browse_item(item: &BrowseItem) -> Vec<Action> {
-    match item {
-        BrowseItem::Artist { key, .. } => {
-            vec![Action::PlayArtistTracks { artist_key: key.clone() }]
-        }
-        BrowseItem::Album { key, .. } => {
-            vec![Action::PlayAlbum { rating_key: key.clone() }]
-        }
-        _ => vec![],
-    }
-}
 
 /// Handle Browse view keys (CUA-style).
 pub(super) fn handle_browse_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
@@ -312,10 +297,8 @@ pub(super) fn handle_folder_browse_keys(key: event::KeyEvent, state: &mut AppSta
                             return vec![Action::NavigateIntoFolder(item.key)];
                         }
                         FolderItemType::Track if key.code == KeyCode::Enter => {
-                            // Enter plays single track, Shift+Enter plays all folder tracks
-                            if key.modifiers.contains(KeyModifiers::SHIFT) {
-                                return vec![Action::PlayFolderTracks];
-                            } else if let Some(col) = folder_state.focused() {
+                            // Enter: play single track
+                            if let Some(col) = folder_state.focused() {
                                 return vec![Action::PlayFolderTrack { track_index: col.selected_index }];
                             }
                         }
@@ -428,18 +411,6 @@ pub(super) fn handle_artist_browse_keys(key: event::KeyEvent, state: &mut AppSta
         return actions;
     }
 
-    // Shift+Enter on non-track items: play+enqueue (Artist → all tracks, Album → album)
-    // Track items fall through to the Enter handler below which handles single vs. multi
-    if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::SHIFT) {
-        if let Some(item) = state.artist_nav.selected_item().cloned() {
-            let actions = play_browse_item(&item);
-            if !actions.is_empty() {
-                return actions;
-            }
-            // Track items: fall through to Enter handler
-        }
-    }
-
     // Handle Enter/Right - drill down into containers; Enter plays tracks
     if matches!(key.code, KeyCode::Enter | KeyCode::Right) {
         if let Some(item) = state.artist_nav.selected_item().cloned() {
@@ -486,10 +457,10 @@ pub(super) fn handle_artist_browse_keys(key: event::KeyEvent, state: &mut AppSta
                     vec![Action::LoadCompilationAlbumsForMiller { artist_key, artist_name }]
                 }
                 BrowseItem::Track { .. } if key.code == KeyCode::Enter => {
-                    let single = !key.modifiers.contains(KeyModifiers::SHIFT);
+                    // Enter: play single track
                     if let Some(col) = state.artist_nav.focused() {
                         let idx = col.selected_index;
-                        vec![Action::PlayTrackFromMiller { column_index: state.artist_nav.focused_column, track_index: idx, single_track: single }]
+                        vec![Action::PlayTrackFromMiller { column_index: state.artist_nav.focused_column, track_index: idx, single_track: true }]
                     } else {
                         vec![]
                     }
@@ -563,16 +534,6 @@ pub(super) fn handle_genre_browse_keys(key: event::KeyEvent, state: &mut AppStat
         return actions;
     }
 
-    // Shift+Enter on non-track items: play+enqueue
-    if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::SHIFT) {
-        if let Some(item) = state.genre_nav.selected_item().cloned() {
-            let actions = play_browse_item(&item);
-            if !actions.is_empty() {
-                return actions;
-            }
-        }
-    }
-
     // Handle Enter/Right - drill into containers; Enter plays tracks
     if matches!(key.code, KeyCode::Enter | KeyCode::Right) {
         if let Some(item) = state.genre_nav.selected_item().cloned() {
@@ -594,10 +555,10 @@ pub(super) fn handle_genre_browse_keys(key: event::KeyEvent, state: &mut AppStat
                     vec![Action::LoadGenreTracksForMiller { album_key: key }]
                 }
                 BrowseItem::Track { .. } if key.code == KeyCode::Enter => {
-                    let single = !key.modifiers.contains(KeyModifiers::SHIFT);
+                    // Enter: play single track
                     if let Some(col) = state.genre_nav.focused() {
                         let idx = col.selected_index;
-                        vec![Action::PlayGenreTrackFromMiller { column_index: state.genre_nav.focused_column, track_index: idx, single_track: single }]
+                        vec![Action::PlayGenreTrackFromMiller { column_index: state.genre_nav.focused_column, track_index: idx, single_track: true }]
                     } else {
                         vec![]
                     }
@@ -646,16 +607,6 @@ pub(super) fn handle_playlist_browse_keys(key: event::KeyEvent, state: &mut AppS
         return actions;
     }
 
-    // Shift+Enter on non-track items: play+enqueue
-    if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::SHIFT) {
-        if let Some(item) = state.playlist_nav.selected_item().cloned() {
-            let actions = play_browse_item(&item);
-            if !actions.is_empty() {
-                return actions;
-            }
-        }
-    }
-
     // Handle Enter/Right - drill into containers; Enter plays tracks
     if matches!(key.code, KeyCode::Enter | KeyCode::Right) {
         if let Some(item) = state.playlist_nav.selected_item().cloned() {
@@ -677,10 +628,10 @@ pub(super) fn handle_playlist_browse_keys(key: event::KeyEvent, state: &mut AppS
                     vec![Action::LoadAlbumTracksForMiller { album_key: key }]
                 }
                 BrowseItem::Track { .. } if key.code == KeyCode::Enter => {
-                    let single = !key.modifiers.contains(KeyModifiers::SHIFT);
+                    // Enter: play single track
                     if let Some(col) = state.playlist_nav.focused() {
                         let idx = col.selected_index;
-                        vec![Action::PlayPlaylistTrackFromMiller { column_index: state.playlist_nav.focused_column, track_index: idx, single_track: single }]
+                        vec![Action::PlayPlaylistTrackFromMiller { column_index: state.playlist_nav.focused_column, track_index: idx, single_track: true }]
                     } else {
                         vec![]
                     }

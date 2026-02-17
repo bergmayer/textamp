@@ -42,8 +42,8 @@ VIEWS
 
 COMMANDS (Alt+/ or Ctrl+/ to see available commands)
   Ctrl+F          Search popup (floating dialog)
-  Ctrl+E          Add selection to end of queue (enqueue)
-  Shift+Click     Same as Shift+Enter for clicked item
+  Ctrl+E          Add track + following to TOP of queue and play
+  Ctrl+Shift+E    Add track + following to END of queue
   Click track name in transport bar → Now Playing
   Ctrl+S          Sort options popup (sort, direction, artwork, group-by-album)
   F3              Switch library

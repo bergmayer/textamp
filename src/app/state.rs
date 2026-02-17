@@ -1450,8 +1450,12 @@ pub struct AppState {
     pub station_scroll_pin: Option<usize>,
     /// Pinned scroll offset for queue track list after mouse click.
     pub queue_scroll_pin: Option<usize>,
+    /// Last click time in queue view (for double-click detection).
+    pub queue_click_time: Option<std::time::Instant>,
     /// Pinned scroll offset for similar view after mouse click.
     pub similar_scroll_pin: Option<usize>,
+    /// Last click time in similar view (for double-click detection).
+    pub similar_click_time: Option<std::time::Instant>,
     /// Active scrollbar drag state (click-and-drag on scrollbar thumb/track).
     pub scrollbar_drag: Option<ScrollbarDrag>,
 }
@@ -1940,7 +1944,9 @@ impl AppState {
             search_scroll_pin: None,
             station_scroll_pin: None,
             queue_scroll_pin: None,
+            queue_click_time: None,
             similar_scroll_pin: None,
+            similar_click_time: None,
             scrollbar_drag: None,
         }
     }

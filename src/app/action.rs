@@ -57,11 +57,17 @@ pub enum Action {
     PlayAlbum { rating_key: String },  // Load album tracks and play them
     PlayArtistTracks { artist_key: String },  // Load all artist tracks and play them
     PlaySearchResult,  // Play the selected search result
-    EnqueueSelection,  // Ctrl+E: Add current selection to queue
-    EnqueueAlbum { rating_key: String, title: String },  // Load album tracks and add to queue
-    EnqueueArtistTracks { artist_key: String, artist_name: String },  // Add all tracks by artist to queue
-    EnqueueTrack(Track),  // Add a single track to queue
-    EnqueueSearchResult,  // Add selected search result to queue
+    EnqueueSelection,  // Ctrl+Shift+E: Add current selection to END of queue
+    EnqueueSelectionNext,  // Ctrl+E: Add current selection to TOP of queue and play
+    EnqueueAlbum { rating_key: String, title: String },  // Load album tracks and add to queue (end)
+    EnqueueArtistTracks { artist_key: String, artist_name: String },  // Add all tracks by artist to queue (end)
+    EnqueueTrack(Track),  // Add a single track to queue (end)
+    EnqueueSearchResult,  // Add selected search result to queue (end)
+    EnqueueSearchResultNext,  // Shift+Enter: add search result to TOP and play
+    // Shift+Enter actions: add to TOP of queue and start playing
+    EnqueueAlbumNext { rating_key: String, title: String },  // Add album tracks to TOP and play
+    EnqueueArtistTracksNext { artist_key: String, artist_name: String },  // Add artist tracks to TOP and play
+    EnqueueTracksNext(Vec<Track>),  // Add tracks to TOP and play
     ClearQueue,
     RemoveFromQueue(usize),
     ToggleQueueShuffle,
@@ -139,6 +145,7 @@ pub enum Action {
     LoadArtistAllTracksForMiller { artist_key: String },  // Load all tracks by artist (from "All Tracks" entry)
     LoadAllAlbumsForMiller,  // Load all albums as a Miller column (from "All Artists" entry)
     PlayTrackFromMiller { column_index: usize, track_index: usize, single_track: bool },
+    EnqueueTrackFromMiller { column_index: usize, track_index: usize },  // Shift+Enter: enqueue track + following
     LoadCompilationsForMiller,  // Load compilation albums into a new Miller column
     LoadCompilationAlbumsForMiller { artist_key: String, artist_name: String },  // Load compilation albums for an artist
     LoadCompilationAllTracksForMiller { artist_key: String, artist_name: String },  // Load all compilation tracks for an artist
@@ -149,10 +156,12 @@ pub enum Action {
     LoadGenreAlbumsForMiller { genre_key: String },
     LoadGenreTracksForMiller { album_key: String },
     PlayGenreTrackFromMiller { column_index: usize, track_index: usize, single_track: bool },
+    EnqueueGenreTrackFromMiller { column_index: usize, track_index: usize },  // Shift+Enter: enqueue track + following
 
     // Miller column navigation for Playlists view
     LoadPlaylistTracksForMiller { playlist_key: String },
     PlayPlaylistTrackFromMiller { column_index: usize, track_index: usize, single_track: bool },
+    EnqueuePlaylistTrackFromMiller { column_index: usize, track_index: usize },  // Shift+Enter: enqueue track + following
 
     // Radio mode
     StopRadio,

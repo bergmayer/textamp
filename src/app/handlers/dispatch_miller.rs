@@ -317,11 +317,20 @@ pub async fn dispatch(
                 let tracks: Vec<Track> = if single_track {
                     col.tracks.get(track_index).cloned().into_iter().collect()
                 } else {
-                    // Shift+Enter: selected track + all following
+                    // Selected track + all following
                     col.tracks[track_index..].to_vec()
                 };
                 if !tracks.is_empty() {
                     helpers::queue_and_play(event_tx, state, client, audio, tracks, 0).await;
+                }
+            }
+        }
+        Action::EnqueueTrackFromMiller { column_index, track_index } => {
+            // Shift+Enter: enqueue track + following after current (no auto-play)
+            if let Some(col) = state.artist_nav.columns.get(column_index) {
+                let tracks: Vec<Track> = col.tracks[track_index..].to_vec();
+                if !tracks.is_empty() {
+                    return Ok(vec![Action::EnqueueTracksNext(tracks)]);
                 }
             }
         }
@@ -443,6 +452,15 @@ pub async fn dispatch(
                 }
             }
         }
+        Action::EnqueueGenreTrackFromMiller { column_index, track_index } => {
+            // Shift+Enter: enqueue track + following after current (no auto-play)
+            if let Some(col) = state.genre_nav.columns.get(column_index) {
+                let tracks: Vec<Track> = col.tracks[track_index..].to_vec();
+                if !tracks.is_empty() {
+                    return Ok(vec![Action::EnqueueTracksNext(tracks)]);
+                }
+            }
+        }
 
         // Miller Column Actions for Playlists View
         // ================================================================
@@ -489,6 +507,15 @@ pub async fn dispatch(
                 };
                 if !tracks.is_empty() {
                     helpers::queue_and_play(event_tx, state, client, audio, tracks, 0).await;
+                }
+            }
+        }
+        Action::EnqueuePlaylistTrackFromMiller { column_index, track_index } => {
+            // Shift+Enter: enqueue track + following after current (no auto-play)
+            if let Some(col) = state.playlist_nav.columns.get(column_index) {
+                let tracks: Vec<Track> = col.tracks[track_index..].to_vec();
+                if !tracks.is_empty() {
+                    return Ok(vec![Action::EnqueueTracksNext(tracks)]);
                 }
             }
         }

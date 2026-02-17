@@ -3,7 +3,7 @@
 //! EnqueueSelection, PromptSavePlaylist, SaveQueueAsPlaylist.
 
 use crate::app::{Action, AppState, Event};
-use crate::app::state::{BrowseCategory, BrowseItem, PlayStatus, PlaybackMode, QueueSortMode, RightPanelMode, SimilarMode, View};
+use crate::app::state::{BrowseCategory, BrowseItem, PlayStatus, PlaybackMode, QueueSortMode, SimilarMode, View};
 use crate::api::PlexClient;
 use crate::api::models::Track;
 use crate::audio::AudioPlayer;
@@ -104,6 +104,11 @@ pub async fn dispatch(
                             state.queue_index = state.radio.track_index;
                             state.playback_mode = PlaybackMode::Queue;
                             state.radio.clear();
+                            // Clear play history when switching from radio to manual queue
+                            state.play_history.clear();
+                            if let Some(idx) = state.queue_index {
+                                state.list_state.queue_index = idx;
+                            }
                         }
 
                         let added = tracks.len();
@@ -127,6 +132,11 @@ pub async fn dispatch(
                             state.queue_index = state.radio.track_index;
                             state.playback_mode = PlaybackMode::Queue;
                             state.radio.clear();
+                            // Clear play history when switching from radio to manual queue
+                            state.play_history.clear();
+                            if let Some(idx) = state.queue_index {
+                                state.list_state.queue_index = idx;
+                            }
                         }
                         let added = tracks.len();
                         let insert_pos = state.queue.len();
@@ -146,15 +156,68 @@ pub async fn dispatch(
                 state.queue_index = state.radio.track_index;
                 state.playback_mode = PlaybackMode::Queue;
                 state.radio.clear();
+                // Clear play history when switching from radio to manual queue
+                state.play_history.clear();
+                if let Some(idx) = state.queue_index {
+                    state.list_state.queue_index = idx;
+                }
             }
             let title = track.title.clone();
             state.queue.push(track);
             state.set_status(format!("Added \"{}\" to queue", title));
         }
         Action::EnqueueSearchResult => {
-            // Enqueue the selected search result
+            // Enqueue the selected search result (at end of queue)
             let follow_up = enqueue_search_result(state);
             follow_ups.extend(follow_up);
+        }
+        Action::EnqueueSearchResultNext => {
+            // Shift+Enter: enqueue search result after current track
+            let follow_up = enqueue_search_result_next(state);
+            follow_ups.extend(follow_up);
+        }
+        Action::EnqueueAlbumNext { rating_key, title } => {
+            // Shift+Enter: Insert album tracks at TOP of queue and start playing
+            match client.get_album_tracks(&rating_key).await {
+                Ok(tracks) => {
+                    if !tracks.is_empty() {
+                        let added = tracks.len();
+                        helpers::queue_and_play(event_tx, state, client, audio, tracks, 0).await;
+                        state.set_status(format!("Playing {} tracks from \"{}\"", added, title));
+                    }
+                }
+                Err(e) => {
+                    state.set_error(format!("Failed to load album: {}", e));
+                }
+            }
+        }
+        Action::EnqueueArtistTracksNext { artist_key, artist_name } => {
+            // Shift+Enter: Insert artist tracks at TOP of queue and start playing
+            match client.get_artist_all_tracks(&artist_key).await {
+                Ok(tracks) => {
+                    if !tracks.is_empty() {
+                        let added = tracks.len();
+                        helpers::queue_and_play(event_tx, state, client, audio, tracks, 0).await;
+                        state.set_status(format!("Playing {} tracks by \"{}\"", added, artist_name));
+                    }
+                }
+                Err(e) => {
+                    state.set_error(format!("Failed to load artist tracks: {}", e));
+                }
+            }
+        }
+        Action::EnqueueTracksNext(tracks) => {
+            // Shift+Enter: Insert tracks at TOP of queue and start playing
+            if !tracks.is_empty() {
+                let added = tracks.len();
+                let title = tracks.first().map(|t| t.title.clone()).unwrap_or_default();
+                helpers::queue_and_play(event_tx, state, client, audio, tracks, 0).await;
+                if added == 1 {
+                    state.set_status(format!("Playing \"{}\"", title));
+                } else {
+                    state.set_status(format!("Playing {} tracks starting with \"{}\"", added, title));
+                }
+            }
         }
         Action::ClearQueue => {
             // Clear the appropriate queue based on playback mode
@@ -169,6 +232,9 @@ pub async fn dispatch(
                     state.queue_sort_mode = QueueSortMode::QueueOrder;
                 }
             }
+            // Also clear play history (Ctrl+X clears everything)
+            state.play_history.clear();
+            state.list_state.queue_index = 0;
             audio.stop();
             audio.track_cache.flush();
             state.playback.status = PlayStatus::Stopped;
@@ -266,63 +332,30 @@ pub async fn dispatch(
             }
         }
         Action::EnqueueSelection => {
-            // Check if we should enqueue an album instead of tracks
+            // Ctrl+Shift+E: Add selected item + all following items to END of queue
+            // For tracks: enqueue selected track + all following tracks in the view
+            // For albums: enqueue the album
+
+            // Check for album selection first
             let album_to_enqueue: Option<(String, String)> = match state.view {
                 View::Browse => {
-                    // Check Miller columns first — selected album in any browse category
-                    let miller_album = {
-                        let nav = match state.browse_category {
-                            BrowseCategory::Library => Some(&state.artist_nav),
-                            BrowseCategory::Genres => Some(&state.genre_nav),
-                            BrowseCategory::Playlists => Some(&state.playlist_nav),
-                            _ => None,
-                        };
-                        nav.and_then(|n| n.selected_item()).and_then(|item| {
-                            if let BrowseItem::Album { key, title, .. } = item {
-                                Some((key.clone(), title.clone()))
-                            } else {
-                                None
-                            }
-                        })
+                    let nav = match state.browse_category {
+                        BrowseCategory::Library => Some(&state.artist_nav),
+                        BrowseCategory::Genres => Some(&state.genre_nav),
+                        BrowseCategory::Playlists => Some(&state.playlist_nav),
+                        _ => None,
                     };
-                    if miller_album.is_some() {
-                        miller_album
-                    } else {
-                    match state.focus {
-                        crate::app::state::Focus::Left => {
-                            match state.browse_category {
-                                _ => None,
-                            }
+                    nav.and_then(|n| n.selected_item()).and_then(|item| {
+                        if let BrowseItem::Album { key, title, .. } = item {
+                            Some((key.clone(), title.clone()))
+                        } else {
+                            None
                         }
-                        crate::app::state::Focus::Right => {
-                            // Check if we're viewing albums (not tracks)
-                            match state.right_panel_mode {
-                                RightPanelMode::ArtistAlbums => {
-                                    // Artist's albums - enqueue selected album
-                                    // Note: right_albums_index 0 is "All tracks", so actual albums start at 1
-                                    if state.list_state.right_albums_index > 0 {
-                                        let album_idx = state.list_state.right_albums_index - 1;
-                                        state.selected_artist_albums.get(album_idx)
-                                            .map(|a| (a.rating_key.clone(), a.title.clone()))
-                                    } else {
-                                        None
-                                    }
-                                }
-                                RightPanelMode::CategoryAlbums => {
-                                    // Genre/mood albums - enqueue selected album
-                                    state.genre_albums.get(state.genre_albums_index)
-                                        .map(|a| (a.rating_key.clone(), a.title.clone()))
-                                }
-                                _ => None,
-                            }
-                        }
-                    }
-                    } // else (no Miller album)
+                    })
                 }
                 View::Similar => {
                     match state.similar_mode {
                         SimilarMode::Albums => {
-                            // Similar albums - enqueue selected album
                             state.similar_albums.get(state.list_state.similar_index)
                                 .map(|a| (a.rating_key.clone(), a.title.clone()))
                         }
@@ -332,44 +365,61 @@ pub async fn dispatch(
                 _ => None,
             };
 
-            // If we found an album to enqueue, do that instead
             if let Some((rating_key, title)) = album_to_enqueue {
                 return Ok(vec![Action::EnqueueAlbum { rating_key, title }]);
             }
 
-            // Otherwise, try to enqueue individual tracks
+            // Get tracks from selected index to end
             let tracks_to_add: Vec<Track> = match state.view {
                 View::Browse => {
-                    match state.focus {
-                        crate::app::state::Focus::Right => {
-                            // Enqueue selected track
-                            if !state.selected_album_tracks.is_empty() {
-                                vec![state.selected_album_tracks[state.list_state.tracks_index].clone()]
+                    // Miller columns: get selected track + all following
+                    let nav = match state.browse_category {
+                        BrowseCategory::Library => Some(&state.artist_nav),
+                        BrowseCategory::Genres => Some(&state.genre_nav),
+                        BrowseCategory::Playlists => Some(&state.playlist_nav),
+                        _ => None,
+                    };
+                    if let Some(nav) = nav {
+                        if let Some(col) = nav.columns.get(nav.focused_column) {
+                            if let Some(BrowseItem::Track { .. }) = col.items.get(col.selected_index) {
+                                col.tracks[col.selected_index..].to_vec()
                             } else {
                                 vec![]
                             }
-                        }
-                        crate::app::state::Focus::Left => {
-                            // Left panel with no album selected - nothing to enqueue
+                        } else {
                             vec![]
                         }
+                    } else {
+                        vec![]
                     }
                 }
                 View::Similar => {
                     match state.similar_mode {
                         SimilarMode::Tracks => {
-                            if let Some(track) = state.similar_tracks.get(state.list_state.similar_index) {
-                                vec![track.clone()]
-                            } else {
-                                vec![]
-                            }
+                            let idx = state.list_state.similar_index;
+                            state.similar_tracks[idx..].to_vec()
                         }
                         _ => vec![],
                     }
                 }
-                View::NowPlaying => {
-                    // Already in queue view - can't enqueue from here
-                    vec![]
+                View::Search => {
+                    use crate::app::state::SearchTab;
+                    if let Some(ref results) = state.search_results {
+                        let idx = state.list_state.search_item_index;
+                        let (section, local_idx) = if state.search_tab == SearchTab::Global {
+                            super::dispatch_search::resolve_global_index(results, idx)
+                        } else {
+                            (state.search_tab, idx)
+                        };
+                        match section {
+                            SearchTab::Tracks => {
+                                results.tracks[local_idx..].to_vec()
+                            }
+                            _ => vec![],
+                        }
+                    } else {
+                        vec![]
+                    }
                 }
                 _ => vec![],
             };
@@ -377,20 +427,122 @@ pub async fn dispatch(
             if !tracks_to_add.is_empty() {
                 // If radio is playing, convert to queue mode
                 if state.playback_mode == PlaybackMode::Radio {
-                    // Convert current radio tracks to queue
                     state.queue = state.radio.tracks.clone();
                     state.queue_index = state.radio.track_index;
                     state.playback_mode = PlaybackMode::Queue;
                     state.radio.clear();
+                    state.play_history.clear();
+                    if let Some(idx) = state.queue_index {
+                        state.list_state.queue_index = idx;
+                    }
                 }
 
-                // Reset shuffle state since we're modifying the queue
                 state.queue_original.clear();
                 state.queue_sort_mode = QueueSortMode::QueueOrder;
 
                 let added = tracks_to_add.len();
                 state.queue.extend(tracks_to_add);
                 state.set_status(format!("Added {} to queue ({} total)", added, state.queue.len()));
+            }
+        }
+        Action::EnqueueSelectionNext => {
+            // Ctrl+E: Add selected item + all following items to TOP of queue and start playing
+            // For tracks: enqueue selected track + all following tracks in the view
+            // For albums: enqueue the album
+
+            // Check for album selection first
+            let album_to_enqueue: Option<(String, String)> = match state.view {
+                View::Browse => {
+                    let nav = match state.browse_category {
+                        BrowseCategory::Library => Some(&state.artist_nav),
+                        BrowseCategory::Genres => Some(&state.genre_nav),
+                        BrowseCategory::Playlists => Some(&state.playlist_nav),
+                        _ => None,
+                    };
+                    nav.and_then(|n| n.selected_item()).and_then(|item| {
+                        if let BrowseItem::Album { key, title, .. } = item {
+                            Some((key.clone(), title.clone()))
+                        } else {
+                            None
+                        }
+                    })
+                }
+                View::Similar => {
+                    match state.similar_mode {
+                        SimilarMode::Albums => {
+                            state.similar_albums.get(state.list_state.similar_index)
+                                .map(|a| (a.rating_key.clone(), a.title.clone()))
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+
+            if let Some((rating_key, title)) = album_to_enqueue {
+                return Ok(vec![Action::EnqueueAlbumNext { rating_key, title }]);
+            }
+
+            // Get tracks from selected index to end
+            let tracks_to_add: Vec<Track> = match state.view {
+                View::Browse => {
+                    // Miller columns: get selected track + all following
+                    let nav = match state.browse_category {
+                        BrowseCategory::Library => Some(&state.artist_nav),
+                        BrowseCategory::Genres => Some(&state.genre_nav),
+                        BrowseCategory::Playlists => Some(&state.playlist_nav),
+                        _ => None,
+                    };
+                    if let Some(nav) = nav {
+                        if let Some(col) = nav.columns.get(nav.focused_column) {
+                            if let Some(BrowseItem::Track { .. }) = col.items.get(col.selected_index) {
+                                // Get all tracks from selected index to end
+                                col.tracks[col.selected_index..].to_vec()
+                            } else {
+                                vec![]
+                            }
+                        } else {
+                            vec![]
+                        }
+                    } else {
+                        vec![]
+                    }
+                }
+                View::Similar => {
+                    match state.similar_mode {
+                        SimilarMode::Tracks => {
+                            // Get selected track + all following
+                            let idx = state.list_state.similar_index;
+                            state.similar_tracks[idx..].to_vec()
+                        }
+                        _ => vec![],
+                    }
+                }
+                View::Search => {
+                    // Search results: get selected track + all following in tracks tab
+                    use crate::app::state::SearchTab;
+                    if let Some(ref results) = state.search_results {
+                        let idx = state.list_state.search_item_index;
+                        let (section, local_idx) = if state.search_tab == SearchTab::Global {
+                            super::dispatch_search::resolve_global_index(results, idx)
+                        } else {
+                            (state.search_tab, idx)
+                        };
+                        match section {
+                            SearchTab::Tracks => {
+                                results.tracks[local_idx..].to_vec()
+                            }
+                            _ => vec![],
+                        }
+                    } else {
+                        vec![]
+                    }
+                }
+                _ => vec![],
+            };
+
+            if !tracks_to_add.is_empty() {
+                return Ok(vec![Action::EnqueueTracksNext(tracks_to_add)]);
             }
         }
         Action::PromptSavePlaylist => {
@@ -1143,8 +1295,8 @@ async fn remix_doppelganger_batch(
     replacements
 }
 
-/// Enqueue the currently selected search result.
-fn enqueue_search_result(state: &AppState) -> Vec<Action> {
+/// Enqueue the currently selected search result + following items to END of queue.
+fn enqueue_search_result(state: &mut AppState) -> Vec<Action> {
     use crate::app::state::SearchTab;
 
     let Some(ref results) = state.search_results else { return vec![] };
@@ -1174,8 +1326,25 @@ fn enqueue_search_result(state: &AppState) -> Vec<Action> {
             }
         }
         SearchTab::Tracks => {
-            if let Some(track) = results.tracks.get(local_idx) {
-                return vec![Action::EnqueueTrack(track.clone())];
+            // Get selected track + all following tracks, add directly to queue
+            let tracks: Vec<Track> = results.tracks[local_idx..].to_vec();
+            if !tracks.is_empty() {
+                // If radio is playing, convert to queue mode
+                if state.playback_mode == PlaybackMode::Radio {
+                    state.queue = state.radio.tracks.clone();
+                    state.queue_index = state.radio.track_index;
+                    state.playback_mode = PlaybackMode::Queue;
+                    state.radio.clear();
+                    state.play_history.clear();
+                    if let Some(idx) = state.queue_index {
+                        state.list_state.queue_index = idx;
+                    }
+                }
+                state.queue_original.clear();
+                state.queue_sort_mode = QueueSortMode::QueueOrder;
+                let added = tracks.len();
+                state.queue.extend(tracks);
+                state.set_status(format!("Added {} to queue ({} total)", added, state.queue.len()));
             }
         }
         SearchTab::Playlists | SearchTab::Genres | SearchTab::Global => {
@@ -1221,6 +1390,51 @@ fn play_search_result(state: &AppState) -> Vec<Action> {
             }
         }
         SearchTab::Playlists | SearchTab::Genres | SearchTab::Global => {}
+    }
+
+    vec![]
+}
+
+/// Ctrl+E in search: add search result + following to TOP of queue and start playing.
+fn enqueue_search_result_next(state: &AppState) -> Vec<Action> {
+    use crate::app::state::SearchTab;
+
+    let Some(ref results) = state.search_results else { return vec![] };
+    let idx = state.list_state.search_item_index;
+
+    let (section, local_idx) = if state.search_tab == SearchTab::Global {
+        super::dispatch_search::resolve_global_index(results, idx)
+    } else {
+        (state.search_tab, idx)
+    };
+
+    match section {
+        SearchTab::Artists => {
+            if let Some(artist) = results.artists.get(local_idx) {
+                return vec![Action::EnqueueArtistTracksNext {
+                    artist_key: artist.rating_key.clone(),
+                    artist_name: artist.title.clone(),
+                }];
+            }
+        }
+        SearchTab::Albums => {
+            if let Some(album) = results.albums.get(local_idx) {
+                return vec![Action::EnqueueAlbumNext {
+                    rating_key: album.rating_key.clone(),
+                    title: album.title.clone(),
+                }];
+            }
+        }
+        SearchTab::Tracks => {
+            // Get selected track + all following tracks
+            let tracks: Vec<Track> = results.tracks[local_idx..].to_vec();
+            if !tracks.is_empty() {
+                return vec![Action::EnqueueTracksNext(tracks)];
+            }
+        }
+        SearchTab::Playlists | SearchTab::Genres | SearchTab::Global => {
+            // Playlists and genres can't be directly enqueued
+        }
     }
 
     vec![]

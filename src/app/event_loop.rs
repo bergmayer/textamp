@@ -508,13 +508,15 @@ impl EventLoop {
             | EnqueueAlbum { .. } | EnqueueArtistTracks { .. } | EnqueueTrack(_)
             | EnqueueSearchResult | ClearQueue | RemoveFromQueue(_)
             | JumpToQueueIndex(_)
-            | EnqueueSelection | PromptSavePlaylist | SaveQueueAsPlaylist(_)
+            | EnqueueSelection | EnqueueSelectionNext | PromptSavePlaylist | SaveQueueAsPlaylist(_)
             | ToggleQueueShuffle
             | RemixGemini | RemixTwofer | RemixStretch | RemixDoppelganger
             | RemixShuffle | RemixUndoShuffle | UndoLastRemix
             | MoveQueueTrackUp | MoveQueueTrackDown
             | MoveSelectedTracksUp | MoveSelectedTracksDown | RemoveSelectedFromQueue
-            | RemixBatchReady(_) | RemixDoppelgangerReady(_) => {
+            | RemixBatchReady(_) | RemixDoppelgangerReady(_)
+            | EnqueueAlbumNext { .. } | EnqueueArtistTracksNext { .. }
+            | EnqueueTracksNext(_) | EnqueueSearchResultNext => {
                 handlers::dispatch_queue::dispatch(&self.event_tx, action, state, client, audio).await?
             }
 

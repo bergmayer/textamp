@@ -214,7 +214,8 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
                     return handle_help_click(click_row, click_col, state);
                 }
                 View::Similar => {
-                    return handle_similar_click(click_row, click_col, state);
+                    let shift = event.modifiers.contains(crossterm::event::KeyModifiers::SHIFT);
+                    return handle_similar_click(click_row, click_col, shift, state);
                 }
             }
         }
@@ -294,14 +295,10 @@ fn handle_library_picker_mouse(event: crossterm::event::MouseEvent, state: &mut 
                 if click_row >= inner_top && click_row < inner_bottom {
                     let clicked_idx = (click_row - inner_top) as usize;
                     if clicked_idx < lib_count {
-                        if state.library_picker_index == clicked_idx {
-                            // Click already-selected: activate
-                            if let Some(lib) = state.libraries.get(clicked_idx) {
-                                let key = lib.key.clone();
-                                return vec![Action::SelectLibrary(key), Action::CloseLibraryPicker];
-                            }
-                        } else {
-                            state.library_picker_index = clicked_idx;
+                        // Single-click activates immediately
+                        if let Some(lib) = state.libraries.get(clicked_idx) {
+                            let key = lib.key.clone();
+                            return vec![Action::SelectLibrary(key), Action::CloseLibraryPicker];
                         }
                     }
                 }
@@ -560,7 +557,7 @@ fn handle_alt_bar_row_click(click_col: u16, state: &mut AppState, is_top_row: bo
     }
 
     // Filter commands for this row (same split as render_alt_bar_row)
-    let filtered: Vec<&crate::app::handlers::key_input::AltCommand> = alt_cmds.iter()
+    let mut filtered: Vec<&crate::app::handlers::key_input::AltCommand> = alt_cmds.iter()
         .filter(|cmd| {
             if is_top_row {
                 cmd.display_key.is_some()
@@ -569,6 +566,20 @@ fn handle_alt_bar_row_click(click_col: u16, state: &mut AppState, is_top_row: bo
             }
         })
         .collect();
+
+    // Sort bottom row by modifier (Ctrl < Alt < None) then alphabetically by key
+    // This MUST match render_alt_bar_row sorting!
+    if !is_top_row {
+        filtered.sort_by(|a, b| {
+            let mod_order = |m: &CommandModifier| match m {
+                CommandModifier::Ctrl => 0,
+                CommandModifier::Alt => 1,
+                CommandModifier::None => 2,
+            };
+            mod_order(&a.modifier).cmp(&mod_order(&b.modifier))
+                .then(a.key.cmp(&b.key))
+        });
+    }
 
     if filtered.is_empty() {
         state.alt_bar_until = None;
@@ -580,7 +591,8 @@ fn handle_alt_bar_row_click(click_col: u16, state: &mut AppState, is_top_row: bo
     let mut item_ranges: Vec<(u16, u16, usize)> = Vec::new();
 
     for (i, cmd) in filtered.iter().enumerate() {
-        let separator_width: u16 = if i > 0 { 1 } else { 0 };
+        // Separator is " | " = 3 characters (must match render_alt_bar_row)
+        let separator_width: u16 = if i > 0 { 3 } else { 0 };
         let key_str_len = if let Some(dk) = cmd.display_key {
             dk.len() as u16 + 2
         } else {
@@ -1274,31 +1286,29 @@ fn handle_browse_click(click_row: u16, click_col: u16, shift_held: bool, state: 
                     }
                     drill
                 } else {
-                    // No filter: normal already-selected = drill, otherwise select
+                    // No filter: click highlights, Enter key activates
                     state.browse_scroll_pin = Some((col_idx, scroll_offset));
                     state.browse_click_time = Some(std::time::Instant::now());
-                    if col_sel == item_idx {
-                        true
-                    } else {
-                        if let Some(col) = nav.columns.get_mut(col_idx) {
-                            col.selected_index = item_idx;
-                        }
-                        // Shift+click on a new item: enqueue immediately
-                        if shift_held {
-                            if let Some(item) = {
-                                let nav = match state.browse_category {
-                                    BrowseCategory::Library => &state.artist_nav,
-                                    BrowseCategory::Genres => &state.genre_nav,
-                                    BrowseCategory::Playlists => &state.playlist_nav,
-                                    _ => return vec![],
-                                };
-                                nav.columns.get(col_idx).and_then(|c| c.items.get(item_idx)).cloned()
-                            } {
-                                return browse_enqueue_action(&item, col_idx, state);
-                            }
-                        }
-                        false
+                    // Update selection
+                    if let Some(col) = nav.columns.get_mut(col_idx) {
+                        col.selected_index = item_idx;
                     }
+                    // Shift+click: enqueue
+                    if shift_held {
+                        if let Some(item) = {
+                            let nav = match state.browse_category {
+                                BrowseCategory::Library => &state.artist_nav,
+                                BrowseCategory::Genres => &state.genre_nav,
+                                BrowseCategory::Playlists => &state.playlist_nav,
+                                _ => return vec![],
+                            };
+                            nav.columns.get(col_idx).and_then(|c| c.items.get(item_idx)).cloned()
+                        } {
+                            return browse_enqueue_action(&item, col_idx, state);
+                        }
+                    }
+                    // Click just highlights, never drills down
+                    false
                 };
 
                 if should_drill {
@@ -1705,24 +1715,7 @@ fn handle_now_playing_down(click_row: u16, click_col: u16, modifiers: crossterm:
                         state.queue_selected.clear();
                     }
 
-                    let current = state.list_state.queue_index;
-                    if current == actual_idx {
-                        // Double-click: if this is the currently playing track, switch to NowPlaying view
-                        if actual_idx >= history_len {
-                            let queue_idx = actual_idx - history_len;
-                            let is_current = match state.playback_mode {
-                                PlaybackMode::Queue | PlaybackMode::None => state.queue_index == Some(queue_idx),
-                                PlaybackMode::Radio => state.radio.track_index == Some(queue_idx),
-                            };
-                            if is_current {
-                                return vec![Action::SetView(View::NowPlaying), Action::LoadWaveform];
-                            }
-                            return match state.playback_mode {
-                                PlaybackMode::Radio => vec![Action::JumpToRadioTrack(queue_idx)],
-                                _ => vec![Action::JumpToQueueIndex(queue_idx)],
-                            };
-                        }
-                    }
+                    // Click just highlights, Enter key activates
                     state.queue_scroll_pin = Some(scroll_offset);
                     state.list_state.queue_index = actual_idx;
                 }
@@ -2114,7 +2107,7 @@ fn handle_help_click(click_row: u16, click_col: u16, state: &mut AppState) -> Ve
 }
 
 /// Handle click in Similar view (popup overlay).
-fn handle_similar_click(click_row: u16, click_col: u16, state: &mut AppState) -> Vec<Action> {
+fn handle_similar_click(click_row: u16, click_col: u16, shift_held: bool, state: &mut AppState) -> Vec<Action> {
     use crate::app::state::SimilarMode;
 
     // Compute popup area (matches render: 65% wide, 80% tall of full screen)
@@ -2164,34 +2157,46 @@ fn handle_similar_click(click_row: u16, click_col: u16, state: &mut AppState) ->
         return vec![];
     }
 
-    if state.list_state.similar_index == clicked_idx {
-        // Double-click: activate (same as Enter)
+    // Shift+click: add to queue and play (like Shift+Enter)
+    if shift_held {
+        state.list_state.similar_index = clicked_idx;
+        state.similar_scroll_pin = Some(scroll_offset);
         match state.similar_mode {
             SimilarMode::Albums => {
-                if let Some(album) = state.similar_albums.get(clicked_idx).cloned() {
-                    state.pending_album_key = Some(album.rating_key.clone());
-                    state.selected_album_title = album.title.clone();
-                    state.selected_artist_name = album.artist_name().to_string();
-                    state.set_view(View::Browse);
-                    state.browse_category = BrowseCategory::Library;
-                    if let Some(artist_key) = &album.parent_rating_key {
-                        if let Some(idx) = state.artists.iter().position(|a| &a.rating_key == artist_key) {
-                            state.list_state.artists_index = idx;
-                        }
-                    }
-                    return vec![Action::LoadArtistAlbums];
+                // Shift+click: play this album and enqueue all following albums
+                let albums_to_enqueue: Vec<_> = state.similar_albums[clicked_idx..].to_vec();
+                if albums_to_enqueue.is_empty() {
+                    return vec![];
                 }
+                let mut actions = Vec::new();
+                // First album: play it
+                let first = &albums_to_enqueue[0];
+                actions.push(Action::PlayAlbum {
+                    rating_key: first.rating_key.clone(),
+                });
+                // Remaining albums: append to end of queue
+                for album in albums_to_enqueue.iter().skip(1) {
+                    actions.push(Action::EnqueueAlbum {
+                        rating_key: album.rating_key.clone(),
+                        title: album.title.clone(),
+                    });
+                }
+                return actions;
             }
             SimilarMode::Tracks => {
-                if let Some(track) = state.similar_tracks.get(clicked_idx).cloned() {
-                    return vec![Action::PlayTrack(track)];
+                // Shift+click: play this track and all following tracks
+                let tracks: Vec<_> = state.similar_tracks[clicked_idx..].to_vec();
+                if !tracks.is_empty() {
+                    return vec![Action::EnqueueTracksNext(tracks)];
                 }
             }
         }
-    } else {
-        state.similar_scroll_pin = Some(scroll_offset);
-        state.list_state.similar_index = clicked_idx;
+        return vec![];
     }
+
+    // Click just highlights, Enter key activates
+    state.similar_scroll_pin = Some(scroll_offset);
+    state.list_state.similar_index = clicked_idx;
 
     vec![]
 }

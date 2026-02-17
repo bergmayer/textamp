@@ -254,13 +254,15 @@ fn render_search(frame: &mut Frame, state: &AppState) {
 }
 
 fn render_similar(frame: &mut Frame, state: &AppState) {
-    // Render the previous view underneath as context
-    match state.previous_view.unwrap_or(View::Browse) {
-        View::Browse => render_browse(frame, state),
+    // Render the previous view behind the popup
+    let prev = state.previous_view.unwrap_or(View::Browse);
+    match prev {
         View::Queue => render_queue(frame, state),
         View::NowPlaying => render_now_playing(frame, state),
+        View::Browse => render_browse(frame, state),
         _ => render_browse(frame, state),
     }
+
     // Overlay the similar popup
     screens::similar::render(frame, state, frame.area());
 }
