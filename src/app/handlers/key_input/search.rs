@@ -1,6 +1,6 @@
 //! Search popup key handling.
 
-use crossterm::event::{self, KeyCode};
+use crossterm::event::{self, KeyCode, KeyModifiers};
 
 use crate::app::Action;
 use crate::app::state::{SearchFocus, SearchTab};
@@ -10,6 +10,22 @@ use crate::app::AppState;
 pub(super) fn handle_search_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
     // Clear mouse scroll pin on any keyboard navigation
     state.search_scroll_pin = None;
+
+    // Handle Ctrl+E / Ctrl+Shift+E before other keys
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('e') => {
+                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    // Ctrl+Shift+E: add to END of queue
+                    return vec![Action::EnqueueSearchResult];
+                } else {
+                    // Ctrl+E: add to TOP of queue and play
+                    return vec![Action::EnqueueSearchResultNext];
+                }
+            }
+            _ => {}
+        }
+    }
 
     match key.code {
         KeyCode::Esc => {

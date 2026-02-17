@@ -47,6 +47,7 @@ COMMANDS (Alt+/ or Ctrl+/ to see available commands)
   Click track name in transport bar → Now Playing
   Ctrl+S          Sort options popup (sort, direction, artwork, group-by-album)
   F3              Switch library
+  F4              Artist bio popup
   Ctrl+V          Quick sort cycle (context-dependent)
                   Artists: default ↔ shuffled
                   Albums: default → by artist → shuffled → default

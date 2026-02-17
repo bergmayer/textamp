@@ -245,6 +245,13 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
                 return vec![Action::OpenLibraryPicker];
             }
         }
+        (_, KeyCode::F(4)) => {
+            // F4 = Artist bio popup
+            // Priority: selected track → selected album → selected artist → now-playing track
+            if let Some((artist_key, artist_name)) = helpers::get_artist_for_bio(state) {
+                return vec![Action::ShowArtistBio { artist_key, artist_name }];
+            }
+        }
         (_, KeyCode::F(5)) => {
             // F5 = Refresh current view
             return helpers::refresh_current_view(state);
@@ -296,12 +303,12 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
         (KeyModifiers::SHIFT, KeyCode::Left) => return vec![Action::SeekRelative(-10000)],
         (KeyModifiers::SHIFT, KeyCode::Right) => return vec![Action::SeekRelative(10000)],
         // Action commands (Ctrl+key) — gated by availability check
-        // Ctrl+E: Add to TOP of queue and play
-        (KeyModifiers::CONTROL, KeyCode::Char('e')) if alt_commands::is_action_command_available(state, 'e') => {
+        // Ctrl+E: Add to TOP of queue and play (skip if in search popup - handled there)
+        (KeyModifiers::CONTROL, KeyCode::Char('e')) if !state.search_popup_active && alt_commands::is_action_command_available(state, 'e') => {
             return vec![Action::EnqueueSelectionNext];
         }
-        // Ctrl+Shift+E: Add to END of queue
-        (mods, KeyCode::Char('e')) | (mods, KeyCode::Char('E')) if mods == KeyModifiers::CONTROL | KeyModifiers::SHIFT && alt_commands::is_action_command_available(state, 'e') => {
+        // Ctrl+Shift+E: Add to END of queue (skip if in search popup - handled there)
+        (mods, KeyCode::Char('e')) | (mods, KeyCode::Char('E')) if !state.search_popup_active && mods == KeyModifiers::CONTROL | KeyModifiers::SHIFT && alt_commands::is_action_command_available(state, 'e') => {
             return vec![Action::EnqueueSelection];
         }
         (KeyModifiers::CONTROL, KeyCode::Char('v')) if alt_commands::is_action_command_available(state, 'v') => {
@@ -367,6 +374,11 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
     // Search popup handling (takes priority over view-specific handling)
     if state.search_popup_active {
         return search::handle_search_keys(key, state);
+    }
+
+    // Artist bio popup handling
+    if state.artist_bio_popup.is_some() {
+        return handle_artist_bio_popup_keys(key, state);
     }
 
     // Library picker popup handling
@@ -440,6 +452,42 @@ fn handle_library_picker_keys(key: event::KeyEvent, state: &mut AppState) -> Vec
                 } else {
                     return vec![Action::SelectLibrary(lib_key), Action::CloseLibraryPicker];
                 }
+            }
+        }
+        _ => {} // Absorb all other keys
+    }
+    vec![]
+}
+
+/// Handle keys when artist bio popup is active.
+fn handle_artist_bio_popup_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
+    match key.code {
+        KeyCode::Esc | KeyCode::F(4) => {
+            state.artist_bio_popup = None;
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            if let Some(ref mut popup) = state.artist_bio_popup {
+                popup.scroll = popup.scroll.saturating_sub(1);
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if let Some(ref mut popup) = state.artist_bio_popup {
+                popup.scroll = popup.scroll.saturating_add(1);
+            }
+        }
+        KeyCode::PageUp => {
+            if let Some(ref mut popup) = state.artist_bio_popup {
+                popup.scroll = popup.scroll.saturating_sub(10);
+            }
+        }
+        KeyCode::PageDown => {
+            if let Some(ref mut popup) = state.artist_bio_popup {
+                popup.scroll = popup.scroll.saturating_add(10);
+            }
+        }
+        KeyCode::Home => {
+            if let Some(ref mut popup) = state.artist_bio_popup {
+                popup.scroll = 0;
             }
         }
         _ => {} // Absorb all other keys

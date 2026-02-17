@@ -1052,6 +1052,19 @@ pub struct ArtistRadioPickerState {
     pub scroll_pin: Option<usize>,
 }
 
+/// State for the artist bio popup (F4).
+#[derive(Debug, Clone)]
+pub struct ArtistBioPopup {
+    /// Artist name displayed in the title.
+    pub artist_name: String,
+    /// Artist biography text.
+    pub bio: String,
+    /// Scroll offset for long bios.
+    pub scroll: u16,
+    /// Loading state.
+    pub loading: bool,
+}
+
 /// Snapshot of queue state for undo.
 #[derive(Debug, Clone)]
 pub struct QueueSnapshot {
@@ -1402,6 +1415,9 @@ pub struct AppState {
 
     // Sort popup state (Ctrl+S)
     pub sort_popup: Option<SortPopupState>,
+
+    // Artist bio popup state (F4)
+    pub artist_bio_popup: Option<ArtistBioPopup>,
 
     /// Auto-drill flag: when true, the next load action replaces the child column
     /// instead of pushing a new one, and does not change focus.
@@ -1924,6 +1940,7 @@ impl AppState {
             library_picker_active: false,
             library_picker_index: 0,
             sort_popup: None,
+            artist_bio_popup: None,
             auto_drill_pending: false,
             marquee: std::cell::RefCell::new(MarqueeState::default()),
             marquee_subtitle: std::cell::RefCell::new(MarqueeState::default()),

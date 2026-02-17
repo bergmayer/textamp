@@ -1682,6 +1682,17 @@ pub fn handle_app_event(
             vec![Action::ArtistRadioComplete(tracks)]
         }
 
+        // Artist bio popup loaded
+        Event::ArtistBioLoaded { artist_name, bio } => {
+            if let Some(ref mut popup) = state.artist_bio_popup {
+                popup.loading = false;
+                popup.artist_name = artist_name;
+                popup.bio = bio;
+                popup.scroll = 0;
+            }
+            vec![]
+        }
+
         // Inline list filter completed
         Event::ListFilterCompleted { version, results } => {
             // Only apply if this is the most recent filter version

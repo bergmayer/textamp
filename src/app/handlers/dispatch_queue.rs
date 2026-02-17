@@ -308,13 +308,22 @@ pub async fn dispatch(
             }
         }
         Action::JumpToQueueIndex(idx) => {
-            // Jump to and play a specific track in the queue
+            // Jump to and play a specific track in the queue (without modifying queue order)
             if idx < state.queue.len() {
+                // Report stop for currently playing track before switching
+                if let Some(current) = state.current_track().cloned() {
+                    helpers::report_playback_stop_to_plex(&current, state.playback.position_ms, true, state.plex_session_id.clone(), client);
+                }
+
+                // Generate new session ID for this playback context
+                state.plex_session_id = Some(helpers::generate_plex_session_id());
+
                 state.queue_index = Some(idx);
                 state.list_state.queue_index = idx;
-                if let Some(track) = state.queue.get(idx).cloned() {
-                    follow_ups.push(Action::PlayTrack(track));
-                }
+                state.playback_mode = PlaybackMode::Queue;
+                audio.track_cache.flush();
+                helpers::play_current_track(event_tx, state, client, audio).await;
+
                 // Trigger DJ mode processing after jump (all modes are continuous)
                 if !state.dj_inserting && state.active_dj_mode.is_some() {
                     follow_ups.push(Action::DjModeProcess);

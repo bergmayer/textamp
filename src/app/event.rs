@@ -203,6 +203,9 @@ pub enum Event {
     // Multi-artist radio
     ArtistRadioComplete { tracks: Vec<Track> },
 
+    // Artist bio popup (F4)
+    ArtistBioLoaded { artist_name: String, bio: String },
+
     // Remote player control
     PlayersDiscovered(Vec<crate::plex::models::RemotePlayer>),
     PlayerDiscoveryFailed(String),

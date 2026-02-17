@@ -105,6 +105,10 @@ pub enum Action {
     ClearSearch,
     SelectSearchResult,
 
+    // Artist bio popup (F4)
+    ShowArtistBio { artist_key: String, artist_name: String },
+    ArtistBioLoaded { bio: String },
+
     // UI
     ListUp,
     ListDown,

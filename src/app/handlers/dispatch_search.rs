@@ -564,6 +564,36 @@ pub async fn dispatch(
                 }
             }
         }
+        // Artist bio popup (F4)
+        Action::ShowArtistBio { artist_key, artist_name } => {
+            // Initialize popup in loading state
+            state.artist_bio_popup = Some(crate::app::state::ArtistBioPopup {
+                artist_name: artist_name.clone(),
+                bio: String::new(),
+                scroll: 0,
+                loading: true,
+            });
+
+            // Fetch artist details from API
+            let tx = event_tx.clone();
+            let client_clone = client.clone();
+            tokio::spawn(async move {
+                match client_clone.get_artist(&artist_key).await {
+                    Ok(artist) => {
+                        let bio = artist.summary.unwrap_or_else(|| "No biography available.".to_string());
+                        let _ = tx.send(Event::ArtistBioLoaded { artist_name, bio }).await;
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to fetch artist bio: {}", e);
+                        let _ = tx.send(Event::ArtistBioLoaded {
+                            artist_name,
+                            bio: format!("Failed to load biography: {}", e),
+                        }).await;
+                    }
+                }
+            });
+        }
+
         Action::ArtistRadioPickerLaunch => {
             if let Some(picker) = state.artist_radio_picker.take() {
                 if picker.selected_artists.is_empty() {

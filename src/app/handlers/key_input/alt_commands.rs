@@ -102,6 +102,10 @@ pub fn available_alt_commands(state: &AppState) -> Vec<AltCommand> {
     if !state.libraries.is_empty() {
         cmds.push(AltCommand { modifier: CommandModifier::None, key: '\0', label: "library", display_key: Some("F3") });
     }
+    // F4 artist bio: available when there's an artist context
+    if super::super::helpers::get_artist_for_bio(state).is_some() {
+        cmds.push(AltCommand { modifier: CommandModifier::None, key: '\0', label: "bio", display_key: Some("F4") });
+    }
     cmds.push(AltCommand { modifier: CommandModifier::None, key: '\0', label: "refresh", display_key: Some("F5") });
 
     cmds

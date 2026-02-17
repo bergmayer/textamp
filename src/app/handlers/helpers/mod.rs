@@ -189,6 +189,184 @@ pub fn sort_key(title: &str) -> String {
     }
 }
 
+/// Get artist key and name for the bio popup (F4).
+/// Priority: selected track → selected album → selected artist → now-playing track.
+/// For compilation tracks, uses the track artist (original_title) instead of album artist.
+pub fn get_artist_for_bio(state: &crate::app::state::AppState) -> Option<(String, String)> {
+    use crate::app::state::{View, BrowseItem, PlaybackMode};
+
+    // Helper: extract artist info from a track, preferring track artist for compilations
+    let artist_from_track = |track: &crate::plex::models::Track| -> Option<(String, String)> {
+        // Check if this is a compilation track (has original_title different from album artist)
+        if let Some(ref track_artist) = track.original_title {
+            let album_artist = track.grandparent_title.as_deref().unwrap_or("");
+            // If track artist differs from album artist, try to find the track artist
+            if !track_artist.is_empty() && track_artist != album_artist {
+                // Search for artist by name in cached artists
+                if let Some(found) = state.artists.iter().find(|a| a.title == *track_artist) {
+                    return Some((found.rating_key.clone(), found.title.clone()));
+                }
+                // Fall back to album artist if track artist not found in library
+            }
+        }
+        // Use album artist
+        if let (Some(key), Some(name)) = (&track.grandparent_rating_key, &track.grandparent_title) {
+            return Some((key.clone(), name.clone()));
+        }
+        None
+    };
+
+    // 1. Check selected item (in Browse, Queue, Search, etc.)
+    match state.view {
+        View::Browse => {
+            // Check Miller columns for selected item
+            if let Some(nav) = state.browse_nav() {
+                let col_idx = nav.focused_column;
+                if let Some(col) = nav.columns.get(col_idx) {
+                    let item_idx = col.selected_index;
+
+                    // Check if we have a track column (with tracks vec)
+                    if !col.tracks.is_empty() {
+                        if let Some(track) = col.tracks.get(item_idx) {
+                            if let Some(result) = artist_from_track(track) {
+                                return Some(result);
+                            }
+                        }
+                    }
+
+                    // Check browse item type
+                    if let Some(item) = col.items.get(item_idx) {
+                        match item {
+                            BrowseItem::Album { key, artist, .. } => {
+                                // Look up album in state.albums to get artist key
+                                if let Some(album) = state.albums.iter().find(|a| a.rating_key == *key) {
+                                    if let (Some(artist_key), Some(artist_name)) = (&album.parent_rating_key, &album.parent_title) {
+                                        return Some((artist_key.clone(), artist_name.clone()));
+                                    }
+                                }
+                                // Fall back to artist name from BrowseItem
+                                if !artist.is_empty() {
+                                    // Try to find artist by name in state.artists
+                                    if let Some(found) = state.artists.iter().find(|a| a.title == *artist) {
+                                        return Some((found.rating_key.clone(), found.title.clone()));
+                                    }
+                                }
+                            }
+                            BrowseItem::Artist { key, title, .. } => {
+                                return Some((key.clone(), title.clone()));
+                            }
+                            BrowseItem::AllTracks { artist_key, artist_name, .. } => {
+                                return Some((artist_key.clone(), artist_name.clone()));
+                            }
+                            BrowseItem::ArtistRadio { artist_key, artist_name, .. } => {
+                                return Some((artist_key.clone(), artist_name.clone()));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        View::Queue | View::NowPlaying => {
+            // Check selected queue/radio track
+            let tracks = match state.playback_mode {
+                PlaybackMode::Radio => &state.radio.tracks,
+                _ => &state.queue,
+            };
+            if let Some(track) = tracks.get(state.list_state.queue_index) {
+                if let Some(result) = artist_from_track(track) {
+                    return Some(result);
+                }
+            }
+        }
+        View::Search => {
+            // Check selected search result based on active tab
+            if let Some(ref results) = state.search_results {
+                use crate::app::state::SearchTab;
+                let idx = state.list_state.search_item_index;
+
+                match state.search_tab {
+                    SearchTab::Tracks => {
+                        if let Some(track) = results.tracks.get(idx) {
+                            if let Some(result) = artist_from_track(track) {
+                                return Some(result);
+                            }
+                        }
+                    }
+                    SearchTab::Albums => {
+                        if let Some(album) = results.albums.get(idx) {
+                            if let (Some(key), Some(name)) = (&album.parent_rating_key, &album.parent_title) {
+                                return Some((key.clone(), name.clone()));
+                            }
+                        }
+                    }
+                    SearchTab::Artists => {
+                        if let Some(artist) = results.artists.get(idx) {
+                            return Some((artist.rating_key.clone(), artist.title.clone()));
+                        }
+                    }
+                    SearchTab::Global => {
+                        // All tab: figure out which section the index is in
+                        let (section, local_idx) = crate::app::handlers::dispatch_search::resolve_global_index(results, idx);
+                        match section {
+                            SearchTab::Artists => {
+                                if let Some(artist) = results.artists.get(local_idx) {
+                                    return Some((artist.rating_key.clone(), artist.title.clone()));
+                                }
+                            }
+                            SearchTab::Albums => {
+                                if let Some(album) = results.albums.get(local_idx) {
+                                    if let (Some(key), Some(name)) = (&album.parent_rating_key, &album.parent_title) {
+                                        return Some((key.clone(), name.clone()));
+                                    }
+                                }
+                            }
+                            SearchTab::Tracks => {
+                                if let Some(track) = results.tracks.get(local_idx) {
+                                    if let Some(result) = artist_from_track(track) {
+                                        return Some(result);
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        View::Similar => {
+            // Check similar albums/tracks
+            match state.similar_mode {
+                crate::app::state::SimilarMode::Albums => {
+                    if let Some(album) = state.similar_albums.get(state.list_state.similar_index) {
+                        if let (Some(key), Some(name)) = (&album.parent_rating_key, &album.parent_title) {
+                            return Some((key.clone(), name.clone()));
+                        }
+                    }
+                }
+                crate::app::state::SimilarMode::Tracks => {
+                    if let Some(track) = state.similar_tracks.get(state.list_state.similar_index) {
+                        if let Some(result) = artist_from_track(track) {
+                            return Some(result);
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+
+    // 2. Fall back to now-playing track
+    if let Some(track) = state.current_track() {
+        if let Some(result) = artist_from_track(track) {
+            return Some(result);
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

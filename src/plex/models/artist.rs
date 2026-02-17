@@ -23,6 +23,9 @@ pub struct Artist {
     pub country: Option<String>,
     #[serde(default)]
     pub added_at: Option<i64>,
+    /// Artist biography/summary from Plex.
+    #[serde(default)]
+    pub summary: Option<String>,
 }
 
 /// Album metadata.

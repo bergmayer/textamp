@@ -74,6 +74,11 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         screens::sort_popup::render(frame, state, frame.area());
     }
 
+    // Render artist bio popup if active
+    if state.artist_bio_popup.is_some() {
+        render_artist_bio_popup(frame, state);
+    }
+
     // Render error popup if present
     if let Some(ref error) = state.last_error {
         render_error_popup(frame, error);
@@ -1596,6 +1601,60 @@ fn render_library_picker(frame: &mut Frame, state: &AppState) {
 
     // Help line
     let help = Paragraph::new("Enter: switch | Esc: close")
+        .style(Style::default().fg(t.colors.fg_muted))
+        .alignment(Alignment::Center);
+    frame.render_widget(help, chunks[1]);
+}
+
+/// Render the artist bio popup (F4).
+fn render_artist_bio_popup(frame: &mut Frame, state: &AppState) {
+    let popup = match &state.artist_bio_popup {
+        Some(p) => p,
+        None => return,
+    };
+
+    let t = theme();
+    let area = centered_rect(70, 60, frame.area());
+
+    frame.render_widget(Clear, area);
+
+    let title = format!(" {} ", popup.artist_name);
+    let block = Block::default()
+        .title(title)
+        .title_style(Style::default().fg(t.colors.fg_accent))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(t.colors.border_focused))
+        .style(Style::default().bg(t.colors.bg_primary));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if popup.loading {
+        let loading = Paragraph::new("Loading biography...")
+            .style(Style::default().fg(t.colors.fg_muted))
+            .alignment(Alignment::Center);
+        frame.render_widget(loading, inner);
+        return;
+    }
+
+    // Split inner area: bio text + help line
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(1),    // bio text
+            Constraint::Length(1), // help line
+        ])
+        .split(inner);
+
+    // Render bio with word wrap and scroll
+    let bio_text = Paragraph::new(popup.bio.as_str())
+        .style(Style::default().fg(t.colors.fg_primary))
+        .wrap(Wrap { trim: true })
+        .scroll((popup.scroll, 0));
+    frame.render_widget(bio_text, chunks[0]);
+
+    // Help line
+    let help = Paragraph::new("↑↓: scroll | Esc/F4: close")
         .style(Style::default().fg(t.colors.fg_muted))
         .alignment(Alignment::Center);
     frame.render_widget(help, chunks[1]);

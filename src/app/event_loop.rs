@@ -534,7 +534,8 @@ impl EventLoop {
             | OpenSortPopup | CloseSortPopup | ApplySortOption
             | OpenArtistRadioPicker | CloseArtistRadioPicker | ArtistRadioPickerSearch
             | ArtistRadioPickerSetCount | ArtistRadioPickerToggleArtist
-            | ArtistRadioPickerLaunch => {
+            | ArtistRadioPickerLaunch
+            | ShowArtistBio { .. } => {
                 handlers::dispatch_search::dispatch(&self.event_tx, action, state, client).await?
             }
 

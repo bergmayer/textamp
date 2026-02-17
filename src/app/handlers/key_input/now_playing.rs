@@ -380,13 +380,12 @@ fn handle_queue_track_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Ac
                 return vec![Action::SetView(View::NowPlaying), Action::LoadWaveform];
             }
 
-            // Play selected item from queue or radio
+            // Play selected item from queue or radio (without modifying queue order)
             match state.playback_mode {
                 PlaybackMode::Queue | PlaybackMode::None => {
                     let queue_idx = state.list_state.queue_index;
-                    if let Some(track) = state.queue.get(queue_idx).cloned() {
-                        state.queue_index = Some(queue_idx);
-                        vec![Action::PlayTrack(track)]
+                    if queue_idx < state.queue.len() {
+                        vec![Action::JumpToQueueIndex(queue_idx)]
                     } else {
                         vec![]
                     }
