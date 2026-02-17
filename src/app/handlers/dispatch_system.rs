@@ -105,6 +105,15 @@ pub async fn dispatch(
                 // Stations
                 cache_data.stations = state.stations.clone();
 
+                // All tracks + track-level artists + aliases
+                // Only save if non-empty to avoid overwriting cached data when preload is in-flight
+                if !state.all_tracks.is_empty() {
+                    cache_data.all_tracks = state.all_tracks.clone();
+                    cache_data.track_artists = state.track_artists.clone();
+                }
+                cache_data.artist_aliases = state.artist_aliases.clone();
+                cache_data.album_display_artist = state.album_display_artist.clone();
+
                 // Compilation detection results
                 cache_data.compilation_albums = state.compilation_albums.clone();
                 cache_data.compilation_artist_keys = state.compilation_artist_keys.clone();
@@ -437,108 +446,6 @@ pub async fn dispatch(
                                     }
                                 }
                             });
-                        }
-                    }
-                }
-            }
-        }
-        Action::ToggleAlbumArtView => {
-            state.album_art_view = !state.album_art_view;
-
-            // Persist cover art view preference
-            config.ui.cover_art_view = state.album_art_view;
-            if let Err(e) = crate::config::save_config(config) {
-                tracing::warn!("Failed to save cover art view preference: {}", e);
-            }
-
-            if state.album_art_view {
-                // Load art only for visible items in the focused column
-                let nav = match state.browse_category {
-                    crate::app::state::BrowseCategory::Library => &state.artist_nav,
-                    crate::app::state::BrowseCategory::Genres => &state.genre_nav,
-                    crate::app::state::BrowseCategory::Playlists => &state.playlist_nav,
-                    _ => return Ok(vec![]),
-                };
-
-                if let Some(col) = nav.focused() {
-                    let total_items = col.items.len();
-                    if total_items > 0 {
-                        let inner_height = state.terminal_height.saturating_sub(4) as usize;
-                        let target_visible = 3usize.max(total_items.min(5));
-                        let row_height = if target_visible > 0 { (inner_height / target_visible).max(3) } else { 3 };
-                        let visible_rows = if row_height > 0 { (inner_height / row_height).max(1) } else { 1 };
-                        let scroll_offset = crate::services::NavigationService::calc_scroll_offset(
-                            col.selected_index, visible_rows, total_items,
-                        );
-                        let end = (scroll_offset + visible_rows).min(total_items);
-
-                        let mut to_load: Vec<(String, String)> = Vec::new();
-                        for item in &col.items[scroll_offset..end] {
-                            if to_load.len() >= 4 { break; }
-                            match item {
-                                crate::app::state::BrowseItem::Album { key, thumb: Some(thumb), .. } => {
-                                    if !state.album_art_cache.contains_key(key)
-                                        && !state.album_art_pending.contains(key)
-                                    {
-                                        to_load.push((key.clone(), thumb.clone()));
-                                    }
-                                }
-                                crate::app::state::BrowseItem::AllTracks { artist_key, thumb: Some(thumb), .. } => {
-                                    if !state.album_art_cache.contains_key(artist_key)
-                                        && !state.album_art_pending.contains(artist_key)
-                                    {
-                                        to_load.push((artist_key.clone(), thumb.clone()));
-                                    }
-                                }
-                                crate::app::state::BrowseItem::Artist { key, thumb: Some(thumb), .. } => {
-                                    if !state.album_art_cache.contains_key(key)
-                                        && !state.album_art_pending.contains(key)
-                                    {
-                                        to_load.push((key.clone(), thumb.clone()));
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-
-                        if !to_load.is_empty() {
-                            return Ok(vec![Action::LoadAlbumArt(to_load)]);
-                        }
-                    }
-                }
-            }
-        }
-        Action::ToggleArtistArtView => {
-            state.artist_art_view = !state.artist_art_view;
-
-            if state.artist_art_view {
-                // Load art for visible artists in the focused column
-                if let Some(col) = state.artist_nav.focused() {
-                    let total_items = col.items.len();
-                    if total_items > 0 {
-                        let inner_height = state.terminal_height.saturating_sub(4) as usize;
-                        let target_visible = 3usize.max(total_items.min(5));
-                        let row_height = if target_visible > 0 { (inner_height / target_visible).max(3) } else { 3 };
-                        let visible_rows = if row_height > 0 { (inner_height / row_height).max(1) } else { 1 };
-                        let scroll_offset = crate::services::NavigationService::calc_scroll_offset(
-                            col.selected_index, visible_rows, total_items,
-                        );
-                        let end = (scroll_offset + visible_rows).min(total_items);
-
-                        let mut to_load: Vec<(String, String)> = Vec::new();
-                        for item in &col.items[scroll_offset..end] {
-                            if to_load.len() >= 4 { break; }
-                            if let crate::app::state::BrowseItem::Artist { key, thumb: Some(thumb), .. } = item {
-                                if !state.album_art_cache.contains_key(key)
-                                    && !state.album_art_pending.contains(key)
-                                {
-                                    to_load.push((key.clone(), thumb.clone()));
-                                }
-                            }
-                        }
-
-                        if !to_load.is_empty() {
-                            return Ok(vec![Action::LoadAlbumArt(to_load)]);
                         }
                     }
                 }

@@ -150,6 +150,14 @@ pub struct Track {
 }
 
 impl Track {
+    /// Get track-level artist (original_title), falling back to album artist.
+    pub fn track_artist(&self) -> &str {
+        match self.original_title.as_deref() {
+            Some(s) if !s.is_empty() => s,
+            _ => self.artist_name(),
+        }
+    }
+
     /// Get album name (handles None and empty string).
     pub fn album_name(&self) -> &str {
         match self.parent_title.as_deref() {

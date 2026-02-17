@@ -208,6 +208,11 @@ fn render_artist_albums_level(
         .collect();
 
     frame.render_widget(List::new(items), chunks[1]);
+
+    // Scrollbar for long album lists
+    if albums.len() > visible_height {
+        crate::ui::widgets::render_scrollbar_borderless(frame, chunks[1], albums.len(), visible_height, scroll_offset);
+    }
 }
 
 /// Render the album tracks drill level.
@@ -280,6 +285,11 @@ fn render_album_tracks_level(
         .collect();
 
     frame.render_widget(List::new(items), chunks[1]);
+
+    // Scrollbar for long track lists
+    if tracks.len() > visible_height {
+        crate::ui::widgets::render_scrollbar_borderless(frame, chunks[1], tracks.len(), visible_height, scroll_offset);
+    }
 }
 
 /// Render search input box.
@@ -374,7 +384,7 @@ fn render_search_results(frame: &mut Frame, launcher: &AdventureLauncherState, a
             if !results.tracks.is_empty() {
                 entries.push((format!("── Tracks ({}) ──", results.tracks.len()), true, None));
                 for tr in &results.tracks {
-                    entries.push((format!("  {} - {}", tr.title, tr.artist_name()), false, Some(global_idx)));
+                    entries.push((format!("  {} - {}", tr.title, tr.track_artist()), false, Some(global_idx)));
                     global_idx += 1;
                 }
             }
@@ -407,6 +417,11 @@ fn render_search_results(frame: &mut Frame, launcher: &AdventureLauncherState, a
                 .collect();
 
             frame.render_widget(List::new(items), area);
+
+            // Scrollbar for long lists
+            if entries.len() > visible_height {
+                crate::ui::widgets::render_scrollbar_borderless(frame, area, entries.len(), visible_height, scroll_offset);
+            }
         }
         SearchTab::Artists => {
             render_simple_list(frame, &results.artists, |a| a.title.clone(), selected_idx, is_focused, visible_height, launcher.scroll_pin, area);
@@ -423,7 +438,7 @@ fn render_search_results(frame: &mut Frame, launcher: &AdventureLauncherState, a
         }
         SearchTab::Tracks => {
             render_simple_list(frame, &results.tracks, |tr| {
-                format!("{} - {}", tr.title, tr.artist_name())
+                format!("{} - {}", tr.title, tr.track_artist())
             }, selected_idx, is_focused, visible_height, launcher.scroll_pin, area);
         }
         SearchTab::Playlists => {
@@ -481,6 +496,11 @@ where
         .collect();
 
     frame.render_widget(List::new(list_items), area);
+
+    // Scrollbar for long lists
+    if items.len() > visible_height {
+        crate::ui::widgets::render_scrollbar_borderless(frame, area, items.len(), visible_height, scroll_offset);
+    }
 }
 
 /// Render step 2: track count input.
@@ -510,7 +530,7 @@ fn render_track_count(frame: &mut Frame, launcher: &AdventureLauncherState, area
 
     // Start track info
     let start_info = if let Some(ref track) = launcher.start_track {
-        format!("Start: {} — {}", track.title, track.artist_name())
+        format!("Start: {} — {}", track.title, track.track_artist())
     } else {
         "Start: (none)".to_string()
     };

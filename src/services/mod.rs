@@ -13,6 +13,7 @@
 //! When porting to other platforms (iOS, Web), these services can be
 //! reused directly via FFI or compiled to the target platform.
 
+pub mod artist_alias_service;
 mod adventure;
 mod cache_service;
 mod folder_service;

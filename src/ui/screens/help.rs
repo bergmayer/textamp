@@ -6,32 +6,20 @@ use crate::ui::theme::theme;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
-pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
-    let t = theme();
+/// Return the total number of lines in the help text (for scrollbar hit-testing).
+pub fn help_total_lines() -> usize {
+    HELP_TEXT.lines().count()
+}
 
-    // Fill background
-    frame.render_widget(
-        Block::default().style(Style::default().bg(t.colors.bg_primary)),
-        area
-    );
-
-    let block = Block::default()
-        .title(" help (↑↓ PgUp/PgDn to scroll, Esc to close) ")
-        .title_style(Style::default().fg(t.colors.fg_accent))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(t.colors.border_focused))
-        .style(Style::default().bg(t.colors.bg_primary));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let help_text = r#"
+const HELP_TEXT: &str = r#"
 NAVIGATION
   Arrow keys      Navigate lists
   Tab             Next view (Library→Playlists→Queue→Now Playing)
   Shift+Tab       Previous view
-  Shift+Down      Cycle modes within category (e.g., Library→Album Artists)
-  Shift+Up        Cycle modes backwards
-  Enter / Right   Select / Drill down / Play
+  Enter           Select / Drill down; on tracks: add to queue + play
+  Shift+Enter     On tracks: add track + following to queue + play
+                  On album/artist: add to queue + play (skip drill)
+  Right           Select / Drill down (no playback)
   Left / Bksp     Go back / Move focus left
   Esc             Cancel / Go back
   Page Up/Down    Scroll by page
@@ -41,7 +29,7 @@ NAVIGATION
   /               Activate inline filter (type to filter list)
 
 CATEGORIES (Ctrl+key - works from any view)
-  Ctrl+L          Library (cycles: artists/album artists)
+  Ctrl+L          Library (artists with alias-aware display)
   Ctrl+P          Playlists
   Ctrl+G          Genres (Left/Right or Ctrl+V to switch tabs)
   Ctrl+O          Folders
@@ -54,20 +42,26 @@ VIEWS
 
 COMMANDS (Alt+/ or Ctrl+/ to see available commands)
   Ctrl+F          Search popup (floating dialog)
-  Ctrl+E          Add selection to queue (enqueue)
-  Ctrl+V          Cycle view mode (context-dependent)
-                  Artists: list → shuffled → artwork → artwork shuffled
-                  Albums: list → shuffled → by artist → artwork → artwork shuffled → artwork by artist
-                  Playlist tracks: tracks → shuffled → by album → shuffled → artwork → artwork shuffled
-                  Genres: cycle through tabs (all/library/artist/album/mood/style)
-                  Now Playing: cycle visualizer (waveform→spectrum→spectrogram)
-  Ctrl+M          Show similar albums/tracks
+  Ctrl+E          Add selection to end of queue (enqueue)
+  Shift+Click     Same as Shift+Enter for clicked item
+  Click track name in transport bar → Now Playing
+  Ctrl+S          Sort options popup (sort, direction, artwork, group-by-album)
+  F3              Switch library
+  Ctrl+V          Quick sort cycle (context-dependent)
+                  Artists: default ↔ shuffled
+                  Albums: default → by artist → shuffled → default
+                  Album tracks: default → by title → by duration → shuffled
+                  All tracks*: default → by artist → by album → by title
+                    → by duration → shuffled → default
+                  Genres: cycle through tabs
+                  Now Playing: cycle view (waveform→spectrum→spectrogram)
+                  * playlist, all tracks, compilation tracks columns
+  Ctrl+M          Show similar albums/tracks (popup overlay)
   Ctrl+B          Go to Album (navigate to track's album in Library)
   Ctrl+W          Save queue/radio as playlist
   Ctrl+X          Clear queue/radio
   Alt+L           Library Radio (station based on your library)
   Alt+R           Random Album Radio (shuffled albums)
-  Alt+S           Quick library switcher
 
 SEARCH POPUP (Ctrl+F)
   Type to search library (instant local search)
@@ -76,6 +70,7 @@ SEARCH POPUP (Ctrl+F)
   Enter / Down    Move to results
   Up (at top)     Back to search input
   Enter           Navigate to selected item in library
+  Shift+Enter     Play selected item (add to queue + play)
   Esc             Close search
 
 INLINE FILTER (/ key)
@@ -107,7 +102,7 @@ QUEUE (Ctrl+U)
 NOW PLAYING (Ctrl+N)
   Album art, track info, and visualizer panel
   Visualizer tabs waveform / spectrum / spectrogram
-  Ctrl+V          Cycle visualizer tab
+  Ctrl+V          Cycle view (visualizer tab)
   Up              Focus tab bar (then Left/Right to switch, Down to return)
   Left/Right      Seek ±1 second
   Esc             Return to Queue view
@@ -118,6 +113,13 @@ ARTIST RADIO
   Multi-artist radio: select "Artist Radio" in the stations panel to open
   the picker. Enter count (2-12), search and select artists with Enter.
   Auto-launches when all artists are selected.
+
+COMPILATIONS
+  Artists with tracks on multi-artist compilation albums show "Compilations"
+  in their album list. Drill in to see compilation albums for that artist.
+  "All Tracks" at top shows all tracks from those compilation albums.
+  Compilation-only artists are hidden from the artist list; filter (/)
+  redirects matches to the "Compilations" entry instead.
 
 SONIC ADVENTURE (Alt+A or via stations panel)
   Creates a sonic bridge between two tracks using Plex sonic analysis.
@@ -157,13 +159,15 @@ QUEUE REMIX (via stations panel)
   If a radio station is playing, remix auto-converts to queue first.
   Ctrl+Z undoes the last remix (restores radio if it was auto-converted).
 
-    Remix: Gemini   Insert similar tracks between each queue pair
-    Remix: Twofer   Insert same-artist tracks between each queue pair
-    Remix: Stretch  Insert sonic bridge tracks between each queue pair
-    Remix: Shuffle  Shuffle the queue (press again to undo)
+    Remix: Gemini       Insert similar tracks between each queue pair
+    Remix: Twofer       Insert same-artist tracks between each queue pair
+    Remix: Stretch      Insert sonic bridge tracks between each queue pair
+    Remix: Doppelganger Replace each track with similar by different artist
+    Remix: Shuffle      Shuffle the queue (press again to undo)
 
 PLAYLISTS (Ctrl+P)
   Miller columns navigation (drill down into playlists)
+  Ctrl+S → Group by album  Group playlist tracks by album
 
 GENRES (Ctrl+G)
   Up (at top)     Focus tab bar (All / Library / Artist / Album / Mood / Style)
@@ -186,16 +190,44 @@ GENERAL
   Ctrl+Q          Quit
 "#;
 
+pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
+    let t = theme();
+
+    // Fill background
+    frame.render_widget(
+        Block::default().style(Style::default().bg(t.colors.bg_primary)),
+        area
+    );
+
+    let block = Block::default()
+        .title(" help (↑↓ PgUp/PgDn to scroll, Esc to close) ")
+        .title_style(Style::default().fg(t.colors.fg_accent))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(t.colors.border_focused))
+        .style(Style::default().bg(t.colors.bg_primary));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
     // Count lines for scroll clamping
-    let line_count = help_text.lines().count() as u16;
+    let line_count = HELP_TEXT.lines().count() as u16;
     let visible_lines = inner.height;
     let max_scroll = line_count.saturating_sub(visible_lines);
     let scroll = state.help_scroll.min(max_scroll);
 
-    let paragraph = Paragraph::new(help_text.trim())
+    let paragraph = Paragraph::new(HELP_TEXT.trim())
         .style(Style::default().fg(t.colors.fg_primary))
         .wrap(Wrap { trim: false })
         .scroll((scroll, 0));
 
     frame.render_widget(paragraph, inner);
+
+    // Scrollbar for long help text
+    if line_count > visible_lines {
+        crate::ui::widgets::render_scrollbar(
+            frame, area,
+            line_count as usize,
+            visible_lines as usize,
+            scroll as usize,
+        );
+    }
 }

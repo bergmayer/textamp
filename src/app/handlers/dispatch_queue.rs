@@ -63,40 +63,11 @@ pub async fn dispatch(
             }
         }
         Action::PlayAlbum { rating_key } => {
-            // Load album tracks and prepend to queue
+            // Load album tracks and play them (Shift+Enter on album)
             match client.get_album_tracks(&rating_key).await {
                 Ok(tracks) => {
                     if !tracks.is_empty() {
-                        // Report stop for currently playing track before switching
-                        if let Some(current) = state.current_track().cloned() {
-                            helpers::report_playback_stop_to_plex(&current, state.playback.position_ms, true, state.plex_session_id.clone(), client);
-                        }
-
-                        // Generate new session ID for this playback context
-                        state.plex_session_id = Some(helpers::generate_plex_session_id());
-
-                        // Clear radio state if switching from radio mode
-                        if state.playback_mode == PlaybackMode::Radio {
-                            state.radio.clear();
-                        }
-
-                        // Move played tracks (including current) to history
-                        if let Some(qi) = state.queue_index {
-                            if qi < state.queue.len() {
-                                let played: Vec<Track> = state.queue.drain(..=qi).collect();
-                                state.play_history.extend(played);
-                            }
-                        }
-
-                        // Prepend album tracks at front of queue
-                        state.queue.splice(0..0, tracks);
-                        state.queue_index = Some(0);
-                        state.queue_original.clear();
-                        state.queue_sort_mode = QueueSortMode::QueueOrder;
-                        state.playback_mode = PlaybackMode::Queue;
-                        state.list_state.queue_index = state.play_history.len();
-                        audio.track_cache.flush();
-                        helpers::play_current_track(event_tx, state, client, audio).await;
+                        helpers::queue_and_play(event_tx, state, client, audio, tracks, 0).await;
                     }
                 }
                 Err(e) => {
@@ -104,8 +75,26 @@ pub async fn dispatch(
                 }
             }
         }
+        Action::PlayArtistTracks { artist_key } => {
+            // Load all tracks by artist and play them (Shift+Enter on artist)
+            match client.get_artist_all_tracks(&artist_key).await {
+                Ok(tracks) => {
+                    if !tracks.is_empty() {
+                        helpers::queue_and_play(event_tx, state, client, audio, tracks, 0).await;
+                    }
+                }
+                Err(e) => {
+                    state.set_error(format!("Failed to load artist tracks: {}", e));
+                }
+            }
+        }
+        Action::PlaySearchResult => {
+            // Play the selected search result (Shift+Enter in search)
+            let play_actions = play_search_result(state);
+            follow_ups.extend(play_actions);
+        }
         Action::EnqueueAlbum { rating_key, title } => {
-            // Load album tracks and insert after current position ("play next")
+            // Load album tracks and append to end of queue
             match client.get_album_tracks(&rating_key).await {
                 Ok(tracks) => {
                     if !tracks.is_empty() {
@@ -118,7 +107,7 @@ pub async fn dispatch(
                         }
 
                         let added = tracks.len();
-                        let insert_pos = state.queue_index.map(|i| i + 1).unwrap_or(0);
+                        let insert_pos = state.queue.len();
                         state.queue.splice(insert_pos..insert_pos, tracks);
                         state.set_status(format!("Added {} tracks from \"{}\" to queue", added, title));
                     }
@@ -127,6 +116,45 @@ pub async fn dispatch(
                     state.set_error(format!("Failed to load album: {}", e));
                 }
             }
+        }
+        Action::EnqueueArtistTracks { artist_key, artist_name } => {
+            // Load all tracks by artist and append to end of queue
+            match client.get_artist_all_tracks(&artist_key).await {
+                Ok(tracks) => {
+                    if !tracks.is_empty() {
+                        if state.playback_mode == PlaybackMode::Radio {
+                            state.queue = state.radio.tracks.clone();
+                            state.queue_index = state.radio.track_index;
+                            state.playback_mode = PlaybackMode::Queue;
+                            state.radio.clear();
+                        }
+                        let added = tracks.len();
+                        let insert_pos = state.queue.len();
+                        state.queue.splice(insert_pos..insert_pos, tracks);
+                        state.set_status(format!("Added {} tracks by \"{}\" to queue", added, artist_name));
+                    }
+                }
+                Err(e) => {
+                    state.set_error(format!("Failed to load artist tracks: {}", e));
+                }
+            }
+        }
+        Action::EnqueueTrack(track) => {
+            // Append a single track to end of queue
+            if state.playback_mode == PlaybackMode::Radio {
+                state.queue = state.radio.tracks.clone();
+                state.queue_index = state.radio.track_index;
+                state.playback_mode = PlaybackMode::Queue;
+                state.radio.clear();
+            }
+            let title = track.title.clone();
+            state.queue.push(track);
+            state.set_status(format!("Added \"{}\" to queue", title));
+        }
+        Action::EnqueueSearchResult => {
+            // Enqueue the selected search result
+            let follow_up = enqueue_search_result(state);
+            follow_ups.extend(follow_up);
         }
         Action::ClearQueue => {
             // Clear the appropriate queue based on playback mode
@@ -216,9 +244,10 @@ pub async fn dispatch(
                         };
                     }
                 }
-                // Adjust list selection
-                if state.list_state.queue_index >= state.queue.len() && !state.queue.is_empty() {
-                    state.list_state.queue_index = state.queue.len() - 1;
+                // Adjust list selection (visual index includes history offset)
+                let max_visual = state.play_history.len() + state.queue.len().saturating_sub(1);
+                if state.list_state.queue_index > max_visual {
+                    state.list_state.queue_index = max_visual;
                 }
             }
         }
@@ -355,9 +384,12 @@ pub async fn dispatch(
                     state.radio.clear();
                 }
 
+                // Reset shuffle state since we're modifying the queue
+                state.queue_original.clear();
+                state.queue_sort_mode = QueueSortMode::QueueOrder;
+
                 let added = tracks_to_add.len();
-                let insert_pos = state.queue_index.map(|i| i + 1).unwrap_or(0);
-                state.queue.splice(insert_pos..insert_pos, tracks_to_add);
+                state.queue.extend(tracks_to_add);
                 state.set_status(format!("Added {} to queue ({} total)", added, state.queue.len()));
             }
         }
@@ -417,12 +449,13 @@ pub async fn dispatch(
                 state.set_error("No library selected".to_string());
             }
         }
-        Action::RemixGemini | Action::RemixTwofer | Action::RemixStretch => {
+        Action::RemixGemini | Action::RemixTwofer | Action::RemixStretch | Action::RemixDoppelganger => {
             if state.playback_mode == PlaybackMode::Radio {
                 let desc = match action {
                     Action::RemixGemini => "Remix: Gemini (from radio)",
                     Action::RemixTwofer => "Remix: Twofer (from radio)",
                     Action::RemixStretch => "Remix: Stretch (from radio)",
+                    Action::RemixDoppelganger => "Remix: Doppelganger (from radio)",
                     _ => "Remix (from radio)",
                 };
                 let snapshot = state.convert_radio_to_queue(desc);
@@ -442,6 +475,7 @@ pub async fn dispatch(
                         Action::RemixGemini => "Remix: Gemini".to_string(),
                         Action::RemixTwofer => "Remix: Twofer".to_string(),
                         Action::RemixStretch => "Remix: Stretch".to_string(),
+                        Action::RemixDoppelganger => "Remix: Doppelganger".to_string(),
                         _ => "Remix".to_string(),
                     },
                     radio_snapshot: None,
@@ -453,6 +487,7 @@ pub async fn dispatch(
                 Action::RemixGemini => "Gemini",
                 Action::RemixTwofer => "Twofer",
                 Action::RemixStretch => "Stretch",
+                Action::RemixDoppelganger => "Doppelganger",
                 _ => "Remix",
             };
             state.set_status(format!("Remix: {} processing...", mode_name));
@@ -693,6 +728,32 @@ pub async fn dispatch(
             let upcoming = helpers::get_upcoming_tracks(state);
             crate::audio::cache::trigger_prefetch(&audio.track_cache, &upcoming, client);
         }
+        Action::RemixDoppelgangerReady(replacements) => {
+            if replacements.is_empty() {
+                state.set_status("Remix: Doppelganger — no replacements found".to_string());
+                return Ok(vec![]);
+            }
+
+            let count = replacements.len();
+
+            // Replace tracks in reverse index order to preserve positions
+            let mut sorted = replacements;
+            sorted.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+            for (idx, track) in sorted {
+                if idx < state.queue.len() {
+                    state.queue[idx] = track;
+                }
+            }
+
+            state.set_status(format!("Remix: Doppelganger — {} tracks replaced", count));
+
+            // Stop currently playing track since it was replaced
+            follow_ups.push(Action::Stop);
+
+            // Pre-cache upcoming tracks
+            let upcoming = helpers::get_upcoming_tracks(state);
+            crate::audio::cache::trigger_prefetch(&audio.track_cache, &upcoming, client);
+        }
         _ => unreachable!("dispatch_queue called with non-queue action: {:?}", action),
     }
     Ok(follow_ups)
@@ -719,7 +780,9 @@ fn spawn_remix_batch(
     action: Action,
 ) {
     // Collect tracks to process: from current position to end
-    let idx = state.queue_index.unwrap_or(0).min(state.queue.len());
+    // Doppelganger includes the currently playing track (replaces all from current)
+    let base_idx = state.queue_index.unwrap_or(0).min(state.queue.len());
+    let idx = base_idx;
     let tracks_with_indices: Vec<(usize, Track)> = state.queue[idx..]
         .iter()
         .enumerate()
@@ -741,17 +804,24 @@ fn spawn_remix_batch(
         match action {
             Action::RemixGemini => {
                 remix_gemini_batch(&client_clone, tracks_with_indices, &mut history, &mut inserts).await;
+                let _ = tx.send(Event::RemixBatchReady { inserts }).await;
             }
             Action::RemixTwofer => {
                 remix_twofer_batch(&client_clone, tracks_with_indices, &mut history, &mut inserts).await;
+                let _ = tx.send(Event::RemixBatchReady { inserts }).await;
             }
             Action::RemixStretch => {
                 remix_stretch_batch(&client_clone, tracks_with_indices, &mut history, &mut inserts, library_key.as_deref()).await;
+                let _ = tx.send(Event::RemixBatchReady { inserts }).await;
             }
-            _ => {}
+            Action::RemixDoppelganger => {
+                let replacements = remix_doppelganger_batch(&client_clone, tracks_with_indices).await;
+                let _ = tx.send(Event::RemixDoppelgangerReady { replacements }).await;
+            }
+            _ => {
+                let _ = tx.send(Event::RemixBatchReady { inserts }).await;
+            }
         }
-
-        let _ = tx.send(Event::RemixBatchReady { inserts }).await;
     });
 }
 
@@ -974,4 +1044,184 @@ fn pick_diverse_remix(
     }
 
     result
+}
+
+/// Remix Doppelganger: replace each track with the most sonically similar track by a different artist.
+async fn remix_doppelganger_batch(
+    client: &PlexClient,
+    tracks_with_indices: Vec<(usize, Track)>,
+) -> Vec<(usize, Track)> {
+    use futures::stream::{self, StreamExt};
+
+    // Build a map of original track artists for filtering (before consuming the vec)
+    let original_artists: std::collections::HashMap<usize, String> = tracks_with_indices.iter()
+        .filter_map(|(idx, t)| {
+            t.grandparent_rating_key.as_ref().map(|a| (*idx, a.clone()))
+        })
+        .collect();
+
+    // Collect original track keys to avoid picking them
+    let mut used_keys: std::collections::HashSet<String> = tracks_with_indices.iter()
+        .map(|(_, t)| t.rating_key.clone())
+        .collect();
+
+    // Fire all similar-track lookups concurrently
+    let fetch_results: Vec<_> = stream::iter(tracks_with_indices.into_iter().map(|(idx, track)| {
+        let client = client.clone();
+        async move {
+            let result = client.get_similar_tracks(&track.rating_key, REMIX_SIMILAR_FETCH_LIMIT).await;
+            (idx, result)
+        }
+    }))
+    .buffer_unordered(REMIX_BATCH_CONCURRENCY)
+    .collect()
+    .await;
+
+    // Sort by original index to preserve order
+    let mut fetch_results = fetch_results;
+    fetch_results.sort_by_key(|(idx, _)| *idx);
+
+    let mut replacements: Vec<(usize, Track)> = Vec::new();
+
+    for (original_idx, result) in fetch_results {
+        match result {
+            Ok(similar) => {
+                let original_artist = original_artists.get(&original_idx).map(|s| s.as_str()).unwrap_or("");
+
+                // Phase 1: Pick the most similar track by a DIFFERENT artist, not already used
+                let pick = similar.iter().find(|t| {
+                    let artist = t.grandparent_rating_key.as_deref().unwrap_or("");
+                    !used_keys.contains(&t.rating_key)
+                        && !artist.is_empty()
+                        && artist != original_artist
+                });
+
+                // Phase 2: Relax — any different-artist track
+                let pick = pick.or_else(|| {
+                    similar.iter().find(|t| {
+                        let artist = t.grandparent_rating_key.as_deref().unwrap_or("");
+                        !artist.is_empty() && artist != original_artist
+                    })
+                });
+
+                if let Some(pick) = pick {
+                    used_keys.insert(pick.rating_key.clone());
+                    replacements.push((original_idx, pick.clone()));
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Remix Doppelganger: similar tracks failed for index {}: {}", original_idx, e);
+            }
+        }
+    }
+
+    // Post-processing: enforce consecutive-artist diversity (max 2 in a row)
+    // Build a position-sorted list for checking
+    replacements.sort_by_key(|(idx, _)| *idx);
+    if replacements.len() > 2 {
+        for i in 2..replacements.len() {
+            let artist_i = replacements[i].1.grandparent_rating_key.as_deref().unwrap_or("");
+            let artist_prev = replacements[i - 1].1.grandparent_rating_key.as_deref().unwrap_or("");
+            let artist_prev2 = replacements[i - 2].1.grandparent_rating_key.as_deref().unwrap_or("");
+
+            if !artist_i.is_empty() && artist_i == artist_prev && artist_i == artist_prev2 {
+                // Try to swap with next non-same-artist entry
+                if let Some(swap_idx) = (i + 1..replacements.len()).find(|&j| {
+                    replacements[j].1.grandparent_rating_key.as_deref().unwrap_or("") != artist_i
+                }) {
+                    replacements.swap(i, swap_idx);
+                    // Also swap the queue indices so the right tracks go to the right positions
+                    let idx_i = replacements[i].0;
+                    let idx_j = replacements[swap_idx].0;
+                    replacements[i].0 = idx_j;
+                    replacements[swap_idx].0 = idx_i;
+                }
+            }
+        }
+    }
+
+    replacements
+}
+
+/// Enqueue the currently selected search result.
+fn enqueue_search_result(state: &AppState) -> Vec<Action> {
+    use crate::app::state::SearchTab;
+
+    let Some(ref results) = state.search_results else { return vec![] };
+    let idx = state.list_state.search_item_index;
+
+    let (section, local_idx) = if state.search_tab == SearchTab::Global {
+        super::dispatch_search::resolve_global_index(results, idx)
+    } else {
+        (state.search_tab, idx)
+    };
+
+    match section {
+        SearchTab::Artists => {
+            if let Some(artist) = results.artists.get(local_idx) {
+                return vec![Action::EnqueueArtistTracks {
+                    artist_key: artist.rating_key.clone(),
+                    artist_name: artist.title.clone(),
+                }];
+            }
+        }
+        SearchTab::Albums => {
+            if let Some(album) = results.albums.get(local_idx) {
+                return vec![Action::EnqueueAlbum {
+                    rating_key: album.rating_key.clone(),
+                    title: album.title.clone(),
+                }];
+            }
+        }
+        SearchTab::Tracks => {
+            if let Some(track) = results.tracks.get(local_idx) {
+                return vec![Action::EnqueueTrack(track.clone())];
+            }
+        }
+        SearchTab::Playlists | SearchTab::Genres | SearchTab::Global => {
+            // Playlists and genres can't be directly enqueued
+        }
+    }
+
+    vec![]
+}
+
+/// Build actions to play a search result (Shift+Enter/Shift+Click in search).
+/// Uses PlayAlbum/PlayArtistTracks/PlayTrack to add to queue AND start playback.
+fn play_search_result(state: &AppState) -> Vec<Action> {
+    use crate::app::state::SearchTab;
+
+    let Some(ref results) = state.search_results else { return vec![] };
+    let idx = state.list_state.search_item_index;
+
+    let (section, local_idx) = if state.search_tab == SearchTab::Global {
+        super::dispatch_search::resolve_global_index(results, idx)
+    } else {
+        (state.search_tab, idx)
+    };
+
+    match section {
+        SearchTab::Artists => {
+            if let Some(artist) = results.artists.get(local_idx) {
+                return vec![Action::PlayArtistTracks {
+                    artist_key: artist.rating_key.clone(),
+                }];
+            }
+        }
+        SearchTab::Albums => {
+            if let Some(album) = results.albums.get(local_idx) {
+                return vec![Action::PlayAlbum {
+                    rating_key: album.rating_key.clone(),
+                }];
+            }
+        }
+        SearchTab::Tracks => {
+            if let Some(track) = results.tracks.get(local_idx) {
+                return vec![Action::PlayTrack(track.clone())];
+            }
+        }
+        SearchTab::Playlists | SearchTab::Genres | SearchTab::Global => {}
+    }
+
+    vec![]
 }

@@ -3,7 +3,6 @@
 //! SelectLibrary, SaveSettings, ClearCache, and Adventure actions.
 
 use crate::app::{Action, AppState, Event};
-use crate::app::event_loop::PreloadType;
 use crate::app::state::{ConnectionState, PlayStatus, PlaybackMode, QueueSortMode, SettingsSection, View};
 use crate::api::{PlexAuth, PlexClient};
 use crate::audio::AudioPlayer;
@@ -49,6 +48,8 @@ pub async fn dispatch(
             state.connected_server_url = None;
             state.active_server_id = None;
             state.artwork_cache_stats = None;
+            state.library_cache_stats = None;
+            state.waveform_cache_stats = None;
 
             // Clear browse data
             state.artists.clear();
@@ -60,6 +61,10 @@ pub async fn dispatch(
             state.moods.clear();
             state.styles.clear();
             state.stations.clear();
+            state.all_tracks.clear();
+            state.track_artists.clear();
+            state.artist_aliases.clear();
+            state.album_display_artist.clear();
             state.compilation_albums.clear();
             state.compilation_artist_keys.clear();
             state.compilation_track_artist_keys.clear();
@@ -88,6 +93,8 @@ pub async fn dispatch(
             // Clear session/runtime state
             state.category_timestamps.clear();
             state.background_refresh_in_progress.clear();
+            state.preloads_in_progress.clear();
+            state.preloads_total = 0;
             state.plex_session_id = None;
             state.album_art_cache.clear();
             state.album_art_pending.clear();
@@ -213,7 +220,7 @@ pub async fn dispatch(
             }
         }
         Action::OpenSettings => {
-            state.view = View::Settings;
+            state.set_view(View::Settings);
             state.settings_state.section = SettingsSection::Account;
             state.settings_state.item_index = 0;
             state.settings_state.signing_in = false;
@@ -572,6 +579,10 @@ pub async fn dispatch(
                 state.moods.clear();
                 state.styles.clear();
                 state.stations.clear();
+                state.all_tracks.clear();
+                state.track_artists.clear();
+                state.artist_aliases.clear();
+                state.album_display_artist.clear();
                 state.compilation_albums.clear();
                 state.compilation_artist_keys.clear();
                 state.compilation_track_artist_keys.clear();
@@ -672,7 +683,7 @@ pub async fn dispatch(
                 });
 
                 // Refresh from API in background
-                helpers::preload_all_library_data(event_tx, &lib_key, &lib_name, client);
+                helpers::preload_all_library_data(event_tx, &lib_key, &lib_name, client, state);
 
                 state.set_status(format!("Switched to {}", lib_name));
 
@@ -697,6 +708,8 @@ pub async fn dispatch(
                     state.moods.clear();
                     state.styles.clear();
                     state.stations.clear();
+                    state.all_tracks.clear();
+                    state.track_artists.clear();
                     state.compilation_albums.clear();
                     state.compilation_artist_keys.clear();
                     state.compilation_track_artist_keys.clear();
@@ -832,17 +845,7 @@ pub async fn dispatch(
                                 .map(|l| l.title.clone())
                                 .unwrap_or_else(|| lib_key.clone());
 
-                            // Preload all library data (same as preload_all_library_data)
-                            helpers::preload_data(event_tx, PreloadType::Artists, &lib_key, client);
-                            helpers::preload_data(event_tx, PreloadType::Albums, &lib_key, client);
-                            helpers::preload_data(event_tx, PreloadType::Playlists, &lib_key, client);
-                            helpers::preload_data(event_tx, PreloadType::Folders { lib_title: lib_name }, &lib_key, client);
-                            helpers::preload_data(event_tx, PreloadType::Genres, &lib_key, client);
-                            helpers::preload_data(event_tx, PreloadType::ArtistGenres, &lib_key, client);
-                            helpers::preload_data(event_tx, PreloadType::AlbumGenres, &lib_key, client);
-                            helpers::preload_data(event_tx, PreloadType::Moods, &lib_key, client);
-                            helpers::preload_data(event_tx, PreloadType::Styles, &lib_key, client);
-                            helpers::preload_data(event_tx, PreloadType::Stations, &lib_key, client);
+                            helpers::preload_all_library_data(event_tx, &lib_key, &lib_name, client, state);
                         }
 
                         state.set_status(format!("Cleared {} cache files, reloading...", count));
@@ -873,6 +876,8 @@ pub async fn dispatch(
                         state.moods.clear();
                         state.styles.clear();
                         state.stations.clear();
+                        state.all_tracks.clear();
+                        state.track_artists.clear();
                         state.compilation_albums.clear();
                         state.compilation_artist_keys.clear();
                         state.compilation_track_artist_keys.clear();
@@ -889,8 +894,10 @@ pub async fn dispatch(
                                 .find(|l| l.key == lib_key)
                                 .map(|l| l.title.clone())
                                 .unwrap_or_else(|| lib_key.clone());
-                            helpers::preload_all_library_data(event_tx, &lib_key, &lib_name, client);
+                            helpers::preload_all_library_data(event_tx, &lib_key, &lib_name, client, state);
                         }
+
+                        state.library_cache_stats = Some(0);
 
                         state.set_status(format!("Cleared {} library cache files, reloading...", count));
                     }
@@ -1102,7 +1109,7 @@ pub async fn dispatch(
                         state.queue_original.clear();
                         state.queue_sort_mode = QueueSortMode::QueueOrder;
                         state.playback_mode = PlaybackMode::Queue;
-                        state.view = View::Queue;
+                        state.set_view(View::Queue);
 
                         // Start playback
                         helpers::play_current_track(event_tx, state, client, audio).await;
@@ -1137,7 +1144,7 @@ pub async fn dispatch(
             state.queue_original.clear();
             state.queue_sort_mode = QueueSortMode::QueueOrder;
             state.playback_mode = PlaybackMode::Queue;
-            state.view = View::Queue;
+            state.set_view(View::Queue);
             helpers::play_current_track(event_tx, state, client, audio).await;
         }
         Action::AdventureError(msg) => {
@@ -1161,7 +1168,7 @@ pub async fn dispatch(
             state.queue_sort_mode = QueueSortMode::QueueOrder;
             state.playback_mode = PlaybackMode::Queue;
             state.list_state.queue_index = 0;
-            state.view = View::Queue;
+            state.set_view(View::Queue);
             state.set_status(format!("Artist radio: {} tracks", count));
             helpers::play_current_track(event_tx, state, client, audio).await;
         }

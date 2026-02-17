@@ -2,7 +2,7 @@
 //! display and the key handler dispatch.
 
 use crate::app::state::{
-    BrowseCategory, BrowseItem, Focus, PlaybackMode, PlaylistViewMode,
+    BrowseCategory, BrowseItem, Focus, PlaybackMode,
     RightPanelMode, View,
 };
 use crate::app::AppState;
@@ -77,8 +77,18 @@ pub fn available_alt_commands(state: &AppState) -> Vec<AltCommand> {
         cmds.push(AltCommand { modifier: CommandModifier::Alt, key: 'l', label: "library radio", display_key: None });
         cmds.push(AltCommand { modifier: CommandModifier::Alt, key: 'r', label: "random album", display_key: None });
     }
-    if !state.libraries.is_empty() {
-        cmds.push(AltCommand { modifier: CommandModifier::Alt, key: 's', label: "switch library", display_key: None });
+    // Ctrl+S sort: available in Browse view when focused column has sortable items
+    if state.view == View::Browse {
+        if let Some(nav) = state.browse_nav() {
+            if let Some(col) = nav.focused() {
+                let has_sortable = col.items.first().map_or(false, |i| {
+                    matches!(i, BrowseItem::Artist { .. } | BrowseItem::Album { .. } | BrowseItem::Track { .. })
+                }) || col.items.iter().take(4).any(|i| matches!(i, BrowseItem::Artist { .. } | BrowseItem::Album { .. }));
+                if has_sortable {
+                    cmds.push(AltCommand { modifier: CommandModifier::Ctrl, key: 's', label: "sort options", display_key: None });
+                }
+            }
+        }
     }
 
     // Function key commands (always available)
@@ -87,6 +97,9 @@ pub fn available_alt_commands(state: &AppState) -> Vec<AltCommand> {
     }
     if state.view != View::Settings {
         cmds.push(AltCommand { modifier: CommandModifier::None, key: '\0', label: "settings", display_key: Some("F2") });
+    }
+    if !state.libraries.is_empty() {
+        cmds.push(AltCommand { modifier: CommandModifier::None, key: '\0', label: "library", display_key: Some("F3") });
     }
     cmds.push(AltCommand { modifier: CommandModifier::None, key: '\0', label: "refresh", display_key: Some("F5") });
 
@@ -105,7 +118,7 @@ pub fn is_action_command_available(state: &AppState, key: char) -> bool {
 fn get_view_cycle_label(state: &AppState) -> Option<&'static str> {
     // Alt+V cycles visualizer tab in NowPlaying view
     if state.view == View::NowPlaying {
-        return Some("cycle viz");
+        return Some("cycle view");
     }
 
     if state.view != View::Browse {
@@ -122,28 +135,11 @@ fn get_view_cycle_label(state: &AppState) -> Option<&'static str> {
         }
     }
 
-    // Playlist track/album cycle: Playlists, view-cycle column focused (index > 0)
-    if state.browse_category == BrowseCategory::Playlists && state.playlist_nav.focused_column > 0 {
-        let col = state.playlist_nav.focused()?;
-        let first_item = col.items.first()?;
-        let is_valid = match (state.playlist_view_mode, first_item) {
-            (PlaylistViewMode::Tracks, BrowseItem::Track { .. }) => true,
-            (PlaylistViewMode::TracksByAlbum, BrowseItem::Album { .. }) => true,
-            _ => false,
-        };
-        if is_valid {
-            return Some("cycle view");
-        }
-        return None;
-    }
-
-    // General column cycle: Library | Genres | Playlists (not TracksByAlbum)
+    // Column sort cycle: any focused column with sortable content
     let nav = match state.browse_category {
         BrowseCategory::Library => Some(&state.artist_nav),
         BrowseCategory::Genres => Some(&state.genre_nav),
-        BrowseCategory::Playlists if state.playlist_view_mode != PlaylistViewMode::TracksByAlbum => {
-            Some(&state.playlist_nav)
-        }
+        BrowseCategory::Playlists => Some(&state.playlist_nav),
         _ => None,
     }?;
     let col = nav.focused()?;

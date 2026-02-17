@@ -137,6 +137,14 @@ pub struct CacheData {
     #[serde(default)]
     pub stations: Vec<Station>,
 
+    // All tracks (for compilation detection + track-level artist derivation)
+    #[serde(default)]
+    pub all_tracks: Vec<Track>,
+
+    // Track-level artist list (derived from all_tracks)
+    #[serde(default)]
+    pub track_artists: Vec<Artist>,
+
     // Compilation detection results
     #[serde(default)]
     pub compilation_albums: Vec<Album>,
@@ -148,6 +156,12 @@ pub struct CacheData {
     pub artist_compilation_map: HashMap<String, Vec<String>>,
     #[serde(default)]
     pub single_artist_compilations: HashMap<String, Vec<Album>>,
+
+    // Artist aliases (uniform track artists differing from album artist)
+    #[serde(default)]
+    pub artist_aliases: HashMap<String, HashSet<String>>,
+    #[serde(default)]
+    pub album_display_artist: HashMap<String, String>,
 
     // Per-category refresh timestamps (category display_name -> epoch secs)
     #[serde(default)]

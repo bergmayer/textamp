@@ -1,28 +1,28 @@
-//! Background compilation detection.
+//! Compilation detection from cached track data.
 
 use std::collections::{HashMap, HashSet};
 
-use crate::api::models::Album;
-use crate::api::PlexClient;
+use crate::api::models::{Album, Artist, Track};
 use crate::app::{AppState, Event};
+use crate::api::PlexClient;
 use tokio::sync::mpsc;
 
-/// Check preconditions and spawn compilation detection if needed.
+/// Check preconditions and run compilation detection if needed.
 ///
-/// Call this from any code path that finishes populating artists + albums
+/// Call this from any code path that finishes populating artists + albums + all_tracks
 /// (cache load, preload events, etc.). It's idempotent: if detection has
 /// already run or is not needed, it returns immediately.
 pub fn maybe_detect(
     event_tx: &mpsc::Sender<Event>,
     state: &AppState,
-    client: &PlexClient,
+    _client: &PlexClient,
 ) {
     // Already detected (or currently detecting)
     if state.compilations_detected {
         return;
     }
-    // Need both artists and albums loaded
-    if state.artists.is_empty() || state.albums.is_empty() {
+    // Need artists, albums, and all_tracks loaded
+    if state.artists.is_empty() || state.albums.is_empty() || state.all_tracks.is_empty() {
         return;
     }
     // Need an active library
@@ -31,146 +31,157 @@ pub fn maybe_detect(
     };
 
     tracing::info!(
-        "Starting compilation detection: {} albums, {} artists",
+        "Starting compilation detection: {} albums, {} artists, {} tracks",
         state.albums.len(),
-        state.artists.len()
+        state.artists.len(),
+        state.all_tracks.len()
+    );
+
+    // Pure function — no API calls needed
+    let result = detect_compilations_from_tracks(
+        &state.albums,
+        &state.all_tracks,
+        &state.artists,
+        &state.artist_aliases,
     );
 
     let tx = event_tx.clone();
-    let client_clone = client.clone();
-    let albums_clone = state.albums.clone();
-    let all_artist_keys: HashSet<String> = state.artists.iter()
-        .map(|a| a.rating_key.clone())
-        .collect();
-    // Build lowercase name → key map for looking up actual artist from track artist name
-    let artist_name_to_key: HashMap<String, String> = state.artists.iter()
-        .map(|a| (a.title.to_lowercase(), a.rating_key.clone()))
-        .collect();
-
+    // Send result via event (keeps same pattern, could be made sync but event
+    // pattern ensures consistent state update path)
     tokio::spawn(async move {
-        detect_compilations(tx, lib_key, albums_clone, all_artist_keys, artist_name_to_key, client_clone).await;
+        let _ = tx.send(Event::CompilationsDetected {
+            library_key: lib_key,
+            albums: result.confirmed_compilations,
+            artist_only_keys: result.artist_only_keys,
+            track_artist_keys: result.compilation_track_artist_keys,
+            artist_compilation_map: result.artist_compilation_map,
+            single_artist_compilations: result.single_artist_compilations,
+        }).await;
     });
 }
 
-/// Detect compilation albums from the full album list.
+/// Result of compilation detection.
+struct CompilationResult {
+    confirmed_compilations: Vec<Album>,
+    artist_only_keys: HashSet<String>,
+    compilation_track_artist_keys: HashSet<String>,
+    artist_compilation_map: HashMap<String, Vec<String>>,
+    single_artist_compilations: HashMap<String, Vec<Album>>,
+}
+
+/// Detect compilation albums using the pre-cached track list.
 ///
-/// A compilation candidate (subtype="compilation" or "Various Artists") is confirmed
-/// as a true compilation if its tracks come from multiple distinct artists.
-/// Same-artist compilations (e.g., greatest hits) are excluded.
-///
-/// Also computes the set of artist keys that appear ONLY on compilations
-/// (i.e., they have no solo albums), so they can be hidden from the artist list.
-///
-/// Builds `artist_compilation_map`: artist_key → Vec<album_rating_key> so we
-/// can show compilation appearances in an artist's album view.
-async fn detect_compilations(
-    event_tx: mpsc::Sender<Event>,
-    library_key: String,
-    albums: Vec<Album>,
-    all_artist_keys: HashSet<String>,
-    artist_name_to_key: HashMap<String, String>,
-    client: PlexClient,
-) {
+/// Groups tracks by album, checks each compilation candidate for multi-artist content.
+/// Pure function — no API calls, no async.
+fn detect_compilations_from_tracks(
+    albums: &[Album],
+    all_tracks: &[Track],
+    artists: &[Artist],
+    artist_aliases: &HashMap<String, HashSet<String>>,
+) -> CompilationResult {
+    // Group tracks by parent_rating_key (album key)
+    let mut tracks_by_album: HashMap<&str, Vec<&Track>> = HashMap::new();
+    for track in all_tracks {
+        if let Some(ref album_key) = track.parent_rating_key {
+            tracks_by_album.entry(album_key.as_str()).or_default().push(track);
+        }
+    }
+
+    // Build all_artist_keys and normalized artist lookup
+    let all_artist_keys: HashSet<String> = artists.iter()
+        .map(|a| a.rating_key.clone())
+        .collect();
+    let artist_lookup = crate::services::artist_alias_service::build_artist_lookup(artists, artist_aliases);
+
     let candidates: Vec<&Album> = albums.iter()
         .filter(|a| a.is_compilation_candidate())
         .collect();
 
     if candidates.is_empty() {
-        let _ = event_tx.send(Event::CompilationsDetected {
-            library_key,
-            albums: vec![],
+        return CompilationResult {
+            confirmed_compilations: vec![],
             artist_only_keys: HashSet::new(),
-            track_artist_keys: HashSet::new(),
+            compilation_track_artist_keys: HashSet::new(),
             artist_compilation_map: HashMap::new(),
             single_artist_compilations: HashMap::new(),
-        }).await;
-        return;
+        };
     }
 
     tracing::info!("Checking {} compilation candidates...", candidates.len());
 
     let mut confirmed: Vec<Album> = Vec::new();
-    // Track artist keys that appear on compilations (track-level grandparent_rating_key)
     let mut compilation_track_artist_keys: HashSet<String> = HashSet::new();
-    // Map: artist_key → Vec<album_rating_key> for compilation appearances
     let mut artist_compilation_map: HashMap<String, Vec<String>> = HashMap::new();
-    // Single-artist "compilations" mapped to the actual artist key
     let mut single_artist_compilations: HashMap<String, Vec<Album>> = HashMap::new();
 
+    // Helper: resolve a track artist name to a real artist key using normalized matching
+    let resolve_artist_key = |name: &str| -> Option<String> {
+        crate::services::artist_alias_service::resolve_artist_key(name, &artist_lookup)
+    };
+
     for album in &candidates {
-        // Fetch tracks for each candidate to check if multi-artist
-        match client.get_album_tracks(&album.rating_key).await {
-            Ok(tracks) => {
-                if tracks.is_empty() {
-                    continue;
-                }
+        let tracks = match tracks_by_album.get(album.rating_key.as_str()) {
+            Some(t) if !t.is_empty() => t,
+            _ => continue,
+        };
 
-                // Collect distinct artist names from tracks.
-                // Use original_title (track-level artist) when available,
-                // falling back to grandparent_title (album-level artist).
-                let mut track_artists: HashSet<String> = HashSet::new();
-                let mut album_artist_keys: HashSet<String> = HashSet::new();
-                for track in &tracks {
-                    let artist = track.original_title.as_deref()
-                        .unwrap_or_else(|| track.artist_name());
-                    track_artists.insert(artist.to_lowercase());
-                    if let Some(ref key) = track.grandparent_rating_key {
-                        compilation_track_artist_keys.insert(key.clone());
-                        album_artist_keys.insert(key.clone());
-                    }
-                }
-
-                // Multi-artist = true compilation
-                if track_artists.len() > 1 {
-                    confirmed.push((*album).clone());
-                    // Record which artists appear on this compilation
-                    for artist_key in &album_artist_keys {
-                        artist_compilation_map
-                            .entry(artist_key.clone())
-                            .or_default()
-                            .push(album.rating_key.clone());
-                    }
-                } else if track_artists.len() == 1 {
-                    // Single-artist "compilation" — map to the actual artist
-                    // so it appears as a normal album under that artist.
-                    // Look up artist by name since grandparent_rating_key points
-                    // to the album-level parent (e.g. "Various Artists"), not the
-                    // actual track artist.
-                    let artist_name = track_artists.iter().next().unwrap(); // lowercase
-                    if let Some(real_key) = artist_name_to_key.get(artist_name) {
-                        single_artist_compilations
-                            .entry(real_key.clone())
-                            .or_default()
-                            .push((*album).clone());
-                    }
-                }
+        // Collect distinct artist names from tracks.
+        // Use original_title (track-level artist) when available,
+        // falling back to grandparent_title (album-level artist).
+        let mut track_artists: HashSet<String> = HashSet::new();
+        let mut real_artist_keys: HashSet<String> = HashSet::new();
+        for track in tracks {
+            let artist = track.original_title.as_deref()
+                .unwrap_or_else(|| track.artist_name());
+            track_artists.insert(artist.to_lowercase());
+            // Resolve track artist to a real artist key via name or alias
+            if let Some(real_key) = resolve_artist_key(artist) {
+                real_artist_keys.insert(real_key.clone());
+                compilation_track_artist_keys.insert(real_key);
             }
-            Err(e) => {
-                tracing::debug!("Failed to fetch tracks for compilation candidate {}: {}", album.rating_key, e);
+            // Also include grandparent key for backward compat
+            if let Some(ref key) = track.grandparent_rating_key {
+                compilation_track_artist_keys.insert(key.clone());
+            }
+        }
+
+        // Multi-artist = true compilation
+        if track_artists.len() > 1 {
+            confirmed.push((*album).clone());
+            // Map each real track artist to this compilation album
+            for artist_key in &real_artist_keys {
+                artist_compilation_map
+                    .entry(artist_key.clone())
+                    .or_default()
+                    .push(album.rating_key.clone());
+            }
+        } else if track_artists.len() == 1 {
+            // Single-artist "compilation" — map to the actual artist
+            let artist_name = track_artists.iter().next().unwrap(); // lowercase
+            if let Some(real_key) = resolve_artist_key(artist_name) {
+                single_artist_compilations
+                    .entry(real_key.clone())
+                    .or_default()
+                    .push((*album).clone());
             }
         }
     }
 
-    // Find artist keys that appear ONLY on compilations (no solo albums).
-    // An artist's solo albums are those in `albums` where:
-    //   - parent_rating_key matches the artist key
-    //   - the album is NOT a confirmed compilation
+    // Find artist keys that appear ONLY on compilations (no solo albums)
     let confirmed_keys: HashSet<&str> = confirmed.iter()
         .map(|a| a.rating_key.as_str())
         .collect();
 
     let mut artists_with_solo: HashSet<String> = HashSet::new();
-    for album in &albums {
+    for album in albums {
         if confirmed_keys.contains(album.rating_key.as_str()) {
-            continue; // Skip compilation albums
+            continue;
         }
         if let Some(ref artist_key) = album.parent_rating_key {
             artists_with_solo.insert(artist_key.clone());
         }
     }
 
-    // Artist-only-keys = compilation track artists that have no solo albums
-    // AND are actual artists in the library (have an entry in all_artist_keys)
     let artist_only_keys: HashSet<String> = compilation_track_artist_keys.iter()
         .filter(|key| all_artist_keys.contains(*key) && !artists_with_solo.contains(*key))
         .cloned()
@@ -182,12 +193,11 @@ async fn detect_compilations(
         artist_only_keys.len(), compilation_track_artist_keys.len(), artist_compilation_map.len()
     );
 
-    let _ = event_tx.send(Event::CompilationsDetected {
-        library_key,
-        albums: confirmed,
+    CompilationResult {
+        confirmed_compilations: confirmed,
         artist_only_keys,
-        track_artist_keys: compilation_track_artist_keys,
+        compilation_track_artist_keys,
         artist_compilation_map,
         single_artist_compilations,
-    }).await;
+    }
 }

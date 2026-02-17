@@ -22,6 +22,7 @@ use super::layout::{AppLayout, FullScreenLayout, centered_rect};
 use super::screens;
 use super::theme::theme;
 use super::widgets;
+use super::widgets::scrollbar::render_scrollbar;
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs, Wrap};
@@ -68,6 +69,11 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         render_library_picker(frame, state);
     }
 
+    // Render sort popup if active
+    if state.sort_popup.is_some() {
+        screens::sort_popup::render(frame, state, frame.area());
+    }
+
     // Render error popup if present
     if let Some(ref error) = state.last_error {
         render_error_popup(frame, error);
@@ -111,7 +117,7 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
             };
 
             // Artists view with dynamic Miller columns
-            let title = state.artist_view_mode.name();
+            let title = "artists";
             render_browse_miller_columns(
                 frame,
                 state,
@@ -248,11 +254,15 @@ fn render_search(frame: &mut Frame, state: &AppState) {
 }
 
 fn render_similar(frame: &mut Frame, state: &AppState) {
-    let layout = FullScreenLayout::new(frame.area());
-
-    screens::similar::render(frame, state, layout.content);
-    render_transport(frame, state, layout.transport);
-    render_shortcuts(frame, state, layout.shortcuts);
+    // Render the previous view underneath as context
+    match state.previous_view.unwrap_or(View::Browse) {
+        View::Browse => render_browse(frame, state),
+        View::Queue => render_queue(frame, state),
+        View::NowPlaying => render_now_playing(frame, state),
+        _ => render_browse(frame, state),
+    }
+    // Overlay the similar popup
+    screens::similar::render(frame, state, frame.area());
 }
 
 fn render_help(frame: &mut Frame, state: &AppState) {
@@ -432,24 +442,24 @@ fn render_folder_view(
                         (items, len, false)
                     };
 
+                // Calculate scroll offset (needed for both rendering and scrollbar)
+                let display_selected_idx = if let Some(results) = filter_results.filter(|_| filter_active_on_col) {
+                    results.matched_indices.iter()
+                        .position(|&idx| idx == selected_idx)
+                        .unwrap_or(0)
+                } else {
+                    selected_idx
+                };
+                let scroll_offset = match state.browse_scroll_pin {
+                    Some((pin_col, pinned)) if pin_col == col_idx => pinned,
+                    _ => NavigationService::calc_scroll_offset(display_selected_idx, visible_height, total_items),
+                };
+
                 if items_to_show.is_empty() && filter_active_on_col {
                     let empty = Paragraph::new("no matches")
                         .style(Style::default().fg(t.colors.fg_muted));
                     frame.render_widget(empty, inner);
                 } else {
-                    // Calculate scroll offset based on display items
-                    let display_selected_idx = if let Some(results) = filter_results.filter(|_| filter_active_on_col) {
-                        results.matched_indices.iter()
-                            .position(|&idx| idx == selected_idx)
-                            .unwrap_or(0)
-                    } else {
-                        selected_idx
-                    };
-                    let scroll_offset = match state.browse_scroll_pin {
-                        Some((pin_col, pinned)) if pin_col == col_idx => pinned,
-                        _ => NavigationService::calc_scroll_offset(display_selected_idx, visible_height, total_items),
-                    };
-
                     // Only create ListItems for visible range
                     let visible_items: Vec<ListItem> = items_to_show.into_iter()
                         .skip(scroll_offset)
@@ -487,8 +497,10 @@ fn render_folder_view(
                     frame.render_widget(list, inner);
                 }
 
-                // Position indicator for long lists
+                // Scrollbar + position indicator for long lists
                 if total_items > visible_height {
+                    render_scrollbar(frame, col_area, total_items, visible_height, scroll_offset);
+
                     let footer = format!("{}/{}", selected_idx + 1, total_items);
                     let footer_area = Rect::new(
                         col_area.x + col_area.width.saturating_sub(footer.len() as u16 + 2),
@@ -563,6 +575,54 @@ fn render_tab_bar(
     frame.render_widget(tabs, area);
 }
 
+/// Determine if a Miller column should use 2-row display.
+///
+/// Returns true for:
+/// - Special track columns (playlist tracks, all-tracks, compilation tracks, etc.)
+/// - Album-grouped columns (TracksByAlbum / TracksByArtist mode)
+/// - Album columns in "All Artists" mode
+/// - Genre/mood album columns
+fn is_two_row_column(
+    state: &AppState,
+    col: &crate::app::state::BrowseColumn,
+    col_idx: usize,
+    nav: &crate::app::state::BrowseNavigationState,
+    _two_row_tracks: bool,
+) -> bool {
+    use crate::app::state::BrowseItem;
+
+    let first_is_track = col.items.first().map_or(false, |item| matches!(item, BrowseItem::Track { .. }));
+    let first_is_album = col.items.first().map_or(false, |item| matches!(item, BrowseItem::Album { .. }));
+
+    // Special track columns always get two-row display
+    if first_is_track && state.is_special_track_column(nav, col_idx) {
+        return true;
+    }
+
+    // Album columns in "All Artists" mode (shows artist on 2nd row)
+    if first_is_album && (nav.columns.first()
+        .and_then(|c| c.selected_item())
+        .map_or(false, |item| matches!(item, BrowseItem::AllArtists))
+        || (state.browse_category == crate::app::state::BrowseCategory::Library
+            && state.library_sub_mode != crate::app::state::LibrarySubMode::Normal
+            && col_idx == 0))
+    {
+        return true;
+    }
+
+    // Genre/mood album columns
+    if first_is_album && state.browse_category == BrowseCategory::Genres {
+        return true;
+    }
+
+    // Grouped-by-album playlist columns (albums with artist on 2nd row)
+    if first_is_album && col.grouped_by_album {
+        return true;
+    }
+
+    false
+}
+
 /// Render a BrowseNavigationState as dynamic Miller columns.
 /// Used for Artists, Playlists, and Genres views.
 /// When filter_results is Some, only show items at the matched indices in the filter_column.
@@ -591,7 +651,8 @@ fn render_browse_miller_columns(
         height: left_area.height,
     };
 
-    if nav.loading {
+    // Loading with no columns yet: show full loading state
+    if nav.loading && nav.columns.is_empty() {
         let block = Block::default()
             .title(format!(" {} ", root_title))
             .title_style(Style::default().fg(t.colors.fg_accent))
@@ -629,9 +690,11 @@ fn render_browse_miller_columns(
         .find(|&i| !nav.columns[i].items.is_empty() || i <= nav.focused_column)
         .unwrap_or(0);
     let effective_columns = last_meaningful + 1;
+    // When loading with existing columns, reserve space for a loading indicator column
+    let layout_columns = if nav.loading { effective_columns + 1 } else { effective_columns };
 
     // Show up to 3 columns at a time
-    let max_visible = 3.min(effective_columns);
+    let max_visible = 3.min(layout_columns);
     let col_width = area.width / max_visible as u16;
 
     // Determine which columns to show (always include focused column)
@@ -662,30 +725,20 @@ fn render_browse_miller_columns(
 
         let border_color = if is_focused { t.colors.border_focused } else { t.colors.border };
 
-        // Show title for all columns
-        // Build view mode suffix for column header (only for artist/album columns)
-        let view_suffix = {
-            let col_has_artists = col.items.iter().any(|item| matches!(item, BrowseItem::Artist { .. }));
-            let col_has_albums = col.items.iter().any(|item| matches!(item, BrowseItem::Album { .. }));
-            if col_has_artists || col_has_albums {
-                let is_art = if col_has_artists { state.artist_art_view } else { state.album_art_view };
-                match (col.is_shuffled(), col.is_sorted_by_artist(), is_art) {
-                    (_, true, true) => " (artwork by artist)",
-                    (true, _, true) => " (artwork shuffled)",
-                    (false, false, true) => " (artwork)",
-                    (_, true, false) => " (by artist)",
-                    (true, _, false) => " (shuffled)",
-                    _ => "",
-                }
-            } else {
-                if col.is_shuffled() { " (shuffled)" } else { "" }
-            }
+        // Show title for all columns with sort suffix
+        let sort_suffix = {
+            let suffix = col.sort_mode.header_suffix(!col.sort_ascending);
+            if suffix.is_empty() { String::new() } else { format!(" ({})", suffix) }
         };
 
         let title = if is_root {
-            format!(" {}{} ", root_title, view_suffix)
+            format!(" {}{} ", root_title, sort_suffix)
         } else if !col.title.is_empty() {
-            format!(" {}{} ", col.title, view_suffix)
+            if col.grouped_by_album {
+                format!(" albums - {}{} ", col.title, sort_suffix)
+            } else {
+                format!(" {}{} ", col.title, sort_suffix)
+            }
         } else {
             String::new()
         };
@@ -711,15 +764,9 @@ fn render_browse_miller_columns(
             continue;
         }
 
-        // Check if this column has albums/artists and the appropriate art view is active
-        // Never show album art on Library root column (artists/all-albums sub-modes)
-        let has_albums = col.items.iter().any(|item| matches!(item, BrowseItem::Album { .. }));
-        let has_artists = col.items.iter().any(|item| matches!(item, BrowseItem::Artist { .. }));
-        let is_library_root = state.browse_category == BrowseCategory::Library && col_idx == 0;
+        // Check if this column has artwork_visible enabled
         let is_filter_column = filter_column == Some(col_idx);
-        let show_art = (state.album_art_view && has_albums && !is_library_root)
-            || (state.artist_art_view && has_artists);
-        if show_art {
+        if col.artwork_visible {
             let col_filter = if is_filter_column { filter_results } else { None };
             render_album_art_grid(frame, state, col, is_focused, inner, col_area, col_idx, col_filter);
             continue;
@@ -733,38 +780,7 @@ fn render_browse_miller_columns(
             // Calculate max width for text (minus prefix and padding)
             let max_text_width = inner.width.saturating_sub(4) as usize;
 
-            // Check if this column should use 2-row display:
-            // - Track columns in playlist mode (two_row_tracks)
-            // - Album columns in "All Artists" mode (shows artist on 2nd row)
-            let is_two_row_track = two_row_tracks && col.items.first().map_or(false, |item| matches!(item, BrowseItem::Track { .. }));
-            let is_all_artists_albums = col.items.first().map_or(false, |item| matches!(item, BrowseItem::Album { .. }))
-                && (nav.columns.first()
-                    .and_then(|c| c.selected_item())
-                    .map_or(false, |item| matches!(item, BrowseItem::AllArtists))
-                || (state.browse_category == crate::app::state::BrowseCategory::Library
-                    && state.library_sub_mode != crate::app::state::LibrarySubMode::Normal
-                    && col_idx == 0));
-            // Playlist album groups (TracksByAlbum) also use 2-row to show artist
-            let is_playlist_album_group = col_idx > 0
-                && state.browse_category == BrowseCategory::Playlists
-                && state.playlist_view_mode == crate::app::state::PlaylistViewMode::TracksByAlbum
-                && col.items.first().map_or(false, |item| matches!(item, BrowseItem::Album { .. }));
-            // Genre/mood album columns show artist on 2nd row
-            let is_genre_albums = col.items.first().map_or(false, |item| matches!(item, BrowseItem::Album { .. }))
-                && state.browse_category == BrowseCategory::Genres;
-            // Compilation album track columns use 2-row display (shows per-track artist)
-            let is_compilation_album_tracks = col.items.first().map_or(false, |item| matches!(item, BrowseItem::Track { .. }))
-                && col_idx > 0
-                && nav.columns.get(col_idx - 1)
-                    .and_then(|parent| parent.selected_item())
-                    .map_or(false, |parent_item| {
-                        if let BrowseItem::Album { key, .. } = parent_item {
-                            state.compilation_albums.iter().any(|a| a.rating_key == *key)
-                        } else {
-                            false
-                        }
-                    });
-            let is_two_row = is_two_row_track || is_all_artists_albums || is_playlist_album_group || is_genre_albums || is_compilation_album_tracks;
+            let is_two_row = is_two_row_column(state, col, col_idx, nav, two_row_tracks);
             let rows_per_item = if is_two_row { 2 } else { 1 };
             let visible_item_count = visible_height / rows_per_item;
 
@@ -850,23 +866,37 @@ fn render_browse_miller_columns(
                             _ => item.title().to_string(),
                         };
 
+                        // Duration string for tracks (right-aligned)
+                        let dur_str = match item {
+                            BrowseItem::Track { duration_ms, .. } if *duration_ms > 0 => {
+                                Some(crate::util::format_duration(*duration_ms))
+                            }
+                            _ => None,
+                        };
+                        // Reduce title width to make room for duration
+                        let title_width = if let Some(ref d) = dur_str {
+                            max_text_width.saturating_sub(d.len() + 1)
+                        } else {
+                            max_text_width
+                        };
+
                         // Marquee for selected+focused item, or truncate normally
                         let display_text = if is_selected && is_focused {
                             let marquee_key = format!("miller:{}:{}", col_idx, orig_idx);
                             let mut marquee = state.marquee.borrow_mut();
                             if marquee.selection_key != marquee_key {
-                                marquee.reset(marquee_key, full_text.clone(), max_text_width);
+                                marquee.reset(marquee_key, full_text.clone(), title_width);
                             }
                             if marquee.phase == crate::app::state::MarqueePhase::Inactive {
-                                truncate_middle(&full_text, max_text_width)
+                                truncate_middle(&full_text, title_width)
                             } else {
                                 let text = marquee.display_text();
                                 drop(marquee);
-                                // Trim to max_text_width (display_text already pads)
-                                text.chars().take(max_text_width).collect()
+                                // Trim to title_width (display_text already pads)
+                                text.chars().take(title_width).collect()
                             }
                         } else {
-                            truncate_middle(&full_text, max_text_width)
+                            truncate_middle(&full_text, title_width)
                         };
 
                         // Build ListItem — 2-row for playlist tracks or All Artists albums, 1-row otherwise
@@ -942,8 +972,20 @@ fn render_browse_miller_columns(
                                     )
                                 };
 
+                                // Build line 1 with optional right-aligned duration
+                                let line1 = if let Some(ref dur) = dur_str {
+                                    let title_chars = display_text.chars().count();
+                                    let pad = title_width.saturating_sub(title_chars);
+                                    Line::from(Span::styled(
+                                        format!("{}{}{} {}", prefix, display_text, " ".repeat(pad), dur),
+                                        line1_fg,
+                                    ))
+                                } else {
+                                    Line::from(Span::styled(format!("{}{}", prefix, display_text), line1_fg))
+                                };
+
                                 let text = Text::from(vec![
-                                    Line::from(Span::styled(format!("{}{}", prefix, display_text), line1_fg)),
+                                    line1,
                                     Line::from(Span::styled(format!("     {}", subtitle_display), line2_fg)),
                                 ]);
                                 ListItem::new(text).style(item_bg)
@@ -969,7 +1011,14 @@ fn render_browse_miller_columns(
                                 Style::default().fg(t.colors.fg_primary)
                             };
 
-                            ListItem::new(format!("{}{}", prefix, display_text)).style(style)
+                            // Build display with optional right-aligned duration
+                            if let Some(ref dur) = dur_str {
+                                let title_chars = display_text.chars().count();
+                                let pad = title_width.saturating_sub(title_chars);
+                                ListItem::new(format!("{}{}{} {}", prefix, display_text, " ".repeat(pad), dur)).style(style)
+                            } else {
+                                ListItem::new(format!("{}{}", prefix, display_text)).style(style)
+                            }
                         }
                     })
                     .collect();
@@ -977,8 +1026,17 @@ fn render_browse_miller_columns(
                 let list = List::new(visible_items);
                 frame.render_widget(list, inner);
 
-                // Position indicator for long lists
+                // Scrollbar + position indicator for long lists
                 if total_display_items > visible_item_count {
+                    // Render scrollbar on right edge of column
+                    render_scrollbar(
+                        frame,
+                        col_area,
+                        total_display_items,
+                        visible_item_count,
+                        scroll_offset,
+                    );
+
                     let footer = format!("{}/{}", display_selected_idx + 1, total_display_items);
                     let footer_area = Rect::new(
                         col_area.x + col_area.width.saturating_sub(footer.len() as u16 + 2),
@@ -994,6 +1052,29 @@ fn render_browse_miller_columns(
             }
         }
     }
+
+    // Render loading indicator column when data is being fetched
+    if nav.loading {
+        let real_rendered = effective_columns.min(start_col + max_visible).saturating_sub(start_col);
+        if real_rendered < max_visible {
+            let vis_idx = real_rendered;
+            let loading_area = Rect {
+                x: area.x + (vis_idx as u16 * col_width),
+                y: area.y,
+                width: area.width - (vis_idx as u16 * col_width),
+                height: area.height,
+            };
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(t.colors.border))
+                .style(Style::default().bg(t.colors.bg_primary));
+            let loading_inner = block.inner(loading_area);
+            frame.render_widget(block, loading_area);
+            let loading = Paragraph::new("Loading...")
+                .style(Style::default().fg(t.colors.fg_muted));
+            frame.render_widget(loading, loading_inner);
+        }
+    }
 }
 
 /// Render album art list for a column in cover art view mode.
@@ -1002,7 +1083,7 @@ fn render_album_art_grid(
     frame: &mut Frame,
     state: &AppState,
     col: &crate::app::state::BrowseColumn,
-    is_focused: bool,
+    _is_focused: bool,
     inner: Rect,
     col_area: Rect,
     col_idx: usize,
@@ -1032,20 +1113,54 @@ fn render_album_art_grid(
         return;
     }
 
+    // Classify items: "one-row" pinned items vs normal art-height items
+    fn is_one_row(item: &BrowseItem) -> bool {
+        matches!(item,
+            BrowseItem::ArtistRadio { .. } |
+            BrowseItem::CompilationTracks { .. } |
+            BrowseItem::Compilations
+        )
+    }
+
+    // Count art items to size rows (one-row items don't affect art sizing)
+    let art_item_count = items_with_indices.iter().filter(|(_, item)| !is_one_row(item)).count();
+
     // Each list row: artwork on left, text on right
     // Size rows to fill available vertical space with at least 3 visible items.
     // Row height is derived from panel height, then art_width from row_height.
-    let target_visible = 3u16.max((total_items as u16).min(5));
-    let row_height = (inner.height / target_visible).max(3);
-    // Art width: 2x row_height (terminal chars are ~2:1 aspect), capped at half column width
+    let target_visible = 3u16.max((art_item_count.max(1) as u16).min(5));
+    let art_row_height = (inner.height / target_visible).max(3);
+    // Art width: 2x art_row_height (terminal chars are ~2:1 aspect), capped at half column width
     let max_art = inner.width / 2;
-    let art_width = (row_height * 2).min(max_art).max(6);
+    let art_width = (art_row_height * 2).min(max_art).max(6);
 
-    if row_height == 0 {
+    if art_row_height == 0 {
         return;
     }
 
-    let visible_rows = (inner.height / row_height).max(1) as usize;
+    // Check if there's a spacer between item at `idx` and the next item
+    // (spacer appears after the last consecutive one-row item before an art item)
+    let has_spacer_after = |idx: usize| -> bool {
+        idx + 1 < total_items
+            && is_one_row(items_with_indices[idx].1)
+            && !is_one_row(items_with_indices[idx + 1].1)
+    };
+
+    // Compute how many items are visible from a given scroll offset
+    let count_visible_from = |offset: usize| -> usize {
+        let mut y = 0u16;
+        let mut count = 0;
+        for i in offset..total_items {
+            let h = if is_one_row(items_with_indices[i].1) { 1 } else { art_row_height };
+            // Account for spacer row after last one-row item
+            let spacer = if has_spacer_after(i) { 1u16 } else { 0 };
+            if y + h + spacer > inner.height { break; }
+            y += h + spacer;
+            count += 1;
+        }
+        count
+    };
+
     let selected_idx = col.selected_index;
 
     // Convert selected_idx to display position within the (possibly filtered) list
@@ -1055,37 +1170,45 @@ fn render_album_art_grid(
         selected_idx
     };
 
-    // Standard scroll offset (1 item per row), with pin support for mouse clicks
+    // Scroll offset: respect pin, otherwise ensure selected item is visible
     let scroll_offset = match state.browse_scroll_pin {
         Some((pin_col, pinned)) if pin_col == col_idx => pinned,
-        _ => NavigationService::calc_scroll_offset(display_selected, visible_rows, total_items),
+        _ => {
+            // Simple approach: start from 0, advance until selected is visible
+            let mut offset = 0;
+            loop {
+                let visible = count_visible_from(offset);
+                if visible == 0 { break; }
+                if display_selected >= offset && display_selected < offset + visible {
+                    break;
+                }
+                if display_selected < offset {
+                    offset = display_selected;
+                    break;
+                }
+                offset += 1;
+            }
+            offset
+        }
     };
 
-    for vis_row in 0..visible_rows {
+    let visible_count = count_visible_from(scroll_offset);
+
+    let mut row_y = inner.y;
+    for vis_row in 0..visible_count {
         let display_idx = scroll_offset + vis_row;
         if display_idx >= total_items {
             break;
         }
 
-        let row_y = inner.y + (vis_row as u16 * row_height);
+        let (orig_idx, item) = items_with_indices[display_idx];
+        let is_selected = orig_idx == selected_idx;
+        let one_row = is_one_row(item);
+        let row_height = if one_row { 1 } else { art_row_height };
+
         if row_y + row_height > inner.y + inner.height {
             break;
         }
-
-        let (orig_idx, item) = items_with_indices[display_idx];
-        let is_selected = orig_idx == selected_idx;
-
-        // Artwork area (left side)
-        let image_area = Rect {
-            x: inner.x,
-            y: row_y,
-            width: art_width,
-            height: row_height,
-        };
-
-        // Text area (right side)
-        let text_x = inner.x + art_width + 1;
-        let text_width = inner.width.saturating_sub(art_width + 1);
 
         // Selection highlight background across the full row
         if is_selected {
@@ -1095,93 +1218,120 @@ fn render_album_art_grid(
                 width: inner.width,
                 height: row_height,
             };
-            let bg_style = if is_focused {
-                Style::default().bg(t.colors.selection_bar_bg)
-            } else {
-                Style::default().bg(t.colors.selection_bar_bg)
-            };
+            let bg_style = Style::default().bg(t.colors.selection_bar_bg);
             frame.render_widget(Block::default().style(bg_style), row_area);
         }
 
-        // Render album/artist art image or placeholder
-        let mut rendered_image = false;
-        let art_key = match item {
-            BrowseItem::Album { key, .. } => Some(key.as_str()),
-            BrowseItem::AllTracks { artist_key, .. } => Some(artist_key.as_str()),
-            BrowseItem::Artist { key, .. } => Some(key.as_str()),
-            _ => None,
-        };
-        if let Some(key) = art_key {
-            if let Some(data) = state.album_art_cache.get(key) {
-                rendered_image = super::artwork::render_grid_image(frame, image_area, key, data);
-            }
-        }
-
-        if !rendered_image {
-            // Placeholder: centered initials in art area
-            let initials: String = item.title()
-                .split_whitespace()
-                .filter_map(|w| w.chars().next())
-                .take(3)
-                .collect();
-            let placeholder_text = if state.album_art_pending.contains(item.key()) {
-                "...".to_string()
-            } else if initials.is_empty() {
-                "?".to_string()
-            } else {
-                initials
-            };
-
-            let text_y = image_area.y + image_area.height / 2;
-            let text_x_p = image_area.x + (image_area.width.saturating_sub(placeholder_text.len() as u16)) / 2;
-            if text_y < image_area.y + image_area.height {
-                frame.render_widget(
-                    Paragraph::new(placeholder_text).style(Style::default().fg(t.colors.fg_muted)),
-                    Rect { x: text_x_p, y: text_y, width: image_area.width, height: 1 },
-                );
-            }
-        }
-
-        // Text content to the right of artwork
-        if text_width > 2 {
-            let max_text = text_width.saturating_sub(1) as usize;
-
-            // Title (line 1, vertically centered in row)
+        if one_row {
+            // One-row item: full-width text, no art area
+            let max_text = inner.width.saturating_sub(2) as usize;
             let display_title = item.title();
             let title_text = truncate_middle(display_title, max_text);
-            let title_y = row_y + (row_height / 2).saturating_sub(1);
             let title_style = if is_selected {
                 Style::default().fg(t.colors.selection_text)
             } else {
-                Style::default().fg(t.colors.fg_primary)
+                Style::default().fg(t.colors.fg_muted)
             };
             frame.render_widget(
-                Paragraph::new(title_text).style(title_style),
-                Rect { x: text_x, y: title_y, width: text_width, height: 1 },
+                Paragraph::new(format!(" {}", title_text)).style(title_style),
+                Rect { x: inner.x, y: row_y, width: inner.width, height: 1 },
             );
+        } else {
+            // Art-height item: artwork on left, text on right
+            let image_area = Rect {
+                x: inner.x,
+                y: row_y,
+                width: art_width,
+                height: row_height,
+            };
+            let text_x = inner.x + art_width + 1;
+            let text_width = inner.width.saturating_sub(art_width + 1);
 
-            // Artist and year (line 2)
-            if let BrowseItem::Album { artist, year, .. } = item {
-                let subtitle = if let Some(y) = year {
-                    truncate_middle(&format!("{} ({})", artist, y), max_text)
+            // Render album/artist art image or placeholder
+            let mut rendered_image = false;
+            let art_key = match item {
+                BrowseItem::Album { key, .. } => Some(key.as_str()),
+                BrowseItem::Artist { key, .. } => Some(key.as_str()),
+                BrowseItem::ArtistRadio { artist_key, .. } => Some(artist_key.as_str()),
+                _ => None,
+            };
+            if let Some(key) = art_key {
+                if let Some(data) = state.album_art_cache.get(key) {
+                    rendered_image = super::artwork::render_grid_image(frame, image_area, key, data);
+                }
+            }
+
+            if !rendered_image {
+                // Placeholder: centered initials in art area
+                let initials: String = item.title()
+                    .split_whitespace()
+                    .filter_map(|w| w.chars().next())
+                    .take(3)
+                    .collect();
+                let placeholder_text = if state.album_art_pending.contains(item.key()) {
+                    "...".to_string()
+                } else if initials.is_empty() {
+                    "?".to_string()
                 } else {
-                    truncate_middle(artist, max_text)
+                    initials
                 };
-                let sub_style = if is_selected {
-                    Style::default().fg(t.colors.fg_muted)
+
+                let text_y_p = image_area.y + image_area.height / 2;
+                let text_x_p = image_area.x + (image_area.width.saturating_sub(placeholder_text.len() as u16)) / 2;
+                if text_y_p < image_area.y + image_area.height {
+                    frame.render_widget(
+                        Paragraph::new(placeholder_text).style(Style::default().fg(t.colors.fg_muted)),
+                        Rect { x: text_x_p, y: text_y_p, width: image_area.width, height: 1 },
+                    );
+                }
+            }
+
+            // Text content to the right of artwork
+            if text_width > 2 {
+                let max_text = text_width.saturating_sub(1) as usize;
+
+                // Title (line 1, vertically centered in row)
+                let display_title = item.title();
+                let title_text = truncate_middle(display_title, max_text);
+                let title_y = row_y + (row_height / 2).saturating_sub(1);
+                let title_style = if is_selected {
+                    Style::default().fg(t.colors.selection_text)
                 } else {
-                    Style::default().fg(t.colors.fg_muted)
+                    Style::default().fg(t.colors.fg_primary)
                 };
                 frame.render_widget(
-                    Paragraph::new(subtitle).style(sub_style),
-                    Rect { x: text_x, y: title_y + 1, width: text_width, height: 1 },
+                    Paragraph::new(title_text).style(title_style),
+                    Rect { x: text_x, y: title_y, width: text_width, height: 1 },
                 );
+
+                // Artist and year (line 2)
+                if let BrowseItem::Album { artist, year, .. } = item {
+                    let subtitle = if let Some(y) = year {
+                        truncate_middle(&format!("{} ({})", artist, y), max_text)
+                    } else {
+                        truncate_middle(artist, max_text)
+                    };
+                    let sub_style = Style::default().fg(t.colors.fg_muted);
+                    frame.render_widget(
+                        Paragraph::new(subtitle).style(sub_style),
+                        Rect { x: text_x, y: title_y + 1, width: text_width, height: 1 },
+                    );
+                }
             }
+        }
+
+        row_y += row_height;
+
+        // Add spacer row after last one-row item before art items
+        if has_spacer_after(display_idx) {
+            row_y += 1;
         }
     }
 
-    // Position indicator
-    if total_items > visible_rows {
+    // Scrollbar + position indicator
+    if total_items > visible_count {
+        render_scrollbar(frame, col_area, total_items, visible_count, scroll_offset);
+
         let footer = format!("{}/{}", display_selected + 1, total_items);
         let footer_area = Rect::new(
             col_area.x + col_area.width.saturating_sub(footer.len() as u16 + 2),
@@ -1307,7 +1457,7 @@ fn render_alt_bar_row(frame: &mut Frame, state: &AppState, area: Rect, is_top_ro
     let mut spans: Vec<Span> = Vec::new();
 
     // Split commands: function keys (display_key set) go on top, others on bottom
-    let filtered: Vec<&crate::app::AltCommand> = alt_cmds.iter()
+    let mut filtered: Vec<&crate::app::AltCommand> = alt_cmds.iter()
         .filter(|cmd| {
             if is_top_row {
                 cmd.display_key.is_some()
@@ -1316,6 +1466,19 @@ fn render_alt_bar_row(frame: &mut Frame, state: &AppState, area: Rect, is_top_ro
             }
         })
         .collect();
+
+    // Sort bottom row by modifier (Ctrl < Alt < None) then alphabetically by key
+    if !is_top_row {
+        filtered.sort_by(|a, b| {
+            let mod_order = |m: &crate::app::CommandModifier| match m {
+                crate::app::CommandModifier::Ctrl => 0,
+                crate::app::CommandModifier::Alt => 1,
+                crate::app::CommandModifier::None => 2,
+            };
+            mod_order(&a.modifier).cmp(&mod_order(&b.modifier))
+                .then(a.key.cmp(&b.key))
+        });
+    }
 
     if filtered.is_empty() {
         if !is_top_row {
@@ -1357,7 +1520,7 @@ fn render_alt_bar_row(frame: &mut Frame, state: &AppState, area: Rect, is_top_ro
 }
 
 /// Render the search popup as a floating dialog.
-/// Render the library picker popup (Alt+S).
+/// Render the library picker popup (F3).
 fn render_library_picker(frame: &mut Frame, state: &AppState) {
     let t = theme();
     let area = centered_rect(50, 30, frame.area());
@@ -1409,7 +1572,7 @@ fn render_library_picker(frame: &mut Frame, state: &AppState) {
         let is_active = state.active_library.as_deref() == Some(lib.key.as_str())
             && state.active_server_id.as_deref() == Some(*server_id);
 
-        let prefix = if is_selected { "> " } else { "  " };
+        let prefix = if is_selected { "\u{266a} " } else { "  " };
         let suffix = if is_active { " *" } else { "" };
         let text = if multi_server {
             format!("{}{} ({}){}", prefix, lib.title, server_name, suffix)

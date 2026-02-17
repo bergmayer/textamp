@@ -1,7 +1,7 @@
 //! Browse dispatch handlers: LoadStations, LoadGenres, LoadArtistGenres, LoadAlbumGenres,
 //! LoadMoods, LoadStyles, LoadGenreAlbums, LoadArtistGenreAlbums, LoadAlbumGenreAlbums,
 //! LoadMoodAlbums, LoadStyleAlbums, CycleGenreContentType, RefreshGenreView,
-//! CycleArtistViewMode, RefreshArtistView, CycleGenreTab, SetGenreTab.
+//! RefreshArtistView, CycleGenreTab, SetGenreTab.
 
 use crate::app::{Action, AppState, Event};
 use crate::app::state::{
@@ -37,7 +37,7 @@ pub async fn dispatch(
                         state.station_nav.columns.clear();
                         state.station_nav.columns.push(StationColumn::new(
                             None,
-                            "Radio".to_string(),
+                            "stations".to_string(),
                             stations.clone(),
                         ));
                         state.station_nav.focused_column = 0;
@@ -303,11 +303,6 @@ pub async fn dispatch(
                 }
             }
         }
-        Action::CycleArtistViewMode => {
-            state.artist_view_mode = state.artist_view_mode.next();
-            follow_ups.push(Action::RefreshArtistView);
-            follow_ups.push(Action::CheckStaleness(RefreshCategory::Artists));
-        }
         Action::RefreshArtistView => {
             // Clear right panel state (drill-down state) but keep preloaded data
             state.selected_artist_albums.clear();
@@ -320,10 +315,10 @@ pub async fn dispatch(
             if state.artists.is_empty() {
                 follow_ups.push(Action::LoadArtists);
             }
+
             // Reset artist_nav with new data
-            let title = state.artist_view_mode.name();
             let items = state.build_artist_root_items();
-            state.artist_nav.reset(title, items);
+            state.artist_nav.reset("artists", items);
         }
         Action::CycleGenreTab => {
             state.genre_tab = state.genre_tab.next();
@@ -359,7 +354,7 @@ pub async fn dispatch(
             match state.library_sub_mode {
                 LibrarySubMode::Normal => {
                     // Reset to normal artist list
-                    let title = state.artist_view_mode.name();
+                    let title = "artists";
                     let items = state.build_artist_root_items();
                     state.artist_nav.reset(title, items);
                 }
@@ -370,14 +365,14 @@ pub async fn dispatch(
                         a.artist_name().to_lowercase().cmp(&b.artist_name().to_lowercase())
                             .then_with(|| a.year.cmp(&b.year))
                     });
-                    let items = BrowseItem::from_albums(&sorted);
+                    let items = BrowseItem::from_albums(&sorted, &state.album_display_artist);
                     state.artist_nav.reset("all albums", items);
                 }
                 LibrarySubMode::AllShuffled => {
-                    // Shuffle the current column
+                    // Shuffle the current column (sort suffix auto-appended by UI)
                     if let Some(col) = state.artist_nav.columns.first_mut() {
                         col.shuffle();
-                        col.title = "all albums (shuffled)".to_string();
+                        col.title = "all albums".to_string();
                     }
                 }
             }

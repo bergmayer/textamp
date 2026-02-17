@@ -419,6 +419,27 @@ impl WaveformCache {
         }
     }
 
+    /// Get cache statistics: (file_count, total_bytes).
+    pub fn stats(&self) -> (usize, u64) {
+        if !self.cache_dir.exists() {
+            return (0, 0);
+        }
+
+        let mut count = 0usize;
+        let mut total = 0u64;
+        if let Ok(entries) = std::fs::read_dir(&self.cache_dir) {
+            for entry in entries.flatten() {
+                if let Ok(metadata) = entry.metadata() {
+                    if metadata.is_file() {
+                        count += 1;
+                        total += metadata.len();
+                    }
+                }
+            }
+        }
+        (count, total)
+    }
+
     /// Get total waveform cache size in bytes.
     pub fn total_size(&self) -> u64 {
         if !self.cache_dir.exists() {

@@ -1,25 +1,25 @@
-//! Similar content screen.
+//! Similar content popup overlay.
 //!
-//! Shows albums or tracks sonically similar to the selected item.
+//! Shows albums or tracks sonically similar to the selected item,
+//! rendered as a centered popup over the previous view.
 
 use crate::app::AppState;
 use crate::app::state::SimilarMode;
 use crate::services::NavigationService;
+use crate::ui::layout::centered_rect;
 use crate::ui::theme::theme;
-use crate::util::format_duration;
+use crate::util::{format_duration, truncate_middle};
 
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 
-/// Render the similar content screen.
+/// Render the similar content popup overlay.
 pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     let t = theme();
 
-    // Fill background
-    frame.render_widget(
-        Block::default().style(Style::default().bg(t.colors.bg_primary)),
-        area,
-    );
+    // Centered popup: 65% wide, 80% tall
+    let popup_area = centered_rect(65, 80, area);
+    frame.render_widget(Clear, popup_area);
 
     let mode_label = match state.similar_mode {
         SimilarMode::Albums => "albums",
@@ -32,8 +32,8 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(t.colors.fg_accent))
         .style(Style::default().bg(t.colors.bg_primary));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
 
     if state.similar_loading {
         let msg = match state.similar_mode {
@@ -47,13 +47,25 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         return;
     }
 
+    // Split inner: content list + footer
+    let content_height = inner.height.saturating_sub(1);
+    let content_area = Rect::new(inner.x, inner.y, inner.width, content_height);
+    let footer_area = Rect::new(inner.x, inner.y + content_height, inner.width, 1);
+
     match state.similar_mode {
-        SimilarMode::Albums => render_albums(frame, state, inner, area),
-        SimilarMode::Tracks => render_tracks(frame, state, inner, area),
+        SimilarMode::Albums => render_albums(frame, state, content_area, popup_area),
+        SimilarMode::Tracks => render_tracks(frame, state, content_area, popup_area),
     }
+
+    // Footer
+    let footer = Paragraph::new(Line::from(vec![
+        Span::styled(" [Esc] ", Style::default().fg(t.colors.shortcut_key)),
+        Span::styled("close", Style::default().fg(t.colors.fg_muted)),
+    ]));
+    frame.render_widget(footer, footer_area);
 }
 
-fn render_albums(frame: &mut Frame, state: &AppState, inner: Rect, area: Rect) {
+fn render_albums(frame: &mut Frame, state: &AppState, inner: Rect, popup_area: Rect) {
     let t = theme();
 
     if state.similar_albums.is_empty() {
@@ -65,48 +77,83 @@ fn render_albums(frame: &mut Frame, state: &AppState, inner: Rect, area: Rect) {
     }
 
     let selected_idx = state.list_state.similar_index;
-    let visible_height = inner.height as usize;
+    let rows_per_item = 2usize;
+    let visible_item_count = inner.height as usize / rows_per_item;
     let total = state.similar_albums.len();
 
     let scroll_offset = match state.similar_scroll_pin {
         Some(pinned) => pinned,
-        None => NavigationService::calc_scroll_offset(selected_idx, visible_height, total),
+        None => NavigationService::calc_scroll_offset(selected_idx, visible_item_count, total),
     };
+
+    let max_text_width = inner.width.saturating_sub(4) as usize;
 
     let items: Vec<ListItem> = state
         .similar_albums
         .iter()
         .enumerate()
         .skip(scroll_offset)
-        .take(visible_height)
+        .take(visible_item_count)
         .map(|(i, album)| {
             let is_selected = i == selected_idx;
 
-            let artist = album.artist_name();
             let title = &album.title;
-            let year = album.year.map(|y| format!(" ({})", y)).unwrap_or_default();
+            let year_str = album.year.map(|y| format!("({})", y)).unwrap_or_default();
+            let artist = album.artist_name();
 
-            let line = format!("{} - {}{}", artist, title, year);
-
-            let style = if is_selected {
-                Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
+            // Line 1: title + right-aligned year
+            let title_width = if !year_str.is_empty() {
+                max_text_width.saturating_sub(year_str.len() + 1)
             } else {
-                Style::default().fg(t.colors.fg_primary)
+                max_text_width
+            };
+            let title_display = truncate_middle(title, title_width);
+
+            // Line 2: indented artist
+            let subtitle_width = max_text_width.saturating_sub(5);
+            let artist_display = truncate_middle(artist, subtitle_width);
+
+            let (line1_fg, line2_fg, item_bg) = if is_selected {
+                (
+                    Style::default().fg(t.colors.selection_text),
+                    Style::default().fg(t.colors.selection_text),
+                    Style::default().bg(t.colors.selection_bar_bg),
+                )
+            } else {
+                (
+                    Style::default().fg(t.colors.fg_primary),
+                    Style::default().fg(t.colors.fg_muted),
+                    Style::default(),
+                )
             };
 
-            ListItem::new(line).style(style)
+            let line1 = if !year_str.is_empty() {
+                let title_chars = title_display.chars().count();
+                let pad = title_width.saturating_sub(title_chars);
+                Line::from(Span::styled(
+                    format!(" {}{}{} {}", title_display, " ".repeat(pad), "", year_str),
+                    line1_fg,
+                ))
+            } else {
+                Line::from(Span::styled(format!(" {}", title_display), line1_fg))
+            };
+            let line2 = Line::from(Span::styled(format!("     {}", artist_display), line2_fg));
+
+            ListItem::new(Text::from(vec![line1, line2])).style(item_bg)
         })
         .collect();
 
     let list = List::new(items);
     frame.render_widget(list, inner);
 
-    // Position indicator
-    if total > visible_height {
+    // Scrollbar + position indicator
+    if total > visible_item_count {
+        crate::ui::widgets::render_scrollbar(frame, popup_area, total, visible_item_count, scroll_offset);
+
         let footer = format!("{}/{}", selected_idx + 1, total);
         let footer_area = Rect::new(
-            area.x + area.width.saturating_sub(footer.len() as u16 + 2),
-            area.y + area.height - 1,
+            popup_area.x + popup_area.width.saturating_sub(footer.len() as u16 + 2),
+            popup_area.y + popup_area.height - 1,
             footer.len() as u16 + 1,
             1,
         );
@@ -117,7 +164,7 @@ fn render_albums(frame: &mut Frame, state: &AppState, inner: Rect, area: Rect) {
     }
 }
 
-fn render_tracks(frame: &mut Frame, state: &AppState, inner: Rect, area: Rect) {
+fn render_tracks(frame: &mut Frame, state: &AppState, inner: Rect, popup_area: Rect) {
     let t = theme();
 
     if state.similar_tracks.is_empty() {
@@ -129,49 +176,77 @@ fn render_tracks(frame: &mut Frame, state: &AppState, inner: Rect, area: Rect) {
     }
 
     let selected_idx = state.list_state.similar_index;
-    let visible_height = inner.height as usize;
+    let rows_per_item = 2usize;
+    let visible_item_count = inner.height as usize / rows_per_item;
     let total = state.similar_tracks.len();
 
     let scroll_offset = match state.similar_scroll_pin {
         Some(pinned) => pinned,
-        None => NavigationService::calc_scroll_offset(selected_idx, visible_height, total),
+        None => NavigationService::calc_scroll_offset(selected_idx, visible_item_count, total),
     };
+
+    let max_text_width = inner.width.saturating_sub(4) as usize;
 
     let items: Vec<ListItem> = state
         .similar_tracks
         .iter()
         .enumerate()
         .skip(scroll_offset)
-        .take(visible_height)
+        .take(visible_item_count)
         .map(|(i, track)| {
             let is_selected = i == selected_idx;
 
-            let artist = track.artist_name();
             let title = &track.title;
+            let artist = track.track_artist();
             let album = track.album_name();
-            let duration = format_duration(track.duration_ms());
+            let dur_str = format_duration(track.duration_ms());
 
-            let line = format!("{} - {} ({}) [{}]", artist, title, album, duration);
+            // Line 1: title + right-aligned duration
+            let title_width = max_text_width.saturating_sub(dur_str.len() + 1);
+            let title_display = truncate_middle(title, title_width);
 
-            let style = if is_selected {
-                Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
+            // Line 2: indented artist — album
+            let subtitle = format!("{} \u{2014} {}", artist, album);
+            let subtitle_width = max_text_width.saturating_sub(5);
+            let subtitle_display = truncate_middle(&subtitle, subtitle_width);
+
+            let (line1_fg, line2_fg, item_bg) = if is_selected {
+                (
+                    Style::default().fg(t.colors.selection_text),
+                    Style::default().fg(t.colors.selection_text),
+                    Style::default().bg(t.colors.selection_bar_bg),
+                )
             } else {
-                Style::default().fg(t.colors.fg_primary)
+                (
+                    Style::default().fg(t.colors.fg_primary),
+                    Style::default().fg(t.colors.fg_muted),
+                    Style::default(),
+                )
             };
 
-            ListItem::new(line).style(style)
+            let title_chars = title_display.chars().count();
+            let pad = title_width.saturating_sub(title_chars);
+            let line1 = Line::from(Span::styled(
+                format!(" {}{} {}", title_display, " ".repeat(pad), dur_str),
+                line1_fg,
+            ));
+            let line2 = Line::from(Span::styled(format!("     {}", subtitle_display), line2_fg));
+
+            ListItem::new(Text::from(vec![line1, line2])).style(item_bg)
         })
         .collect();
 
     let list = List::new(items);
     frame.render_widget(list, inner);
 
-    // Position indicator
-    if total > visible_height {
+    // Scrollbar + position indicator
+    if total > visible_item_count {
+        crate::ui::widgets::render_scrollbar(frame, popup_area, total, visible_item_count, scroll_offset);
+
         let footer = format!("{}/{}", selected_idx + 1, total);
         let footer_area = Rect::new(
-            area.x + area.width.saturating_sub(footer.len() as u16 + 2),
-            area.y + area.height - 1,
+            popup_area.x + popup_area.width.saturating_sub(footer.len() as u16 + 2),
+            popup_area.y + popup_area.height - 1,
             footer.len() as u16 + 1,
             1,
         );

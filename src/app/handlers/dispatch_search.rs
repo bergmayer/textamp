@@ -58,7 +58,28 @@ pub async fn dispatch(
 
             // Ranked local search: filter artists, albums, playlists, genres from cached data
             use crate::services::{search_with_ranking, search_albums_with_ranking};
-            let artists = search_with_ranking(&state.artists, &query, |a| &a.title, 50);
+            let mut artists = search_with_ranking(&state.artists, &query, |a| &a.title, 50);
+
+            // Also find artists whose aliases match the query (using normalized matching)
+            let alias_extras: Vec<_> = {
+                let existing_keys: std::collections::HashSet<&str> = artists.iter()
+                    .map(|a| a.rating_key.as_str())
+                    .collect();
+                let query_norm = crate::services::artist_alias_service::normalize_artist_name(&query);
+                state.artists.iter()
+                    .filter(|a| !existing_keys.contains(a.rating_key.as_str()))
+                    .filter(|a| {
+                        state.artist_aliases.get(&a.rating_key)
+                            .map_or(false, |aliases| aliases.iter().any(|al| {
+                                let norm = crate::services::artist_alias_service::normalize_artist_name(al);
+                                norm.contains(&query_norm)
+                            }))
+                    })
+                    .cloned()
+                    .collect()
+            };
+            artists.extend(alias_extras);
+
             let albums = search_albums_with_ranking(&state.albums, &query, 50);
             let playlists = search_with_ranking(&state.playlists, &query, |p| &p.title, 50);
             let genres = search_with_ranking(&state.genres, &query, |g| &g.title, 50);
@@ -164,6 +185,8 @@ pub async fn dispatch(
             if let Some(ref results) = state.list_filter.results.clone() {
                 if let Some(&item_idx) = results.matched_indices.get(state.list_filter.selected) {
                     super::key_input::update_filter_column_selection(state, item_idx);
+                    // Deactivate filter before drill-down (new column clears filter)
+                    state.list_filter.deactivate();
                     let drilldown_actions = super::key_input::get_filter_drilldown_actions(state);
                     follow_ups.extend(drilldown_actions);
                 }
@@ -243,6 +266,53 @@ pub async fn dispatch(
             state.library_picker_active = false;
         }
 
+        // Sort popup actions
+        Action::OpenSortPopup => {
+            use crate::app::state::{BrowseItem, SortColumnType, SortPopupState};
+
+            if state.view != View::Browse {
+                // no-op outside browse view
+            } else if let Some(nav) = state.browse_nav() {
+                let col_idx = nav.focused_column;
+                if let Some(col) = nav.columns.get(col_idx) {
+                    // Determine column type from content
+                    let first_item = col.items.first();
+                    let column_type = if first_item.map_or(false, |i| matches!(i, BrowseItem::Artist { .. })) || col.items.iter().take(3).any(|i| matches!(i, BrowseItem::Artist { .. })) {
+                        SortColumnType::Artist
+                    } else if first_item.map_or(false, |i| matches!(i, BrowseItem::Album { .. })) || col.items.iter().take(4).any(|i| matches!(i, BrowseItem::Album { .. })) {
+                        SortColumnType::Album
+                    } else if first_item.map_or(false, |i| matches!(i, BrowseItem::Track { .. })) {
+                        // Determine if this is a special track column (all-tracks/playlist)
+                        if state.is_special_track_column(nav, col_idx) {
+                            SortColumnType::AllTracks
+                        } else {
+                            SortColumnType::Track
+                        }
+                    } else {
+                        // Genre or other non-sortable column - don't open popup
+                        return Ok(vec![]);
+                    };
+
+                    let is_playlist = state.browse_category == crate::app::state::BrowseCategory::Playlists;
+                    let popup = SortPopupState::new(
+                        col_idx,
+                        col.title.clone(),
+                        column_type,
+                        col.sort_mode,
+                        col.artwork_visible,
+                        is_playlist,
+                    );
+                    state.sort_popup = Some(popup);
+                }
+            }
+        }
+        Action::CloseSortPopup => {
+            state.sort_popup = None;
+        }
+        Action::ApplySortOption => {
+            // Handled inline in the sort popup key handler
+        }
+
         // Radio launcher popup actions
         Action::OpenRadioLauncher => {
             state.radio_launcher = Some(crate::app::state::RadioLauncherState {
@@ -266,7 +336,16 @@ pub async fn dispatch(
                     let (query, query_normalized) = normalize_query(&launcher.query);
 
                     let artists: Vec<_> = state.artists.iter()
-                        .filter(|a| fuzzy_matches(&a.title, &query, &query_normalized))
+                        .filter(|a| {
+                            if fuzzy_matches(&a.title, &query, &query_normalized) {
+                                return true;
+                            }
+                            if let Some(aliases) = state.artist_aliases.get(&a.rating_key) {
+                                aliases.iter().any(|alias| fuzzy_matches(alias, &query, &query_normalized))
+                            } else {
+                                false
+                            }
+                        })
                         .take(SEARCH_RESULT_LIMIT)
                         .cloned()
                         .collect();
@@ -440,7 +519,17 @@ pub async fn dispatch(
                     let (query, query_normalized) = normalize_query(&picker.query);
 
                     picker.filtered_artists = state.artists.iter()
-                        .filter(|a| fuzzy_matches(&a.title, &query, &query_normalized))
+                        .filter(|a| {
+                            if fuzzy_matches(&a.title, &query, &query_normalized) {
+                                return true;
+                            }
+                            // Also match artist aliases
+                            if let Some(aliases) = state.artist_aliases.get(&a.rating_key) {
+                                aliases.iter().any(|alias| fuzzy_matches(alias, &query, &query_normalized))
+                            } else {
+                                false
+                            }
+                        })
                         .take(ARTIST_PICKER_LIMIT)
                         .cloned()
                         .collect();
@@ -613,7 +702,7 @@ fn select_search_result(state: &mut AppState) -> Vec<Action> {
 
                 state.search_popup_active = false;
                 state.browse_category = BrowseCategory::Library;
-                state.view = View::Browse;
+                state.set_view(View::Browse);
 
                 // Find artist in artist_nav and select it
                 if let Some(col) = state.artist_nav.columns.get_mut(0) {
@@ -636,7 +725,7 @@ fn select_search_result(state: &mut AppState) -> Vec<Action> {
 
                 state.search_popup_active = false;
                 state.browse_category = BrowseCategory::Library;
-                state.view = View::Browse;
+                state.set_view(View::Browse);
                 state.pending_album_key = Some(album_key);
 
                 // If we have the parent artist key, navigate to them
@@ -673,7 +762,7 @@ fn select_search_result(state: &mut AppState) -> Vec<Action> {
 
                 state.search_popup_active = false;
                 state.browse_category = BrowseCategory::Library;
-                state.view = View::Browse;
+                state.set_view(View::Browse);
                 state.pending_album_key = album_key;
                 state.pending_track_key = Some(track_key);
 
@@ -702,7 +791,7 @@ fn select_search_result(state: &mut AppState) -> Vec<Action> {
 
                 state.search_popup_active = false;
                 state.browse_category = BrowseCategory::Playlists;
-                state.view = View::Browse;
+                state.set_view(View::Browse);
 
                 // Find playlist in playlist_nav and select it
                 if let Some(col) = state.playlist_nav.columns.get_mut(0) {
@@ -723,7 +812,7 @@ fn select_search_result(state: &mut AppState) -> Vec<Action> {
 
                 state.search_popup_active = false;
                 state.browse_category = BrowseCategory::Genres;
-                state.view = View::Browse;
+                state.set_view(View::Browse);
 
                 // Find genre in genre_nav and select it
                 if let Some(col) = state.genre_nav.columns.get_mut(0) {
@@ -745,7 +834,7 @@ fn select_search_result(state: &mut AppState) -> Vec<Action> {
 
 /// For the All tab, map a global flat index to (section, local_index).
 /// Sections order: Artists, Albums, Playlists, Genres, Tracks.
-fn resolve_global_index(results: &SearchResults, global_idx: usize) -> (SearchTab, usize) {
+pub fn resolve_global_index(results: &SearchResults, global_idx: usize) -> (SearchTab, usize) {
     let mut offset = 0;
 
     let artists_len = results.artists.len();
@@ -804,13 +893,19 @@ async fn execute_list_filter(
     let category = state.list_filter.category;
     let column = state.list_filter.column;
 
+    let aliases = state.artist_aliases.clone();
+    let comp_keys = state.compilation_artist_keys.clone();
+    let empty_comp_keys = std::collections::HashSet::new();
+
     match category {
         BrowseCategory::Library => {
             if let Some(col) = state.artist_nav.columns.get(column) {
                 let items: Vec<_> = col.items.clone();
+                let aliases = aliases.clone();
+                let comp_keys = comp_keys.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-                    let results = filter_browse_items(&items, &query, DEFAULT_MAX_RESULTS);
+                    let results = filter_browse_items(&items, &query, DEFAULT_MAX_RESULTS, &aliases, &comp_keys);
                     let _ = event_tx.send(Event::ListFilterCompleted { version, results }).await;
                 });
             }
@@ -818,9 +913,11 @@ async fn execute_list_filter(
         BrowseCategory::Playlists => {
             if let Some(col) = state.playlist_nav.columns.get(column) {
                 let items: Vec<_> = col.items.clone();
+                let aliases = aliases.clone();
+                let empty = empty_comp_keys.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-                    let results = filter_browse_items(&items, &query, DEFAULT_MAX_RESULTS);
+                    let results = filter_browse_items(&items, &query, DEFAULT_MAX_RESULTS, &aliases, &empty);
                     let _ = event_tx.send(Event::ListFilterCompleted { version, results }).await;
                 });
             }
@@ -828,9 +925,11 @@ async fn execute_list_filter(
         BrowseCategory::Genres => {
             if let Some(col) = state.genre_nav.columns.get(column) {
                 let items: Vec<_> = col.items.clone();
+                let aliases = aliases.clone();
+                let empty = empty_comp_keys.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-                    let results = filter_browse_items(&items, &query, DEFAULT_MAX_RESULTS);
+                    let results = filter_browse_items(&items, &query, DEFAULT_MAX_RESULTS, &aliases, &empty);
                     let _ = event_tx.send(Event::ListFilterCompleted { version, results }).await;
                 });
             }
@@ -875,7 +974,28 @@ async fn adventure_launcher_search(
     // Local ranked search for artists, albums, playlists, genres
     use crate::services::{search_with_ranking, search_albums_with_ranking};
     let query = launcher.query.to_lowercase();
-    let artists = search_with_ranking(&state.artists, &query, |a| &a.title, SEARCH_RESULT_LIMIT);
+    let mut artists = search_with_ranking(&state.artists, &query, |a| &a.title, SEARCH_RESULT_LIMIT);
+
+    // Also find artists whose aliases match the query (using normalized matching)
+    let alias_extras: Vec<_> = {
+        let existing_keys: std::collections::HashSet<&str> = artists.iter()
+            .map(|a| a.rating_key.as_str())
+            .collect();
+        let query_norm = crate::services::artist_alias_service::normalize_artist_name(&query);
+        state.artists.iter()
+            .filter(|a| !existing_keys.contains(a.rating_key.as_str()))
+            .filter(|a| {
+                state.artist_aliases.get(&a.rating_key)
+                    .map_or(false, |aliases| aliases.iter().any(|al| {
+                        let norm = crate::services::artist_alias_service::normalize_artist_name(al);
+                        norm.contains(&query_norm)
+                    }))
+            })
+            .cloned()
+            .collect()
+    };
+    artists.extend(alias_extras);
+
     let albums = search_albums_with_ranking(&state.albums, &query, SEARCH_RESULT_LIMIT);
     let playlists = search_with_ranking(&state.playlists, &query, |p| &p.title, SEARCH_RESULT_LIMIT);
     let genres = search_with_ranking(&state.genres, &query, |g| &g.title, SEARCH_RESULT_LIMIT);

@@ -13,9 +13,25 @@ use crossterm::event::{self, KeyCode, KeyModifiers};
 
 use crate::app::Action;
 use crate::app::state::{
-    BrowseCategory, Focus, RightPanelMode, View,
+    BrowseCategory, BrowseItem, Focus, RightPanelMode, View,
 };
 use crate::app::AppState;
+use super::super::helpers;
+
+/// Play+enqueue a browse item (Shift+Enter): Artist → all tracks, Album → album tracks.
+/// Track items are NOT handled here — they fall through to the Enter handler which uses
+/// PlayTrackFromMiller with single_track=false (track + following).
+fn play_browse_item(item: &BrowseItem) -> Vec<Action> {
+    match item {
+        BrowseItem::Artist { key, .. } => {
+            vec![Action::PlayArtistTracks { artist_key: key.clone() }]
+        }
+        BrowseItem::Album { key, .. } => {
+            vec![Action::PlayAlbum { rating_key: key.clone() }]
+        }
+        _ => vec![],
+    }
+}
 
 /// Handle Browse view keys (CUA-style).
 pub(super) fn handle_browse_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
@@ -54,7 +70,7 @@ pub(super) fn handle_browse_keys(key: event::KeyEvent, state: &mut AppState) -> 
             KeyCode::Down if focused_on_filter_column => {
                 return vec![Action::FilteredListDown];
             }
-            KeyCode::Enter if focused_on_filter_column => {
+            KeyCode::Enter | KeyCode::Right if focused_on_filter_column => {
                 return vec![Action::SelectFilteredItem];
             }
             // Typing appends to filter query (only unmodified chars)
@@ -62,7 +78,11 @@ pub(super) fn handle_browse_keys(key: event::KeyEvent, state: &mut AppState) -> 
                 && !key.modifiers.contains(KeyModifiers::ALT) => {
                 return vec![Action::AppendListFilterChar(c)];
             }
-            // Other keys (arrows, etc.) fall through to normal handling
+            // Left/Esc on non-filter column: deactivate and fall through
+            KeyCode::Left if !focused_on_filter_column => {
+                state.list_filter.deactivate();
+            }
+            // Other keys fall through to normal handling
             _ => {}
         }
     }
@@ -292,8 +312,12 @@ pub(super) fn handle_folder_browse_keys(key: event::KeyEvent, state: &mut AppSta
                             return vec![Action::NavigateIntoFolder(item.key)];
                         }
                         FolderItemType::Track if key.code == KeyCode::Enter => {
-                            // Only Enter plays — Right arrow does not begin playback
-                            return vec![Action::PlayFolderTracks];
+                            // Enter plays single track, Shift+Enter plays all folder tracks
+                            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                                return vec![Action::PlayFolderTracks];
+                            } else if let Some(col) = folder_state.focused() {
+                                return vec![Action::PlayFolderTrack { track_index: col.selected_index }];
+                            }
                         }
                         _ => {}
                     }
@@ -312,11 +336,16 @@ pub(super) fn handle_folder_browse_keys(key: event::KeyEvent, state: &mut AppSta
             vec![]
         }
 
-        // Escape - go back or exit
+        // Escape - go back, or truncate child columns at root
         KeyCode::Esc => {
             if let Some(ref mut folder_state) = state.folder_state {
                 if folder_state.can_go_left() {
                     folder_state.focus_left();
+                    return vec![];
+                }
+                // At root column: truncate child columns
+                if folder_state.columns.len() > 1 {
+                    folder_state.columns.truncate(1);
                     return vec![];
                 }
             }
@@ -376,7 +405,21 @@ pub(super) fn handle_artist_browse_keys(key: event::KeyEvent, state: &mut AppSta
     use crate::app::state::BrowseItem;
 
     // Handle common navigation keys
+    let is_up_down = matches!(key.code, KeyCode::Up | KeyCode::Down);
     if let Some(mut actions) = handle_browse_nav_keys(key, &mut state.artist_nav) {
+        // Auto-drill on Up/Down: if child column exists, replace it
+        if is_up_down {
+            let has_child = state.artist_nav.columns.len() > state.artist_nav.focused_column + 1;
+            if has_child {
+                if let Some(drill) = auto_drill_artist_action(state) {
+                    state.auto_drill_pending = true;
+                    actions.push(drill);
+                } else {
+                    // Non-drillable item: truncate child columns
+                    state.artist_nav.truncate_right();
+                }
+            }
+        }
         // After scroll, lazily load album art for newly visible items
         let art_batch = super::super::dispatch_miller::collect_viewport_art(state);
         if !art_batch.is_empty() {
@@ -385,7 +428,19 @@ pub(super) fn handle_artist_browse_keys(key: event::KeyEvent, state: &mut AppSta
         return actions;
     }
 
-    // Handle Enter/Right - drill down into containers; only Enter plays tracks
+    // Shift+Enter on non-track items: play+enqueue (Artist → all tracks, Album → album)
+    // Track items fall through to the Enter handler below which handles single vs. multi
+    if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::SHIFT) {
+        if let Some(item) = state.artist_nav.selected_item().cloned() {
+            let actions = play_browse_item(&item);
+            if !actions.is_empty() {
+                return actions;
+            }
+            // Track items: fall through to Enter handler
+        }
+    }
+
+    // Handle Enter/Right - drill down into containers; Enter plays tracks
     if matches!(key.code, KeyCode::Enter | KeyCode::Right) {
         if let Some(item) = state.artist_nav.selected_item().cloned() {
             return match item {
@@ -400,23 +455,41 @@ pub(super) fn handle_artist_browse_keys(key: event::KeyEvent, state: &mut AppSta
                 BrowseItem::AllArtists => {
                     vec![Action::LoadAllAlbumsForMiller]
                 }
-                BrowseItem::ArtistRadio { artist_key, artist_name, .. } => {
+                BrowseItem::ArtistRadio { artist_key, artist_name, .. } if key.code == KeyCode::Enter => {
                     vec![Action::StartPlexRadio { key: artist_key, title: artist_name }]
                 }
+                BrowseItem::ArtistRadio { .. } => {
+                    // Right arrow on ArtistRadio is a no-op (not drillable)
+                    vec![]
+                }
                 BrowseItem::AllTracks { artist_key, artist_name, .. } => {
-                    state.selected_album_title = format!("All tracks by {}", artist_name);
-                    vec![Action::LoadArtistAllTracksForMiller { artist_key }]
+                    if artist_key == "__all_library__" {
+                        state.selected_album_title = "All Tracks".to_string();
+                        vec![Action::LoadAllLibraryTracksForMiller]
+                    } else if artist_key == "__all_comp__" {
+                        state.selected_album_title = "All Tracks".to_string();
+                        vec![Action::LoadAllCompilationTracksForMiller]
+                    } else if let Some(real_key) = artist_key.strip_prefix("__comp_tracks:") {
+                        vec![Action::LoadCompilationAllTracksForMiller {
+                            artist_key: real_key.to_string(),
+                            artist_name,
+                        }]
+                    } else {
+                        state.selected_album_title = format!("All tracks by {}", artist_name);
+                        vec![Action::LoadArtistAllTracksForMiller { artist_key }]
+                    }
                 }
                 BrowseItem::Compilations => {
                     vec![Action::LoadCompilationsForMiller]
                 }
                 BrowseItem::CompilationTracks { artist_key, artist_name } => {
-                    vec![Action::LoadCompilationTracksForMiller { artist_key, artist_name }]
+                    vec![Action::LoadCompilationAlbumsForMiller { artist_key, artist_name }]
                 }
                 BrowseItem::Track { .. } if key.code == KeyCode::Enter => {
+                    let single = !key.modifiers.contains(KeyModifiers::SHIFT);
                     if let Some(col) = state.artist_nav.focused() {
                         let idx = col.selected_index;
-                        vec![Action::PlayTrackFromMiller { column_index: state.artist_nav.focused_column, track_index: idx }]
+                        vec![Action::PlayTrackFromMiller { column_index: state.artist_nav.focused_column, track_index: idx, single_track: single }]
                     } else {
                         vec![]
                     }
@@ -468,7 +541,20 @@ pub(super) fn handle_genre_browse_keys(key: event::KeyEvent, state: &mut AppStat
     }
 
     // Handle common navigation keys
+    let is_up_down = matches!(key.code, KeyCode::Up | KeyCode::Down);
     if let Some(mut actions) = handle_browse_nav_keys(key, &mut state.genre_nav) {
+        // Auto-drill on Up/Down: if child column exists, replace it
+        if is_up_down {
+            let has_child = state.genre_nav.columns.len() > state.genre_nav.focused_column + 1;
+            if has_child {
+                if let Some(drill) = auto_drill_genre_action(state) {
+                    state.auto_drill_pending = true;
+                    actions.push(drill);
+                } else {
+                    state.genre_nav.truncate_right();
+                }
+            }
+        }
         // After scroll, lazily load album art for newly visible items
         let art_batch = super::super::dispatch_miller::collect_viewport_art(state);
         if !art_batch.is_empty() {
@@ -477,20 +563,41 @@ pub(super) fn handle_genre_browse_keys(key: event::KeyEvent, state: &mut AppStat
         return actions;
     }
 
-    // Handle Enter/Right - drill into containers; only Enter plays tracks
+    // Shift+Enter on non-track items: play+enqueue
+    if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::SHIFT) {
+        if let Some(item) = state.genre_nav.selected_item().cloned() {
+            let actions = play_browse_item(&item);
+            if !actions.is_empty() {
+                return actions;
+            }
+        }
+    }
+
+    // Handle Enter/Right - drill into containers; Enter plays tracks
     if matches!(key.code, KeyCode::Enter | KeyCode::Right) {
         if let Some(item) = state.genre_nav.selected_item().cloned() {
             return match item {
                 BrowseItem::Genre { key, .. } => {
                     vec![Action::LoadGenreAlbumsForMiller { genre_key: key }]
                 }
-                BrowseItem::Album { key, .. } => {
+                BrowseItem::Album { key, title, .. } => {
+                    // Check grouped-by-album (same as playlist handler)
+                    if let Some(col) = state.genre_nav.focused() {
+                        if col.grouped_by_album {
+                            if let Some(new_col) = helpers::drill_grouped_album(col, col.selected_index) {
+                                state.genre_nav.push_column(new_col);
+                                return vec![];
+                            }
+                        }
+                    }
+                    state.selected_album_title = title;
                     vec![Action::LoadGenreTracksForMiller { album_key: key }]
                 }
                 BrowseItem::Track { .. } if key.code == KeyCode::Enter => {
+                    let single = !key.modifiers.contains(KeyModifiers::SHIFT);
                     if let Some(col) = state.genre_nav.focused() {
                         let idx = col.selected_index;
-                        vec![Action::PlayGenreTrackFromMiller { column_index: state.genre_nav.focused_column, track_index: idx }]
+                        vec![Action::PlayGenreTrackFromMiller { column_index: state.genre_nav.focused_column, track_index: idx, single_track: single }]
                     } else {
                         vec![]
                     }
@@ -508,69 +615,72 @@ pub(super) fn handle_playlist_browse_keys(key: event::KeyEvent, state: &mut AppS
     use crate::app::state::BrowseItem;
 
     // Handle common navigation keys
-    if let Some(actions) = handle_browse_nav_keys(key, &mut state.playlist_nav) {
+    let is_up_down = matches!(key.code, KeyCode::Up | KeyCode::Down);
+    if let Some(mut actions) = handle_browse_nav_keys(key, &mut state.playlist_nav) {
+        // Auto-drill on Up/Down: if child column exists, replace it
+        if is_up_down {
+            let has_child = state.playlist_nav.columns.len() > state.playlist_nav.focused_column + 1;
+            if has_child {
+                // Check if focused column is grouped-by-album (sync drill)
+                let did_sync_drill = {
+                    let fc = state.playlist_nav.focused_column;
+                    state.playlist_nav.columns.get(fc)
+                        .filter(|col| col.grouped_by_album)
+                        .and_then(|col| helpers::drill_grouped_album(col, col.selected_index))
+                };
+                if let Some(new_col) = did_sync_drill {
+                    state.playlist_nav.replace_child_column(new_col);
+                } else if let Some(drill) = auto_drill_playlist_action(state) {
+                    state.auto_drill_pending = true;
+                    actions.push(drill);
+                } else {
+                    state.playlist_nav.truncate_right();
+                }
+            }
+        }
+        // After scroll, lazily load album art for newly visible items
+        let art_batch = super::super::dispatch_miller::collect_viewport_art(state);
+        if !art_batch.is_empty() {
+            actions.push(Action::LoadAlbumArt(art_batch));
+        }
         return actions;
     }
 
-    // Handle Enter/Right - drill into containers; only Enter plays tracks
+    // Shift+Enter on non-track items: play+enqueue
+    if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::SHIFT) {
+        if let Some(item) = state.playlist_nav.selected_item().cloned() {
+            let actions = play_browse_item(&item);
+            if !actions.is_empty() {
+                return actions;
+            }
+        }
+    }
+
+    // Handle Enter/Right - drill into containers; Enter plays tracks
     if matches!(key.code, KeyCode::Enter | KeyCode::Right) {
         if let Some(item) = state.playlist_nav.selected_item().cloned() {
             return match item {
                 BrowseItem::Playlist { key, .. } => {
-                    // Reset album grouping when selecting a new playlist
-                    state.playlist_view_mode = crate::app::state::PlaylistViewMode::Tracks;
-                    state.playlist_album_groups.clear();
-                    state.playlist_original_items = None;
-                    state.playlist_original_tracks = None;
                     vec![Action::LoadPlaylistTracksForMiller { playlist_key: key }]
                 }
-                BrowseItem::Album { .. }
-                    if state.playlist_view_mode == crate::app::state::PlaylistViewMode::TracksByAlbum =>
-                {
-                    // Drill into playlist album group: push tracks from stored groups
-                    let focused = state.playlist_nav.focused_column;
-                    if let Some(col) = state.playlist_nav.columns.get(focused) {
-                        let group_idx = col.selected_index;
-                        if let Some(tracks) = state.playlist_album_groups.get(group_idx) {
-                            let items = BrowseItem::from_tracks(tracks);
-                            let title = match &col.items[group_idx] {
-                                BrowseItem::Album { title, .. } => title.clone(),
-                                _ => "tracks".to_string(),
-                            };
-                            let new_col = crate::app::state::BrowseColumn::new_with_tracks(
-                                title, items, tracks.clone(),
-                            );
-                            state.playlist_nav.push_column(new_col);
+                BrowseItem::Album { key, title, .. } => {
+                    // Grouped-by-album: drill into local track group
+                    if let Some(col) = state.playlist_nav.focused() {
+                        if col.grouped_by_album {
+                            if let Some(new_col) = helpers::drill_grouped_album(col, col.selected_index) {
+                                state.playlist_nav.push_column(new_col);
+                                return vec![];
+                            }
                         }
                     }
-                    vec![]
-                }
-                BrowseItem::Album { key, title, .. } => {
                     state.selected_album_title = title;
                     vec![Action::LoadAlbumTracksForMiller { album_key: key }]
                 }
                 BrowseItem::Track { .. } if key.code == KeyCode::Enter => {
-                    // When playing from a TracksByAlbum drill-down, queue all grouped tracks
-                    if state.playlist_view_mode == crate::app::state::PlaylistViewMode::TracksByAlbum
-                        && !state.playlist_album_groups.is_empty()
-                    {
-                        if let Some(col) = state.playlist_nav.focused() {
-                            let track_idx_in_album = col.selected_index;
-                            let parent_col_idx = state.playlist_nav.focused_column.saturating_sub(1);
-                            let album_group_idx = state.playlist_nav.columns.get(parent_col_idx)
-                                .map(|c| c.selected_index)
-                                .unwrap_or(0);
-                            let offset: usize = state.playlist_album_groups.iter()
-                                .take(album_group_idx)
-                                .map(|g| g.len())
-                                .sum();
-                            let abs_idx = offset + track_idx_in_album;
-                            return vec![Action::PlayPlaylistAlbumGroupTrack { track_index: abs_idx }];
-                        }
-                        vec![]
-                    } else if let Some(col) = state.playlist_nav.focused() {
+                    let single = !key.modifiers.contains(KeyModifiers::SHIFT);
+                    if let Some(col) = state.playlist_nav.focused() {
                         let idx = col.selected_index;
-                        vec![Action::PlayPlaylistTrackFromMiller { column_index: state.playlist_nav.focused_column, track_index: idx }]
+                        vec![Action::PlayPlaylistTrackFromMiller { column_index: state.playlist_nav.focused_column, track_index: idx, single_track: single }]
                     } else {
                         vec![]
                     }
@@ -595,17 +705,15 @@ pub fn handle_browse_nav_keys(
         // Settings
         KeyCode::F(2) => Some(vec![Action::OpenSettings]),
 
-        // Up - move selection up, truncate columns to the right
+        // Up - move selection up (caller handles auto-drill or truncate)
         KeyCode::Up => {
             nav.move_up();
-            nav.truncate_right();
             Some(vec![])
         }
 
-        // Down - move selection down, truncate columns to the right
+        // Down - move selection down (caller handles auto-drill or truncate)
         KeyCode::Down => {
             nav.move_down();
-            nav.truncate_right();
             Some(vec![])
         }
 
@@ -650,6 +758,9 @@ pub fn handle_browse_nav_keys(
         KeyCode::Left | KeyCode::Backspace | KeyCode::Esc => {
             if nav.can_go_left() {
                 nav.focus_left();
+            } else if key.code == KeyCode::Esc && nav.columns.len() > 1 {
+                // At root column: Esc truncates child columns
+                nav.columns.truncate(1);
             }
             Some(vec![])
         }
@@ -810,6 +921,78 @@ pub fn get_filter_drilldown_actions(state: &mut AppState) -> Vec<Action> {
     }
 }
 
+/// Determine the auto-drill action for the currently selected item in artist_nav.
+/// Returns None if the item is not drillable (e.g. Track, ArtistRadio).
+fn auto_drill_artist_action(state: &mut AppState) -> Option<Action> {
+    use crate::app::state::BrowseItem;
+    let item = state.artist_nav.selected_item()?.clone();
+    match item {
+        BrowseItem::Artist { key, title, .. } => {
+            state.selected_artist_name = title;
+            Some(Action::LoadArtistAlbumsForMiller { artist_key: key })
+        }
+        BrowseItem::Album { key, title, .. } => {
+            state.selected_album_title = title;
+            Some(Action::LoadAlbumTracksForMiller { album_key: key })
+        }
+        BrowseItem::AllArtists => {
+            Some(Action::LoadAllAlbumsForMiller)
+        }
+        BrowseItem::AllTracks { artist_key, artist_name, .. } => {
+            if artist_key == "__all_library__" {
+                state.selected_album_title = "All Tracks".to_string();
+                Some(Action::LoadAllLibraryTracksForMiller)
+            } else if artist_key == "__all_comp__" {
+                state.selected_album_title = "All Tracks".to_string();
+                Some(Action::LoadAllCompilationTracksForMiller)
+            } else if let Some(real_key) = artist_key.strip_prefix("__comp_tracks:") {
+                Some(Action::LoadCompilationAllTracksForMiller {
+                    artist_key: real_key.to_string(),
+                    artist_name,
+                })
+            } else {
+                state.selected_album_title = format!("All tracks by {}", artist_name);
+                Some(Action::LoadArtistAllTracksForMiller { artist_key })
+            }
+        }
+        BrowseItem::Compilations => {
+            Some(Action::LoadCompilationsForMiller)
+        }
+        BrowseItem::CompilationTracks { artist_key, artist_name } => {
+            Some(Action::LoadCompilationAlbumsForMiller { artist_key, artist_name })
+        }
+        // Track, ArtistRadio, Genre, Playlist — not drillable
+        _ => None,
+    }
+}
+
+/// Determine the auto-drill action for the currently selected item in genre_nav.
+fn auto_drill_genre_action(state: &AppState) -> Option<Action> {
+    use crate::app::state::BrowseItem;
+    let item = state.genre_nav.selected_item()?.clone();
+    match item {
+        BrowseItem::Genre { key, .. } => {
+            Some(Action::LoadGenreAlbumsForMiller { genre_key: key })
+        }
+        BrowseItem::Album { key, .. } => {
+            Some(Action::LoadGenreTracksForMiller { album_key: key })
+        }
+        _ => None,
+    }
+}
+
+/// Determine the auto-drill action for the currently selected item in playlist_nav.
+fn auto_drill_playlist_action(state: &AppState) -> Option<Action> {
+    use crate::app::state::BrowseItem;
+    let item = state.playlist_nav.selected_item()?.clone();
+    match item {
+        BrowseItem::Playlist { key, .. } => {
+            Some(Action::LoadPlaylistTracksForMiller { playlist_key: key })
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -929,7 +1112,7 @@ fn tab_navigate_next(state: &mut AppState) -> Vec<Action> {
         }
         BrowseCategory::Playlists | BrowseCategory::Genres | BrowseCategory::Folders => {
             // Any other browse category → Queue
-            state.view = View::Queue;
+            state.set_view(View::Queue);
             vec![]
         }
     }
@@ -943,7 +1126,7 @@ fn tab_navigate_prev(state: &mut AppState) -> Vec<Action> {
     match state.browse_category {
         BrowseCategory::Library => {
             // Library (first) → wrap to Now Playing
-            state.view = View::NowPlaying;
+            state.set_view(View::NowPlaying);
             vec![]
         }
         BrowseCategory::Playlists | BrowseCategory::Genres | BrowseCategory::Folders => {

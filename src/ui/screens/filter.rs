@@ -189,7 +189,7 @@ fn render_results(frame: &mut Frame, state: &AppState, area: Rect) {
                         } else {
                             &tr.title
                         };
-                        format!("{} - {}", title, tr.artist_name())
+                        format!("{} - {}", title, tr.track_artist())
                     },
                     is_results_focused, selected_idx, scroll_pin, area,
                 );
@@ -280,7 +280,7 @@ fn render_all_tab(
             } else {
                 &tr.title
             };
-            entries.push((format!("  {} - {}", title, tr.artist_name()), false, Some(global_idx)));
+            entries.push((format!("  {} - {}", title, tr.track_artist()), false, Some(global_idx)));
             global_idx += 1;
         }
     }
@@ -315,6 +315,11 @@ fn render_all_tab(
         .collect();
 
     frame.render_widget(List::new(items), area);
+
+    // Scrollbar for long lists
+    if entries.len() > visible_height {
+        crate::ui::widgets::render_scrollbar_borderless(frame, area, entries.len(), visible_height, scroll_offset);
+    }
 }
 
 /// Render a single-section list (for Artists, Albums, Playlists, Tracks, Genres tabs).
@@ -363,5 +368,10 @@ fn render_single_section<T, F>(
         .collect();
 
     frame.render_widget(List::new(list_items), area);
+
+    // Scrollbar for long lists
+    if total > visible_height {
+        crate::ui::widgets::render_scrollbar_borderless(frame, area, total, visible_height, scroll_offset);
+    }
 }
 

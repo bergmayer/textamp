@@ -95,6 +95,8 @@ pub fn filter_browse_items(
     items: &[crate::app::state::BrowseItem],
     query: &str,
     max_results: usize,
+    artist_aliases: &std::collections::HashMap<String, std::collections::HashSet<String>>,
+    compilation_artist_keys: &std::collections::HashSet<String>,
 ) -> ListFilterResults {
     use crate::app::state::BrowseItem;
 
@@ -110,9 +112,27 @@ pub fn filter_browse_items(
     let mut priority2: Vec<usize> = Vec::new(); // Word starts with
     let mut priority3: Vec<usize> = Vec::new(); // Contains
     let mut priority4: Vec<usize> = Vec::new(); // Normalized match (punctuation-insensitive)
-    let mut priority5: Vec<usize> = Vec::new(); // Year match
+    let mut priority5: Vec<usize> = Vec::new(); // Year match / alias match
+
+    // Track whether any compilation-only artist matched (to inject Compilations entry)
+    let mut compilation_artist_matched = false;
 
     for (idx, item) in items.iter().enumerate() {
+        // Skip compilation-only artists (they appear only on compilations)
+        if let BrowseItem::Artist { key, .. } = item {
+            if !compilation_artist_keys.is_empty() && compilation_artist_keys.contains(key) {
+                // Check if it matches the query — if so, flag for Compilations injection
+                let title = item.title().to_lowercase();
+                if title.starts_with(&query_lower)
+                    || (!short_query && (title.split_whitespace().any(|w| w.starts_with(&query_lower))
+                        || title.contains(&query_lower)))
+                {
+                    compilation_artist_matched = true;
+                }
+                continue; // Skip this artist from results
+            }
+        }
+
         let title = item.title().to_lowercase();
 
         if title.starts_with(&query_lower) {
@@ -131,6 +151,17 @@ pub fn filter_browse_items(
                     if year.to_string().contains(&query_lower) {
                         priority5.push(idx);
                     }
+                } else if let BrowseItem::Artist { key, .. } = item {
+                    // Check artist aliases (with normalization)
+                    if let Some(aliases) = artist_aliases.get(key) {
+                        let query_norm = crate::services::artist_alias_service::normalize_artist_name(&query_lower);
+                        if aliases.iter().any(|alias| {
+                            let a = crate::services::artist_alias_service::normalize_artist_name(alias);
+                            a.starts_with(&query_norm) || a.contains(&query_norm)
+                        }) {
+                            priority5.push(idx);
+                        }
+                    }
                 }
             }
         } else {
@@ -139,6 +170,20 @@ pub fn filter_browse_items(
                 if year.to_string().contains(&query_lower) {
                     priority5.push(idx);
                 }
+            }
+        }
+    }
+
+    // If a compilation-only artist matched, inject the Compilations entry index
+    // (find it in the items list)
+    if compilation_artist_matched {
+        if let Some(comp_idx) = items.iter().position(|item| matches!(item, BrowseItem::Compilations)) {
+            // Add at the end of priority5 if not already in results
+            if !priority1.contains(&comp_idx) && !priority2.contains(&comp_idx)
+                && !priority3.contains(&comp_idx) && !priority4.contains(&comp_idx)
+                && !priority5.contains(&comp_idx)
+            {
+                priority5.push(comp_idx);
             }
         }
     }

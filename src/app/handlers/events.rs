@@ -55,7 +55,7 @@ pub fn handle_app_event(
             state.settings_state.password_input.clear(); // Never keep password in memory
             state.settings_state.signing_in = false;
             if state.view != View::Settings {
-                state.view = View::Browse;
+                state.set_view(View::Browse);
             }
 
             // Track which server we're connected to
@@ -76,6 +76,27 @@ pub fn handle_app_event(
                     let cache = crate::plex::ArtworkCache::default();
                     let (count, total_bytes) = cache.stats();
                     let _ = event_tx.blocking_send(Event::ArtworkCacheStats { count, total_bytes });
+                });
+            }
+
+            // Compute library cache stats in background
+            {
+                let event_tx = event_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    if let Some(cache) = crate::plex::LibraryCache::new() {
+                        let total_bytes = cache.total_size();
+                        let _ = event_tx.blocking_send(Event::LibraryCacheStats { total_bytes });
+                    }
+                });
+            }
+
+            // Compute waveform cache stats in background
+            {
+                let event_tx = event_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let cache = crate::plex::WaveformCache::default();
+                    let (count, total_bytes) = cache.stats();
+                    let _ = event_tx.blocking_send(Event::WaveformCacheStats { count, total_bytes });
                 });
             }
 
@@ -228,7 +249,7 @@ pub fn handle_app_event(
                 });
             } else {
                 // Multiple servers - let user choose
-                state.view = View::Auth;
+                state.set_view(View::Auth);
                 state.auth_state.step = AuthStep::ServerSelect;
                 state.auth_state.server_index = 0;
                 state.settings_state.discovering_servers = false;
@@ -324,7 +345,7 @@ pub fn handle_app_event(
                     .map(|l| l.title.clone())
                     .unwrap_or_else(|| "Music".to_string());
                 tracing::info!("Active library {} has no cached data, starting preloads", lib_key);
-                helpers::preload_all_library_data(event_tx, &lib_key, &lib_title, client);
+                helpers::preload_all_library_data(event_tx, &lib_key, &lib_title, client, state);
                 return vec![];
             }
 
@@ -334,7 +355,7 @@ pub fn handle_app_event(
                 let lib_key = lib.key.clone();
                 let lib_title = lib.title.clone();
                 state.active_library = Some(lib_key.clone());
-                helpers::preload_all_library_data(event_tx, &lib_key, &lib_title, client);
+                helpers::preload_all_library_data(event_tx, &lib_key, &lib_title, client, state);
             }
             vec![]
         }
@@ -346,7 +367,7 @@ pub fn handle_app_event(
 
             // Update artist_nav if we're in Artists category
             if state.browse_category == BrowseCategory::Library && !state.artists.is_empty() {
-                let title = state.artist_view_mode.name();
+                let title = "artists";
                 let items = state.build_artist_root_items();
                 state.artist_nav.update_root_items(title, items);
             }
@@ -681,6 +702,8 @@ pub fn handle_app_event(
                 state.folder_state = Some(folder_state);
                 tracing::debug!("Folders preloaded and ready");
             }
+            state.preloads_in_progress.remove("Folders");
+            if state.preloads_in_progress.is_empty() { state.preloads_total = 0; }
             vec![]
         }
         Event::SubfoldersPreloaded { library_key, entries, done } => {
@@ -760,6 +783,14 @@ pub fn handle_app_event(
             state.artwork_cache_stats = Some((count, total_bytes));
             vec![]
         }
+        Event::LibraryCacheStats { total_bytes } => {
+            state.library_cache_stats = Some(total_bytes);
+            vec![]
+        }
+        Event::WaveformCacheStats { count, total_bytes } => {
+            state.waveform_cache_stats = Some((count, total_bytes));
+            vec![]
+        }
         Event::ArtistsPreloaded { library_key, mut artists } => {
             // Ignore if this is for a different library (race condition from library switch)
             if state.active_library.as_ref() != Some(&library_key) {
@@ -775,11 +806,13 @@ pub fn handle_app_event(
                 // Update Miller columns (preserves drill-down state)
                 if !state.artists.is_empty() {
                     let items = state.build_artist_root_items();
-                    state.artist_nav.update_root_items(state.artist_view_mode.name(), items);
+                    state.artist_nav.update_root_items("artists", items);
                 }
             }
             // Artists now loaded — try compilation detection (needs both artists + albums)
             helpers::maybe_detect_compilations(event_tx, state, client);
+            state.preloads_in_progress.remove("Artists");
+            if state.preloads_in_progress.is_empty() { state.preloads_total = 0; }
             vec![]
         }
         Event::AlbumsPreloaded { library_key, mut albums } => {
@@ -798,7 +831,8 @@ pub fn handle_app_event(
 
             // Spawn background compilation detection if not already done
             helpers::maybe_detect_compilations(event_tx, state, client);
-
+            state.preloads_in_progress.remove("Albums");
+            if state.preloads_in_progress.is_empty() { state.preloads_total = 0; }
             vec![]
         }
         Event::PlaylistsPreloaded { library_key, playlists } => {
@@ -848,6 +882,8 @@ pub fn handle_app_event(
                     state.playlist_nav = crate::app::state::BrowseNavigationState::new();
                 }
             }
+            state.preloads_in_progress.remove("Playlists");
+            if state.preloads_in_progress.is_empty() { state.preloads_total = 0; }
             vec![]
         }
         Event::GenresPreloaded { library_key, genres } => {
@@ -868,6 +904,8 @@ pub fn handle_app_event(
                     state.genre_nav.update_root_items("genres", items);
                 }
             }
+            state.preloads_in_progress.remove("Genres");
+            if state.preloads_in_progress.is_empty() { state.preloads_total = 0; }
             vec![]
         }
         Event::ArtistGenresPreloaded { library_key, genres } => {
@@ -888,6 +926,8 @@ pub fn handle_app_event(
                     state.genre_nav.update_root_items("artist genres", items);
                 }
             }
+            state.preloads_in_progress.remove("Artist Genres");
+            if state.preloads_in_progress.is_empty() { state.preloads_total = 0; }
             vec![]
         }
         Event::AlbumGenresPreloaded { library_key, genres } => {
@@ -908,6 +948,8 @@ pub fn handle_app_event(
                     state.genre_nav.update_root_items("album genres", items);
                 }
             }
+            state.preloads_in_progress.remove("Album Genres");
+            if state.preloads_in_progress.is_empty() { state.preloads_total = 0; }
             vec![]
         }
         Event::MoodsPreloaded { library_key, moods } => {
@@ -928,6 +970,8 @@ pub fn handle_app_event(
                     state.genre_nav.update_root_items("moods", items);
                 }
             }
+            state.preloads_in_progress.remove("Moods");
+            if state.preloads_in_progress.is_empty() { state.preloads_total = 0; }
             vec![]
         }
         Event::StylesPreloaded { library_key, styles } => {
@@ -948,6 +992,8 @@ pub fn handle_app_event(
                     state.genre_nav.update_root_items("styles", items);
                 }
             }
+            state.preloads_in_progress.remove("Styles");
+            if state.preloads_in_progress.is_empty() { state.preloads_total = 0; }
             vec![]
         }
         Event::StationsPreloaded { library_key, mut stations } => {
@@ -970,6 +1016,73 @@ pub fn handle_app_event(
                 ));
                 state.station_nav.focused_column = 0;
             }
+            state.preloads_in_progress.remove("Stations");
+            if state.preloads_in_progress.is_empty() { state.preloads_total = 0; }
+            vec![]
+        }
+        Event::AllTracksPreloaded { library_key, tracks } => {
+            if state.active_library.as_ref() != Some(&library_key) {
+                tracing::debug!("Ignoring stale all-tracks preload for library {}", library_key);
+                return vec![];
+            }
+            let was_refresh = !state.all_tracks.is_empty();
+            let count = tracks.len();
+            state.all_tracks = tracks;
+            tracing::debug!("All tracks {}: {} items", if was_refresh { "refreshed" } else { "preloaded" }, count);
+            state.cache_dirty = true;
+
+            // Build track-level artist list and artist aliases
+            state.build_track_artists();
+            state.build_artist_aliases();
+
+            if was_refresh {
+                // On refresh: re-detect compilations (reset flag so maybe_detect runs)
+                state.compilations_detected = false;
+                helpers::maybe_detect_compilations(event_tx, state, client);
+
+                // Re-render All Artists album column if active (so album_display_artist updates show)
+                if state.artist_nav.columns.len() >= 2 {
+                    if let Some(col0) = state.artist_nav.columns.first() {
+                        let is_all_artists = col0.selected_item()
+                            .map_or(false, |i| matches!(i, BrowseItem::AllArtists));
+                        if is_all_artists {
+                            let mut items = vec![BrowseItem::AllTracks {
+                                artist_key: "__all_library__".to_string(),
+                                artist_name: "All Artists".to_string(),
+                                thumb: None,
+                            }];
+                            items.extend(BrowseItem::from_albums(&state.albums, &state.album_display_artist));
+                            let old_idx = state.artist_nav.columns[1].selected_index;
+                            state.artist_nav.columns[1].items = items;
+                            state.artist_nav.columns[1].selected_index = old_idx.min(
+                                state.artist_nav.columns[1].items.len().saturating_sub(1)
+                            );
+                        }
+                    }
+                }
+            } else {
+                // Initial preload: trigger compilation detection
+                helpers::maybe_detect_compilations(event_tx, state, client);
+            }
+
+            // Fill any pending "tracks (loading...)" placeholder column
+            if let Some(col) = state.artist_nav.focused_mut() {
+                if col.items.is_empty() && col.title.starts_with("tracks (loading") {
+                    let items = BrowseItem::from_tracks(&state.all_tracks);
+                    col.title = format!("tracks ({})", state.all_tracks.len());
+                    col.items = items;
+                    col.tracks = state.all_tracks.clone();
+                }
+            }
+
+            state.preloads_in_progress.remove("Tracks");
+            if state.preloads_in_progress.is_empty() { state.preloads_total = 0; }
+            vec![]
+        }
+        Event::PreloadFailed { category } => {
+            tracing::warn!("Preload failed for category: {}", category);
+            state.preloads_in_progress.remove(&category);
+            if state.preloads_in_progress.is_empty() { state.preloads_total = 0; }
             vec![]
         }
         Event::CompilationsDetected { library_key, albums, artist_only_keys, track_artist_keys, artist_compilation_map, single_artist_compilations } => {
@@ -1037,16 +1150,17 @@ pub fn handle_app_event(
 
             // Album art loading: lazy-load only for visible items in the focused column
             // Limit concurrent in-flight requests to avoid overwhelming the Plex transcoder
-            if (state.album_art_view || state.artist_art_view) && state.view == crate::app::state::View::Browse
+            // Album art loading: lazy-load for columns with artwork_visible
+            if state.view == crate::app::state::View::Browse
                 && state.album_art_pending.len() < 4
             {
                 let nav = match state.browse_category {
                     crate::app::state::BrowseCategory::Library => &state.artist_nav,
                     crate::app::state::BrowseCategory::Genres => &state.genre_nav,
                     crate::app::state::BrowseCategory::Playlists => &state.playlist_nav,
-                    _ => &state.artist_nav, // won't match albums anyway
+                    _ => &state.artist_nav,
                 };
-                if let Some(col) = nav.focused() {
+                if let Some(col) = nav.focused().filter(|c| c.artwork_visible) {
                     let total_items = col.items.len();
                     if total_items > 0 {
                         // Compute visible range using same formula as render_album_art_grid
@@ -1185,7 +1299,7 @@ pub fn handle_app_event(
                 state.artists.sort_by(|a, b| helpers::sort_key(&a.title).cmp(&helpers::sort_key(&b.title)));
                 state.artists_total = state.artists.len() as u32;
                 let items = state.build_artist_root_items();
-                state.artist_nav.reset(state.artist_view_mode.name(), items);
+                state.artist_nav.reset("artists", items);
             }
             if !cached.albums.is_empty() {
                 state.albums = cached.albums;
@@ -1268,6 +1382,25 @@ pub fn handle_app_event(
                 state.station_nav.focused_column = 0;
             }
 
+            // All tracks + track-level artists
+            if !cached.all_tracks.is_empty() {
+                state.all_tracks = cached.all_tracks;
+                tracing::debug!("Library switch: loaded {} cached tracks", state.all_tracks.len());
+            }
+            if !cached.track_artists.is_empty() {
+                state.track_artists = cached.track_artists;
+                tracing::debug!("Library switch: loaded {} cached track artists", state.track_artists.len());
+            }
+
+            // Artist aliases
+            if !cached.artist_aliases.is_empty() {
+                state.artist_aliases = cached.artist_aliases;
+                state.album_display_artist = cached.album_display_artist;
+                tracing::debug!("Library switch: loaded {} cached artist aliases", state.artist_aliases.len());
+            } else if !state.all_tracks.is_empty() && !state.albums.is_empty() {
+                state.build_artist_aliases();
+            }
+
             // Compilation detection results
             if !cached.compilation_albums.is_empty() || !cached.compilation_artist_keys.is_empty() {
                 state.compilation_albums = cached.compilation_albums;
@@ -1280,6 +1413,9 @@ pub fn handle_app_event(
                 let items = state.build_artist_root_items();
                 state.artist_nav.update_root_items("artists", items);
             }
+
+            // Trigger compilation detection from cached tracks if not already done
+            helpers::maybe_detect_compilations(event_tx, state, client);
 
             vec![]
         }
@@ -1424,7 +1560,7 @@ pub fn handle_app_event(
                 }
 
                 state.list_state.queue_index = 0;
-                state.view = View::Queue;
+                state.set_view(View::Queue);
                 state.set_status(format!("Playing {} ({} tracks)", station_title, state.radio.tracks.len()));
                 return vec![Action::PlayCurrentRadioTrack];
             }
@@ -1492,11 +1628,22 @@ pub fn handle_app_event(
         // Playlist tracks loaded (non-blocking)
         Event::PlaylistTracksForMillerLoaded { playlist_key, tracks } => {
             state.playlist_nav.loading = false;
+            let auto_drill = std::mem::take(&mut state.auto_drill_pending);
             state.playlist_tracks_cache.insert(playlist_key, crate::plex::CachedPlaylistTracks::new(tracks.clone()));
             state.cache_dirty = true;
+            // Get playlist name from the focused column's selected item
+            let playlist_name = state.playlist_nav.focused()
+                .and_then(|c| c.selected_item())
+                .map(|item| item.title().to_string())
+                .unwrap_or_default();
+            let title = if playlist_name.is_empty() {
+                "tracks".to_string()
+            } else {
+                format!("tracks \u{2014} {}", playlist_name)
+            };
             let items = crate::app::state::BrowseItem::from_tracks(&tracks);
-            let col = crate::app::state::BrowseColumn::new_with_tracks("tracks", items, tracks);
-            state.playlist_nav.push_column(col);
+            let col = crate::app::state::BrowseColumn::new_with_tracks(title, items, tracks);
+            state.playlist_nav.drill_column(col, auto_drill);
             vec![]
         }
         Event::PlaylistTracksForMillerFailed { playlist_key: _, error } => {
@@ -1525,6 +1672,9 @@ pub fn handle_app_event(
         // Queue remix batch ready
         Event::RemixBatchReady { inserts } => {
             vec![Action::RemixBatchReady(inserts)]
+        }
+        Event::RemixDoppelgangerReady { replacements } => {
+            vec![Action::RemixDoppelgangerReady(replacements)]
         }
 
         // Multi-artist radio complete

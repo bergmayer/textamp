@@ -55,8 +55,13 @@ pub enum Action {
     PlayTrack(Track),
     PlayTrackFromCategory(usize),
     PlayAlbum { rating_key: String },  // Load album tracks and play them
+    PlayArtistTracks { artist_key: String },  // Load all artist tracks and play them
+    PlaySearchResult,  // Play the selected search result
     EnqueueSelection,  // Ctrl+E: Add current selection to queue
     EnqueueAlbum { rating_key: String, title: String },  // Load album tracks and add to queue
+    EnqueueArtistTracks { artist_key: String, artist_name: String },  // Add all tracks by artist to queue
+    EnqueueTrack(Track),  // Add a single track to queue
+    EnqueueSearchResult,  // Add selected search result to queue
     ClearQueue,
     RemoveFromQueue(usize),
     ToggleQueueShuffle,
@@ -79,9 +84,8 @@ pub enum Action {
     CycleGenreContentType,     // Ctrl+G when in genres: cycle Genres -> Artist -> Album -> Moods -> Styles
     RefreshGenreView,          // Refresh genre view after mode change (shared logic)
 
-    // Artist view mode cycling
-    CycleArtistViewMode, // Ctrl+L when in Library: cycle Artist ↔ AlbumArtist
-    RefreshArtistView,   // Refresh artist view after mode change (shared logic)
+    // Artist view refresh
+    RefreshArtistView,   // Refresh artist view (shared logic)
     CycleLibrarySubMode, // Alt+S in Library: cycle Normal → AllByArtist → AllShuffled
 
     // Genre tab cycling
@@ -124,6 +128,7 @@ pub enum Action {
     NavigateIntoFolder(String),
     NavigateUpFolder,
     PlayFolderTracks,
+    PlayFolderTrack { track_index: usize },
     /// Refresh a specific subfolder (F5 when focused on a subfolder column).
     /// This is the only way subfolder caches get manually refreshed.
     RefreshSubfolder(String),
@@ -133,20 +138,21 @@ pub enum Action {
     LoadAlbumTracksForMiller { album_key: String },
     LoadArtistAllTracksForMiller { artist_key: String },  // Load all tracks by artist (from "All Tracks" entry)
     LoadAllAlbumsForMiller,  // Load all albums as a Miller column (from "All Artists" entry)
-    PlayTrackFromMiller { column_index: usize, track_index: usize },
+    PlayTrackFromMiller { column_index: usize, track_index: usize, single_track: bool },
     LoadCompilationsForMiller,  // Load compilation albums into a new Miller column
-    LoadCompilationTracksForMiller { artist_key: String, artist_name: String },  // Load compilation tracks for an artist
+    LoadCompilationAlbumsForMiller { artist_key: String, artist_name: String },  // Load compilation albums for an artist
+    LoadCompilationAllTracksForMiller { artist_key: String, artist_name: String },  // Load all compilation tracks for an artist
+    LoadAllCompilationTracksForMiller,  // Load all compilation tracks across all artists
+    LoadAllLibraryTracksForMiller,  // Load all library tracks into a Miller column (from "All Tracks" in All Artists)
 
     // Miller column navigation for Genres view
     LoadGenreAlbumsForMiller { genre_key: String },
     LoadGenreTracksForMiller { album_key: String },
-    PlayGenreTrackFromMiller { column_index: usize, track_index: usize },
+    PlayGenreTrackFromMiller { column_index: usize, track_index: usize, single_track: bool },
 
     // Miller column navigation for Playlists view
     LoadPlaylistTracksForMiller { playlist_key: String },
-    PlayPlaylistTrackFromMiller { column_index: usize, track_index: usize },
-    /// Play from album-grouped playlist: queue is all groups flattened, starting at track_index.
-    PlayPlaylistAlbumGroupTrack { track_index: usize },
+    PlayPlaylistTrackFromMiller { column_index: usize, track_index: usize, single_track: bool },
 
     // Radio mode
     StopRadio,
@@ -168,8 +174,6 @@ pub enum Action {
 
     // Artwork
     LoadArtwork,
-    ToggleAlbumArtView,
-    ToggleArtistArtView,
     /// Load album art for a batch of albums: Vec<(rating_key, thumb_path)>
     LoadAlbumArt(Vec<(String, String)>),
 
@@ -234,9 +238,14 @@ pub enum Action {
     AdventureLauncherSelectTrack,
     AdventureLauncherBack,
 
-    // Library picker popup (Alt+S)
+    // Library picker popup (F3)
     OpenLibraryPicker,
     CloseLibraryPicker,
+
+    // Sort popup (Ctrl+S)
+    OpenSortPopup,
+    CloseSortPopup,
+    ApplySortOption,
 
     // DJ modes
     ToggleDjMode(crate::app::state::DjMode),
@@ -249,6 +258,7 @@ pub enum Action {
     RemixGemini,
     RemixTwofer,
     RemixStretch,
+    RemixDoppelganger,
     RemixShuffle,
     RemixUndoShuffle,
     UndoLastRemix,
@@ -259,6 +269,8 @@ pub enum Action {
     RemoveSelectedFromQueue,
     /// Batch result from remix: Vec<(original_queue_index, tracks_to_insert_after)>
     RemixBatchReady(Vec<(usize, Vec<Track>)>),
+    /// Doppelganger remix result: Vec<(queue_index, replacement_track)>
+    RemixDoppelgangerReady(Vec<(usize, Track)>),
 
     // Multi-artist radio picker
     OpenArtistRadioPicker,

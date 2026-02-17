@@ -178,6 +178,7 @@ fn handle_station_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action
                         "remix:gemini" => vec![Action::RemixGemini],
                         "remix:twofer" => vec![Action::RemixTwofer],
                         "remix:stretch" => vec![Action::RemixStretch],
+                        "remix:doppelganger" => vec![Action::RemixDoppelganger],
                         "remix:shuffle" => {
                             if state.shuffle_undo_queue.is_some() {
                                 vec![Action::RemixUndoShuffle]
@@ -461,7 +462,7 @@ fn handle_queue_track_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Ac
                     .map(|ch| ch.to_ascii_lowercase() == letter_lower)
                     .unwrap_or(false)
             }) {
-                state.list_state.queue_index = idx;
+                state.list_state.queue_index = state.play_history.len() + idx;
             }
             vec![]
         }

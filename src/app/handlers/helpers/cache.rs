@@ -71,6 +71,15 @@ pub fn maybe_save_cache_async(event_tx: &mpsc::Sender<Event>, state: &mut AppSta
     cache_data.styles = state.styles.clone();
     cache_data.stations = state.stations.clone();
 
+    // All tracks + track-level artists + aliases
+    // Only save if non-empty to avoid overwriting cached data when preload is in-flight
+    if !state.all_tracks.is_empty() {
+        cache_data.all_tracks = state.all_tracks.clone();
+        cache_data.track_artists = state.track_artists.clone();
+    }
+    cache_data.artist_aliases = state.artist_aliases.clone();
+    cache_data.album_display_artist = state.album_display_artist.clone();
+
     // Compilation detection results
     cache_data.compilation_albums = state.compilation_albums.clone();
     cache_data.compilation_artist_keys = state.compilation_artist_keys.clone();

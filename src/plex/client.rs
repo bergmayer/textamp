@@ -60,6 +60,25 @@ impl PlexClient {
         }
     }
 
+    /// Create a new PlexClient with a specific timeout (for large responses like AllTracks).
+    pub fn new_with_url_and_timeout(server_url: &str, token: Option<&str>, client_identifier: &str, timeout_secs: u64) -> Self {
+        let http = Client::builder()
+            .timeout(Duration::from_secs(timeout_secs))
+            .build()
+            .expect("Failed to create HTTP client");
+
+        let mut client_info = PlexClientInfo::default();
+        client_info.client_identifier = client_identifier.to_string();
+
+        Self {
+            http,
+            client_info,
+            auth_token: token.map(|s| s.to_string()),
+            server_url: Some(server_url.trim_end_matches('/').to_string()),
+            cached_machine_id: None,
+        }
+    }
+
     /// Set the authentication token.
     pub fn set_auth_token(&mut self, token: String) {
         self.auth_token = Some(token);

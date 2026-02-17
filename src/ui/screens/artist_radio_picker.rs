@@ -224,5 +224,10 @@ fn render_artist_list(
         .collect();
 
     frame.render_widget(List::new(items), area);
+
+    // Scrollbar for long lists
+    if total > visible_height {
+        crate::ui::widgets::render_scrollbar_borderless(frame, area, total, visible_height, scroll_offset);
+    }
 }
 

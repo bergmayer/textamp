@@ -325,7 +325,7 @@ pub async fn dispatch(
             state.similar_loading = true;
             state.similar_albums.clear();
             state.list_state.similar_index = 0;
-            state.view = View::Similar;
+            state.set_view(View::Similar);
 
             let event_tx = event_tx.clone();
             let client = client.clone();
@@ -341,7 +341,7 @@ pub async fn dispatch(
             state.similar_loading = true;
             state.similar_tracks.clear();
             state.list_state.similar_index = 0;
-            state.view = View::Similar;
+            state.set_view(View::Similar);
 
             let event_tx = event_tx.clone();
             let client = client.clone();
@@ -407,7 +407,7 @@ fn load_from_cache(state: &mut AppState, cached: CacheData, lib_key: &str, lib_t
         state.artists.sort_by(|a, b| helpers::sort_key(&a.title).cmp(&helpers::sort_key(&b.title)));
         state.artists_total = state.artists.len() as u32;
         let items = state.build_artist_root_items();
-        state.artist_nav.reset(state.artist_view_mode.name(), items);
+        state.artist_nav.reset("artists", items);
     }
     if !cached.albums.is_empty() {
         state.albums = cached.albums;
@@ -484,6 +484,26 @@ fn load_from_cache(state: &mut AppState, cached: CacheData, lib_key: &str, lib_t
         state.station_nav.focused_column = 0;
     }
 
+    // All tracks + track-level artists
+    if !cached.all_tracks.is_empty() {
+        state.all_tracks = cached.all_tracks;
+        tracing::debug!("Cache load: {} tracks", state.all_tracks.len());
+    }
+    if !cached.track_artists.is_empty() {
+        state.track_artists = cached.track_artists;
+        tracing::debug!("Cache load: {} track artists", state.track_artists.len());
+    }
+
+    // Artist aliases
+    if !cached.artist_aliases.is_empty() {
+        state.artist_aliases = cached.artist_aliases;
+        state.album_display_artist = cached.album_display_artist;
+        tracing::debug!("Cache load: {} artist aliases", state.artist_aliases.len());
+    } else if !state.all_tracks.is_empty() && !state.albums.is_empty() {
+        // Recompute from tracks if not cached
+        state.build_artist_aliases();
+    }
+
     // Compilation detection results
     if !cached.compilation_albums.is_empty() || !cached.compilation_artist_keys.is_empty() {
         state.compilation_albums = cached.compilation_albums;
@@ -494,7 +514,7 @@ fn load_from_cache(state: &mut AppState, cached: CacheData, lib_key: &str, lib_t
         state.compilations_detected = true;
         // Re-build artist root items with compilation data
         let items = state.build_artist_root_items();
-        state.artist_nav.update_root_items(state.artist_view_mode.name(), items);
+        state.artist_nav.update_root_items("artists", items);
     }
 
 }

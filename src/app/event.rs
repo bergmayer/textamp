@@ -107,6 +107,15 @@ pub enum Event {
         count: usize,
         total_bytes: u64,
     },
+    /// Library cache total size computed in background.
+    LibraryCacheStats {
+        total_bytes: u64,
+    },
+    /// Waveform cache stats computed in background.
+    WaveformCacheStats {
+        count: usize,
+        total_bytes: u64,
+    },
 
     // Background data preloading (all events include library_key for race condition safety)
     ArtistsPreloaded { library_key: String, artists: Vec<Artist> },
@@ -118,6 +127,10 @@ pub enum Event {
     MoodsPreloaded { library_key: String, moods: Vec<Genre> },
     StylesPreloaded { library_key: String, styles: Vec<Genre> },
     StationsPreloaded { library_key: String, stations: Vec<Station> },
+    /// All tracks preloaded for compilation detection and track-level artist derivation.
+    AllTracksPreloaded { library_key: String, tracks: Vec<Track> },
+    /// A background preload failed (clear tracking so notification doesn't hang).
+    PreloadFailed { category: String },
     /// Background compilation detection completed.
     CompilationsDetected {
         library_key: String,
@@ -184,6 +197,8 @@ pub enum Event {
     // Queue remix
     /// Batch result from remix operations: (original_queue_index, tracks_to_insert_after)
     RemixBatchReady { inserts: Vec<(usize, Vec<Track>)> },
+    /// Doppelganger remix result: (queue_index, replacement_track)
+    RemixDoppelgangerReady { replacements: Vec<(usize, Track)> },
 
     // Multi-artist radio
     ArtistRadioComplete { tracks: Vec<Track> },

@@ -279,7 +279,7 @@ impl BrowseItem {
             BrowseItem::AllArtists => "All Artists",
             BrowseItem::ArtistRadio { .. } => "Artist Radio",
             BrowseItem::Compilations => "Compilations",
-            BrowseItem::CompilationTracks { .. } => "Compilation Tracks",
+            BrowseItem::CompilationTracks { .. } => "Compilations",
         }
     }
 
@@ -316,19 +316,23 @@ impl BrowseItem {
 
     /// Convert a list of Albums to BrowseItems.
     /// Placeholder items (empty title → "Unknown Album (...)") are sorted to the end.
-    pub fn from_albums(albums: &[Album]) -> Vec<BrowseItem> {
+    /// If `album_display_artist` is provided, uses it to override the artist name
+    /// when all tracks on a non-compilation album share a uniform track artist.
+    pub fn from_albums(albums: &[Album], album_display_artist: &HashMap<String, String>) -> Vec<BrowseItem> {
         let mut items: Vec<BrowseItem> = albums.iter().map(|a| {
             let is_empty = a.title.is_empty();
+            let display_artist = album_display_artist.get(&a.rating_key)
+                .map(|s| s.as_str())
+                .unwrap_or_else(|| a.artist_name());
             let (title, year) = if is_empty {
-                let artist = a.artist_name(); // handles empty/None → "Unknown Artist"
-                (format!("Unknown Album ({})", artist), None)
+                (format!("Unknown Album ({})", display_artist), None)
             } else {
                 (a.title.clone(), a.year)
             };
             BrowseItem::Album {
                 key: a.rating_key.clone(),
                 title,
-                artist: a.artist_name().to_string(),
+                artist: display_artist.to_string(),
                 year,
                 thumb: a.thumb.clone(),
                 is_placeholder: is_empty,
@@ -350,7 +354,7 @@ impl BrowseItem {
             BrowseItem::Track {
                 key: t.rating_key.clone(),
                 title,
-                artist_name: Some(t.artist_name().to_string()),
+                artist_name: Some(t.track_artist().to_string()),
                 album_name: Some(t.album_name().to_string()),
                 year: t.year.or(t.parent_year),
                 duration_ms: t.duration_ms(),
@@ -414,6 +418,178 @@ impl BrowseItem {
     }
 }
 
+/// Per-column sort mode (replaces global TrackViewMode and sorted_by_artist).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ColumnSortMode {
+    #[default]
+    Default,      // Alphabetical / track number / playlist order
+    ByArtist,
+    ByAlbum,      // Track columns: sort by album name
+    ByTitle,      // Sort by title
+    ByDuration,   // Sort by duration
+    Shuffled,
+}
+
+impl ColumnSortMode {
+    /// Human-readable suffix for column headers (empty for Default).
+    pub fn header_suffix(&self, descending: bool) -> &'static str {
+        match (self, descending) {
+            (ColumnSortMode::Default, false) => "",
+            (ColumnSortMode::Default, true) => "\u{2193}",
+            (ColumnSortMode::ByArtist, false) => "by artist",
+            (ColumnSortMode::ByArtist, true) => "by artist \u{2193}",
+            (ColumnSortMode::ByAlbum, false) => "by album",
+            (ColumnSortMode::ByAlbum, true) => "by album \u{2193}",
+            (ColumnSortMode::ByTitle, false) => "by title",
+            (ColumnSortMode::ByTitle, true) => "by title \u{2193}",
+            (ColumnSortMode::ByDuration, false) => "by duration",
+            (ColumnSortMode::ByDuration, true) => "by duration \u{2193}",
+            (ColumnSortMode::Shuffled, _) => "shuffled",
+        }
+    }
+}
+
+/// Column type for determining available sort options.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortColumnType {
+    /// Artist root column: Default, Shuffled
+    Artist,
+    /// Album column (artist's albums, genre albums): Default, ByArtist, Shuffled
+    Album,
+    /// Track column (single album tracks): Default, ByTitle, ByDuration, Shuffled
+    Track,
+    /// All-tracks / playlist track column: Default, ByArtist, ByAlbum, ByTitle, ByDuration, Shuffled
+    AllTracks,
+}
+
+/// An option in the sort popup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortPopupOption {
+    SortMode(ColumnSortMode),
+    Direction,
+    Artwork,
+    GroupByAlbum,
+}
+
+/// State for the sort popup (Ctrl+S).
+#[derive(Debug, Clone)]
+pub struct SortPopupState {
+    /// Focused option index in the flattened list.
+    pub selected_index: usize,
+    /// Which column this applies to.
+    pub column_idx: usize,
+    /// Display title for the popup header.
+    pub column_title: String,
+    /// Column type determines available options.
+    pub column_type: SortColumnType,
+    /// Flattened list of all options.
+    pub options: Vec<SortPopupOption>,
+    /// Whether this is a playlist track column (affects GroupByAlbum availability).
+    pub is_playlist: bool,
+    /// Context-specific label for the "Default" sort mode.
+    pub default_label: &'static str,
+}
+
+impl SortPopupState {
+    /// Build sort popup for the given column type.
+    pub fn new(column_idx: usize, column_title: String, column_type: SortColumnType, current_mode: ColumnSortMode, _artwork_visible: bool, is_playlist: bool) -> Self {
+        let mut options = Vec::new();
+
+        // Context-specific label for "Default" sort mode
+        let default_label = match column_type {
+            SortColumnType::Artist => "Artist",
+            SortColumnType::Album => if is_playlist { "Title" } else { "Year" },
+            SortColumnType::Track => "Track #",
+            SortColumnType::AllTracks => if is_playlist { "Playlist order" } else { "Library order" },
+        };
+
+        // Sort mode options depend on column type
+        let modes = match column_type {
+            SortColumnType::Artist => vec![ColumnSortMode::Default, ColumnSortMode::Shuffled],
+            SortColumnType::Album => vec![ColumnSortMode::Default, ColumnSortMode::ByTitle, ColumnSortMode::ByArtist, ColumnSortMode::Shuffled],
+            SortColumnType::Track => vec![ColumnSortMode::Default, ColumnSortMode::ByTitle, ColumnSortMode::ByDuration, ColumnSortMode::Shuffled],
+            SortColumnType::AllTracks => vec![ColumnSortMode::Default, ColumnSortMode::ByArtist, ColumnSortMode::ByAlbum, ColumnSortMode::ByTitle, ColumnSortMode::ByDuration, ColumnSortMode::Shuffled],
+        };
+        for mode in &modes {
+            options.push(SortPopupOption::SortMode(*mode));
+        }
+
+        // Direction option (available for all non-Shuffled modes)
+        if !matches!(current_mode, ColumnSortMode::Shuffled) {
+            options.push(SortPopupOption::Direction);
+        }
+
+        // Artwork toggle for album columns
+        if matches!(column_type, SortColumnType::Album) {
+            options.push(SortPopupOption::Artwork);
+        }
+
+        // Group by album toggle for playlist columns (available in both track and album views)
+        if is_playlist {
+            options.push(SortPopupOption::GroupByAlbum);
+        }
+
+        // Find the initial selection (match current sort mode)
+        let initial = modes.iter().position(|m| *m == current_mode).unwrap_or(0);
+
+        Self {
+            selected_index: initial,
+            column_idx,
+            column_title,
+            column_type,
+            options,
+            is_playlist,
+            default_label,
+        }
+    }
+
+    /// Rebuild options (e.g. after mode change to add/remove Direction).
+    pub fn rebuild_options(&mut self, current_mode: ColumnSortMode) {
+        let old_selection = self.options.get(self.selected_index).copied();
+        self.options.clear();
+
+        // Update default_label based on current column type
+        self.default_label = match self.column_type {
+            SortColumnType::Artist => "Artist",
+            SortColumnType::Album => if self.is_playlist { "Title" } else { "Year" },
+            SortColumnType::Track => "Track #",
+            SortColumnType::AllTracks => if self.is_playlist { "Playlist order" } else { "Library order" },
+        };
+
+        let modes = match self.column_type {
+            SortColumnType::Artist => vec![ColumnSortMode::Default, ColumnSortMode::Shuffled],
+            SortColumnType::Album => vec![ColumnSortMode::Default, ColumnSortMode::ByTitle, ColumnSortMode::ByArtist, ColumnSortMode::Shuffled],
+            SortColumnType::Track => vec![ColumnSortMode::Default, ColumnSortMode::ByTitle, ColumnSortMode::ByDuration, ColumnSortMode::Shuffled],
+            SortColumnType::AllTracks => vec![ColumnSortMode::Default, ColumnSortMode::ByArtist, ColumnSortMode::ByAlbum, ColumnSortMode::ByTitle, ColumnSortMode::ByDuration, ColumnSortMode::Shuffled],
+        };
+        for mode in &modes {
+            self.options.push(SortPopupOption::SortMode(*mode));
+        }
+
+        if !matches!(current_mode, ColumnSortMode::Shuffled) {
+            self.options.push(SortPopupOption::Direction);
+        }
+
+        if matches!(self.column_type, SortColumnType::Album) {
+            self.options.push(SortPopupOption::Artwork);
+        }
+
+        if self.is_playlist {
+            self.options.push(SortPopupOption::GroupByAlbum);
+        }
+
+        // Try to preserve selection
+        if let Some(old) = old_selection {
+            if let Some(pos) = self.options.iter().position(|o| *o == old) {
+                self.selected_index = pos;
+                return;
+            }
+        }
+        // Fallback: select current mode
+        self.selected_index = modes.iter().position(|m| *m == current_mode).unwrap_or(0);
+    }
+}
+
 /// A single column in the Miller columns browse view.
 #[derive(Debug, Clone)]
 pub struct BrowseColumn {
@@ -429,8 +605,16 @@ pub struct BrowseColumn {
     original_items: Option<Vec<BrowseItem>>,
     /// Original tracks before shuffle/sort (None if in original order)
     original_tracks: Option<Vec<crate::plex::models::Track>>,
-    /// Whether items are currently sorted by artist name
-    sorted_by_artist: bool,
+    /// Per-column sort mode (replaces global track_view_mode and sorted_by_artist)
+    pub sort_mode: ColumnSortMode,
+    /// Sort direction: true = ascending (default)
+    pub sort_ascending: bool,
+    /// Album artwork visible (album columns only, replaces global album_art_view)
+    pub artwork_visible: bool,
+    /// Playlist tracks grouped by album
+    pub grouped_by_album: bool,
+    /// Album group indices into tracks (replaces global track_album_groups)
+    pub album_groups: Option<Vec<Vec<usize>>>,
 }
 
 impl BrowseColumn {
@@ -442,7 +626,11 @@ impl BrowseColumn {
             tracks: vec![],
             original_items: None,
             original_tracks: None,
-            sorted_by_artist: false,
+            sort_mode: ColumnSortMode::Default,
+            sort_ascending: true,
+            artwork_visible: false,
+            grouped_by_album: false,
+            album_groups: None,
         }
     }
 
@@ -455,7 +643,11 @@ impl BrowseColumn {
             tracks,
             original_items: None,
             original_tracks: None,
-            sorted_by_artist: false,
+            sort_mode: ColumnSortMode::Default,
+            sort_ascending: true,
+            artwork_visible: false,
+            grouped_by_album: false,
+            album_groups: None,
         }
     }
 
@@ -463,14 +655,19 @@ impl BrowseColumn {
         self.items.get(self.selected_index)
     }
 
-    /// Whether this column is currently shuffled (not sorted-by-artist).
+    /// Whether this column is currently shuffled.
     pub fn is_shuffled(&self) -> bool {
-        self.original_items.is_some() && !self.sorted_by_artist
+        self.sort_mode == ColumnSortMode::Shuffled
     }
 
     /// Whether items are currently sorted by artist name.
     pub fn is_sorted_by_artist(&self) -> bool {
-        self.sorted_by_artist
+        self.sort_mode == ColumnSortMode::ByArtist
+    }
+
+    /// Whether original items are saved (for restore).
+    pub fn has_originals(&self) -> bool {
+        self.original_items.is_some()
     }
 
     /// Shuffle items (and tracks in parallel). Saves originals for restore.
@@ -478,7 +675,7 @@ impl BrowseColumn {
     /// Placeholder items (is_placeholder: true) are kept at the end.
     pub fn shuffle(&mut self) {
         use rand::seq::SliceRandom;
-        self.sorted_by_artist = false;
+        self.sort_mode = ColumnSortMode::Shuffled;
         // Save originals (fresh copy each time for re-shuffle)
         self.original_items = Some(self.items.clone());
         self.original_tracks = if self.tracks.is_empty() { None } else { Some(self.tracks.clone()) };
@@ -527,7 +724,7 @@ impl BrowseColumn {
         self.selected_index = 0;
     }
 
-    /// Restore original order (clears both shuffle and sort-by-artist state).
+    /// Restore original order (clears sort mode to Default).
     pub fn unshuffle(&mut self) {
         if let Some(items) = self.original_items.take() {
             self.items = items;
@@ -535,14 +732,15 @@ impl BrowseColumn {
         if let Some(tracks) = self.original_tracks.take() {
             self.tracks = tracks;
         }
-        self.sorted_by_artist = false;
+        self.sort_mode = ColumnSortMode::Default;
+        self.sort_ascending = true;
         self.selected_index = 0;
     }
 
     /// Sort album items by artist name (case-insensitive), then by year.
     /// Saves originals for restore. Pinned items at index 0 are excluded.
     pub fn sort_by_artist(&mut self) {
-        if self.sorted_by_artist { return; }
+        if self.sort_mode == ColumnSortMode::ByArtist { return; }
         // Save originals if not already saved
         if self.original_items.is_none() {
             self.original_items = Some(self.items.clone());
@@ -563,7 +761,166 @@ impl BrowseColumn {
                 a_year.cmp(&b_year)
             })
         });
-        self.sorted_by_artist = true;
+        self.sort_mode = ColumnSortMode::ByArtist;
+        self.selected_index = 0;
+    }
+
+    /// Sort track items by title (case-insensitive).
+    /// Saves originals for restore. Pinned items at start are excluded.
+    pub fn sort_by_title(&mut self) {
+        if self.sort_mode == ColumnSortMode::ByTitle { return; }
+        self.save_originals();
+        let start = self.pinned_count();
+        // Sort items
+        self.items[start..].sort_by(|a, b| {
+            a.title().to_lowercase().cmp(&b.title().to_lowercase())
+        });
+        // Sort tracks in parallel
+        if start < self.tracks.len() {
+            self.tracks[start..].sort_by(|a, b| {
+                a.title.to_lowercase().cmp(&b.title.to_lowercase())
+            });
+        }
+        self.sort_mode = ColumnSortMode::ByTitle;
+        self.selected_index = 0;
+    }
+
+    /// Sort track items by duration (ascending).
+    /// Saves originals for restore. Pinned items at start are excluded.
+    pub fn sort_by_duration(&mut self) {
+        if self.sort_mode == ColumnSortMode::ByDuration { return; }
+        self.save_originals();
+        let start = self.pinned_count();
+        // Sort items
+        self.items[start..].sort_by(|a, b| {
+            let a_dur = if let BrowseItem::Track { duration_ms, .. } = a { *duration_ms } else { 0 };
+            let b_dur = if let BrowseItem::Track { duration_ms, .. } = b { *duration_ms } else { 0 };
+            a_dur.cmp(&b_dur)
+        });
+        // Sort tracks in parallel
+        if start < self.tracks.len() {
+            self.tracks[start..].sort_by(|a, b| {
+                a.duration_ms().cmp(&b.duration_ms())
+            });
+        }
+        self.sort_mode = ColumnSortMode::ByDuration;
+        self.selected_index = 0;
+    }
+
+    /// Sort track items by album name (case-insensitive), then track number.
+    /// Saves originals for restore.
+    pub fn sort_by_album(&mut self) {
+        if self.sort_mode == ColumnSortMode::ByAlbum { return; }
+        self.save_originals();
+        let start = self.pinned_count();
+        // Sort items
+        self.items[start..].sort_by(|a, b| {
+            let a_album = if let BrowseItem::Track { album_name, .. } = a { album_name.as_deref().unwrap_or("").to_lowercase() } else { String::new() };
+            let b_album = if let BrowseItem::Track { album_name, .. } = b { album_name.as_deref().unwrap_or("").to_lowercase() } else { String::new() };
+            a_album.cmp(&b_album).then_with(|| {
+                let a_num = if let BrowseItem::Track { track_number, .. } = a { *track_number } else { None };
+                let b_num = if let BrowseItem::Track { track_number, .. } = b { *track_number } else { None };
+                a_num.cmp(&b_num)
+            })
+        });
+        // Sort tracks in parallel
+        if start < self.tracks.len() {
+            self.tracks[start..].sort_by(|a, b| {
+                a.album_name().to_lowercase().cmp(&b.album_name().to_lowercase())
+                    .then_with(|| a.index.cmp(&b.index))
+            });
+        }
+        self.sort_mode = ColumnSortMode::ByAlbum;
+        self.selected_index = 0;
+    }
+
+    /// Apply a sort mode (unified dispatcher for sort popup).
+    pub fn apply_sort(&mut self, mode: ColumnSortMode) {
+        match mode {
+            ColumnSortMode::Default => self.unshuffle(),
+            ColumnSortMode::Shuffled => self.shuffle(),
+            ColumnSortMode::ByArtist => self.sort_by_artist(),
+            ColumnSortMode::ByTitle => self.sort_by_title(),
+            ColumnSortMode::ByDuration => self.sort_by_duration(),
+            ColumnSortMode::ByAlbum => self.sort_by_album(),
+        }
+    }
+
+    /// Save originals if not already saved (used by sort methods).
+    fn save_originals(&mut self) {
+        if self.original_items.is_none() {
+            self.original_items = Some(self.items.clone());
+            self.original_tracks = if self.tracks.is_empty() { None } else { Some(self.tracks.clone()) };
+        }
+    }
+
+    /// Count pinned items at the start of the column.
+    fn pinned_count(&self) -> usize {
+        self.items.iter().take_while(|item| {
+            matches!(item, BrowseItem::AllArtists | BrowseItem::AllTracks { .. }
+                | BrowseItem::ArtistRadio { .. } | BrowseItem::Compilations
+                | BrowseItem::CompilationTracks { .. })
+        }).count()
+    }
+
+    /// Group tracks by album for playlist columns.
+    ///
+    /// Saves originals, replaces items with BrowseItem::Album entries,
+    /// and stores track index groups in `album_groups`.
+    pub fn group_by_album(&mut self) {
+        use std::collections::HashMap;
+
+        if self.tracks.is_empty() { return; }
+
+        self.save_originals();
+        self.grouped_by_album = true;
+
+        // Group track indices by album key, preserving first-seen order
+        let mut key_to_group: HashMap<String, usize> = HashMap::new();
+        let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+        for (i, track) in self.tracks.iter().enumerate() {
+            let album_key = track.parent_rating_key.clone().unwrap_or_default();
+            if let Some(&group_idx) = key_to_group.get(&album_key) {
+                groups[group_idx].1.push(i);
+            } else {
+                let group_idx = groups.len();
+                key_to_group.insert(album_key.clone(), group_idx);
+                groups.push((album_key, vec![i]));
+            }
+        }
+
+        // Build album items from first track of each group
+        let mut album_items = Vec::with_capacity(groups.len());
+        let mut album_groups = Vec::with_capacity(groups.len());
+        for (album_key, indices) in groups {
+            let first = &self.tracks[indices[0]];
+            album_items.push(BrowseItem::Album {
+                key: album_key,
+                title: first.album_name().to_string(),
+                thumb: first.parent_thumb.clone(),
+                artist: first.artist_name().to_string(),
+                year: first.year.or(first.parent_year),
+                is_placeholder: false,
+            });
+            album_groups.push(indices);
+        }
+
+        self.items = album_items;
+        self.album_groups = Some(album_groups);
+        self.selected_index = 0;
+    }
+
+    /// Restore original track view from album grouping.
+    pub fn ungroup_by_album(&mut self) {
+        self.grouped_by_album = false;
+        self.album_groups = None;
+
+        if let Some(items) = self.original_items.take() {
+            self.items = items;
+        }
+        if let Some(tracks) = self.original_tracks.take() {
+            self.tracks = tracks;
+        }
         self.selected_index = 0;
     }
 
@@ -605,6 +962,17 @@ impl MillerState<BrowseColumn> {
         self.columns = vec![BrowseColumn::new(title, items)];
         self.focused_column = 0;
         self.loading = false;
+    }
+
+    /// Push or replace a child column based on the auto_drill flag.
+    /// When auto_drill is true, replaces the child column at focused_column+1
+    /// without changing focus. When false, behaves like push_column.
+    pub fn drill_column(&mut self, column: BrowseColumn, auto_drill: bool) {
+        if auto_drill {
+            self.replace_child_column(column);
+        } else {
+            self.push_column(column);
+        }
     }
 
     /// Update root column items without resetting navigation.
@@ -785,6 +1153,12 @@ pub struct AppState {
     pub playlists: Vec<Playlist>,
     pub playlists_loading: bool,
 
+    // All tracks cache (for compilation detection + track-level artist derivation)
+    pub all_tracks: Vec<Track>,
+
+    // Track-level artist list (derived from all_tracks original_title)
+    pub track_artists: Vec<Artist>,
+
     // Compilation detection
     /// Albums confirmed as true compilations (multi-artist).
     pub compilation_albums: Vec<Album>,
@@ -799,6 +1173,12 @@ pub struct AppState {
     pub single_artist_compilations: std::collections::HashMap<String, Vec<Album>>,
     /// Whether compilation detection has run for current library.
     pub compilations_detected: bool,
+
+    // Artist aliases (uniform track artists that differ from album artist)
+    /// Maps album_artist_key → set of alias names (e.g. Robert Pollard → {"Guided by Voices"})
+    pub artist_aliases: std::collections::HashMap<String, std::collections::HashSet<String>>,
+    /// Maps album_key → uniform track artist name (when all tracks agree and differ from album artist)
+    pub album_display_artist: std::collections::HashMap<String, String>,
 
     // Genres, Artist Genres, Album Genres, Moods, and Styles
     pub genres: Vec<Genre>,              // Actual genre tags from files
@@ -816,8 +1196,6 @@ pub struct AppState {
     pub genre_albums: Vec<Album>,  // Albums in selected genre/mood
     pub genre_albums_index: usize,
 
-    // Artist view mode (Artist vs Album Artist)
-    pub artist_view_mode: ArtistViewMode,
     // Library sub-mode for Alt+S cycling (Normal / AllByArtist / AllShuffled)
     pub library_sub_mode: LibrarySubMode,
 
@@ -970,14 +1348,6 @@ pub struct AppState {
     /// Whether the genre tab bar itself is focused (for arrow key navigation)
     pub genre_tab_focused: bool,
 
-    // Playlist view mode (Tracks vs TracksByAlbum)
-    pub playlist_view_mode: PlaylistViewMode,
-    pub playlist_album_groups: Vec<Vec<Track>>,
-    /// Original track column items saved when switching to TracksByAlbum mode.
-    pub playlist_original_items: Option<Vec<BrowseItem>>,
-    /// Original track column Track objects saved when switching to TracksByAlbum mode.
-    pub playlist_original_tracks: Option<Vec<Track>>,
-
     // Cache management
     /// Per-category timestamps (Unix epoch secs) for when each category was last refreshed.
     pub category_timestamps: HashMap<RefreshCategory, u64>,
@@ -986,6 +1356,10 @@ pub struct AppState {
     pub last_cache_save: std::time::Instant,
     pub cache_save_in_progress: bool,
     pub background_refresh_in_progress: std::collections::HashSet<RefreshCategory>,
+    /// Categories currently being preloaded from the server (initial load, not refresh).
+    pub preloads_in_progress: std::collections::HashSet<String>,
+    /// Total number of preloads started in the current batch (for progress display).
+    pub preloads_total: usize,
 
     // Waveform seekbar state
     pub waveform: WaveformState,
@@ -1022,9 +1396,16 @@ pub struct AppState {
     /// Saved queue index for shuffle toggle undo
     pub shuffle_undo_index: Option<usize>,
 
-    // Library picker popup state (Alt+S)
+    // Library picker popup state (F3)
     pub library_picker_active: bool,
     pub library_picker_index: usize,
+
+    // Sort popup state (Ctrl+S)
+    pub sort_popup: Option<SortPopupState>,
+
+    /// Auto-drill flag: when true, the next load action replaces the child column
+    /// instead of pushing a new one, and does not change focus.
+    pub auto_drill_pending: bool,
 
     // Marquee scroll animation state (RefCell for interior mutability during render)
     pub marquee: std::cell::RefCell<MarqueeState>,
@@ -1040,16 +1421,18 @@ pub struct AppState {
     pub discovering_players: bool,
     pub remote_playback: RemotePlaybackState,
 
-    // Album art cover view mode (Alt+V cycle in browse)
-    pub album_art_view: bool,
-    /// Artist art cover view mode (independent from album art view).
-    pub artist_art_view: bool,
+    /// Default artwork visibility for new album columns (from config).
+    pub default_artwork_visible: bool,
     /// Artwork rendering mode (Auto / Halfblocks / Braille).
     pub artwork_mode: ArtworkMode,
     pub album_art_cache: HashMap<String, Vec<u8>>,
     pub album_art_pending: std::collections::HashSet<String>,
     /// Artwork disk cache stats: (file_count, total_bytes). Computed on startup and after clears.
     pub artwork_cache_stats: Option<(usize, u64)>,
+    /// Library cache total bytes on disk. Computed on startup and after clears.
+    pub library_cache_stats: Option<u64>,
+    /// Waveform cache stats: (file_count, total_bytes). Computed on startup and after clears.
+    pub waveform_cache_stats: Option<(usize, u64)>,
     /// Scroll cooldown for cover art mode (prevents trackpad momentum).
     pub art_scroll_cooldown: Option<std::time::Instant>,
     /// General scroll cooldown (coalesces multiple scroll events per mouse wheel tick).
@@ -1069,6 +1452,31 @@ pub struct AppState {
     pub queue_scroll_pin: Option<usize>,
     /// Pinned scroll offset for similar view after mouse click.
     pub similar_scroll_pin: Option<usize>,
+    /// Active scrollbar drag state (click-and-drag on scrollbar thumb/track).
+    pub scrollbar_drag: Option<ScrollbarDrag>,
+}
+
+/// Which view a scrollbar drag is operating on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrollbarView {
+    Browse,
+    Folder,
+    Queue,
+    Station,
+    Similar,
+    Help,
+}
+
+/// State for an active scrollbar drag operation.
+#[derive(Debug, Clone)]
+pub struct ScrollbarDrag {
+    pub view: ScrollbarView,
+    pub col_idx: usize,
+    pub total_items: usize,
+    pub visible_items: usize,
+    pub track_y_start: u16,
+    pub track_height: u16,
+    pub grab_offset: u16,
 }
 
 /// Active DJ mode that modifies queue behavior.
@@ -1391,12 +1799,16 @@ impl AppState {
             albums_loading: false,
             playlists: Vec::new(),
             playlists_loading: false,
+            all_tracks: Vec::new(),
+            track_artists: Vec::new(),
             compilation_albums: Vec::new(),
             compilation_artist_keys: std::collections::HashSet::new(),
             compilation_track_artist_keys: std::collections::HashSet::new(),
             artist_compilation_map: std::collections::HashMap::new(),
             single_artist_compilations: std::collections::HashMap::new(),
             compilations_detected: false,
+            artist_aliases: std::collections::HashMap::new(),
+            album_display_artist: std::collections::HashMap::new(),
             genres: Vec::new(),
             artist_genres: Vec::new(),
             album_genres: Vec::new(),
@@ -1411,7 +1823,6 @@ impl AppState {
             genre_content_type: GenreContentType::default(),
             genre_albums: Vec::new(),
             genre_albums_index: 0,
-            artist_view_mode: ArtistViewMode::default(),
             library_sub_mode: LibrarySubMode::default(),
             right_panel_mode: RightPanelMode::Empty,
             selected_artist_albums: Vec::new(),
@@ -1483,16 +1894,14 @@ impl AppState {
             visualizer_tab_focused: false,
             genre_tab: GenreTab::default(),
             genre_tab_focused: false,
-            playlist_view_mode: PlaylistViewMode::default(),
-            playlist_album_groups: Vec::new(),
-            playlist_original_items: None,
-            playlist_original_tracks: None,
             category_timestamps: HashMap::new(),
             cache_dirty: false,
             last_input_time: std::time::Instant::now(),
             last_cache_save: std::time::Instant::now(),
             cache_save_in_progress: false,
             background_refresh_in_progress: std::collections::HashSet::new(),
+            preloads_in_progress: std::collections::HashSet::new(),
+            preloads_total: 0,
             waveform: WaveformState::default(),
             spectrogram: SpectrogramState::default(),
             toast_message: None,
@@ -1508,6 +1917,8 @@ impl AppState {
             shuffle_undo_index: None,
             library_picker_active: false,
             library_picker_index: 0,
+            sort_popup: None,
+            auto_drill_pending: false,
             marquee: std::cell::RefCell::new(MarqueeState::default()),
             marquee_subtitle: std::cell::RefCell::new(MarqueeState::default()),
             library_loading: false,
@@ -1515,12 +1926,13 @@ impl AppState {
             remote_players: Vec::new(),
             discovering_players: false,
             remote_playback: RemotePlaybackState::default(),
-            album_art_view: false,
-            artist_art_view: false,
+            default_artwork_visible: false,
             artwork_mode: ArtworkMode::Auto,
             album_art_cache: HashMap::new(),
             album_art_pending: std::collections::HashSet::new(),
             artwork_cache_stats: None,
+            library_cache_stats: None,
+            waveform_cache_stats: None,
             art_scroll_cooldown: None,
             scroll_cooldown: None,
             browse_scroll_pin: None,
@@ -1529,6 +1941,7 @@ impl AppState {
             station_scroll_pin: None,
             queue_scroll_pin: None,
             similar_scroll_pin: None,
+            scrollbar_drag: None,
         }
     }
 
@@ -1554,7 +1967,6 @@ impl AppState {
         }
     }
 
-    /// Set an error message to display.
     /// Build artist root items, using compilation-aware version if compilations are detected.
     pub fn build_artist_root_items(&self) -> Vec<BrowseItem> {
         if self.compilations_detected {
@@ -1566,6 +1978,97 @@ impl AppState {
         } else {
             BrowseItem::artist_root_items(&self.artists)
         }
+    }
+
+    /// Build track-level artist list from `all_tracks`.
+    ///
+    /// Scans all tracks, collects unique artist names from `original_title`
+    /// (falling back to `grandparent_title`), and creates Artist entries.
+    /// For names matching an existing Plex artist, uses that Artist.
+    /// For others, creates a synthetic Artist entry.
+    pub fn build_track_artists(&mut self) {
+        use std::collections::HashMap;
+
+        if self.all_tracks.is_empty() {
+            return;
+        }
+
+        // Build name→Artist lookup from Plex artists (case-insensitive)
+        let plex_artist_by_name: HashMap<String, &Artist> = self.artists.iter()
+            .map(|a| (a.title.to_lowercase(), a))
+            .collect();
+
+        // Collect unique artist names from tracks
+        let mut seen: HashMap<String, Artist> = HashMap::new();
+        for track in &self.all_tracks {
+            let artist_name = track.original_title.as_deref()
+                .unwrap_or_else(|| track.artist_name());
+            if artist_name.is_empty() {
+                continue;
+            }
+            let key_lower = artist_name.to_lowercase();
+            if seen.contains_key(&key_lower) {
+                continue;
+            }
+
+            // Try to find matching Plex artist
+            if let Some(plex_artist) = plex_artist_by_name.get(&key_lower) {
+                seen.insert(key_lower, (*plex_artist).clone());
+            } else {
+                // Create synthetic artist entry
+                // Use grandparent_rating_key if available, otherwise hash the name
+                let rating_key = track.grandparent_rating_key.clone()
+                    .unwrap_or_else(|| format!("track_artist:{}", key_lower));
+                seen.insert(key_lower, Artist {
+                    rating_key,
+                    title: artist_name.to_string(),
+                    thumb: None,
+                    ..Artist::default()
+                });
+            }
+        }
+
+        let mut track_artists: Vec<Artist> = seen.into_values().collect();
+        track_artists.sort_by(|a, b| {
+            crate::app::handlers::helpers::sort_key(&a.title)
+                .cmp(&crate::app::handlers::helpers::sort_key(&b.title))
+        });
+        self.track_artists = track_artists;
+        tracing::info!("Built {} track-level artists from {} tracks", self.track_artists.len(), self.all_tracks.len());
+    }
+
+    /// Compute artist aliases from uniform track artists on non-compilation albums.
+    ///
+    /// When ALL tracks on a non-compilation album share the same `original_title` that
+    /// differs from the album artist, that track artist is an alias of the album artist.
+    /// Example: Robert Pollard (album artist) → "Guided by Voices" (track artist alias).
+    pub fn build_artist_aliases(&mut self) {
+        let (aliases, album_display) = crate::services::artist_alias_service::compute_aliases(
+            &self.all_tracks,
+            &self.albums,
+        );
+
+        let alias_count: usize = aliases.values().map(|s| s.len()).sum();
+        tracing::info!(
+            "Built {} artist aliases across {} artists, {} album display overrides",
+            alias_count,
+            aliases.len(),
+            album_display.len(),
+        );
+
+        self.artist_aliases = aliases;
+        self.album_display_artist = album_display;
+    }
+
+    /// Switch to a new view, deactivating the inline filter and clearing queue multi-select.
+    pub fn set_view(&mut self, view: View) {
+        if self.list_filter.active {
+            self.list_filter.deactivate();
+        }
+        if view != View::Queue {
+            self.queue_selected.clear();
+        }
+        self.view = view;
     }
 
     pub fn set_error(&mut self, msg: String) {
@@ -1610,6 +2113,53 @@ impl AppState {
         snapshot
     }
 
+    /// Whether the given column in the given nav is a "special track column"
+    /// that supports the Ctrl+V view cycle (tracks/shuffled/by-album/by-artist/covers).
+    ///
+    /// Special track columns are those where the user cannot already tell
+    /// artist/album from the Miller context:
+    /// - Playlist track columns
+    /// - All Library Tracks (parent AllTracks `__all_library__`)
+    /// - Compilation All Tracks (parent AllTracks `__comp_tracks:*`)
+    /// - Per-artist All Tracks (parent AllTracks item)
+    /// - Compilation album track columns (parent album in `compilation_albums`)
+    pub fn is_special_track_column(&self, nav: &BrowseNavigationState, col_idx: usize) -> bool {
+        let col = match nav.columns.get(col_idx) {
+            Some(c) => c,
+            None => return false,
+        };
+        let first_is_track = col.items.first().map_or(false, |item| matches!(item, BrowseItem::Track { .. }));
+        if !first_is_track {
+            return false;
+        }
+
+        // Playlist track columns (always special)
+        if self.browse_category == BrowseCategory::Playlists {
+            return true;
+        }
+
+        // Check parent item for AllTracks or compilation album
+        if col_idx > 0 {
+            if let Some(parent_item) = nav.columns.get(col_idx - 1).and_then(|p| p.selected_item()) {
+                match parent_item {
+                    // Per-artist All Tracks, All Library Tracks, Compilation All Tracks
+                    BrowseItem::AllTracks { .. } => return true,
+                    // Compilation Tracks for a specific artist
+                    BrowseItem::CompilationTracks { .. } => return true,
+                    // Compilation album track column
+                    BrowseItem::Album { key, .. } => {
+                        if self.compilation_albums.iter().any(|a| a.rating_key == *key) {
+                            return true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        false
+    }
+
     /// Whether multiple servers have music libraries available.
     pub fn has_multiple_servers(&self) -> bool {
         self.all_server_libraries.len() > 1
@@ -1652,12 +2202,24 @@ impl AppState {
             return Some(Notification::ongoing("Loading library..."));
         }
 
-        // Priority 3: Station loading (ongoing)
+        // Priority 3: Preloads in progress (initial library data loading)
+        if !self.preloads_in_progress.is_empty() {
+            let done = self.preloads_total.saturating_sub(self.preloads_in_progress.len());
+            let total = self.preloads_total;
+            let msg = if total > 0 {
+                format!("Loading library data ({}/{})...", done, total)
+            } else {
+                "Loading library data...".to_string()
+            };
+            return Some(Notification::ongoing(msg));
+        }
+
+        // Priority 4: Station loading (ongoing)
         if self.station_nav.loading {
             return Some(Notification::ongoing("Loading station..."));
         }
 
-        // Priority 4: Background refresh (ongoing)
+        // Priority 5: Background refresh (ongoing)
         if !self.background_refresh_in_progress.is_empty() {
             let categories: Vec<_> = self.background_refresh_in_progress
                 .iter()
@@ -1671,22 +2233,22 @@ impl AppState {
             return Some(Notification::ongoing(msg));
         }
 
-        // Priority 5: Waveform generation (ongoing)
+        // Priority 6: Waveform generation (ongoing)
         if self.waveform.generating {
             return Some(Notification::ongoing("Generating waveform..."));
         }
 
-        // Priority 6: Cache saving (ongoing)
+        // Priority 7: Cache saving (ongoing)
         if self.cache_save_in_progress {
             return Some(Notification::ongoing("Saving cache..."));
         }
 
-        // Priority 7: Toast notifications (transient)
+        // Priority 8: Toast notifications (transient)
         if let Some(ref msg) = self.toast_message {
             return Some(Notification::toast(msg.clone()));
         }
 
-        // Priority 8: Status messages (transient)
+        // Priority 9: Status messages (transient)
         if let Some(ref msg) = self.status_message {
             return Some(Notification::toast(msg.clone()));
         }
@@ -1837,16 +2399,6 @@ pub enum View {
     Settings,
 }
 
-
-/// Playlist view mode for track column display.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum PlaylistViewMode {
-    /// Standard track list
-    #[default]
-    Tracks,
-    /// Tracks grouped by album
-    TracksByAlbum,
-}
 
 /// Visualizer tab for the Now Playing view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -2069,38 +2621,6 @@ impl LibrarySubMode {
     }
 }
 
-/// Artist view mode - cycles between Artist and Album Artist metadata fields.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ArtistViewMode {
-    #[default]
-    Artist,
-    AlbumArtist,
-}
-
-impl ArtistViewMode {
-    /// Cycle to the next mode (Artist ↔ AlbumArtist).
-    pub fn next(&self) -> Self {
-        match self {
-            ArtistViewMode::Artist => ArtistViewMode::AlbumArtist,
-            ArtistViewMode::AlbumArtist => ArtistViewMode::Artist,
-        }
-    }
-
-    /// Cycle to the previous mode (Artist ↔ AlbumArtist).
-    pub fn prev(&self) -> Self {
-        match self {
-            ArtistViewMode::Artist => ArtistViewMode::AlbumArtist,
-            ArtistViewMode::AlbumArtist => ArtistViewMode::Artist,
-        }
-    }
-
-    pub fn name(&self) -> &'static str {
-        match self {
-            ArtistViewMode::Artist => "artists",
-            ArtistViewMode::AlbumArtist => "album artists",
-        }
-    }
-}
 
 /// Genre content type - genres, normalized genres, moods, or styles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -2504,6 +3024,7 @@ pub enum RefreshCategory {
     Moods,
     Styles,
     Stations,
+    AllTracks,
     Folders,
 }
 
@@ -2521,6 +3042,7 @@ impl RefreshCategory {
             RefreshCategory::Moods,
             RefreshCategory::Styles,
             RefreshCategory::Stations,
+            RefreshCategory::AllTracks,
             RefreshCategory::Folders,
         ]
     }
@@ -2553,6 +3075,7 @@ impl RefreshCategory {
             RefreshCategory::Moods => "Moods",
             RefreshCategory::Styles => "Styles",
             RefreshCategory::Stations => "Stations",
+            RefreshCategory::AllTracks => "All Tracks",
             RefreshCategory::Folders => "Folders",
         }
     }
@@ -2640,6 +3163,17 @@ impl Default for ListFilterState {
             category: BrowseCategory::Library,
             column: 0,
         }
+    }
+}
+
+impl ListFilterState {
+    /// Deactivate the filter, clearing all state.
+    pub fn deactivate(&mut self) {
+        self.active = false;
+        self.query.clear();
+        self.results = None;
+        self.loading = false;
+        self.selected = 0;
     }
 }
 

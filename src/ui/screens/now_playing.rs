@@ -50,7 +50,7 @@ pub fn restore_artwork_native_protocol() {
 /// Format "Artist — Album (Year)" for queue display.
 /// Uses helper methods that handle empty/None fields with fallbacks.
 fn format_artist_album(track: &crate::api::models::Track) -> String {
-    let artist = track.artist_name();
+    let artist = track.track_artist();
     let album = track.album_name();
     let year = track.year.or(track.parent_year);
 
@@ -156,21 +156,7 @@ fn render_station_panel(frame: &mut Frame, state: &AppState, area: Rect) {
     let is_focused = state.now_playing_focus == NowPlayingFocus::Stations;
     let border_color = if is_focused { t.colors.border_focused } else { t.colors.border };
 
-    // Title from focused column
-    let title = if state.station_nav.loading {
-        " stations ".to_string()
-    } else {
-        let col_title = state.station_nav.current_title();
-        if col_title == "Stations" || col_title == "stations" {
-            " stations ".to_string()
-        } else {
-            format!(" {} ", col_title)
-        }
-    };
-
     let block = Block::default()
-        .title(title)
-        .title_style(Style::default().fg(t.colors.fg_accent))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color))
         .style(Style::default().bg(t.colors.bg_primary));
@@ -276,8 +262,10 @@ fn render_station_panel(frame: &mut Frame, state: &AppState, area: Rect) {
     let list = List::new(visible_items);
     frame.render_widget(list, inner);
 
-    // Position indicator for long lists
+    // Scrollbar + position indicator for long lists
     if total_items > visible_height {
+        crate::ui::widgets::render_scrollbar(frame, area, total_items, visible_height, scroll_offset);
+
         let footer = format!("{}/{}", selected_idx + 1, total_items);
         let footer_area = Rect::new(
             area.x + area.width.saturating_sub(footer.len() as u16 + 2),
@@ -360,11 +348,11 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
     let history_len = state.play_history.len();
     let total_display = history_len + tracks.len();
 
-    // Calculate scroll offset - center on selected item in current tracks
-    let display_selected = history_len + selected_idx;
+    // Calculate scroll offset - center on selected item
+    // selected_idx is already a visual index (includes history offset)
     let scroll_offset = match state.queue_scroll_pin {
         Some(pinned) => pinned,
-        None => NavigationService::calc_scroll_offset(display_selected, visible_item_count, total_display),
+        None => NavigationService::calc_scroll_offset(selected_idx, visible_item_count, total_display),
     };
 
     let mut items: Vec<ListItem> = Vec::new();
@@ -399,7 +387,7 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
         }
 
         let is_current = current_idx == Some(i);
-        let is_selected = i == selected_idx;
+        let is_selected = display_i == selected_idx;
         let is_multi_selected = state.queue_selected.contains(&i);
 
         let prefix = if is_current { "♪ " } else if is_multi_selected { "● " } else { "  " };
@@ -449,21 +437,10 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
         };
 
         let tracks_focused = state.now_playing_focus == NowPlayingFocus::Tracks;
-        let (line1_fg, line2_fg, item_bg) = if is_current && !is_selected && !is_multi_selected {
+        let (line1_fg, line2_fg, item_bg) = if is_selected && tracks_focused {
+            // Selection bar always wins when tracks focused (even on currently playing)
             (
-                Style::default().fg(t.colors.fg_accent).bold(),
-                Style::default().fg(t.colors.fg_accent),
-                Style::default(),
-            )
-        } else if is_multi_selected && !is_selected {
-            (
-                Style::default().fg(t.colors.fg_accent),
-                Style::default().fg(t.colors.fg_accent),
-                Style::default().bg(t.colors.bg_secondary),
-            )
-        } else if is_selected && tracks_focused {
-            (
-                Style::default().fg(t.colors.selection_text),
+                Style::default().fg(t.colors.selection_text).bold(),
                 Style::default().fg(t.colors.selection_text),
                 Style::default().bg(t.colors.selection_bar_bg),
             )
@@ -472,6 +449,19 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
             (
                 Style::default().fg(t.colors.fg_primary),
                 Style::default().fg(t.colors.fg_muted),
+                Style::default().bg(t.colors.bg_secondary),
+            )
+        } else if is_current {
+            // Currently playing track (not selected)
+            (
+                Style::default().fg(t.colors.fg_accent).bold(),
+                Style::default().fg(t.colors.fg_accent),
+                Style::default(),
+            )
+        } else if is_multi_selected {
+            (
+                Style::default().fg(t.colors.fg_accent),
+                Style::default().fg(t.colors.fg_accent),
                 Style::default().bg(t.colors.bg_secondary),
             )
         } else {
@@ -491,6 +481,11 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
 
     let list = List::new(items);
     frame.render_widget(list, inner);
+
+    // Scrollbar for long lists
+    if total_display > visible_item_count {
+        crate::ui::widgets::render_scrollbar(frame, area, total_display, visible_item_count, scroll_offset);
+    }
 
     // Footer: position and mode info
     let mode_indicator = match state.playback_mode {
@@ -627,7 +622,7 @@ fn render_track_info_panel(frame: &mut Frame, state: &AppState, area: Rect) {
         } else {
             &track.title
         };
-        let artist = track.artist_name();
+        let artist = track.track_artist();
         let album = track.album_name();
 
         let status_icon = match state.playback.status {

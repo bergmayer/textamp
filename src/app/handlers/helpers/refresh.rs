@@ -26,6 +26,21 @@ pub fn refresh_current_view(state: &mut AppState) -> Vec<Action> {
         }
     }
 
+    // Check if we're viewing the All Library Tracks column (artist_nav, All Artists → All Tracks)
+    if state.view == View::Browse && state.browse_category == BrowseCategory::Library {
+        if state.artist_nav.focused_column >= 2 {
+            // Check if parent column's selected item is the "__all_library__" AllTracks entry
+            if let Some(parent_col) = state.artist_nav.columns.get(state.artist_nav.focused_column - 1) {
+                if let Some(item) = parent_col.selected_item() {
+                    if matches!(item, crate::app::state::BrowseItem::AllTracks { ref artist_key, .. } if artist_key == "__all_library__") {
+                        state.set_status("Refreshing all tracks...".to_string());
+                        return vec![Action::RefreshCategory(RefreshCategory::AllTracks)];
+                    }
+                }
+            }
+        }
+    }
+
     // Check if we're viewing album tracks in a Miller column — refresh just that album
     if state.view == View::Browse {
         let album_key = match state.browse_category {
@@ -99,19 +114,15 @@ pub fn refresh_current_view(state: &mut AppState) -> Vec<Action> {
 
 /// Check if the user is currently viewing a specific category.
 pub fn is_viewing_category(category: &crate::app::state::RefreshCategory, state: &AppState) -> bool {
-    use crate::app::state::{RefreshCategory, ArtistViewMode, GenreContentType};
+    use crate::app::state::{RefreshCategory, GenreContentType};
 
     if state.view != View::Browse {
         return false;
     }
 
     match (state.browse_category, category) {
-        (BrowseCategory::Library, RefreshCategory::Artists) => {
-            matches!(state.artist_view_mode, ArtistViewMode::Artist)
-        }
-        (BrowseCategory::Library, RefreshCategory::AlbumArtists) => {
-            matches!(state.artist_view_mode, ArtistViewMode::AlbumArtist)
-        }
+        (BrowseCategory::Library, RefreshCategory::Artists) => true,
+        (BrowseCategory::Library, RefreshCategory::AlbumArtists) => true,
         (BrowseCategory::Playlists, RefreshCategory::Playlists) => true,
         (BrowseCategory::Genres, RefreshCategory::Genres) => {
             matches!(state.genre_content_type, GenreContentType::Genres)
@@ -232,6 +243,7 @@ pub fn spawn_category_refresh(
         RefreshCategory::Moods => state.moods.len(),
         RefreshCategory::Styles => state.styles.len(),
         RefreshCategory::Stations => state.stations.len(),
+        RefreshCategory::AllTracks => state.all_tracks.len(),
         RefreshCategory::Folders => state.folder_state.as_ref().map(|f| f.columns.first().map(|c| c.items.len()).unwrap_or(0)).unwrap_or(0),
     };
 
@@ -354,6 +366,19 @@ pub fn spawn_category_refresh(
                     }
                     Err(e) => {
                         tracing::warn!("Failed to refresh stations: {}", e);
+                        false
+                    }
+                }
+            }
+            RefreshCategory::AllTracks => {
+                match client.get_tracks(&lib_key).await {
+                    Ok(tracks) => {
+                        let new_count = tracks.len();
+                        let _ = event_tx.send(Event::AllTracksPreloaded { library_key: lib_key.clone(), tracks }).await;
+                        new_count != old_count
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to refresh all tracks: {}", e);
                         false
                     }
                 }

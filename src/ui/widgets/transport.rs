@@ -100,15 +100,14 @@ fn build_adventure_text(state: &AppState) -> String {
 fn build_left_content(state: &AppState) -> String {
     let mut line = String::new();
 
-    // Play/pause button at the start
+    // Play/pause button at the start (padded for click target)
     let status_icon = match state.playback.status {
-        PlayStatus::Playing => "⏸",
-        PlayStatus::Paused => "▶",
-        PlayStatus::Stopped => "▶",
-        PlayStatus::Buffering => "◌",
+        PlayStatus::Playing => " ⏸ ",
+        PlayStatus::Paused => " ▶ ",
+        PlayStatus::Stopped => " ▶ ",
+        PlayStatus::Buffering => " ◌ ",
     };
     line.push_str(status_icon);
-    line.push(' ');
 
     // Time display with progress bar
     let pos_str = format_time(state.playback.position_ms);
@@ -133,7 +132,7 @@ fn build_left_content(state: &AppState) -> String {
         };
         line.push_str(title);
         line.push_str(" by ");
-        line.push_str(track.artist_name());
+        line.push_str(track.track_artist());
         line.push_str(" from ");
         line.push_str(track.album_name());
     } else {

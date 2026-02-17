@@ -19,26 +19,14 @@ pub async fn dispatch(
 ) -> Result<Vec<Action>> {
     let mut follow_ups = vec![];
 
-    // Deactivate inline filter on any view/category change
-    let deactivates_filter = matches!(
-        action,
-        Action::SetView(_) | Action::NextView | Action::PrevView | Action::SetCategory(_)
-    );
-    if deactivates_filter && state.list_filter.active {
-        state.list_filter.active = false;
-        state.list_filter.query.clear();
-        state.list_filter.results = None;
-        state.list_filter.loading = false;
-        state.list_filter.selected = 0;
+    // Deactivate inline filter on view or category change
+    if matches!(action, Action::SetView(_) | Action::SetCategory(_)) && state.list_filter.active {
+        state.list_filter.deactivate();
     }
 
     match action {
         Action::SetView(view) => {
-            state.view = view;
-            // Clear multi-select when leaving Queue view
-            if view != View::Queue {
-                state.queue_selected.clear();
-            }
+            state.set_view(view);
             // Load stations when entering Queue view if not already loaded
             if view == View::Queue
                 && state.station_nav.columns.is_empty()
@@ -58,11 +46,11 @@ pub async fn dispatch(
             // Genre/Folder categories are accessed via Ctrl+G / Ctrl+O, not Tab.
             if state.view == View::NowPlaying {
                 // From Now Playing, go to Library
-                state.view = View::Browse;
+                state.set_view(View::Browse);
                 follow_ups.push(Action::SetCategory(BrowseCategory::Library));
             } else if state.view == View::Queue {
                 // From Queue, go to Now Playing
-                state.view = View::NowPlaying;
+                state.set_view(View::NowPlaying);
             } else if state.view == View::Browse {
                 match state.browse_category {
                     BrowseCategory::Library => {
@@ -70,12 +58,12 @@ pub async fn dispatch(
                     }
                     _ => {
                         // From Playlists, Genres, or Folders → Queue
-                        state.view = View::Queue;
+                        state.set_view(View::Queue);
                     }
                 }
             } else {
                 // From other views (Help, Settings, Search, Similar), go to Browse
-                state.view = View::Browse;
+                state.set_view(View::Browse);
             }
         }
         Action::PrevView => {
@@ -83,15 +71,15 @@ pub async fn dispatch(
             // Order: Library ← Playlists ← Queue ← Now Playing ← Library
             if state.view == View::NowPlaying {
                 // From Now Playing, go to Queue
-                state.view = View::Queue;
+                state.set_view(View::Queue);
             } else if state.view == View::Queue {
                 // From Queue, go to Playlists
-                state.view = View::Browse;
+                state.set_view(View::Browse);
                 follow_ups.push(Action::SetCategory(BrowseCategory::Playlists));
             } else if state.view == View::Browse {
                 match state.browse_category {
                     BrowseCategory::Library => {
-                        state.view = View::NowPlaying;
+                        state.set_view(View::NowPlaying);
                     }
                     _ => {
                         // From Playlists, Genres, or Folders → Library
@@ -100,7 +88,7 @@ pub async fn dispatch(
                 }
             } else {
                 // From other views (Help, Settings, Search, Similar), go to Browse
-                state.view = View::Browse;
+                state.set_view(View::Browse);
             }
         }
         Action::NextMode => {
@@ -108,8 +96,7 @@ pub async fn dispatch(
             if state.view == View::Browse {
                 match state.browse_category {
                     BrowseCategory::Library => {
-                        state.artist_view_mode = state.artist_view_mode.next();
-                        follow_ups.push(Action::RefreshArtistView);
+                        // Library has no modes to cycle
                     }
                     BrowseCategory::Playlists => {
                         // Playlists has no modes to cycle
@@ -128,8 +115,7 @@ pub async fn dispatch(
             if state.view == View::Browse {
                 match state.browse_category {
                     BrowseCategory::Library => {
-                        state.artist_view_mode = state.artist_view_mode.prev();
-                        follow_ups.push(Action::RefreshArtistView);
+                        // Library has no modes to cycle
                     }
                     BrowseCategory::Playlists => {
                         // Playlists has no modes to cycle
@@ -152,13 +138,6 @@ pub async fn dispatch(
                             col.unshuffle();
                         }
                     }
-                }
-                // Reset playlist album grouping when leaving Playlists
-                if state.browse_category == BrowseCategory::Playlists {
-                    state.playlist_view_mode = crate::app::state::PlaylistViewMode::Tracks;
-                    state.playlist_album_groups.clear();
-                    state.playlist_original_items = None;
-                    state.playlist_original_tracks = None;
                 }
                 state.browse_category = category;
                 state.focus = Focus::Left;

@@ -80,6 +80,11 @@ pub fn render_selectable_list<T: DisplayItem>(
     let list = List::new(list_items);
     frame.render_widget(list, area);
 
+    // Scrollbar for long lists
+    if total > visible_height {
+        super::render_scrollbar_borderless(frame, area, total, visible_height, scroll_offset);
+    }
+
     // Render position footer
     render_position_footer(frame, selected_idx, total, area);
 }
@@ -117,7 +122,7 @@ impl DisplayItem for crate::api::models::Album {
 
 impl DisplayItem for crate::api::models::Track {
     fn display_text(&self) -> Cow<'_, str> {
-        Cow::Owned(format!("{} - {}", self.artist_name(), self.title))
+        Cow::Owned(format!("{} - {}", self.track_artist(), self.title))
     }
 }
 

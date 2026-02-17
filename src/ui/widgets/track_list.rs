@@ -41,7 +41,7 @@ pub fn render(
             Row::new(vec![
                 num,
                 track.title.clone(),
-                track.artist_name().to_string(),
+                track.track_artist().to_string(),
                 format_duration(track.duration_ms()),
             ])
             .style(style)

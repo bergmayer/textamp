@@ -1,6 +1,6 @@
 //! Search popup key handling.
 
-use crossterm::event::{self, KeyCode};
+use crossterm::event::{self, KeyCode, KeyModifiers};
 
 use crate::app::Action;
 use crate::app::state::{SearchFocus, SearchTab};
@@ -31,8 +31,13 @@ pub(super) fn handle_search_keys(key: event::KeyEvent, state: &mut AppState) -> 
                     vec![]
                 }
                 SearchFocus::Results => {
-                    // Select the highlighted result
-                    vec![Action::SelectSearchResult]
+                    if key.modifiers.contains(KeyModifiers::SHIFT) {
+                        // Shift+Enter: play the selected result (add to queue + play)
+                        vec![Action::PlaySearchResult]
+                    } else {
+                        // Enter: navigate to the selected result in library
+                        vec![Action::SelectSearchResult]
+                    }
                 }
             }
         }

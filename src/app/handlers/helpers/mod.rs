@@ -25,9 +25,9 @@ pub use navigation::{
     load_playlists, maybe_load_more, set_list_index,
 };
 pub use playback::{
-    collect_tracks_from_column, fetch_more_radio_tracks, generate_plex_session_id,
-    get_upcoming_tracks, play_current_track, play_track, report_playback_progress_to_plex,
-    report_playback_stop_to_plex,
+    fetch_more_radio_tracks, generate_plex_session_id,
+    get_upcoming_tracks, play_current_track, play_track, queue_and_play,
+    report_playback_progress_to_plex, report_playback_stop_to_plex,
 };
 pub use preload::{maybe_start_subfolder_preload, preload_all_library_data, preload_data, SubfolderPreloadResult};
 pub use compilations::maybe_detect as maybe_detect_compilations;
@@ -146,12 +146,37 @@ pub fn append_station_action_items(stations: &mut Vec<crate::api::models::Statio
         description: Some("Insert sonic bridge tracks between queue items".to_string()),
     });
     stations.push(Station {
+        key: "remix:doppelganger".to_string(),
+        title: "Remix: Doppelganger".to_string(),
+        station_type: "remix".to_string(),
+        identifier: None, thumb: None, art: None,
+        description: Some("Replace each track with similar track by different artist".to_string()),
+    });
+    stations.push(Station {
         key: "remix:shuffle".to_string(),
         title: if shuffle_active { "Undo Shuffle" } else { "Remix: Shuffle" }.to_string(),
         station_type: "remix".to_string(),
         identifier: None, thumb: None, art: None,
         description: Some(if shuffle_active { "Restore original queue order" } else { "Shuffle the current queue" }.to_string()),
     });
+}
+
+/// Build a drill-down column from a grouped-by-album column's selected album group.
+///
+/// Used by keyboard (Enter/Right, Up/Down auto-drill) and mouse click handlers
+/// to avoid duplicating the grouped-album expansion logic.
+pub fn drill_grouped_album(col: &crate::app::state::BrowseColumn, album_idx: usize) -> Option<crate::app::state::BrowseColumn> {
+    use crate::app::state::{BrowseColumn, BrowseItem};
+    let groups = col.album_groups.as_ref()?;
+    let indices = groups.get(album_idx)?;
+    let tracks: Vec<_> = indices.iter()
+        .filter_map(|&i| col.tracks.get(i).cloned())
+        .collect();
+    let items = BrowseItem::from_tracks(&tracks);
+    let title = col.items.get(album_idx)
+        .map(|item| format!("tracks \u{2014} {}", item.title()))
+        .unwrap_or_else(|| "tracks".to_string());
+    Some(BrowseColumn::new_with_tracks(title, items, tracks))
 }
 
 /// Generate a sort key for a title, ignoring "The " prefix.

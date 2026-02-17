@@ -235,24 +235,49 @@ fn render_account_content(frame: &mut Frame, state: &AppState, area: Rect) {
     )));
 
     if connected && state.active_library.is_some() {
-        // Item counts
-        let counts = [
-            ("artists", state.artists.len()),
-            ("albums", state.albums.len()),
-            ("playlists", state.playlists.len()),
-            ("genres", state.genres.len()),
-            ("moods", state.moods.len()),
-            ("styles", state.styles.len()),
-            ("stations", state.stations.len()),
+        use crate::app::state::RefreshCategory;
+
+        let now_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let alias_count: usize = state.artist_aliases.values().map(|s| s.len()).sum();
+
+        // Each row: (label, count, is_loading, refresh_category for age lookup)
+        let rows: Vec<(&str, usize, bool, Option<RefreshCategory>)> = vec![
+            ("Artists", state.artists.len(), false, Some(RefreshCategory::Artists)),
+            ("Albums", state.albums.len(), false, Some(RefreshCategory::Albums)),
+            ("Tracks", state.all_tracks.len(), state.all_tracks.is_empty(), Some(RefreshCategory::AllTracks)),
+            ("Playlists", state.playlists.len(), false, Some(RefreshCategory::Playlists)),
+            ("Genres", state.genres.len(), false, Some(RefreshCategory::Genres)),
+            ("Moods", state.moods.len(), false, Some(RefreshCategory::Moods)),
+            ("Styles", state.styles.len(), false, Some(RefreshCategory::Styles)),
+            ("Stations", state.stations.len(), false, Some(RefreshCategory::Stations)),
+            ("Aliases", alias_count, false, None),
         ];
-        let count_parts: Vec<String> = counts.iter()
-            .filter(|(_, n)| *n > 0)
-            .map(|(label, n)| format!("{} {}", n, label))
-            .collect();
-        if !count_parts.is_empty() {
+
+        for (label, count, is_loading, cat) in &rows {
+            if *count == 0 && !is_loading {
+                continue;
+            }
+            let count_str = if *is_loading {
+                "loading".to_string()
+            } else {
+                format_count(*count)
+            };
+            let age_str = cat
+                .and_then(|c| state.category_timestamps.get(&c))
+                .map(|&ts| {
+                    let age = std::time::Duration::from_secs(now_ts.saturating_sub(ts));
+                    format!("  {} ago", format_duration(age))
+                })
+                .unwrap_or_default();
+            let refreshing = cat.map_or(false, |c| state.background_refresh_in_progress.contains(&c));
+            let suffix = if refreshing { "  refreshing..." } else { "" };
             lines.push(Line::from(Span::styled(
-                format!("  {}", count_parts.join(", ")),
-                Style::default().fg(t.colors.fg_muted),
+                format!("  {:12}{:>8}{}{}", label, count_str, age_str, suffix),
+                if refreshing { Style::default().fg(t.colors.fg_accent) } else { Style::default().fg(t.colors.fg_muted) },
             )));
         }
 
@@ -275,47 +300,26 @@ fn render_account_content(frame: &mut Frame, state: &AppState, area: Rect) {
             lines.push(Line::from(Span::styled(folder_text, Style::default().fg(t.colors.fg_muted))));
         }
 
-        // Per-category cache ages
-        if !state.category_timestamps.is_empty() {
-            let now_ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            use crate::app::state::RefreshCategory;
-            for cat in RefreshCategory::all() {
-                if let Some(&ts) = state.category_timestamps.get(cat) {
-                    let age = std::time::Duration::from_secs(now_ts.saturating_sub(ts));
-                    lines.push(Line::from(Span::styled(
-                        format!("  {:20}{} ago", cat.display_name(), format_duration(age)),
-                        Style::default().fg(t.colors.fg_muted),
-                    )));
-                }
-            }
-        }
-
-        // Background refresh
-        if !state.background_refresh_in_progress.is_empty() {
-            let categories: Vec<_> = state.background_refresh_in_progress
-                .iter()
-                .map(|c| c.display_name())
-                .collect();
+        // Artwork cache
+        if let Some((art_count, art_bytes)) = state.artwork_cache_stats {
             lines.push(Line::from(Span::styled(
-                format!("  refreshing: {}", categories.join(", ")),
-                Style::default().fg(t.colors.fg_accent),
+                format!("  artwork: {} images, {}", art_count, format_size(art_bytes)),
+                Style::default().fg(t.colors.fg_muted),
             )));
         }
 
-        // Artwork cache
-        if let Some((art_count, art_bytes)) = state.artwork_cache_stats {
-            let size_text = if art_bytes >= 1024 * 1024 {
-                format!("{:.1} MB", art_bytes as f64 / (1024.0 * 1024.0))
-            } else if art_bytes >= 1024 {
-                format!("{} KB", art_bytes / 1024)
-            } else {
-                format!("{} B", art_bytes)
-            };
+        // Library cache
+        if let Some(lib_bytes) = state.library_cache_stats {
             lines.push(Line::from(Span::styled(
-                format!("  artwork: {} images, {}", art_count, size_text),
+                format!("  library: {}", format_size(lib_bytes)),
+                Style::default().fg(t.colors.fg_muted),
+            )));
+        }
+
+        // Waveform cache
+        if let Some((wf_count, wf_bytes)) = state.waveform_cache_stats {
+            lines.push(Line::from(Span::styled(
+                format!("  waveforms: {} files, {}", wf_count, format_size(wf_bytes)),
                 Style::default().fg(t.colors.fg_muted),
             )));
         }
@@ -575,6 +579,30 @@ fn render_textamp_content(frame: &mut Frame, state: &AppState, area: Rect) {
 
     let paragraph = Paragraph::new(lines);
     frame.render_widget(paragraph, area);
+}
+
+/// Format a byte count as a human-readable size string.
+fn format_size(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{} KB", bytes / 1024)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+/// Format a count with comma separators (e.g. 12345 → "12,345").
+fn format_count(n: usize) -> String {
+    let s = n.to_string();
+    let mut result = String::new();
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push(',');
+        }
+        result.push(c);
+    }
+    result.chars().rev().collect()
 }
 
 /// Format a Duration as a human-readable string (e.g. "5m", "2h", "3d").

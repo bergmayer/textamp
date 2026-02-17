@@ -1,7 +1,7 @@
 //! Playback helpers: track playing, Plex reporting, radio fetching.
 
 use crate::app::{AppState, Event};
-use crate::app::state::{PlayStatus, PlaybackMode};
+use crate::app::state::{PlayStatus, PlaybackMode, View};
 use crate::api::PlexClient;
 use crate::api::models::{Artist, Track};
 use crate::audio::{AudioEvent, AudioPlayer};
@@ -107,47 +107,45 @@ pub async fn play_track(
     play_current_track(event_tx, state, client, audio).await;
 }
 
-/// Helper to collect tracks from a Miller column for playback.
-pub fn collect_tracks_from_column(col: &crate::app::state::BrowseColumn) -> Vec<Track> {
-    if !col.tracks.is_empty() {
-        return col.tracks.clone();
+/// Replace the active queue with `tracks`, start playback at `play_idx`,
+/// and switch to the Queue view.
+///
+/// This consolidates the common queue-management sequence shared by all
+/// "play tracks" handlers (Miller columns, folders, album groups, etc.):
+///   1. Clear radio mode if active
+///   2. Drain played tracks to history
+///   3. Flush the audio pre-fetch cache
+///   4. Splice new tracks into the queue
+///   5. Set queue index, playback mode, list state
+///   6. Switch to Now Playing
+///   7. Start playback
+pub async fn queue_and_play(
+    event_tx: &mpsc::Sender<Event>,
+    state: &mut AppState,
+    client: &PlexClient,
+    audio: &mut AudioPlayer,
+    tracks: Vec<Track>,
+    play_idx: usize,
+) {
+    if state.playback_mode == PlaybackMode::Radio {
+        state.radio.clear();
     }
-
-    let track_count = col.items.iter().filter(|item| matches!(item, crate::app::state::BrowseItem::Track { .. })).count();
-    if track_count > 0 {
-        tracing::warn!(
-            "collect_tracks_from_column fallback: creating {} track stubs without media info for column '{}'. Direct playback may fail.",
-            track_count,
-            col.title
-        );
+    if let Some(qi) = state.queue_index {
+        if qi < state.queue.len() {
+            let played: Vec<Track> = state.queue.drain(..=qi).collect();
+            state.play_history.extend(played);
+        }
     }
-
-    col.items.iter()
-        .filter_map(|item| {
-            if let crate::app::state::BrowseItem::Track { key, title, duration_ms, track_number, .. } = item {
-                Some(Track {
-                    rating_key: key.clone(),
-                    title: title.clone(),
-                    duration: Some(*duration_ms),
-                    index: *track_number,
-                    year: None,
-                    parent_year: None,
-                    parent_title: None,
-                    grandparent_title: None,
-                    parent_rating_key: None,
-                    grandparent_rating_key: None,
-                    media: vec![],
-                    thumb: None,
-                    key: String::new(),
-                    parent_thumb: None,
-                    grandparent_thumb: None,
-                    original_title: None,
-                })
-            } else {
-                None
-            }
-        })
-        .collect()
+    audio.track_cache.flush();
+    state.queue.splice(0..0, tracks);
+    state.queue_index = Some(play_idx);
+    state.queue_selected.clear();
+    state.queue_original.clear();
+    state.queue_sort_mode = crate::app::state::QueueSortMode::QueueOrder;
+    state.playback_mode = PlaybackMode::Queue;
+    state.list_state.queue_index = state.play_history.len();
+    state.set_view(View::Queue);
+    play_current_track(event_tx, state, client, audio).await;
 }
 
 /// Play the current track from the queue.

@@ -45,7 +45,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         let info = format!(
             "{} - {}",
             track.title,
-            track.artist_name()
+            track.track_artist()
         );
         let info_text = Paragraph::new(info)
             .style(Style::default().fg(t.colors.fg_primary));

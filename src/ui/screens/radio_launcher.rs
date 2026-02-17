@@ -201,6 +201,11 @@ fn render_all_tab(
         .collect();
 
     frame.render_widget(List::new(items), area);
+
+    // Scrollbar for long lists
+    if entries.len() > visible_height {
+        crate::ui::widgets::render_scrollbar_borderless(frame, area, entries.len(), visible_height, scroll_offset);
+    }
 }
 
 /// Render a single-section list.
@@ -244,5 +249,10 @@ fn render_single_section<T, F>(
         .collect();
 
     frame.render_widget(List::new(list_items), area);
+
+    // Scrollbar for long lists
+    if total > visible_height {
+        crate::ui::widgets::render_scrollbar_borderless(frame, area, total, visible_height, scroll_offset);
+    }
 }
 

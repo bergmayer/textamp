@@ -169,7 +169,7 @@ impl SearchFilterService {
                 .iter()
                 .map(|t| {
                     FilteredItem::new(
-                        format!("{} - {}", t.title, t.artist_name()),
+                        format!("{} - {}", t.title, t.track_artist()),
                         &t.rating_key,
                     )
                 })
@@ -180,7 +180,7 @@ impl SearchFilterService {
                 .filter(|t| query.is_empty() || t.title.to_lowercase().contains(&query_lower))
                 .map(|t| {
                     FilteredItem::new(
-                        format!("{} - {}", t.title, t.artist_name()),
+                        format!("{} - {}", t.title, t.track_artist()),
                         &t.rating_key,
                     )
                 })

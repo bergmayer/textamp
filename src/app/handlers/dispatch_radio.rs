@@ -86,7 +86,7 @@ pub async fn dispatch(
                 title: title.clone(),
             });
 
-            state.view = View::Queue;
+            state.set_view(View::Queue);
             state.set_status(format!("Starting radio: {}...", title));
 
             // Pre-load artist artwork for the radio display

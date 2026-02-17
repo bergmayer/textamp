@@ -37,6 +37,8 @@ pub enum PreloadType {
     AlbumGenres,
     Styles,
     Stations,
+    /// All tracks in the library (for compilation detection + track-level artist derivation).
+    AllTracks,
     /// Folders require additional lib_title for display.
     Folders { lib_title: String },
 }
@@ -103,7 +105,7 @@ impl EventLoop {
         crate::ui::theme::set_theme(state.theme);
 
         // Restore cover art view preference
-        state.album_art_view = self.config.ui.cover_art_view;
+        state.default_artwork_visible = self.config.ui.cover_art_view;
 
         // Restore artwork mode preference
         state.artwork_mode = crate::app::state::ArtworkMode::from_config(&self.config.ui.artwork_mode);
@@ -460,7 +462,7 @@ impl EventLoop {
             // System
             Quit | ShowError(_) | ClearError | SetStatus(_) | ClearStatus
             | RefreshCategory(_) | CheckStaleness(_) | CycleTheme | LoadArtwork | LoadWaveform
-            | LoadSpectrogram | ToggleAlbumArtView | ToggleArtistArtView | LoadAlbumArt(_) => {
+            | LoadSpectrogram | LoadAlbumArt(_) => {
                 handlers::dispatch_system::dispatch(&self.event_tx, &mut self.config, action, state, client).await?
             }
 
@@ -484,9 +486,12 @@ impl EventLoop {
             | LoadArtistAllTracksForMiller { .. } | LoadAllAlbumsForMiller | PlayTrackFromMiller { .. }
             | LoadGenreAlbumsForMiller { .. } | LoadGenreTracksForMiller { .. }
             | PlayGenreTrackFromMiller { .. } | LoadPlaylistTracksForMiller { .. }
-            | PlayPlaylistTrackFromMiller { .. } | PlayPlaylistAlbumGroupTrack { .. }
+            | PlayPlaylistTrackFromMiller { .. }
             | RefreshAlbumTracks { .. }
-            | LoadCompilationsForMiller | LoadCompilationTracksForMiller { .. } => {
+            | LoadCompilationsForMiller | LoadCompilationAlbumsForMiller { .. }
+            | LoadCompilationAllTracksForMiller { .. }
+            | LoadAllCompilationTracksForMiller
+            | LoadAllLibraryTracksForMiller => {
                 handlers::dispatch_miller::dispatch(&self.event_tx, action, state, client, audio).await?
             }
 
@@ -499,15 +504,17 @@ impl EventLoop {
 
             // Queue operations
             PlayTrack(_) | PlayTrackFromCategory(_) | PlayAlbum { .. }
-            | EnqueueAlbum { .. } | ClearQueue | RemoveFromQueue(_)
+            | PlayArtistTracks { .. } | PlaySearchResult
+            | EnqueueAlbum { .. } | EnqueueArtistTracks { .. } | EnqueueTrack(_)
+            | EnqueueSearchResult | ClearQueue | RemoveFromQueue(_)
             | JumpToQueueIndex(_)
             | EnqueueSelection | PromptSavePlaylist | SaveQueueAsPlaylist(_)
             | ToggleQueueShuffle
-            | RemixGemini | RemixTwofer | RemixStretch
+            | RemixGemini | RemixTwofer | RemixStretch | RemixDoppelganger
             | RemixShuffle | RemixUndoShuffle | UndoLastRemix
             | MoveQueueTrackUp | MoveQueueTrackDown
             | MoveSelectedTracksUp | MoveSelectedTracksDown | RemoveSelectedFromQueue
-            | RemixBatchReady(_) => {
+            | RemixBatchReady(_) | RemixDoppelgangerReady(_) => {
                 handlers::dispatch_queue::dispatch(&self.event_tx, action, state, client, audio).await?
             }
 
@@ -522,6 +529,7 @@ impl EventLoop {
             | AdventureLauncherDrillArtist { .. } | AdventureLauncherDrillAlbum { .. }
             | AdventureLauncherSelectTrack | AdventureLauncherBack
             | OpenLibraryPicker | CloseLibraryPicker
+            | OpenSortPopup | CloseSortPopup | ApplySortOption
             | OpenArtistRadioPicker | CloseArtistRadioPicker | ArtistRadioPickerSearch
             | ArtistRadioPickerSetCount | ArtistRadioPickerToggleArtist
             | ArtistRadioPickerLaunch => {
@@ -533,7 +541,7 @@ impl EventLoop {
             | LoadMoods | LoadStyles | LoadGenreAlbums | LoadArtistGenreAlbums
             | LoadAlbumGenreAlbums | LoadMoodAlbums | LoadStyleAlbums
             | CycleGenreContentType | RefreshGenreView
-            | CycleArtistViewMode | RefreshArtistView | CycleLibrarySubMode
+            | RefreshArtistView | CycleLibrarySubMode
             | CycleGenreTab | SetGenreTab(_)
             | ToggleBrowseShuffle => {
                 handlers::dispatch_browse::dispatch(&self.event_tx, action, state, client).await?
@@ -541,7 +549,7 @@ impl EventLoop {
 
             // Folder navigation
             LoadFolderRoot | NavigateIntoFolder(_) | NavigateUpFolder
-            | RefreshSubfolder(_) | PlayFolderTracks => {
+            | RefreshSubfolder(_) | PlayFolderTracks | PlayFolderTrack { .. } => {
                 handlers::dispatch_folders::dispatch(&self.event_tx, action, state, client, audio).await?
             }
 
