@@ -1456,6 +1456,8 @@ pub struct AppState {
     pub similar_scroll_pin: Option<usize>,
     /// Last click time in similar view (for double-click detection).
     pub similar_click_time: Option<std::time::Instant>,
+    /// Last click time in search popup (to prevent double-click from opening).
+    pub search_click_time: Option<std::time::Instant>,
     /// Active scrollbar drag state (click-and-drag on scrollbar thumb/track).
     pub scrollbar_drag: Option<ScrollbarDrag>,
 }
@@ -1947,6 +1949,7 @@ impl AppState {
             queue_click_time: None,
             similar_scroll_pin: None,
             similar_click_time: None,
+            search_click_time: None,
             scrollbar_drag: None,
         }
     }

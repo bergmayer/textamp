@@ -358,7 +358,7 @@ fn handle_search_tab_click(rel_col: u16, state: &mut AppState) -> Vec<Action> {
 }
 
 /// Shared: handle a click in the search results area.
-/// Returns `SelectSearchResult` if the clicked item was already selected (double-click to navigate).
+/// Click highlights item. Click on already-highlighted item (if not a rapid double-click) opens in library.
 fn handle_search_result_click(visual_row: usize, results_height: usize, state: &mut AppState) -> Vec<Action> {
     use crate::services::NavigationService;
 
@@ -369,6 +369,11 @@ fn handle_search_result_click(visual_row: usize, results_height: usize, state: &
     let Some(ref results) = state.search_results else { return vec![] };
     let prev_idx = state.list_state.search_item_index;
     let was_focused = matches!(state.search_focus, crate::app::state::SearchFocus::Results);
+
+    // Check if this is a rapid click (within 500ms) - if so, don't open on second click
+    let is_rapid_click = state.search_click_time
+        .map(|t| t.elapsed().as_millis() < 500)
+        .unwrap_or(false);
 
     match state.search_tab {
         SearchTab::Global => {
@@ -405,7 +410,9 @@ fn handle_search_result_click(visual_row: usize, results_height: usize, state: &
                 state.search_focus = crate::app::state::SearchFocus::Results;
                 state.list_state.search_item_index = *idx;
                 state.search_scroll_pin = Some(scroll_offset);
-                if already_selected {
+                state.search_click_time = Some(std::time::Instant::now());
+                // Open in library only if already selected AND not a rapid click
+                if already_selected && !is_rapid_click {
                     return vec![Action::SelectSearchResult];
                 }
             }
@@ -431,7 +438,9 @@ fn handle_search_result_click(visual_row: usize, results_height: usize, state: &
                 state.search_focus = crate::app::state::SearchFocus::Results;
                 state.list_state.search_item_index = actual_idx;
                 state.search_scroll_pin = Some(scroll_offset);
-                if already_selected {
+                state.search_click_time = Some(std::time::Instant::now());
+                // Open in library only if already selected AND not a rapid click
+                if already_selected && !is_rapid_click {
                     return vec![Action::SelectSearchResult];
                 }
             }
