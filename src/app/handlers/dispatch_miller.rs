@@ -447,7 +447,12 @@ pub async fn dispatch(
 
         Action::LoadPlaylistTracksForMiller { playlist_key } => {
             // Always fetch fresh from API (playlist contents may change, e.g. smart playlists)
-            state.playlist_nav.loading = true;
+            // Only show loading indicator if no child column exists yet.
+            // When replacing an existing tracks column (navigating between playlists),
+            // the old column stays visible until the new one arrives.
+            if state.playlist_nav.columns.len() <= state.playlist_nav.focused_column + 1 {
+                state.playlist_nav.loading = true;
+            }
             let tx = event_tx.clone();
             let client_clone = client.clone();
             let pk = playlist_key.clone();
