@@ -151,12 +151,14 @@ impl<C: MillerColumn> MillerState<C> {
 
     /// Replace the child column (focused_column + 1) without changing focus.
     /// If a child column exists, replaces it and truncates anything beyond.
-    /// If no child column exists, does nothing (auto-drill only replaces).
+    /// If no child column exists, pushes the new column.
     pub fn replace_child_column(&mut self, column: C) {
         let child_idx = self.focused_column + 1;
         if child_idx < self.columns.len() {
             self.columns[child_idx] = column;
             self.columns.truncate(child_idx + 1);
+        } else if child_idx == self.columns.len() {
+            self.columns.push(column);
         }
     }
 }

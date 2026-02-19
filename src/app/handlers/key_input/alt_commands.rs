@@ -23,9 +23,12 @@ pub struct AltCommand {
     pub label: &'static str,
     /// Display string for the key (e.g., "^E", "⌥L", "F1"). Overrides modifier+key when set.
     pub display_key: Option<&'static str>,
+    /// Whether the command is currently available. Disabled commands are shown greyed out.
+    pub enabled: bool,
 }
 
-/// Returns the list of Alt commands available in the current state.
+/// Returns all commands for the shortcut bar. Disabled commands have `enabled: false`
+/// and are shown greyed out rather than hidden.
 ///
 /// Used by both `render_shortcuts()` (to display the bar) and the key handler
 /// (to gate dispatch), so the bar and behavior are always in sync.
@@ -36,124 +39,90 @@ pub fn available_alt_commands(state: &AppState) -> Vec<AltCommand> {
     let has_album = has_album_context(state);
     let has_playing = state.current_track().is_some();
 
-    // Ctrl+E enqueue: need a track or album that can be enqueued (not from Queue or Now Playing)
-    // Ctrl+E adds to TOP and plays, Ctrl+Shift+E adds to END
-    if state.view != View::Queue && state.view != View::NowPlaying && (has_track || has_album || has_enqueue_context(state)) {
-        cmds.push(AltCommand { modifier: CommandModifier::Ctrl, key: 'e', label: "add+play", display_key: None });
-    }
+    // --- Top row: function keys (always present) ---
 
-    // Ctrl+V view cycle: context-dependent cycling (albums, playlist tracks, genre tabs)
-    if let Some(label) = get_view_cycle_label(state) {
-        cmds.push(AltCommand { modifier: CommandModifier::Ctrl, key: 'v', label, display_key: None });
-    }
+    cmds.push(AltCommand { modifier: CommandModifier::None, key: '\0', label: "help", display_key: Some("F1"),
+        enabled: state.view != View::Help });
+    cmds.push(AltCommand { modifier: CommandModifier::None, key: '\0', label: "settings", display_key: Some("F2"),
+        enabled: state.view != View::Settings });
+    cmds.push(AltCommand { modifier: CommandModifier::None, key: '\0', label: "library", display_key: Some("F3"),
+        enabled: !state.libraries.is_empty() });
+    cmds.push(AltCommand { modifier: CommandModifier::None, key: '\0', label: "bio", display_key: Some("F4"),
+        enabled: super::super::helpers::get_artist_for_bio(state).is_some() });
+    cmds.push(AltCommand { modifier: CommandModifier::None, key: '\0', label: "refresh", display_key: Some("F5"),
+        enabled: true });
 
-    // Ctrl+M similar: need a track or album in context, or something playing
-    if has_track || has_album || has_playing {
-        cmds.push(AltCommand { modifier: CommandModifier::Ctrl, key: 'm', label: "similar", display_key: None });
-    }
+    // --- Bottom row: contextual commands (always present, greyed out when unavailable) ---
 
-    // Ctrl+B album: need a track with album info (Miller columns, folder, or now-playing)
-    if has_track_with_album(state) || has_miller_album_context(state)
-        || has_folder_track_with_album(state) || has_playing_with_album(state)
-    {
-        cmds.push(AltCommand { modifier: CommandModifier::Ctrl, key: 'b', label: "album", display_key: None });
-    }
+    // Ctrl+F find
+    cmds.push(AltCommand { modifier: CommandModifier::Ctrl, key: 'f', label: "find", display_key: None,
+        enabled: true });
 
-    // Ctrl+W save: has tracks in queue or radio (in Queue or NowPlaying view)
-    if (state.view == View::Queue || state.view == View::NowPlaying)
-        && (!state.queue.is_empty() || !state.radio.tracks.is_empty())
-    {
-        cmds.push(AltCommand { modifier: CommandModifier::Ctrl, key: 'w', label: "save", display_key: None });
-    }
+    // Ctrl+E enqueue
+    let enqueue_enabled = state.view != View::Queue && state.view != View::NowPlaying
+        && (has_track || has_album || has_enqueue_context(state));
+    cmds.push(AltCommand { modifier: CommandModifier::Ctrl, key: 'e', label: "enqueue", display_key: None,
+        enabled: enqueue_enabled });
 
-    // Ctrl+X clear: has tracks in queue or radio (in Queue or NowPlaying view)
-    if (state.view == View::Queue || state.view == View::NowPlaying)
-        && (!state.queue.is_empty() || !state.radio.tracks.is_empty())
-    {
-        cmds.push(AltCommand { modifier: CommandModifier::Ctrl, key: 'x', label: "clear", display_key: None });
-    }
+    // Ctrl+M similar
+    let similar_enabled = has_track || has_album || has_playing;
+    cmds.push(AltCommand { modifier: CommandModifier::Ctrl, key: 'm', label: "similar", display_key: None,
+        enabled: similar_enabled });
+
+    // Ctrl+J jump to album
+    // In Library view, only useful when now-playing track is from a different album
+    // than the one currently viewed in Miller columns.
+    let in_library = state.view == View::Browse && state.browse_category == BrowseCategory::Library;
+    let album_enabled = if in_library {
+        playing_album_differs_from_viewed(state)
+    } else {
+        has_track_with_album(state) || has_miller_album_context(state)
+            || has_folder_track_with_album(state) || has_playing_with_album(state)
+    };
+    cmds.push(AltCommand { modifier: CommandModifier::Ctrl, key: 'j', label: "jump to album", display_key: None,
+        enabled: album_enabled });
+
+    // Ctrl+W save
+    let save_enabled = (state.view == View::Queue || state.view == View::NowPlaying)
+        && (!state.queue.is_empty() || !state.radio.tracks.is_empty());
+    cmds.push(AltCommand { modifier: CommandModifier::Ctrl, key: 'w', label: "save", display_key: None,
+        enabled: save_enabled });
+
+    // Ctrl+X clear
+    cmds.push(AltCommand { modifier: CommandModifier::Ctrl, key: 'x', label: "clear", display_key: None,
+        enabled: save_enabled });
+
+    // Ctrl+S sort
+    let sort_enabled = state.view == View::Browse && state.browse_nav()
+        .and_then(|nav| nav.focused())
+        .map_or(false, |col| {
+            col.items.first().map_or(false, |i| {
+                matches!(i, BrowseItem::Artist { .. } | BrowseItem::Album { .. } | BrowseItem::Track { .. })
+            }) || col.items.iter().take(4).any(|i| matches!(i, BrowseItem::Artist { .. } | BrowseItem::Album { .. }))
+        });
+    cmds.push(AltCommand { modifier: CommandModifier::Ctrl, key: 's', label: "sort", display_key: None,
+        enabled: sort_enabled });
 
     // Alt global commands
-    if state.active_library.is_some() {
-        cmds.push(AltCommand { modifier: CommandModifier::Alt, key: 'l', label: "library radio", display_key: None });
-        cmds.push(AltCommand { modifier: CommandModifier::Alt, key: 'r', label: "random album", display_key: None });
-    }
-    // Ctrl+S sort: available in Browse view when focused column has sortable items
-    if state.view == View::Browse {
-        if let Some(nav) = state.browse_nav() {
-            if let Some(col) = nav.focused() {
-                let has_sortable = col.items.first().map_or(false, |i| {
-                    matches!(i, BrowseItem::Artist { .. } | BrowseItem::Album { .. } | BrowseItem::Track { .. })
-                }) || col.items.iter().take(4).any(|i| matches!(i, BrowseItem::Artist { .. } | BrowseItem::Album { .. }));
-                if has_sortable {
-                    cmds.push(AltCommand { modifier: CommandModifier::Ctrl, key: 's', label: "sort options", display_key: None });
-                }
-            }
-        }
-    }
-
-    // Function key commands (always available)
-    if state.view != View::Help {
-        cmds.push(AltCommand { modifier: CommandModifier::None, key: '\0', label: "help", display_key: Some("F1") });
-    }
-    if state.view != View::Settings {
-        cmds.push(AltCommand { modifier: CommandModifier::None, key: '\0', label: "settings", display_key: Some("F2") });
-    }
-    if !state.libraries.is_empty() {
-        cmds.push(AltCommand { modifier: CommandModifier::None, key: '\0', label: "library", display_key: Some("F3") });
-    }
-    // F4 artist bio: available when there's an artist context
-    if super::super::helpers::get_artist_for_bio(state).is_some() {
-        cmds.push(AltCommand { modifier: CommandModifier::None, key: '\0', label: "bio", display_key: Some("F4") });
-    }
-    cmds.push(AltCommand { modifier: CommandModifier::None, key: '\0', label: "refresh", display_key: Some("F5") });
+    let lib_enabled = state.active_library.is_some();
+    let filter_enabled = state.view == View::Browse && !state.list_filter.active
+        && !state.search_popup_active && state.sort_popup.is_none()
+        && state.radio_launcher.is_none() && state.adventure_launcher.is_none()
+        && state.artist_radio_picker.is_none();
+    cmds.push(AltCommand { modifier: CommandModifier::Alt, key: 'f', label: "filter", display_key: None,
+        enabled: filter_enabled });
+    cmds.push(AltCommand { modifier: CommandModifier::Alt, key: 'r', label: "random album", display_key: None,
+        enabled: lib_enabled });
 
     cmds
 }
 
-/// Check if a Ctrl+key command is currently available.
+/// Check if a Ctrl+key command is currently available (enabled).
 pub fn is_action_command_available(state: &AppState, key: char) -> bool {
-    available_alt_commands(state).iter().any(|cmd| cmd.modifier == CommandModifier::Ctrl && cmd.key == key)
+    available_alt_commands(state).iter().any(|cmd| cmd.modifier == CommandModifier::Ctrl && cmd.key == key && cmd.enabled)
 }
 
 // --- Context helpers ---
-
-/// Determine the view cycle context and return the label for the next state.
-/// Returns None if Alt+V is not available in the current context.
-fn get_view_cycle_label(state: &AppState) -> Option<&'static str> {
-    // Alt+V cycles visualizer tab in NowPlaying view
-    if state.view == View::NowPlaying {
-        return Some("cycle view");
-    }
-
-    if state.view != View::Browse {
-        return None;
-    }
-
-    // Genre tab cycle: Genres category, focused column has Genre items
-    if state.browse_category == BrowseCategory::Genres {
-        let is_genre_col = state.genre_nav.focused()
-            .and_then(|col| col.items.first())
-            .map_or(false, |item| matches!(item, BrowseItem::Genre { .. }));
-        if is_genre_col {
-            return Some("cycle view");
-        }
-    }
-
-    // Column sort cycle: any focused column with sortable content
-    let nav = match state.browse_category {
-        BrowseCategory::Library => Some(&state.artist_nav),
-        BrowseCategory::Genres => Some(&state.genre_nav),
-        BrowseCategory::Playlists => Some(&state.playlist_nav),
-        _ => None,
-    }?;
-    let col = nav.focused()?;
-    if col.items.is_empty() {
-        return None;
-    }
-
-    Some("cycle view")
-}
 
 /// Is there a track highlighted/selected in the current view?
 fn has_track_context(state: &AppState) -> bool {
@@ -337,5 +306,42 @@ fn has_playing_with_album(state: &AppState) -> bool {
     state.current_track()
         .map(|t| t.parent_rating_key.is_some() && t.grandparent_rating_key.is_some())
         .unwrap_or(false)
+}
+
+/// In Library view, does the now-playing track's album differ from the currently viewed album?
+/// Returns false if there's no now-playing track.
+fn playing_album_differs_from_viewed(state: &AppState) -> bool {
+    let playing_album_key = state.current_track()
+        .and_then(|t| t.parent_rating_key.clone());
+    let Some(playing_key) = playing_album_key else { return false };
+
+    // Also need album info (grandparent = artist) to navigate
+    if state.current_track().and_then(|t| t.grandparent_rating_key.as_ref()).is_none() {
+        return false;
+    }
+
+    // Find the album key currently visible in Miller columns
+    let nav = &state.artist_nav;
+    let focused = nav.focused_column;
+    let current_key = nav.columns.get(focused)
+        .and_then(|c| c.items.get(c.selected_index))
+        .and_then(|item| match item {
+            BrowseItem::Album { key, .. } => Some(key.clone()),
+            BrowseItem::Track { .. } => {
+                // Track focused → check parent column for album
+                (focused > 0).then(|| nav.columns.get(focused - 1)).flatten()
+                    .and_then(|c| c.items.get(c.selected_index))
+                    .and_then(|i| match i {
+                        BrowseItem::Album { key, .. } => Some(key.clone()),
+                        _ => None,
+                    })
+            }
+            _ => None,
+        });
+
+    match current_key {
+        Some(key) => key != playing_key, // Different album → useful to jump
+        None => true,                     // Not viewing any album → jump is useful
+    }
 }
 

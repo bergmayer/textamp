@@ -53,6 +53,11 @@ pub fn apply_selected_option(state: &mut AppState) -> Vec<Action> {
     }
 }
 
+/// Apply a sort mode to a specific column (public for title bar click cycling).
+pub fn apply_sort_for_column(state: &mut AppState, col_idx: usize, mode: ColumnSortMode) -> Vec<Action> {
+    apply_sort_mode(state, col_idx, mode)
+}
+
 /// Apply a sort mode to the column and update the popup.
 fn apply_sort_mode(state: &mut AppState, col_idx: usize, mode: ColumnSortMode) -> Vec<Action> {
     let nav = match state.browse_nav_mut() {
@@ -84,10 +89,12 @@ fn apply_sort_mode(state: &mut AppState, col_idx: usize, mode: ColumnSortMode) -
         popup.rebuild_options(mode);
     }
 
-    vec![]
+    // Auto-drill to repopulate child column after sort change
+    auto_drill_after_sort(state)
 }
 
 /// Toggle sort direction for the current column.
+/// Reverses the non-pinned items/tracks and flips the ascending flag.
 fn toggle_sort_direction(state: &mut AppState, col_idx: usize) -> Vec<Action> {
     let nav = match state.browse_nav_mut() {
         Some(n) => n,
@@ -96,8 +103,23 @@ fn toggle_sort_direction(state: &mut AppState, col_idx: usize) -> Vec<Action> {
 
     if let Some(col) = nav.columns.get_mut(col_idx) {
         col.sort_ascending = !col.sort_ascending;
+        // Actually reverse the items (skip pinned items at the start)
+        let start = col.pinned_count();
+        col.items[start..].reverse();
+        if start < col.tracks.len() {
+            col.tracks[start..].reverse();
+        }
+        col.selected_index = start; // reset selection to top of sortable items
+
+        // Truncate child columns since order changed
+        nav.columns.truncate(col_idx + 1);
+        if nav.focused_column > col_idx {
+            nav.focused_column = col_idx;
+        }
     }
-    vec![]
+
+    // Auto-drill to repopulate child column after direction change
+    auto_drill_after_sort(state)
 }
 
 /// Toggle group-by-album for a playlist track column.
@@ -132,7 +154,8 @@ fn toggle_group_by_album(state: &mut AppState, col_idx: usize) -> Vec<Action> {
         popup.rebuild_options(sort_mode);
     }
 
-    vec![]
+    // Auto-drill to repopulate child column after grouping change
+    auto_drill_after_sort(state)
 }
 
 /// Toggle artwork visibility for an album column.
@@ -146,4 +169,30 @@ fn toggle_artwork(state: &mut AppState, col_idx: usize) -> Vec<Action> {
         col.artwork_visible = !col.artwork_visible;
     }
     vec![]
+}
+
+/// Auto-drill after sort/direction/grouping changes.
+/// Tries synchronous cache-based drill first, falls back to async actions.
+fn auto_drill_after_sort(state: &mut AppState) -> Vec<Action> {
+    use crate::app::state::BrowseCategory;
+
+    // Try synchronous cache-based drill first
+    let sync_actions = super::super::dispatch_data::auto_drill_from_cache(state);
+    if !sync_actions.is_empty() {
+        return sync_actions;
+    }
+
+    // Fall back to async drill based on category
+    let drill = match state.browse_category {
+        BrowseCategory::Library => super::auto_drill_artist_action(state),
+        BrowseCategory::Genres => super::auto_drill_genre_action(state),
+        BrowseCategory::Playlists => super::auto_drill_playlist_action(state),
+        _ => None,
+    };
+    if let Some(action) = drill {
+        state.auto_drill_pending = true;
+        vec![action]
+    } else {
+        vec![]
+    }
 }

@@ -77,13 +77,13 @@ fn render_content(frame: &mut Frame, state: &AppState, area: Rect) {
     frame.render_widget(block, area);
 
     match state.settings_state.section {
-        SettingsSection::Account => render_account_content(frame, state, inner),
-        SettingsSection::Textamp => render_textamp_content(frame, state, inner),
-        SettingsSection::About => render_about_content(frame, state, inner),
+        SettingsSection::Account => render_account_content(frame, state, area, inner),
+        SettingsSection::Textamp => render_textamp_content(frame, state, area, inner),
+        SettingsSection::About => render_about_content(frame, state, area, inner),
     }
 }
 
-fn render_account_content(frame: &mut Frame, state: &AppState, area: Rect) {
+fn render_account_content(frame: &mut Frame, state: &AppState, outer: Rect, area: Rect) {
     let t = theme();
     let is_focused = state.settings_state.focus == SettingsFocus::Content;
 
@@ -93,6 +93,7 @@ fn render_account_content(frame: &mut Frame, state: &AppState, area: Rect) {
     }
 
     let mut lines = vec![];
+    let mut selected_line: Option<usize> = None;
     let connected = matches!(state.connection, ConnectionState::Connected { .. });
 
     // Account info header
@@ -127,6 +128,7 @@ fn render_account_content(frame: &mut Frame, state: &AppState, area: Rect) {
         for (i, lib) in state.libraries.iter().enumerate() {
             let is_active = state.active_library.as_ref() == Some(&lib.key);
             let is_selected = is_focused && i == state.settings_state.item_index;
+            if is_selected { selected_line = Some(lines.len()); }
             let prefix = if is_active { "  ♪ " } else { "  " };
             let style = if is_selected { Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg) } else { Style::default().fg(t.colors.fg_primary) };
             lines.push(Line::from(Span::styled(
@@ -166,6 +168,7 @@ fn render_account_content(frame: &mut Frame, state: &AppState, area: Rect) {
         for (i, label) in action_items.iter().enumerate() {
             let item_idx = lib_count + i;
             let is_selected = is_focused && item_idx == state.settings_state.item_index;
+            if is_selected { selected_line = Some(lines.len()); }
             let prefix = "  ";
             let style = if is_selected { Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg) } else { Style::default().fg(t.colors.fg_primary) };
             lines.push(Line::from(Span::styled(
@@ -177,6 +180,7 @@ fn render_account_content(frame: &mut Frame, state: &AppState, area: Rect) {
     } else {
         // Sign In button (item 0)
         let is_signin_selected = is_focused && state.settings_state.item_index == 0;
+        if is_signin_selected { selected_line = Some(lines.len()); }
         let signin_prefix = "  ";
         let signin_style = if is_signin_selected { Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg) } else { Style::default().fg(t.colors.fg_primary) };
         lines.push(Line::from(Span::styled(
@@ -308,12 +312,26 @@ fn render_account_content(frame: &mut Frame, state: &AppState, area: Rect) {
             )));
         }
 
-        // Library cache
-        if let Some(lib_bytes) = state.library_cache_stats {
+        // Library cache (per-library size with breakdown)
+        if let Some((lib_bytes, ref breakdown)) = state.library_cache_stats {
             lines.push(Line::from(Span::styled(
                 format!("  library: {}", format_size(lib_bytes)),
                 Style::default().fg(t.colors.fg_muted),
             )));
+            // Show top 3 breakdown items on a sub-line
+            if !breakdown.is_empty() {
+                let top: Vec<String> = breakdown.iter()
+                    .take(3)
+                    .filter(|(_, bytes)| *bytes > 0)
+                    .map(|(name, bytes)| format!("{} {}", name, format_size(*bytes)))
+                    .collect();
+                if !top.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        format!("    {}", top.join(" | ")),
+                        Style::default().fg(t.colors.fg_muted),
+                    )));
+                }
+            }
         }
 
         // Waveform cache
@@ -330,8 +348,24 @@ fn render_account_content(frame: &mut Frame, state: &AppState, area: Rect) {
         )));
     }
 
-    let paragraph = Paragraph::new(lines);
+    // Auto-scroll to keep selected item visible
+    let total = lines.len() as u16;
+    let visible = area.height;
+    let scroll = if let Some(sel) = selected_line {
+        let sel = sel as u16;
+        if total <= visible { 0 }
+        else { sel.saturating_sub(visible / 3).min(total.saturating_sub(visible)) }
+    } else {
+        0
+    };
+
+    let paragraph = Paragraph::new(lines).scroll((scroll, 0));
     frame.render_widget(paragraph, area);
+
+    // Scrollbar when content overflows
+    if total > visible {
+        crate::ui::widgets::render_scrollbar(frame, outer, total as usize, visible as usize, scroll as usize);
+    }
 }
 
 /// Render the sign-in form (username/password/sign in button/servers).
@@ -454,12 +488,13 @@ fn render_signin_form(frame: &mut Frame, state: &AppState, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
-fn render_textamp_content(frame: &mut Frame, state: &AppState, area: Rect) {
+fn render_textamp_content(frame: &mut Frame, state: &AppState, outer: Rect, area: Rect) {
     use crate::app::state::OutputTarget;
 
     let t = theme();
     let is_focused = state.settings_state.focus == SettingsFocus::Content;
     let mut lines = vec![];
+    let mut selected_line: Option<usize> = None;
 
     // Theme selection
     lines.push(Line::from(Span::styled(
@@ -471,6 +506,7 @@ fn render_textamp_content(frame: &mut Frame, state: &AppState, area: Rect) {
     for (i, theme_name) in ThemeName::all().iter().enumerate() {
         let is_active = *theme_name == state.theme;
         let is_selected = is_focused && i == state.settings_state.item_index;
+        if is_selected { selected_line = Some(lines.len()); }
         let prefix = if is_active { "  ♪ " } else { "  " };
         let style = if is_selected { Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg) } else { Style::default().fg(t.colors.fg_primary) };
         lines.push(Line::from(Span::styled(
@@ -508,6 +544,7 @@ fn render_textamp_content(frame: &mut Frame, state: &AppState, area: Rect) {
         let item_idx = theme_count + i;
         let is_active = *mode == state.artwork_mode;
         let is_selected = is_focused && state.settings_state.item_index == item_idx;
+        if is_selected { selected_line = Some(lines.len()); }
         let prefix = if is_active { "  ♪ " } else { "  " };
         let style = if is_selected { Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg) } else { Style::default().fg(t.colors.fg_primary) };
         lines.push(Line::from(Span::styled(
@@ -529,6 +566,7 @@ fn render_textamp_content(frame: &mut Frame, state: &AppState, area: Rect) {
     let is_local = matches!(state.output_target, OutputTarget::Local);
     let local_idx = output_offset;
     let is_selected = is_focused && state.settings_state.item_index == local_idx;
+    if is_selected { selected_line = Some(lines.len()); }
     let prefix = if is_local { "  ♪ " } else { "  " };
     let style = if is_selected { Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg) } else { Style::default().fg(t.colors.fg_primary) };
     lines.push(Line::from(Span::styled(
@@ -544,6 +582,7 @@ fn render_textamp_content(frame: &mut Frame, state: &AppState, area: Rect) {
             _ => false,
         };
         let is_selected = is_focused && item_idx == state.settings_state.item_index;
+        if is_selected { selected_line = Some(lines.len()); }
         let prefix = if is_active { "  ♪ " } else { "  " };
         let style = if is_selected { Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg) } else { Style::default().fg(t.colors.fg_primary) };
         lines.push(Line::from(Span::styled(
@@ -555,6 +594,7 @@ fn render_textamp_content(frame: &mut Frame, state: &AppState, area: Rect) {
     // Refresh players
     let refresh_idx = output_offset + 1 + state.remote_players.len();
     let is_selected = is_focused && refresh_idx == state.settings_state.item_index;
+    if is_selected { selected_line = Some(lines.len() + 1); } // +1 for the blank line before
     let prefix = "  ";
     let style = if is_selected { Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg) } else { Style::default().fg(t.colors.fg_primary) };
     lines.push(Line::from(""));
@@ -577,8 +617,24 @@ fn render_textamp_content(frame: &mut Frame, state: &AppState, area: Rect) {
         Style::default().fg(t.colors.fg_muted),
     )));
 
-    let paragraph = Paragraph::new(lines);
+    // Auto-scroll to keep selected item visible
+    let total = lines.len() as u16;
+    let visible = area.height;
+    let scroll = if let Some(sel) = selected_line {
+        let sel = sel as u16;
+        if total <= visible { 0 }
+        else { sel.saturating_sub(visible / 3).min(total.saturating_sub(visible)) }
+    } else {
+        0
+    };
+
+    let paragraph = Paragraph::new(lines).scroll((scroll, 0));
     frame.render_widget(paragraph, area);
+
+    // Scrollbar when content overflows
+    if total > visible {
+        crate::ui::widgets::render_scrollbar(frame, outer, total as usize, visible as usize, scroll as usize);
+    }
 }
 
 /// Format a byte count as a human-readable size string.
@@ -619,7 +675,7 @@ fn format_duration(d: std::time::Duration) -> String {
     }
 }
 
-fn render_about_content(frame: &mut Frame, state: &AppState, area: Rect) {
+fn render_about_content(frame: &mut Frame, state: &AppState, outer: Rect, area: Rect) {
     let t = theme();
 
     let mut lines = parse_ansi_logo(t.colors.bg_primary);
@@ -654,8 +710,19 @@ fn render_about_content(frame: &mut Frame, state: &AppState, area: Rect) {
         Style::default().fg(t.colors.fg_muted),
     )));
 
-    let paragraph = Paragraph::new(lines);
+    // Manual scroll (no selectable items)
+    let total = lines.len() as u16;
+    let visible = area.height;
+    let max_scroll = total.saturating_sub(visible);
+    let scroll = state.settings_state.scroll.min(max_scroll);
+
+    let paragraph = Paragraph::new(lines).scroll((scroll, 0));
     frame.render_widget(paragraph, area);
+
+    // Scrollbar when content overflows
+    if total > visible {
+        crate::ui::widgets::render_scrollbar(frame, outer, total as usize, visible as usize, scroll as usize);
+    }
 }
 
 /// Parse the embedded ANSI art logo, replacing black with the theme background.

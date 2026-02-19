@@ -107,9 +107,10 @@ pub enum Event {
         count: usize,
         total_bytes: u64,
     },
-    /// Library cache total size computed in background.
+    /// Library cache size and per-field breakdown for active library.
     LibraryCacheStats {
         total_bytes: u64,
+        breakdown: Vec<(String, u64)>,
     },
     /// Waveform cache stats computed in background.
     WaveformCacheStats {
@@ -204,7 +205,8 @@ pub enum Event {
     ArtistRadioComplete { tracks: Vec<Track> },
 
     // Artist bio popup (F4)
-    ArtistBioLoaded { artist_name: String, bio: String },
+    ArtistBioLoaded { artist_name: String, bio: String, thumb: Option<String> },
+    ArtistBioArtworkLoaded { data: Vec<u8>, thumb: String },
 
     // Remote player control
     PlayersDiscovered(Vec<crate::plex::models::RemotePlayer>),

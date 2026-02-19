@@ -600,7 +600,7 @@ pub async fn dispatch(
                         Ok(()) => {
                             state.set_status(format!("Saved \"{}\" ({} tracks)", name_clone, track_count));
                             // Refresh playlists so the new one appears
-                            state.playlists_loading = true;
+                            return Ok(vec![Action::LoadPlaylists]);
                         }
                         Err(e) => {
                             state.set_error(format!("Failed to save playlist: {}", e));

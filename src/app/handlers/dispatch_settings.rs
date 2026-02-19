@@ -8,8 +8,6 @@ use crate::api::{PlexAuth, PlexClient};
 use crate::audio::AudioPlayer;
 use crate::cache::LibraryCache;
 use crate::config::Config;
-use crate::util::truncate_str;
-
 use anyhow::Result;
 use tokio::sync::mpsc;
 
@@ -306,6 +304,7 @@ pub async fn dispatch(
                                         title: "Clear Library Cache".to_string(),
                                         message: "Clear all cached library data and reload from server?".to_string(),
                                         on_confirm: ConfirmAction::ClearLibraryCache,
+                                        selected_yes: true,
                                     });
                                 }
                                 1 => {
@@ -313,6 +312,7 @@ pub async fn dispatch(
                                         title: "Clear Artwork Cache".to_string(),
                                         message: "Delete all cached album artwork from disk?".to_string(),
                                         on_confirm: ConfirmAction::ClearArtworkCache,
+                                        selected_yes: true,
                                     });
                                 }
                                 2 => {
@@ -320,6 +320,7 @@ pub async fn dispatch(
                                         title: "Clear Subfolder Cache".to_string(),
                                         message: "Clear all cached subfolder contents?".to_string(),
                                         on_confirm: ConfirmAction::ClearSubfolderCache,
+                                        selected_yes: true,
                                     });
                                 }
                                 3 => {
@@ -368,16 +369,19 @@ pub async fn dispatch(
                             state.artwork_mode = mode;
                             crate::ui::screens::now_playing::set_artwork_mode(mode);
                             crate::ui::artwork::set_grid_artwork_mode(mode);
+                            crate::ui::set_bio_artwork_mode(mode);
 
                             match mode {
                                 crate::app::state::ArtworkMode::Halfblocks => {
                                     let hb = ratatui_image::picker::ProtocolType::Halfblocks;
                                     crate::ui::screens::now_playing::set_artwork_protocol_type(hb);
                                     crate::ui::artwork::set_grid_protocol_type(hb);
+                                    crate::ui::set_bio_artwork_protocol_type(hb);
                                 }
                                 crate::app::state::ArtworkMode::Auto => {
                                     crate::ui::screens::now_playing::restore_artwork_native_protocol();
                                     crate::ui::artwork::restore_grid_native_protocol();
+                                    crate::ui::restore_bio_artwork_native_protocol();
                                 }
                                 crate::app::state::ArtworkMode::Braille => {
                                     // Braille doesn't use picker protocol
@@ -507,26 +511,6 @@ pub async fn dispatch(
 
                 // Clear password immediately from memory (don't store it)
                 state.settings_state.password_input.clear();
-            }
-        }
-        Action::SettingsDiscoverServers => {
-            // Use stored auth to get both token and client_identifier
-            if let Some(stored) = PlexAuth::load_token() {
-                state.settings_state.discovering_servers = true;
-                let event_tx = event_tx.clone();
-                tokio::spawn(async move {
-                    let auth = PlexAuth::from_stored_auth(&stored);
-                    match auth.get_servers(&stored.token).await {
-                        Ok(servers) => {
-                            let _ = event_tx.send(Event::ServersDiscovered(servers)).await;
-                        }
-                        Err(e) => {
-                            let _ = event_tx.send(Event::ServerDiscoveryFailed(e.to_string())).await;
-                        }
-                    }
-                });
-            } else {
-                state.set_error("No authentication token available".to_string());
             }
         }
         Action::SelectServer(server_id) => {
@@ -818,47 +802,6 @@ pub async fn dispatch(
                 tracing::debug!("Settings saved");
             }
         }
-        Action::ClearCache => {
-            // Clear all cached library data
-            if let Some(cache) = LibraryCache::new() {
-                match cache.clear_all() {
-                    Ok(count) => {
-                        tracing::info!("Cleared {} cache files", count);
-
-                        // Clear in-memory data
-                        state.artists.clear();
-                        state.albums.clear();
-                        state.playlists.clear();
-                        state.folder_state = None;
-                        state.folder_contents_cache.clear();
-                        state.subfolder_preload_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-                        state.subfolder_preload_active = false;
-                        state.playlist_tracks_cache.clear();
-                        state.category_timestamps.clear();
-                        state.cache_dirty = true;
-
-                        // Reload from API
-                        if let Some(lib_key) = &state.active_library {
-                            let lib_key = lib_key.clone();
-                            let lib_name = state.libraries.iter()
-                                .find(|l| l.key == lib_key)
-                                .map(|l| l.title.clone())
-                                .unwrap_or_else(|| lib_key.clone());
-
-                            helpers::preload_all_library_data(event_tx, &lib_key, &lib_name, client, state);
-                        }
-
-                        state.set_status(format!("Cleared {} cache files, reloading...", count));
-                    }
-                    Err(e) => {
-                        state.set_error(format!("Failed to clear cache: {}", e));
-                    }
-                }
-            } else {
-                state.set_error("Cache not available".to_string());
-            }
-        }
-
         Action::ClearLibraryCache => {
             // Clear main library cache files and in-memory data (but not subfolders or artwork)
             if let Some(cache) = LibraryCache::new() {
@@ -897,7 +840,7 @@ pub async fn dispatch(
                             helpers::preload_all_library_data(event_tx, &lib_key, &lib_name, client, state);
                         }
 
-                        state.library_cache_stats = Some(0);
+                        state.library_cache_stats = Some((0, vec![]));
 
                         state.set_status(format!("Cleared {} library cache files, reloading...", count));
                     }
@@ -1049,35 +992,6 @@ pub async fn dispatch(
             }
         }
 
-        // Sonic Adventure actions
-        Action::StartAdventure => {
-            state.adventure = crate::app::state::AdventureState {
-                active: true,
-                start_track: None,
-                end_track: None,
-                requested_length: 20,
-                generating: false,
-            };
-            state.set_status("Adventure: select START track (Alt+A)".to_string());
-        }
-        Action::SetAdventureStart(track) => {
-            state.adventure.active = true;
-            state.adventure.start_track = Some(track.clone());
-            state.adventure.end_track = None;
-            state.adventure.generating = false;
-            state.set_status(format!("Adventure: {} → select END (Alt+A)", truncate_str(&track.title, 25)));
-        }
-        Action::SetAdventureEnd(track) => {
-            state.adventure.end_track = Some(track);
-            // Clear status message so transport shows normal info
-            state.clear_status();
-            // Show input dialog for length
-            state.input_dialog = Some(crate::app::state::InputDialog {
-                title: "Adventure Length (5-100)".to_string(),
-                input: "20".to_string(),
-                action_type: crate::app::state::InputDialogAction::AdventureLength,
-            });
-        }
         Action::SetAdventureLength(length) => {
             state.adventure.requested_length = length.clamp(5, 100);
             state.input_dialog = None;

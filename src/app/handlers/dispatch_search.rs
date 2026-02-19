@@ -125,10 +125,6 @@ pub async fn dispatch(
                 state.search_track_loading = false;
             }
         }
-        Action::ClearSearch => {
-            state.search_query.clear();
-            state.search_results = None;
-        }
         Action::SelectSearchResult => {
             let follow_up_actions = select_search_result(state);
             follow_ups.extend(follow_up_actions);
@@ -216,15 +212,6 @@ pub async fn dispatch(
                 execute_list_filter(event_tx, state).await?;
             }
         }
-        Action::ClearListFilter => {
-            state.list_filter.query.clear();
-            state.list_filter.results = None;
-            state.list_filter.loading = false;
-        }
-        Action::ExecuteListFilter => {
-            execute_list_filter(event_tx, state).await?;
-        }
-
         // Search popup actions
         Action::OpenSearchPopup => {
             if state.list_filter.active {
@@ -308,21 +295,6 @@ pub async fn dispatch(
         }
         Action::CloseSortPopup => {
             state.sort_popup = None;
-        }
-        Action::ApplySortOption => {
-            // Handled inline in the sort popup key handler
-        }
-
-        // Radio launcher popup actions
-        Action::OpenRadioLauncher => {
-            state.radio_launcher = Some(crate::app::state::RadioLauncherState {
-                query: String::new(),
-                results: None,
-                focus: SearchFocus::Input,
-                tab: crate::app::state::RadioLauncherTab::All,
-                item_index: 0,
-                loading: false,
-            });
         }
         Action::CloseRadioLauncher => {
             state.radio_launcher = None;
@@ -572,6 +544,8 @@ pub async fn dispatch(
                 bio: String::new(),
                 scroll: 0,
                 loading: true,
+                artwork_data: None,
+                artwork_thumb: None,
             });
 
             // Fetch artist details from API
@@ -581,13 +555,27 @@ pub async fn dispatch(
                 match client_clone.get_artist(&artist_key).await {
                     Ok(artist) => {
                         let bio = artist.summary.unwrap_or_else(|| "No biography available.".to_string());
-                        let _ = tx.send(Event::ArtistBioLoaded { artist_name, bio }).await;
+                        let thumb = artist.thumb.clone();
+                        let _ = tx.send(Event::ArtistBioLoaded { artist_name, bio, thumb: thumb.clone() }).await;
+
+                        // Fetch artwork if thumb is available
+                        if let Some(thumb_path) = thumb {
+                            match client_clone.fetch_artwork(&thumb_path, 600).await {
+                                Ok(data) => {
+                                    let _ = tx.send(Event::ArtistBioArtworkLoaded { data, thumb: thumb_path }).await;
+                                }
+                                Err(e) => {
+                                    tracing::warn!("Failed to fetch artist artwork: {}", e);
+                                }
+                            }
+                        }
                     }
                     Err(e) => {
                         tracing::warn!("Failed to fetch artist bio: {}", e);
                         let _ = tx.send(Event::ArtistBioLoaded {
                             artist_name,
                             bio: format!("Failed to load biography: {}", e),
+                            thumb: None,
                         }).await;
                     }
                 }

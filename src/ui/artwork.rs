@@ -114,6 +114,42 @@ impl ArtworkRenderer {
         true
     }
 
+    /// Load an image with the top portion cropped (for scrolling).
+    /// `crop_fraction` is 0.0..1.0 indicating how much of the top to remove.
+    pub fn load_image_cropped(&mut self, image_data: &[u8], thumb_path: &str, crop_fraction: f32) -> bool {
+        if crop_fraction <= 0.0 {
+            return self.load_image(image_data, thumb_path);
+        }
+
+        // Cache key includes crop amount to avoid re-creating protocol unnecessarily
+        let crop_key = format!("{}:c{}", thumb_path, (crop_fraction * 100.0) as u32);
+        if self.current_thumb.as_deref() == Some(&crop_key) {
+            return self.has_image();
+        }
+
+        let Ok(img) = image::load_from_memory(image_data) else { return false; };
+
+        let crop_pixels = (img.height() as f32 * crop_fraction).min(img.height() as f32 - 1.0) as u32;
+        let cropped = if crop_pixels > 0 && crop_pixels < img.height() {
+            img.crop_imm(0, crop_pixels, img.width(), img.height() - crop_pixels)
+        } else {
+            img
+        };
+
+        if self.mode == ArtworkMode::Braille {
+            self.braille_image = Some(cropped);
+            self.protocol = None;
+            self.current_thumb = Some(crop_key);
+            return true;
+        }
+
+        let Some(ref mut picker) = self.picker else { return false; };
+        self.protocol = Some(picker.new_resize_protocol(cropped));
+        self.braille_image = None;
+        self.current_thumb = Some(crop_key);
+        true
+    }
+
     /// Clear the current image.
     pub fn clear(&mut self) {
         self.protocol = None;

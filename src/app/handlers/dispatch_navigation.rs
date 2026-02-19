@@ -96,44 +96,6 @@ pub async fn dispatch(
                 state.set_view(View::Browse);
             }
         }
-        Action::NextMode => {
-            // Shift+Down: cycle modes within current category
-            if state.view == View::Browse {
-                match state.browse_category {
-                    BrowseCategory::Library => {
-                        // Library has no modes to cycle
-                    }
-                    BrowseCategory::Playlists => {
-                        // Playlists has no modes to cycle
-                    }
-                    BrowseCategory::Genres => {
-                        follow_ups.push(Action::CycleGenreTab);
-                    }
-                    BrowseCategory::Folders => {
-                        // Folders has no modes to cycle
-                    }
-                }
-            }
-        }
-        Action::PrevMode => {
-            // Shift+Up: cycle modes backwards within current category
-            if state.view == View::Browse {
-                match state.browse_category {
-                    BrowseCategory::Library => {
-                        // Library has no modes to cycle
-                    }
-                    BrowseCategory::Playlists => {
-                        // Playlists has no modes to cycle
-                    }
-                    BrowseCategory::Genres => {
-                        follow_ups.push(Action::CycleGenreTab);
-                    }
-                    BrowseCategory::Folders => {
-                        // Folders has no modes to cycle
-                    }
-                }
-            }
-        }
         Action::SetCategory(category) => {
             if state.browse_category != category {
                 // Unshuffle Library root when leaving, so "All Artists" is in correct position
@@ -156,11 +118,21 @@ pub async fn dispatch(
                     BrowseCategory::Library => {
                         if state.artists.is_empty() && !state.artists_loading {
                             helpers::load_artists(event_tx, state, client);
+                        } else {
+                            // Build second column synchronously from cached data
+                            follow_ups.extend(super::dispatch_data::auto_drill_from_cache(state));
                         }
                     }
                     BrowseCategory::Playlists => {
                         if state.playlists.is_empty() && !state.playlists_loading {
                             helpers::load_playlists(event_tx, state, client);
+                        } else {
+                            // Rebuild root column from state.playlists to ensure it's populated
+                            // (guards against stale/empty nav from preload race conditions)
+                            let items = crate::app::state::BrowseItem::from_playlists(&state.playlists);
+                            state.playlist_nav.reset("playlists", items);
+                            // Build second column synchronously (async fallback for smart playlists)
+                            follow_ups.extend(super::dispatch_data::auto_drill_from_cache(state));
                         }
                     }
                     BrowseCategory::Genres => {

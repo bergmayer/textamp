@@ -682,6 +682,7 @@ async fn run_tui_mode(verbose: bool) -> Result<()> {
         tracing::info!("Native protocol: {:?}, Artwork mode: {:?}", picker.protocol_type(), effective_mode);
         textamp::ui::artwork::init_grid_renderer(picker.clone());
         textamp::ui::screens::now_playing::init_artwork_renderer(picker.clone());
+        textamp::ui::init_bio_artwork_renderer(picker.clone());
 
         // Apply halfblocks if artwork mode requires it
         if effective_mode == textamp::app::state::ArtworkMode::Halfblocks {
@@ -689,13 +690,15 @@ async fn run_tui_mode(verbose: bool) -> Result<()> {
             let hb = ratatui_image::picker::ProtocolType::Halfblocks;
             textamp::ui::artwork::set_grid_protocol_type(hb);
             textamp::ui::screens::now_playing::set_artwork_protocol_type(hb);
+            textamp::ui::set_bio_artwork_protocol_type(hb);
         }
         textamp::ui::artwork::set_grid_artwork_mode(effective_mode);
         textamp::ui::screens::now_playing::set_artwork_mode(effective_mode);
+        textamp::ui::set_bio_artwork_mode(effective_mode);
     }
 
     // Run the app and ensure terminal is always restored
-    let result = run_app(&mut terminal, config).await;
+    let (result, pending_cache) = run_app(&mut terminal, config).await;
 
     // Always restore terminal, even on error
     let _ = restore_terminal(&mut terminal);
@@ -703,10 +706,25 @@ async fn run_tui_mode(verbose: bool) -> Result<()> {
     // Display exit logo (clear screen, show ANSI art)
     display_exit_logo();
 
+    // Save cache to disk on a background thread (runs while exit logo is displayed)
+    let cache_thread = pending_cache.map(|cache_data| {
+        std::thread::spawn(move || {
+            if let Some(cache) = textamp::plex::LibraryCache::new() {
+                if cache.save(&cache_data) {
+                    tracing::info!("Cache saved on quit");
+                }
+            }
+        })
+    });
+
     // Now handle any errors
     if let Err(e) = result {
         eprintln!("Error: {}", e);
-        std::process::exit(1);
+    }
+
+    // Wait for cache write to finish before exiting
+    if let Some(handle) = cache_thread {
+        let _ = handle.join();
     }
 
     tracing::info!("textamp shutdown complete");
@@ -759,11 +777,12 @@ fn display_exit_logo() {
     println!();
 }
 
-/// Inner app runner - separated so terminal restoration always happens
+/// Inner app runner - separated so terminal restoration always happens.
+/// Returns the event loop result and any pending cache data to save after terminal restore.
 async fn run_app(
     terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
     config: Config,
-) -> Result<()> {
+) -> (Result<()>, Option<textamp::plex::CacheData>) {
     // Create Plex client with stored client_identifier if available
     // IMPORTANT: The client_identifier must match what the auth token was issued for,
     // otherwise Plex will reject requests with 400 errors
@@ -780,13 +799,19 @@ async fn run_app(
     tracing::info!("PlexClient created with client_identifier: {}", client.client_identifier());
 
     // Create audio player
-    let mut audio = AudioPlayer::new()?;
+    let mut audio = match AudioPlayer::new() {
+        Ok(a) => a,
+        Err(e) => return (Err(e), None),
+    };
 
     // Create application state
     let mut state = AppState::new();
 
     // Get terminal size
-    let size = terminal.size()?;
+    let size = match terminal.size() {
+        Ok(s) => s,
+        Err(e) => return (Err(e.into()), None),
+    };
     state.terminal_width = size.width;
     state.terminal_height = size.height;
 
@@ -796,5 +821,9 @@ async fn run_app(
 
     // Run event loop
     let mut event_loop = EventLoop::new(config);
-    event_loop.run(terminal, &mut state, &mut client, &mut audio).await
+    let result = event_loop.run(terminal, &mut state, &mut client, &mut audio).await;
+
+    // Extract pending cache save (built during Action::Quit, deferred for fast exit)
+    let pending_cache = state.pending_cache_save.take();
+    (result, pending_cache)
 }

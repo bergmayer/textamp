@@ -41,6 +41,17 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         ])
         .split(inner);
 
+    // Register hit regions for mouse handler
+    {
+        let mut hr = state.hit_regions.borrow_mut();
+        hr.search_popup = Some(crate::ui::hit_regions::SearchPopupRegions {
+            outer: popup_area,
+            tab_area: chunks[0],
+            input_area: chunks[1],
+            results_area: chunks[2],
+        });
+    }
+
     // Tabs
     render_tabs(frame, state, chunks[0]);
 

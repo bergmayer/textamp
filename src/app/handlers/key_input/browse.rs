@@ -477,40 +477,6 @@ pub(super) fn handle_artist_browse_keys(key: event::KeyEvent, state: &mut AppSta
 pub(super) fn handle_genre_browse_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
     use crate::app::state::BrowseItem;
 
-    // Genre tab bar focused mode: Left/Right cycle tabs, Down/Enter/Esc exit
-    if state.genre_tab_focused {
-        match key.code {
-            KeyCode::Left => {
-                return vec![Action::SetGenreTab(state.genre_tab.prev())];
-            }
-            KeyCode::Right => {
-                return vec![Action::SetGenreTab(state.genre_tab.next())];
-            }
-            KeyCode::Down | KeyCode::Enter => {
-                state.genre_tab_focused = false;
-                return vec![];
-            }
-            KeyCode::Esc => {
-                state.genre_tab_focused = false;
-                return vec![];
-            }
-            _ => {
-                state.genre_tab_focused = false;
-                // Fall through to normal handling
-            }
-        }
-    }
-
-    // Intercept Up at position 0 in root column → focus tab bar
-    if key.code == KeyCode::Up && state.genre_nav.focused_column == 0 {
-        if let Some(col) = state.genre_nav.focused() {
-            if col.selected_index == 0 {
-                state.genre_tab_focused = true;
-                return vec![];
-            }
-        }
-    }
-
     // Handle common navigation keys
     let is_up_down = matches!(key.code, KeyCode::Up | KeyCode::Down);
     if let Some(mut actions) = handle_browse_nav_keys(key, &mut state.genre_nav) {
@@ -538,6 +504,9 @@ pub(super) fn handle_genre_browse_keys(key: event::KeyEvent, state: &mut AppStat
     if matches!(key.code, KeyCode::Enter | KeyCode::Right) {
         if let Some(item) = state.genre_nav.selected_item().cloned() {
             return match item {
+                BrowseItem::GenreCategory { key: cat_key, .. } => {
+                    vec![Action::DrillGenreCategory { category_key: cat_key }]
+                }
                 BrowseItem::Genre { key, .. } => {
                     vec![Action::LoadGenreAlbumsForMiller { genre_key: key }]
                 }
@@ -874,7 +843,7 @@ pub fn get_filter_drilldown_actions(state: &mut AppState) -> Vec<Action> {
 
 /// Determine the auto-drill action for the currently selected item in artist_nav.
 /// Returns None if the item is not drillable (e.g. Track, ArtistRadio).
-fn auto_drill_artist_action(state: &mut AppState) -> Option<Action> {
+pub(crate) fn auto_drill_artist_action(state: &mut AppState) -> Option<Action> {
     use crate::app::state::BrowseItem;
     let item = state.artist_nav.selected_item()?.clone();
     match item {
@@ -918,10 +887,13 @@ fn auto_drill_artist_action(state: &mut AppState) -> Option<Action> {
 }
 
 /// Determine the auto-drill action for the currently selected item in genre_nav.
-fn auto_drill_genre_action(state: &AppState) -> Option<Action> {
+pub(crate) fn auto_drill_genre_action(state: &AppState) -> Option<Action> {
     use crate::app::state::BrowseItem;
     let item = state.genre_nav.selected_item()?.clone();
     match item {
+        BrowseItem::GenreCategory { key, .. } => {
+            Some(Action::DrillGenreCategory { category_key: key })
+        }
         BrowseItem::Genre { key, .. } => {
             Some(Action::LoadGenreAlbumsForMiller { genre_key: key })
         }
@@ -933,7 +905,7 @@ fn auto_drill_genre_action(state: &AppState) -> Option<Action> {
 }
 
 /// Determine the auto-drill action for the currently selected item in playlist_nav.
-fn auto_drill_playlist_action(state: &AppState) -> Option<Action> {
+pub(crate) fn auto_drill_playlist_action(state: &AppState) -> Option<Action> {
     use crate::app::state::BrowseItem;
     let item = state.playlist_nav.selected_item()?.clone();
     match item {

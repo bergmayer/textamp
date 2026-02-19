@@ -43,19 +43,6 @@ pub async fn dispatch(
                 _ => {}
             }
         }
-        Action::Pause => {
-            // Report stop to Plex before pausing
-            // continuing=false because playback is pausing (not moving to next track)
-            if let Some(track) = state.current_track().cloned() {
-                helpers::report_playback_stop_to_plex(&track, state.playback.position_ms, false, state.plex_session_id.clone(), client);
-            }
-            audio.pause();
-            state.playback.status = PlayStatus::Paused;
-        }
-        Action::Play => {
-            audio.resume();
-            state.playback.status = PlayStatus::Playing;
-        }
         Action::Stop => {
             // Report stop to Plex before stopping
             // continuing=false because playback is truly stopping
@@ -166,6 +153,11 @@ pub async fn dispatch(
             state.playback.volume = (state.playback.volume - 0.05).max(0.0);
             audio.set_volume(state.playback.volume);
         }
+        Action::SetVolume(vol) => {
+            state.playback.volume = vol.clamp(0.0, 1.0);
+            state.playback.muted = false;
+            audio.set_volume(state.playback.volume);
+        }
         Action::ToggleMute => {
             state.playback.muted = !state.playback.muted;
             audio.set_volume(if state.playback.muted { 0.0 } else { state.playback.volume });
@@ -271,26 +263,6 @@ async fn dispatch_remote(
                 _ => {}
             }
         }
-        Action::Pause => {
-            let rc = rc.clone();
-            let event_tx = event_tx.clone();
-            tokio::spawn(async move {
-                if let Err(e) = rc.pause().await {
-                    let _ = event_tx.send(Event::RemotePlayerError(e.to_string())).await;
-                }
-            });
-            state.playback.status = PlayStatus::Paused;
-        }
-        Action::Play => {
-            let rc = rc.clone();
-            let event_tx = event_tx.clone();
-            tokio::spawn(async move {
-                if let Err(e) = rc.resume().await {
-                    let _ = event_tx.send(Event::RemotePlayerError(e.to_string())).await;
-                }
-            });
-            state.playback.status = PlayStatus::Playing;
-        }
         Action::Stop => {
             let rc = rc.clone();
             let event_tx = event_tx.clone();
@@ -304,12 +276,20 @@ async fn dispatch_remote(
             state.plex_session_id = None;
         }
         Action::Next => {
+            // Report stop for current track before switching
+            if let Some(track) = state.current_track().cloned() {
+                helpers::report_playback_stop_to_plex(&track, state.playback.position_ms, true, state.plex_session_id.clone(), client);
+            }
+
+            let mut track_advanced = false;
+
             match state.playback_mode {
                 PlaybackMode::Radio => {
                     if let Some(idx) = state.radio.track_index {
                         if idx + 1 < state.radio.tracks.len() {
                             state.radio.track_index = Some(idx + 1);
                             helpers::play_current_track(event_tx, state, client, audio).await;
+                            track_advanced = true;
 
                             let remaining = state.radio.tracks.len().saturating_sub(idx + 1);
                             if remaining < 5 && !state.radio.fetching {
@@ -325,13 +305,25 @@ async fn dispatch_remote(
                         if idx + 1 < state.queue.len() {
                             state.queue_index = Some(idx + 1);
                             helpers::play_current_track(event_tx, state, client, audio).await;
+                            track_advanced = true;
                         } else {
-                            // End of queue
+                            // End of queue — report final stop (not continuing)
+                            if let Some(track) = state.current_track().cloned() {
+                                helpers::report_playback_stop_to_plex(&track, state.playback.position_ms, false, state.plex_session_id.clone(), client);
+                            }
+                            let rc = rc.clone();
                             tokio::spawn(async move { let _ = rc.stop().await; });
                             state.playback.status = PlayStatus::Stopped;
                             state.plex_session_id = None;
                         }
                     }
+                }
+            }
+
+            // Trigger DJ mode processing after every track transition
+            if track_advanced && !state.dj_inserting {
+                if state.active_dj_mode.is_some() {
+                    return Ok(vec![Action::DjModeProcess]);
                 }
             }
         }
@@ -340,6 +332,11 @@ async fn dispatch_remote(
                 state.playback.position_ms = 0;
                 helpers::play_current_track(event_tx, state, client, audio).await;
             } else {
+                // Report stop for current track before going to previous
+                if let Some(track) = state.current_track().cloned() {
+                    helpers::report_playback_stop_to_plex(&track, state.playback.position_ms, true, state.plex_session_id.clone(), client);
+                }
+
                 match state.playback_mode {
                     PlaybackMode::Radio => {
                         if let Some(idx) = state.radio.track_index {
@@ -373,6 +370,18 @@ async fn dispatch_remote(
         }
         Action::VolumeDown => {
             state.playback.volume = (state.playback.volume - 0.05).max(0.0);
+            let volume_pct = (state.playback.volume * 100.0) as u32;
+            let rc = rc.clone();
+            let event_tx = event_tx.clone();
+            tokio::spawn(async move {
+                if let Err(e) = rc.set_volume(volume_pct).await {
+                    let _ = event_tx.send(Event::RemotePlayerError(e.to_string())).await;
+                }
+            });
+        }
+        Action::SetVolume(vol) => {
+            state.playback.volume = vol.clamp(0.0, 1.0);
+            state.playback.muted = false;
             let volume_pct = (state.playback.volume * 100.0) as u32;
             let rc = rc.clone();
             let event_tx = event_tx.clone();

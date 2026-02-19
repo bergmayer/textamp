@@ -13,18 +13,14 @@ pub enum Action {
     SetCategory(BrowseCategory),
     NextView,   // Tab: cycle Library→Playlists→Queue→NowPlaying
     PrevView,   // Shift+Tab: cycle backwards
-    NextMode,   // Shift+Down: cycle modes within current category
-    PrevMode,   // Shift+Up: cycle modes backwards
     ToggleFocus,
 
     // Data loading
     LoadInitialData,
-    LoadLibraries,
     SelectLibrary(String),
     /// Switch to a library on a different server: (library_key, server_identifier)
     SelectLibraryOnServer(String, String),
     LoadArtists,
-    LoadAlbums,
     LoadPlaylists,
     LoadArtistAlbums,      // Load albums for selected artist (right panel)
     LoadArtistAllTracks,   // Load all tracks by the selected artist
@@ -36,8 +32,6 @@ pub enum Action {
     LoadSimilarTracks { rating_key: String, title: String },
 
     // Playback control
-    Play,
-    Pause,
     TogglePlayPause,
     Stop,
     Next,
@@ -71,7 +65,6 @@ pub enum Action {
     ClearQueue,
     RemoveFromQueue(usize),
     ToggleQueueShuffle,
-    ToggleBrowseShuffle,
     JumpToQueueIndex(usize),      // Jump to and play a specific queue index
     PromptSavePlaylist,           // Ctrl+W: Prompt user for playlist name
     SaveQueueAsPlaylist(String),  // Save queue with given name
@@ -83,31 +76,20 @@ pub enum Action {
     LoadMoods,
     LoadStyles,           // Load Plex styles
     LoadGenreAlbums,           // Load albums in selected genre (file tags)
-    LoadArtistGenreAlbums,     // Load albums in selected artist genre
-    LoadAlbumGenreAlbums,      // Load albums in selected album genre
-    LoadMoodAlbums,            // Load albums in selected mood
-    LoadStyleAlbums,           // Load albums in selected style
-    CycleGenreContentType,     // Ctrl+G when in genres: cycle Genres -> Artist -> Album -> Moods -> Styles
     RefreshGenreView,          // Refresh genre view after mode change (shared logic)
-
-    // Artist view refresh
-    RefreshArtistView,   // Refresh artist view (shared logic)
-    CycleLibrarySubMode, // Alt+S in Library: cycle Normal → AllByArtist → AllShuffled
 
     // Genre tab cycling
     CycleGenreTab,       // Ctrl+G when already in Genres: cycle All/Library/Artist/Album/Mood/Style
     SetGenreTab(crate::app::state::GenreTab), // Direct tab selection (mouse clicks)
+    // Genre category drill-down (Miller column)
+    DrillGenreCategory { category_key: String }, // Drill into a genre category from column 0
 
     // Search
-    AppendSearchChar(char),
-    DeleteSearchChar,
     ExecuteLocalSearch,
-    ClearSearch,
     SelectSearchResult,
 
     // Artist bio popup (F4)
     ShowArtistBio { artist_key: String, artist_name: String },
-    ArtistBioLoaded { bio: String },
 
     // UI
     ListUp,
@@ -116,16 +98,13 @@ pub enum Action {
     ListPageDown,
     ListTop,
     ListBottom,
-    SelectItem,
 
     // Settings
     OpenSettings,
     SettingsSelect,
-    SettingsDiscoverServers,
     SelectServer(String),
     SaveSettings,
     SaveCredentials, // Save username/password from settings
-    ClearCache,      // Clear all cached data and reload (legacy, kept for Account section)
     ClearLibraryCache,      // Clear main library cache only (artists, albums, etc.)
     ClearArtworkCache,      // Clear artwork disk cache
     ClearSubfolderCache,    // Clear subfolder cache entries
@@ -136,7 +115,6 @@ pub enum Action {
     // Folder navigation
     LoadFolderRoot,
     NavigateIntoFolder(String),
-    NavigateUpFolder,
     PlayFolderTracks,
     PlayFolderTrack { track_index: usize },
     /// Refresh a specific subfolder (F5 when focused on a subfolder column).
@@ -149,7 +127,6 @@ pub enum Action {
     LoadArtistAllTracksForMiller { artist_key: String },  // Load all tracks by artist (from "All Tracks" entry)
     LoadAllAlbumsForMiller,  // Load all albums as a Miller column (from "All Artists" entry)
     PlayTrackFromMiller { column_index: usize, track_index: usize, single_track: bool },
-    EnqueueTrackFromMiller { column_index: usize, track_index: usize },  // Shift+Enter: enqueue track + following
     LoadCompilationsForMiller,  // Load compilation albums into a new Miller column
     LoadCompilationAlbumsForMiller { artist_key: String, artist_name: String },  // Load compilation albums for an artist
     LoadCompilationAllTracksForMiller { artist_key: String, artist_name: String },  // Load all compilation tracks for an artist
@@ -160,15 +137,12 @@ pub enum Action {
     LoadGenreAlbumsForMiller { genre_key: String },
     LoadGenreTracksForMiller { album_key: String },
     PlayGenreTrackFromMiller { column_index: usize, track_index: usize, single_track: bool },
-    EnqueueGenreTrackFromMiller { column_index: usize, track_index: usize },  // Shift+Enter: enqueue track + following
 
     // Miller column navigation for Playlists view
     LoadPlaylistTracksForMiller { playlist_key: String },
     PlayPlaylistTrackFromMiller { column_index: usize, track_index: usize, single_track: bool },
-    EnqueuePlaylistTrackFromMiller { column_index: usize, track_index: usize },  // Shift+Enter: enqueue track + following
 
     // Radio mode
-    StopRadio,
     JumpToRadioTrack(usize),  // Jump to track in radio queue without clearing
     PlayCurrentRadioTrack,    // Play current track in radio mode (stays in Radio playback mode)
 
@@ -179,7 +153,6 @@ pub enum Action {
     NavigateStationsBack,
 
     // Authentication
-    StartAuth,
     SettingsSignIn, // Sign in with username/password from settings
     AuthSignIn,     // Submit login form (from Auth screen)
     AuthSelectServer, // Select server and connect (from Auth screen)
@@ -200,20 +173,13 @@ pub enum Action {
     ClearError,
     SetStatus(String),
     ClearStatus,
-    Refresh,
     RefreshCategory(crate::app::state::RefreshCategory),
     /// Refresh album tracks in the current Miller column (F5 when viewing album tracks).
     RefreshAlbumTracks { album_key: String },
     /// Check cache staleness on view navigation (tier-1: 72h for this category, tier-2: 32d for all others).
     CheckStaleness(crate::app::state::RefreshCategory),
 
-    // Theme
-    CycleTheme,
-
     // Sonic Adventure
-    StartAdventure,                      // Begin adventure mode
-    SetAdventureStart(Track),            // Set start track
-    SetAdventureEnd(Track),              // Set end track
     SetAdventureLength(usize),           // Set length and start generation
     CancelAdventure,                     // Cancel adventure mode
     AdventureComplete(Vec<Track>),       // Adventure ready
@@ -227,15 +193,12 @@ pub enum Action {
     FilteredListDown,         // Navigate down within filtered results
     AppendListFilterChar(char),
     DeleteListFilterChar,
-    ClearListFilter,
-    ExecuteListFilter,
 
     // Search popup (Ctrl+F)
     OpenSearchPopup,
     CloseSearchPopup,
 
     // Radio launcher popup
-    OpenRadioLauncher,
     CloseRadioLauncher,
     RadioLauncherSearch,
     RadioLauncherSelectResult,
@@ -258,7 +221,6 @@ pub enum Action {
     // Sort popup (Ctrl+S)
     OpenSortPopup,
     CloseSortPopup,
-    ApplySortOption,
 
     // DJ modes
     ToggleDjMode(crate::app::state::DjMode),

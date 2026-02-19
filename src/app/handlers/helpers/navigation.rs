@@ -49,29 +49,6 @@ pub fn load_artists(event_tx: &mpsc::Sender<Event>, state: &mut AppState, client
     }
 }
 
-/// Load albums in background.
-pub fn load_albums(event_tx: &mpsc::Sender<Event>, state: &mut AppState, client: &PlexClient) {
-    if let Some(lib_key) = &state.active_library {
-        tracing::info!("Loading all albums from library: {}", lib_key);
-        state.albums_loading = true;
-
-        let event_tx = event_tx.clone();
-        let client = client.clone();
-        let lib_key = lib_key.clone();
-        tokio::spawn(async move {
-            match client.get_albums(&lib_key).await {
-                Ok(albums) => {
-                    tracing::info!("Loaded {} albums", albums.len());
-                    let _ = event_tx.send(Event::AlbumsLoaded(albums)).await;
-                }
-                Err(e) => {
-                    tracing::error!("Failed to load albums: {}", e);
-                }
-            }
-        });
-    }
-}
-
 /// Load playlists in background, filtered by active library.
 pub fn load_playlists(event_tx: &mpsc::Sender<Event>, state: &mut AppState, client: &PlexClient) {
     tracing::info!("Loading playlists");

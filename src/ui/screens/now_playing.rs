@@ -101,6 +101,22 @@ pub fn render_queue_mode(frame: &mut Frame, state: &AppState, area: Rect) {
         ])
         .split(chunks[0]);
 
+    // Register queue hit regions
+    {
+        let station_block = ratatui::widgets::Block::default().borders(ratatui::widgets::Borders::ALL);
+        let station_inner = station_block.inner(left_chunks[1]);
+        let track_block = ratatui::widgets::Block::default().borders(ratatui::widgets::Borders::ALL);
+        let track_inner = track_block.inner(chunks[1]);
+        let mut hr = state.hit_regions.borrow_mut();
+        hr.queue_content = Some(crate::ui::hit_regions::QueueRegions {
+            station_panel: left_chunks[1],
+            station_inner,
+            track_list: chunks[1],
+            track_list_inner: track_inner,
+            art_area: left_chunks[0],
+        });
+    }
+
     render_artwork(frame, state, left_chunks[0]);
     render_station_panel(frame, state, left_chunks[1]);
     render_track_list(frame, state, chunks[1]);
@@ -162,7 +178,10 @@ fn render_station_panel(frame: &mut Frame, state: &AppState, area: Rect) {
     let is_focused = state.now_playing_focus == NowPlayingFocus::Stations;
     let border_color = if is_focused { t.colors.border_focused } else { t.colors.border };
 
+    let title = state.station_nav.current_title();
     let block = Block::default()
+        .title(format!(" {} ", title))
+        .title_style(Style::default().fg(t.colors.fg_accent))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color))
         .style(Style::default().bg(t.colors.bg_primary));
@@ -194,24 +213,46 @@ fn render_station_panel(frame: &mut Frame, state: &AppState, area: Rect) {
         return;
     }
 
-    let visible_height = inner.height as usize;
+    let has_back_item = col.key.is_some(); // Non-root columns get a "← back" row
+    let back_rows = if has_back_item { 1 } else { 0 };
+    let station_visible_height = (inner.height as usize).saturating_sub(back_rows);
     let selected_idx = col.selected_index;
     let total_items = col.stations.len();
     let max_text_width = inner.width.saturating_sub(3) as usize;
 
     let scroll_offset = match state.station_scroll_pin {
         Some(pinned) => pinned,
-        None => NavigationService::calc_scroll_offset(selected_idx, visible_height, total_items),
+        None => NavigationService::calc_scroll_offset(selected_idx, station_visible_height, total_items),
     };
+
+    // Render "◂ back" row for non-root columns
+    if has_back_item {
+        let back_style = if is_focused && state.station_back_highlighted {
+            Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
+        } else if is_focused {
+            Style::default().fg(t.colors.shortcut_key)
+        } else {
+            Style::default().fg(t.colors.fg_muted)
+        };
+        let back_item = Paragraph::new("◂ back").style(back_style);
+        let back_area = Rect::new(inner.x, inner.y, inner.width, 1);
+        frame.render_widget(back_item, back_area);
+    }
 
     // Determine active station key and active DJ mode for visual indicators
     let active_station_key = state.radio.active_station.as_ref().map(|s| s.key.as_str());
     let active_dj_mode = state.active_dj_mode;
+    // Ancestor key at current column depth (for ♪ on parent categories)
+    let ancestor_key = state.radio.active_station.as_ref().and_then(|_|
+        state.radio.playing_station_ancestors
+            .get(state.station_nav.focused_column)
+            .map(|k| k.as_str())
+    );
 
     let visible_items: Vec<ListItem> = col.stations.iter()
         .enumerate()
         .skip(scroll_offset)
-        .take(visible_height)
+        .take(station_visible_height)
         .map(|(i, station)| {
             let is_selected = i == selected_idx;
 
@@ -231,10 +272,11 @@ fn render_station_panel(frame: &mut Frame, state: &AppState, area: Rect) {
             let is_active_dj = is_dj && active_dj_mode.map(|m| m.key() == station.key.as_str()).unwrap_or(false);
             let is_friendganger = station.key == "dj:friendganger";
             let is_active_shuffle = station.key == "remix:shuffle" && state.shuffle_undo_queue.is_some();
+            let is_ancestor_of_playing = ancestor_key == Some(station.key.as_str());
 
             // Build display text with prefix
-            // Active DJ modes and active shuffle get a dot indicator
-            let prefix = if is_active_station || is_active_dj || is_active_shuffle {
+            // Active station/DJ/shuffle and ancestor categories get ♪ indicator
+            let prefix = if is_active_station || is_active_dj || is_active_shuffle || is_ancestor_of_playing {
                 "\u{266a} " // ♪
             } else {
                 ""
@@ -244,9 +286,10 @@ fn render_station_panel(frame: &mut Frame, state: &AppState, area: Rect) {
             let available_width = max_text_width.saturating_sub(prefix.len() + suffix.len());
             let display_title = truncate_middle(&station.title, available_width);
 
-            let style = if is_selected && is_focused {
+            let back_active = state.station_back_highlighted;
+            let style = if is_selected && is_focused && !back_active {
                 Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
-            } else if is_selected {
+            } else if is_selected && !back_active {
                 Style::default().fg(t.colors.fg_primary).bg(t.colors.bg_secondary)
             } else if is_friendganger {
                 // Grayed out (unavailable)
@@ -254,7 +297,7 @@ fn render_station_panel(frame: &mut Frame, state: &AppState, area: Rect) {
             } else if is_active_dj || is_active_shuffle {
                 // Active DJ/shuffle: accent
                 Style::default().fg(t.colors.fg_accent)
-            } else if is_active_station {
+            } else if is_active_station || is_ancestor_of_playing {
                 Style::default().fg(t.colors.fg_accent)
             } else if is_action || is_dj || is_remix {
                 Style::default().fg(t.colors.fg_accent)
@@ -266,11 +309,12 @@ fn render_station_panel(frame: &mut Frame, state: &AppState, area: Rect) {
         .collect();
 
     let list = List::new(visible_items);
-    frame.render_widget(list, inner);
+    let list_area = Rect::new(inner.x, inner.y + back_rows as u16, inner.width, station_visible_height as u16);
+    frame.render_widget(list, list_area);
 
     // Scrollbar + position indicator for long lists
-    if total_items > visible_height {
-        crate::ui::widgets::render_scrollbar(frame, area, total_items, visible_height, scroll_offset);
+    if total_items > station_visible_height {
+        crate::ui::widgets::render_scrollbar(frame, area, total_items, station_visible_height, scroll_offset);
 
         let footer = format!("{}/{}", selected_idx + 1, total_items);
         let footer_area = Rect::new(
@@ -370,7 +414,7 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
         let is_selected = i == selected_idx;
         let is_multi_selected = state.queue_selected.contains(&i);
 
-        let prefix = if is_current { "♪ " } else if is_multi_selected { "● " } else { "  " };
+        let prefix = if is_current && is_multi_selected { "♪●" } else if is_current { "♪ " } else if is_multi_selected { "● " } else { "  " };
 
         // Title with empty fallback
         let track_title = if track.title.is_empty() {
@@ -429,6 +473,13 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
             (
                 Style::default().fg(t.colors.fg_primary),
                 Style::default().fg(t.colors.fg_muted),
+                Style::default().bg(t.colors.bg_secondary),
+            )
+        } else if is_current && is_multi_selected {
+            // Currently playing AND multi-selected
+            (
+                Style::default().fg(t.colors.fg_accent).bold(),
+                Style::default().fg(t.colors.fg_accent),
                 Style::default().bg(t.colors.bg_secondary),
             )
         } else if is_current {
@@ -664,6 +715,15 @@ fn render_visualizer_panel(frame: &mut Frame, state: &AppState, area: Rect) {
     // Tab bar (1 row)
     let tab_area = Rect::new(inner.x, inner.y, inner.width, 1);
     let content_area = Rect::new(inner.x, inner.y + 1, inner.width, inner.height - 1);
+
+    // Register hit regions for mouse click handling
+    {
+        let mut hr = state.hit_regions.borrow_mut();
+        hr.now_playing_content = Some(crate::ui::hit_regions::NowPlayingRegions {
+            visualizer_tab_area: tab_area,
+            visualizer_content_area: content_area,
+        });
+    }
 
     render_visualizer_tab_bar(frame, state, tab_area);
 

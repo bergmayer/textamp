@@ -5,7 +5,7 @@ use crate::app::AppState;
 use crate::ui::theme::theme;
 
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem};
 
 /// Render the sort popup as an overlay.
 pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
@@ -24,6 +24,18 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     let popup_area = Rect::new(x, y, popup_width.min(area.width), popup_height.min(area.height));
 
     frame.render_widget(Clear, popup_area);
+
+    // Register hit regions
+    {
+        let mut hr = state.hit_regions.borrow_mut();
+        let block_tmp = Block::default().borders(Borders::ALL);
+        let inner_tmp = block_tmp.inner(popup_area);
+        hr.sort_popup = Some(crate::ui::hit_regions::SortPopupRegions {
+            outer: popup_area,
+            inner: inner_tmp,
+            option_count: popup.options.len(),
+        });
+    }
 
     let title = format!(" sort: {} ", popup.column_title);
     let block = Block::default()
@@ -82,18 +94,8 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         ListItem::new(Line::from(Span::styled(text, style)))
     }).collect();
 
-    if inner.height > 1 {
-        // Render options
-        let list_area = Rect::new(inner.x, inner.y, inner.width, inner.height.saturating_sub(1));
+    if inner.height > 0 {
         let list = List::new(items);
-        frame.render_widget(list, list_area);
-
-        // Footer: [Esc] Close
-        let footer_area = Rect::new(inner.x, inner.y + inner.height.saturating_sub(1), inner.width, 1);
-        let footer = Paragraph::new(Line::from(Span::styled(
-            " [Esc] Close",
-            Style::default().fg(t.colors.fg_muted),
-        )));
-        frame.render_widget(footer, footer_area);
+        frame.render_widget(list, inner);
     }
 }

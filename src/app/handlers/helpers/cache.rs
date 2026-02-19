@@ -69,7 +69,11 @@ pub fn maybe_save_cache_async(event_tx: &mpsc::Sender<Event>, state: &mut AppSta
     cache_data.album_genres = state.album_genres.clone();
     cache_data.moods = state.moods.clone();
     cache_data.styles = state.styles.clone();
-    cache_data.stations = state.stations.clone();
+    // Save root column stations (not state.stations which may be drilled children)
+    cache_data.stations = state.station_nav.columns.first()
+        .map(|c| c.stations.clone())
+        .unwrap_or_default();
+    cache_data.station_children = state.station_children_cache.clone();
 
     // All tracks + track-level artists + aliases
     // Only save if non-empty to avoid overwriting cached data when preload is in-flight

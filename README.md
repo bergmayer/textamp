@@ -43,7 +43,7 @@ Press `/` to activate a real-time filter on the current column. Type to narrow r
 
 ### Library Switching
 
-`Ctrl+Alt+S` opens a quick picker to switch between Plex libraries. The switch is instant — cached data for the new library loads immediately while a background refresh runs.
+`F3` opens a quick picker to switch between Plex libraries. The switch is instant — cached data for the new library loads immediately while a background refresh runs.
 
 ## File Locations
 
@@ -81,23 +81,22 @@ For preference and config file locations, textamp checks for XDG environment var
 | `F1` / `?` | Help screen |
 | `F2` | Settings |
 
-### Commands (Alt+/ to see available commands)
+### Commands (Ctrl+/ or Alt+/ to see command bar)
 | Key | Action |
 |-----|--------|
-| `Ctrl+F` | Search popup (floating dialog) |
-| `Alt+E` | Add selection to queue (enqueue) |
-| `Alt+V` | Cycle view mode (context-dependent) |
-| `Alt+M` | Similar albums/tracks |
-| `Alt+G` | Go to Album (navigate to track's album in Library) |
-| `Alt+W` | Save queue/radio as playlist |
-
-### Shortcuts (Alt+/ twice to see available shortcuts)
-| Key | Action |
-|-----|--------|
-| `Ctrl+Alt+A` | Play track album (play album of current/highlighted track) |
-| `Ctrl+Alt+L` | Library Radio (station based on your library) |
-| `Ctrl+Alt+R` | Random Album Radio (shuffled albums) |
-| `Ctrl+Alt+S` | Quick library switcher |
+| `Ctrl+F` | Search popup |
+| `Ctrl+E` | Enqueue at top of queue and play |
+| `Ctrl+Shift+E` | Enqueue at end of queue |
+| `Ctrl+M` | Similar albums/tracks |
+| `Ctrl+J` | Jump to album in Library |
+| `Ctrl+S` | Sort popup |
+| `Ctrl+W` | Save queue/radio as playlist |
+| `Ctrl+X` | Clear queue/radio |
+| `Ctrl+Z` | Undo last queue remix |
+| `Alt+R` | Random Album Radio |
+| `Ctrl+Alt+A` | Search Apple Music |
+| `Ctrl+Alt+S` | Search Spotify |
+| `Ctrl+Alt+Y` | Search YouTube |
 
 ### Queue View Keys (`Ctrl+U`)
 | Key | Action |
@@ -111,11 +110,8 @@ For preference and config file locations, textamp checks for XDG environment var
 ### Now Playing View Keys (`Ctrl+N`)
 | Key | Action |
 |-----|--------|
-| `Tab` / `Shift+Tab` | Cycle visualizer tab (Waveform→Spectrum→Spectrogram) |
-| `Alt+V` | Cycle visualizer tab |
 | `↑` | Focus tab bar (then `←`/`→` to switch, `↓` to return) |
 | `←` / `→` | Seek ±1 second |
-| `Esc` | Return to Queue view |
 
 ### Navigation Flow
 - **Library** (`Ctrl+L`): Miller columns with artists, albums, tracks
@@ -134,6 +130,22 @@ The Genres view (`Ctrl+G`) provides six tabs for different genre sources:
 - **Mood**: Plex analysis-based mood metadata (e.g., "Energetic", "Melancholic")
 - **Style**: Plex analysis-based style metadata (e.g., "Avant-Garde", "Ambient")
 
+### Artist Aliases
+
+Plex does not distinguish between Artist and Album Artist fields. When an album's tracks all have the same `original_title` (track-level artist) that differs from the album artist, textamp treats that name as an alias. For example, if all tracks on an album credited to "Robert Pollard" have `original_title` set to "Guided by Voices", then "Guided by Voices" becomes an alias of "Robert Pollard". Names that differ only by a leading "The" (e.g. "Ramones" vs "The Ramones") are normalized to the same identity and do not create aliases.
+
+Aliases propagate throughout the app: the inline filter, search popup, radio launcher, adventure launcher, and compilation track display all recognize aliases when matching artists.
+
+### Compilation Detection
+
+textamp detects compilation albums automatically from cached track data, without per-album API calls. Albums flagged as compilation candidates by Plex are checked by grouping their tracks by `original_title` (track-level artist). Albums with tracks by multiple distinct artists are confirmed as compilations. Artists who appear only on compilations (no solo albums) are hidden from the main artist list; the inline filter redirects matches to their "Compilations" entry instead.
+
+Each artist's album list shows a "Compilations" entry when they have tracks on multi-artist compilation albums. Drilling in shows the compilation albums for that artist, with "All Tracks" at the top showing all their compilation tracks.
+
+### External Search
+
+`Ctrl+Alt+A`, `Ctrl+Alt+S`, and `Ctrl+Alt+Y` open a search in Apple Music, Spotify, or YouTube based on the currently selected artist, album, or track. On macOS, Apple Music opens in the Music app; on other platforms it opens in the browser.
+
 ## Playback Modes
 
 textamp has three playback modes. Only one is active at a time. Activating a DJ mode while a station is playing converts the station to a queue; starting a station deactivates any active DJ mode.
@@ -145,7 +157,7 @@ A finite, user-controlled playlist. Play an album, playlist, or search result to
 - Maximum 500 tracks
 - ~20 tracks of play history visible above current position
 - `Del` removes a track; `Shift+↑`/`Shift+↓` reorders tracks
-- Add to queue with `Alt+E` from any browse context
+- Add to queue with `Ctrl+E` from any browse context
 
 ### Radio (Stations)
 

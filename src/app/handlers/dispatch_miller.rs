@@ -18,7 +18,7 @@ const ART_BATCH_LIMIT: usize = 30;
 /// Collect album art (key, thumb) pairs from a column that aren't already cached or pending.
 /// Limited to `ART_BATCH_LIMIT` items around the column's selected_index to avoid
 /// blocking the event loop with thousands of synchronous disk reads.
-fn collect_art_to_load(
+pub(crate) fn collect_art_to_load(
     col: Option<&BrowseColumn>,
     cache: &std::collections::HashMap<String, Vec<u8>>,
     pending: &std::collections::HashSet<String>,
@@ -325,16 +325,6 @@ pub async fn dispatch(
                 }
             }
         }
-        Action::EnqueueTrackFromMiller { column_index, track_index } => {
-            // Shift+Enter: enqueue track + following after current (no auto-play)
-            if let Some(col) = state.artist_nav.columns.get(column_index) {
-                let tracks: Vec<Track> = col.tracks[track_index..].to_vec();
-                if !tracks.is_empty() {
-                    return Ok(vec![Action::EnqueueTracksNext(tracks)]);
-                }
-            }
-        }
-
         // Miller Column Actions for Genres View
         // ================================================================
 
@@ -452,16 +442,6 @@ pub async fn dispatch(
                 }
             }
         }
-        Action::EnqueueGenreTrackFromMiller { column_index, track_index } => {
-            // Shift+Enter: enqueue track + following after current (no auto-play)
-            if let Some(col) = state.genre_nav.columns.get(column_index) {
-                let tracks: Vec<Track> = col.tracks[track_index..].to_vec();
-                if !tracks.is_empty() {
-                    return Ok(vec![Action::EnqueueTracksNext(tracks)]);
-                }
-            }
-        }
-
         // Miller Column Actions for Playlists View
         // ================================================================
 
@@ -510,16 +490,6 @@ pub async fn dispatch(
                 }
             }
         }
-        Action::EnqueuePlaylistTrackFromMiller { column_index, track_index } => {
-            // Shift+Enter: enqueue track + following after current (no auto-play)
-            if let Some(col) = state.playlist_nav.columns.get(column_index) {
-                let tracks: Vec<Track> = col.tracks[track_index..].to_vec();
-                if !tracks.is_empty() {
-                    return Ok(vec![Action::EnqueueTracksNext(tracks)]);
-                }
-            }
-        }
-
         Action::LoadCompilationsForMiller => {
             // Push a new column with compilation albums, "All Tracks" pinned at top
             let auto_drill = std::mem::take(&mut state.auto_drill_pending);

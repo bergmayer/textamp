@@ -223,6 +223,11 @@ pub enum BrowseItem {
         key: String,
         title: String,
     },
+    /// Genre category selector in column 0 (All, Library, Artist, Album, Mood, Style).
+    GenreCategory {
+        key: String,
+        title: String,
+    },
     Playlist {
         key: String,
         title: String,
@@ -259,6 +264,7 @@ impl BrowseItem {
             BrowseItem::Album { key, .. } => key,
             BrowseItem::Track { key, .. } => key,
             BrowseItem::Genre { key, .. } => key,
+            BrowseItem::GenreCategory { key, .. } => key,
             BrowseItem::Playlist { key, .. } => key,
             BrowseItem::AllTracks { artist_key, .. } => artist_key,
             BrowseItem::AllArtists => "__all_artists__",
@@ -274,6 +280,7 @@ impl BrowseItem {
             BrowseItem::Album { title, .. } => title,
             BrowseItem::Track { title, .. } => title,
             BrowseItem::Genre { title, .. } => title,
+            BrowseItem::GenreCategory { title, .. } => title,
             BrowseItem::Playlist { title, .. } => title,
             BrowseItem::AllTracks { .. } => "All Tracks",
             BrowseItem::AllArtists => "All Artists",
@@ -855,7 +862,7 @@ impl BrowseColumn {
     }
 
     /// Count pinned items at the start of the column.
-    fn pinned_count(&self) -> usize {
+    pub fn pinned_count(&self) -> usize {
         self.items.iter().take_while(|item| {
             matches!(item, BrowseItem::AllArtists | BrowseItem::AllTracks { .. }
                 | BrowseItem::ArtistRadio { .. } | BrowseItem::Compilations
@@ -1059,10 +1066,14 @@ pub struct ArtistBioPopup {
     pub artist_name: String,
     /// Artist biography text.
     pub bio: String,
-    /// Scroll offset for long bios.
+    /// Scroll offset for long bios (clamped in render).
     pub scroll: u16,
     /// Loading state.
     pub loading: bool,
+    /// Artist artwork image data (fetched from Plex).
+    pub artwork_data: Option<Vec<u8>>,
+    /// Artist artwork thumb path (for cache keying).
+    pub artwork_thumb: Option<String>,
 }
 
 /// Snapshot of queue state for undo.
@@ -1228,6 +1239,10 @@ pub struct AppState {
     pub similar_mode: SimilarMode,
     pub similar_loading: bool,
     pub similar_source_title: String,
+    /// Album key for Tab cycling in Similar view (tracks → albums)
+    pub similar_tab_album_key: Option<String>,
+    /// Album title for Tab cycling footer display
+    pub similar_tab_album_title: Option<String>,
 
     // Playback
     pub playback: PlaybackState,
@@ -1243,6 +1258,7 @@ pub struct AppState {
     pub play_history: VecDeque<Track>,
     /// Whether user is currently dragging the seek indicator
     pub seeking_drag: bool,
+    pub volume_drag: bool,
     /// Consecutive playback errors (for auto-skip with limit)
     pub consecutive_playback_errors: u32,
     /// Plex session identifier for timeline reporting.
@@ -1264,6 +1280,8 @@ pub struct AppState {
     // UI state
     pub list_state: ListStates,
     pub should_quit: bool,
+    /// Cache data built during quit, saved after terminal is restored.
+    pub pending_cache_save: Option<crate::plex::CacheData>,
     pub last_error: Option<String>,
     pub status_message: Option<String>,
     pub status_show_time: Option<std::time::Instant>,
@@ -1274,6 +1292,9 @@ pub struct AppState {
     // Modifier bar display: shows Alt or Ctrl+Alt bar until this deadline.
     // Set on any Alt+key / Ctrl+Alt+key press; cleared on non-modifier keypress or timeout.
     pub alt_bar_until: Option<std::time::Instant>,
+
+    // Volume slider: shows until this deadline, then auto-hides.
+    pub volume_slider_until: Option<std::time::Instant>,
 
     // Unified search/filter tab
     pub search_tab: SearchTab,
@@ -1330,6 +1351,8 @@ pub struct AppState {
     // Stations state (Plexamp-style radio stations) - legacy, use station_nav instead
     pub stations: Vec<Station>,
     pub stations_loading: bool,
+    /// Cached station children (mood/style/decade sub-lists, keyed by station key).
+    pub station_children_cache: std::collections::HashMap<String, Vec<Station>>,
 
     // Theme
     pub theme: ThemeName,
@@ -1428,6 +1451,10 @@ pub struct AppState {
     /// Second marquee for subtitle row (2-row track display in playlists)
     pub marquee_subtitle: std::cell::RefCell<MarqueeState>,
 
+    /// Hit-test region registry (RefCell for interior mutability during render).
+    /// Populated each frame by render code, consumed by mouse_input handlers.
+    pub hit_regions: std::cell::RefCell<crate::ui::hit_regions::HitRegions>,
+
     // Library switch loading state
     pub library_loading: bool,
 
@@ -1446,7 +1473,7 @@ pub struct AppState {
     /// Artwork disk cache stats: (file_count, total_bytes). Computed on startup and after clears.
     pub artwork_cache_stats: Option<(usize, u64)>,
     /// Library cache total bytes on disk. Computed on startup and after clears.
-    pub library_cache_stats: Option<u64>,
+    pub library_cache_stats: Option<(u64, Vec<(String, u64)>)>,
     /// Waveform cache stats: (file_count, total_bytes). Computed on startup and after clears.
     pub waveform_cache_stats: Option<(usize, u64)>,
     /// Scroll cooldown for cover art mode (prevents trackpad momentum).
@@ -1464,6 +1491,8 @@ pub struct AppState {
     pub search_scroll_pin: Option<usize>,
     /// Pinned scroll offset for station panel after mouse click.
     pub station_scroll_pin: Option<usize>,
+    /// Whether the "◂ back" row in the station panel is highlighted (keyboard nav).
+    pub station_back_highlighted: bool,
     /// Pinned scroll offset for queue track list after mouse click.
     pub queue_scroll_pin: Option<usize>,
     /// Last click time in queue view (for double-click detection).
@@ -1646,6 +1675,9 @@ pub struct RadioPlaybackState {
     pub time_travel_decades: Vec<String>,
     /// Current position in decades list (next decade to fetch from)
     pub time_travel_index: usize,
+
+    /// Station nav column keys from root to playing station (for ancestor ♪ indicator).
+    pub playing_station_ancestors: Vec<String>,
 }
 
 impl RadioPlaybackState {
@@ -1676,6 +1708,7 @@ impl RadioPlaybackState {
         // Clear Time Travel state
         self.time_travel_decades.clear();
         self.time_travel_index = 0;
+        self.playing_station_ancestors.clear();
     }
 }
 
@@ -1857,6 +1890,8 @@ impl AppState {
             similar_mode: SimilarMode::Albums,
             similar_loading: false,
             similar_source_title: String::new(),
+            similar_tab_album_key: None,
+            similar_tab_album_title: None,
             playback: PlaybackState::default(),
             queue: Vec::new(),
             queue_index: None,
@@ -1865,6 +1900,7 @@ impl AppState {
             queue_sort_mode: QueueSortMode::default(),
             play_history: VecDeque::new(),
             seeking_drag: false,
+            volume_drag: false,
             consecutive_playback_errors: 0,
             plex_session_id: None,
             last_progress_report: None,
@@ -1877,11 +1913,13 @@ impl AppState {
             pending_track_key: None,
             list_state: ListStates::default(),
             should_quit: false,
+            pending_cache_save: None,
             last_error: None,
             status_message: None,
             status_show_time: None,
             input_dialog: None,
             alt_bar_until: None,
+            volume_slider_until: None,
             search_tab: SearchTab::default(),
             terminal_width: 80,
             terminal_height: 24,
@@ -1905,6 +1943,7 @@ impl AppState {
             station_nav: StationNavigationState::default(),
             stations: Vec::new(),
             stations_loading: false,
+            station_children_cache: std::collections::HashMap::new(),
             theme: ThemeName::default(),
             adventure: AdventureState::default(),
             active_dj_mode: None,
@@ -1944,6 +1983,7 @@ impl AppState {
             auto_drill_pending: false,
             marquee: std::cell::RefCell::new(MarqueeState::default()),
             marquee_subtitle: std::cell::RefCell::new(MarqueeState::default()),
+            hit_regions: std::cell::RefCell::new(crate::ui::hit_regions::HitRegions::default()),
             library_loading: false,
             output_target: OutputTarget::default(),
             remote_players: Vec::new(),
@@ -1962,6 +2002,7 @@ impl AppState {
             browse_click_time: None,
             search_scroll_pin: None,
             station_scroll_pin: None,
+            station_back_highlighted: false,
             queue_scroll_pin: None,
             queue_click_time: None,
             similar_scroll_pin: None,
@@ -2995,6 +3036,8 @@ pub struct SettingsState {
     pub editing_credential: Option<CredentialField>,
     /// Whether the Account section is in sign-in mode (showing login form)
     pub signing_in: bool,
+    /// Scroll offset for the About section (display-only, no selectable items)
+    pub scroll: u16,
 }
 
 /// Which credential field is being edited in settings.
@@ -3113,6 +3156,8 @@ pub struct ConfirmDialog {
     pub title: String,
     pub message: String,
     pub on_confirm: ConfirmAction,
+    /// Which button is currently selected (true = Yes, false = No).
+    pub selected_yes: bool,
 }
 
 /// Action to take when confirmation dialog is confirmed.
@@ -3122,6 +3167,7 @@ pub enum ConfirmAction {
     ClearLibraryCache,
     ClearArtworkCache,
     ClearSubfolderCache,
+    Quit,
 }
 
 /// Output target for playback — Local (default) or Remote (Plex player device).

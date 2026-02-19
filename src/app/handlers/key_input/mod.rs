@@ -18,6 +18,7 @@ mod settings;
 
 // Re-export public items used by other handler modules.
 pub use browse::{update_filter_column_selection, get_filter_drilldown_actions, truncate_filter_right_columns};
+pub(crate) use browse::{auto_drill_artist_action, auto_drill_genre_action, auto_drill_playlist_action};
 pub use self::alt_commands::{AltCommand, CommandModifier, available_alt_commands};
 
 mod alt_commands;
@@ -76,22 +77,49 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
     }
 
     // Handle confirm dialog if active
-    if let Some(dialog) = state.confirm_dialog.take() {
+    if let Some(mut dialog) = state.confirm_dialog.take() {
+        // Pressing the same shortcut again (e.g. Ctrl+Q Ctrl+Q) confirms immediately
+        if matches!(dialog.on_confirm, crate::app::state::ConfirmAction::Quit)
+            && key.modifiers == KeyModifiers::CONTROL
+            && key.code == KeyCode::Char('q')
+        {
+            return vec![Action::Quit];
+        }
         match key.code {
-            KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+            KeyCode::Enter => {
+                if dialog.selected_yes {
+                    use crate::app::state::ConfirmAction;
+                    return match dialog.on_confirm {
+                        ConfirmAction::RefreshCache => helpers::refresh_current_view(state),
+                        ConfirmAction::ClearLibraryCache => vec![Action::ClearLibraryCache],
+                        ConfirmAction::ClearArtworkCache => vec![Action::ClearArtworkCache],
+                        ConfirmAction::ClearSubfolderCache => vec![Action::ClearSubfolderCache],
+                        ConfirmAction::Quit => vec![Action::Quit],
+                    };
+                } else {
+                    // No selected — dismiss
+                    return vec![];
+                }
+            }
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
                 use crate::app::state::ConfirmAction;
                 return match dialog.on_confirm {
                     ConfirmAction::RefreshCache => helpers::refresh_current_view(state),
                     ConfirmAction::ClearLibraryCache => vec![Action::ClearLibraryCache],
                     ConfirmAction::ClearArtworkCache => vec![Action::ClearArtworkCache],
                     ConfirmAction::ClearSubfolderCache => vec![Action::ClearSubfolderCache],
+                    ConfirmAction::Quit => vec![Action::Quit],
                 };
             }
             KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
                 return vec![];
             }
+            KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::BackTab => {
+                dialog.selected_yes = !dialog.selected_yes;
+                state.confirm_dialog = Some(dialog);
+                return vec![];
+            }
             _ => {
-                // Put dialog back — key not handled
                 state.confirm_dialog = Some(dialog);
                 return vec![];
             }
@@ -155,8 +183,17 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
 
     // Global CUA shortcuts (work everywhere)
     match (key.modifiers, key.code) {
-        // Quit: Ctrl+Q
-        (KeyModifiers::CONTROL, KeyCode::Char('q')) => return vec![Action::Quit],
+        // Quit: Ctrl+Q (with confirmation)
+        (KeyModifiers::CONTROL, KeyCode::Char('q')) => {
+            use crate::app::state::{ConfirmDialog, ConfirmAction};
+            state.confirm_dialog = Some(ConfirmDialog {
+                title: "Quit".to_string(),
+                message: "Are you sure you want to quit?".to_string(),
+                on_confirm: ConfirmAction::Quit,
+                selected_yes: false,
+            });
+            return vec![];
+        }
 
         // Global navigation shortcuts
         (KeyModifiers::CONTROL, KeyCode::Char('f')) => {
@@ -198,7 +235,15 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
             if state.artists.is_empty() {
                 return vec![Action::LoadArtists, Action::SetView(View::Browse), Action::CheckStaleness(tier1)];
             }
-            return vec![Action::SetView(View::Browse), Action::CheckStaleness(tier1)];
+            // Auto-drill if only root column exists
+            let mut actions = vec![Action::SetView(View::Browse), Action::CheckStaleness(tier1)];
+            if state.artist_nav.columns.len() == 1 && !state.artist_nav.is_empty() {
+                if let Some(drill) = browse::auto_drill_artist_action(state) {
+                    state.auto_drill_pending = true;
+                    actions.push(drill);
+                }
+            }
+            return actions;
         }
         (KeyModifiers::CONTROL, KeyCode::Char('p')) => {
             // Ctrl+P = Playlists category
@@ -213,6 +258,13 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
             } else {
                 let items = crate::app::state::BrowseItem::from_playlists(&state.playlists);
                 state.playlist_nav.reset("playlists", items);
+                // Auto-drill if only root column exists
+                if state.playlist_nav.columns.len() == 1 && !state.playlist_nav.is_empty() {
+                    if let Some(drill) = browse::auto_drill_playlist_action(state) {
+                        state.auto_drill_pending = true;
+                        actions.push(drill);
+                    }
+                }
             }
             actions.push(Action::CheckStaleness(crate::app::state::RefreshCategory::Playlists));
             return actions;
@@ -256,7 +308,6 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
             // F5 = Refresh current view
             return helpers::refresh_current_view(state);
         }
-
         // Playback controls
         (_, KeyCode::Char(' ')) if state.view != View::Search && !state.list_filter.active && !state.search_popup_active && state.radio_launcher.is_none() && state.adventure_launcher.is_none() && state.artist_radio_picker.is_none() => {
             return vec![Action::TogglePlayPause];
@@ -297,8 +348,14 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
             state.list_state.queue_index = (state.list_state.queue_index + 1).min(max);
             return vec![];
         }
-        (mods, KeyCode::Up) if mods == KeyModifiers::CONTROL | KeyModifiers::SHIFT => return vec![Action::VolumeUp],
-        (mods, KeyCode::Down) if mods == KeyModifiers::CONTROL | KeyModifiers::SHIFT => return vec![Action::VolumeDown],
+        (mods, KeyCode::Up) if mods == KeyModifiers::CONTROL | KeyModifiers::SHIFT => {
+            state.volume_slider_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
+            return vec![Action::VolumeUp];
+        }
+        (mods, KeyCode::Down) if mods == KeyModifiers::CONTROL | KeyModifiers::SHIFT => {
+            state.volume_slider_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
+            return vec![Action::VolumeDown];
+        }
         // Shift+Left/Right for seeking (10 second skip)
         (KeyModifiers::SHIFT, KeyCode::Left) => return vec![Action::SeekRelative(-10000)],
         (KeyModifiers::SHIFT, KeyCode::Right) => return vec![Action::SeekRelative(10000)],
@@ -311,13 +368,10 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
         (mods, KeyCode::Char('e')) | (mods, KeyCode::Char('E')) if !state.search_popup_active && mods == KeyModifiers::CONTROL | KeyModifiers::SHIFT && alt_commands::is_action_command_available(state, 'e') => {
             return vec![Action::EnqueueSelection];
         }
-        (KeyModifiers::CONTROL, KeyCode::Char('v')) if alt_commands::is_action_command_available(state, 'v') => {
-            return handle_cycle_view(state);
-        }
         (KeyModifiers::CONTROL, KeyCode::Char('m')) if alt_commands::is_action_command_available(state, 'm') => {
             return get_similar_action(state);
         }
-        (KeyModifiers::CONTROL, KeyCode::Char('b')) if alt_commands::is_action_command_available(state, 'b') => {
+        (KeyModifiers::CONTROL, KeyCode::Char('j')) if alt_commands::is_action_command_available(state, 'j') => {
             return navigate_to_album(state);
         }
         (KeyModifiers::CONTROL, KeyCode::Char('w')) if alt_commands::is_action_command_available(state, 'w') => {
@@ -327,11 +381,14 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
             return vec![Action::ClearQueue];
         }
         // Alt shortcuts (station/global commands)
-        (KeyModifiers::ALT, KeyCode::Char('l')) => {
-            // Alt+L = Play Library Radio station
-            if let Some(lib_key) = &state.active_library {
-                let key = format!("/library/sections/{}/stations/library", lib_key);
-                return vec![Action::PlayStation(key)];
+        (KeyModifiers::ALT, KeyCode::Char('f')) => {
+            // Alt+F = Activate inline filter (Browse view only)
+            if state.view == View::Browse && !state.list_filter.active
+                && !state.search_popup_active && state.sort_popup.is_none()
+                && state.radio_launcher.is_none() && state.adventure_launcher.is_none()
+                && state.artist_radio_picker.is_none()
+            {
+                return vec![Action::ActivateListFilter];
             }
             return vec![];
         }
@@ -346,6 +403,35 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
         (KeyModifiers::CONTROL, KeyCode::Char('s')) if alt_commands::is_action_command_available(state, 's') => {
             // Ctrl+S = Sort popup for current column
             return vec![Action::OpenSortPopup];
+        }
+
+        // External service search: Ctrl+Alt+A/S/Y
+        (mods, KeyCode::Char('a')) if mods == KeyModifiers::CONTROL | KeyModifiers::ALT => {
+            let query = build_external_search_query(state);
+            if !query.is_empty() {
+                let url = crate::services::external_search::generate_search_url(
+                    crate::services::external_search::SearchTarget::AppleMusic, &query);
+                let _ = open::that(&url);
+            }
+            return vec![];
+        }
+        (mods, KeyCode::Char('s')) if mods == KeyModifiers::CONTROL | KeyModifiers::ALT => {
+            let query = build_external_search_query(state);
+            if !query.is_empty() {
+                let url = crate::services::external_search::generate_search_url(
+                    crate::services::external_search::SearchTarget::Spotify, &query);
+                let _ = open::that(&url);
+            }
+            return vec![];
+        }
+        (mods, KeyCode::Char('y')) if mods == KeyModifiers::CONTROL | KeyModifiers::ALT => {
+            let query = build_external_search_query(state);
+            if !query.is_empty() {
+                let url = crate::services::external_search::generate_search_url(
+                    crate::services::external_search::SearchTarget::YouTube, &query);
+                let _ = open::that(&url);
+            }
+            return vec![];
         }
 
         _ => {}
@@ -465,12 +551,12 @@ fn handle_artist_bio_popup_keys(key: event::KeyEvent, state: &mut AppState) -> V
         KeyCode::Esc | KeyCode::F(4) => {
             state.artist_bio_popup = None;
         }
-        KeyCode::Up | KeyCode::Char('k') => {
+        KeyCode::Up => {
             if let Some(ref mut popup) = state.artist_bio_popup {
                 popup.scroll = popup.scroll.saturating_sub(1);
             }
         }
-        KeyCode::Down | KeyCode::Char('j') => {
+        KeyCode::Down => {
             if let Some(ref mut popup) = state.artist_bio_popup {
                 popup.scroll = popup.scroll.saturating_add(1);
             }
@@ -628,6 +714,8 @@ pub(crate) fn get_similar_action(state: &mut AppState) -> Vec<Action> {
     // 1. Highlighted track → LoadSimilarTracks
     if let Some(track) = get_selected_track(state) {
         let title = format!("{} - {}", track.artist_name(), track.title);
+        state.similar_tab_album_key = track.parent_rating_key.clone();
+        state.similar_tab_album_title = Some(track.album_name().to_string());
         return vec![Action::LoadSimilarTracks {
             rating_key: track.rating_key.clone(),
             title,
@@ -636,6 +724,8 @@ pub(crate) fn get_similar_action(state: &mut AppState) -> Vec<Action> {
 
     // 2. Highlighted album → LoadSimilarAlbums
     if let Some((rating_key, title)) = get_selected_album(state) {
+        state.similar_tab_album_key = None;
+        state.similar_tab_album_title = None;
         return vec![Action::LoadSimilarAlbums {
             rating_key,
             title,
@@ -645,6 +735,8 @@ pub(crate) fn get_similar_action(state: &mut AppState) -> Vec<Action> {
     // 3. Fallback: now-playing track → LoadSimilarTracks
     if let Some(track) = state.current_track().cloned() {
         let title = format!("{} - {}", track.artist_name(), track.title);
+        state.similar_tab_album_key = track.parent_rating_key.clone();
+        state.similar_tab_album_title = Some(track.album_name().to_string());
         return vec![Action::LoadSimilarTracks {
             rating_key: track.rating_key.clone(),
             title,
@@ -665,123 +757,6 @@ fn reset_right_panel(state: &mut AppState) {
     state.genre_albums_index = 0;
     state.selected_artist_name.clear();
     state.selected_album_title.clear();
-}
-
-/// Handle Ctrl+V: simplified per-column sort cycle.
-///
-/// - Artists: Default <-> Shuffled
-/// - Albums: Default -> By Artist -> Shuffled -> Default
-/// - Tracks (album): Default -> By Title -> By Duration -> Shuffled -> Default
-/// - Tracks (all/playlist): Default -> By Artist -> By Album -> By Title -> By Duration -> Shuffled -> Default
-/// - NowPlaying: visualizer tab cycle (unchanged)
-/// - Genres: genre tab cycle (unchanged)
-pub(crate) fn handle_cycle_view(state: &mut AppState) -> Vec<Action> {
-    use crate::app::state::ColumnSortMode;
-
-    // Cycle visualizer tab in NowPlaying view
-    if state.view == View::NowPlaying {
-        state.visualizer_tab = state.visualizer_tab.next();
-        return vec![];
-    }
-
-    if state.view != View::Browse {
-        return vec![];
-    }
-
-    // Genre tab cycle: Genres category, focused column has Genre items
-    if state.browse_category == BrowseCategory::Genres {
-        let is_genre_col = state.genre_nav.focused()
-            .and_then(|col| col.items.first())
-            .map_or(false, |item| matches!(item, BrowseItem::Genre { .. }));
-        if is_genre_col {
-            return vec![Action::CycleGenreTab];
-        }
-    }
-
-    let nav = match state.browse_nav_mut() {
-        Some(n) => n,
-        None => return vec![],
-    };
-
-    let col_idx = nav.focused_column;
-    let col = match nav.columns.get(col_idx) {
-        Some(c) => c,
-        None => return vec![],
-    };
-
-    let current_mode = col.sort_mode;
-
-    // Determine column type from content
-    let is_artist = col.items.iter().take(3).any(|i| matches!(i, BrowseItem::Artist { .. }));
-    let is_album = col.items.iter().take(4).any(|i| matches!(i, BrowseItem::Album { .. }));
-    let is_track = col.items.first().map_or(false, |i| matches!(i, BrowseItem::Track { .. }));
-
-    let next_mode = if is_artist {
-        // Artists: Default <-> Shuffled
-        match current_mode {
-            ColumnSortMode::Default => ColumnSortMode::Shuffled,
-            _ => ColumnSortMode::Default,
-        }
-    } else if is_album {
-        // Albums: Default -> By Artist -> Shuffled -> Default
-        match current_mode {
-            ColumnSortMode::Default => ColumnSortMode::ByArtist,
-            ColumnSortMode::ByArtist => ColumnSortMode::Shuffled,
-            _ => ColumnSortMode::Default,
-        }
-    } else if is_track {
-        // Determine if special track column
-        // We need to re-borrow state immutably for is_special_track_column
-        // So we compute the nav pointer check first
-        let is_special = {
-            let nav_ref = match state.browse_category {
-                BrowseCategory::Library => &state.artist_nav,
-                BrowseCategory::Genres => &state.genre_nav,
-                BrowseCategory::Playlists => &state.playlist_nav,
-                _ => return vec![],
-            };
-            state.is_special_track_column(nav_ref, col_idx)
-        };
-
-        if is_special {
-            // All-tracks/playlist: Default -> ByArtist -> ByAlbum -> ByTitle -> ByDuration -> Shuffled -> Default
-            match current_mode {
-                ColumnSortMode::Default => ColumnSortMode::ByArtist,
-                ColumnSortMode::ByArtist => ColumnSortMode::ByAlbum,
-                ColumnSortMode::ByAlbum => ColumnSortMode::ByTitle,
-                ColumnSortMode::ByTitle => ColumnSortMode::ByDuration,
-                ColumnSortMode::ByDuration => ColumnSortMode::Shuffled,
-                _ => ColumnSortMode::Default,
-            }
-        } else {
-            // Album tracks: Default -> ByTitle -> ByDuration -> Shuffled -> Default
-            match current_mode {
-                ColumnSortMode::Default => ColumnSortMode::ByTitle,
-                ColumnSortMode::ByTitle => ColumnSortMode::ByDuration,
-                ColumnSortMode::ByDuration => ColumnSortMode::Shuffled,
-                _ => ColumnSortMode::Default,
-            }
-        }
-    } else {
-        // Other columns (genres, playlists root): Default <-> Shuffled
-        match current_mode {
-            ColumnSortMode::Default => ColumnSortMode::Shuffled,
-            _ => ColumnSortMode::Default,
-        }
-    };
-
-    // Apply the sort
-    let nav = state.browse_nav_mut().unwrap();
-    let col = &mut nav.columns[col_idx];
-
-    // Restore originals before applying new sort (unless going to shuffle)
-    if col.has_originals() && next_mode != ColumnSortMode::Shuffled {
-        col.unshuffle();
-    }
-    col.apply_sort(next_mode);
-    nav.columns.truncate(col_idx + 1);
-
-    vec![]
 }
 
 /// Navigate to the album of the currently selected track (Ctrl+B).
@@ -1037,6 +1012,40 @@ fn get_selected_album(state: &AppState) -> Option<(String, String)> {
         // Queue and NowPlaying don't have album selection
         _ => None,
     }
+}
+
+/// Build a search query for external services based on current context.
+///
+/// Priority: selected artist → selected album → selected track → now-playing track.
+/// Returns an empty string if nothing is available.
+fn build_external_search_query(state: &AppState) -> String {
+    // 1. Selected artist in browse nav
+    if state.view == View::Browse {
+        if let Some(nav) = state.browse_nav() {
+            if let Some(item) = nav.selected_item() {
+                if let BrowseItem::Artist { title, .. } = item {
+                    return title.clone();
+                }
+            }
+        }
+    }
+
+    // 2. Selected album
+    if let Some((_key, title)) = get_selected_album(state) {
+        return title; // Already formatted as "artist - album"
+    }
+
+    // 3. Selected track
+    if let Some(track) = get_selected_track(state) {
+        return format!("{} - {}", track.artist_name(), track.album_name());
+    }
+
+    // 4. Now-playing fallback
+    if let Some(track) = state.current_track() {
+        return format!("{} - {}", track.artist_name(), track.album_name());
+    }
+
+    String::new()
 }
 
 /// Jump to first item in current list starting with given letter.

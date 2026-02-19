@@ -35,6 +35,16 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     let inner = block.inner(popup_area);
     frame.render_widget(block, popup_area);
 
+    // Register hit regions for mouse handler
+    {
+        let mut hr = state.hit_regions.borrow_mut();
+        hr.similar_content = Some(crate::ui::hit_regions::SimilarRegions {
+            outer: popup_area,
+            inner,
+            rows_per_item: 2,
+        });
+    }
+
     if state.similar_loading {
         let msg = match state.similar_mode {
             SimilarMode::Albums => "Loading similar albums...",
@@ -57,11 +67,34 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         SimilarMode::Tracks => render_tracks(frame, state, content_area, popup_area),
     }
 
-    // Footer
-    let footer = Paragraph::new(Line::from(vec![
+    // Footer with dynamic Tab hint
+    let mut footer_spans = vec![
         Span::styled(" [Esc] ", Style::default().fg(t.colors.shortcut_key)),
         Span::styled("close", Style::default().fg(t.colors.fg_muted)),
-    ]));
+    ];
+
+    match state.similar_mode {
+        SimilarMode::Tracks => {
+            if let Some(ref album_title) = state.similar_tab_album_title {
+                footer_spans.push(Span::styled("  [Tab] ", Style::default().fg(t.colors.shortcut_key)));
+                footer_spans.push(Span::styled(
+                    format!("similar albums to: {}", album_title),
+                    Style::default().fg(t.colors.fg_muted),
+                ));
+            }
+        }
+        SimilarMode::Albums => {
+            if let Some(track) = state.current_track() {
+                footer_spans.push(Span::styled("  [Tab] ", Style::default().fg(t.colors.shortcut_key)));
+                footer_spans.push(Span::styled(
+                    format!("similar tracks to: {} - {}", track.artist_name(), track.title),
+                    Style::default().fg(t.colors.fg_muted),
+                ));
+            }
+        }
+    }
+
+    let footer = Paragraph::new(Line::from(footer_spans));
     frame.render_widget(footer, footer_area);
 }
 

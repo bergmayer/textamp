@@ -14,6 +14,7 @@
 //! reused directly via FFI or compiled to the target platform.
 
 pub mod artist_alias_service;
+pub mod external_search;
 mod adventure;
 mod cache_service;
 mod folder_service;

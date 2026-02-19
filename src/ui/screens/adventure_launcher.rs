@@ -21,6 +21,41 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         None => return,
     };
 
+    // Register hit regions for mouse handler
+    {
+        let popup_area = centered_rect(50, 70, area);
+        let block_tmp = ratatui::widgets::Block::default().borders(ratatui::widgets::Borders::ALL);
+        let inner_tmp = block_tmp.inner(popup_area);
+        // Results Y offset depends on drill level
+        let results_y_offset: u16 = match launcher.step {
+            AdventureStep::EnterTrackCount => 0, // count input popup — no results list
+            _ => match &launcher.drill {
+                AdventureDrillLevel::Search => 2 + 3, // tabs (2) + search input (3)
+                AdventureDrillLevel::ArtistAlbums { .. } => 1, // breadcrumb (1)
+                AdventureDrillLevel::AlbumTracks { .. } => 1,  // breadcrumb (1)
+            },
+        };
+        let item_count = match launcher.step {
+            AdventureStep::EnterTrackCount => 0,
+            _ => match &launcher.drill {
+                AdventureDrillLevel::Search => {
+                    launcher.results.as_ref().map_or(0, |r| {
+                        r.artists.len() + r.albums.len() + r.tracks.len()
+                    })
+                }
+                AdventureDrillLevel::ArtistAlbums { albums, .. } => albums.len(),
+                AdventureDrillLevel::AlbumTracks { tracks, .. } => tracks.len(),
+            },
+        };
+        let mut hr = state.hit_regions.borrow_mut();
+        hr.adventure_launcher = Some(crate::ui::hit_regions::AdventureLauncherRegions {
+            outer: popup_area,
+            inner: inner_tmp,
+            item_count,
+            results_y_offset,
+        });
+    }
+
     match launcher.step {
         AdventureStep::FindStartTrack | AdventureStep::FindEndTrack => {
             render_track_finder(frame, launcher, area);

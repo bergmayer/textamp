@@ -15,9 +15,12 @@
 //! │ ^A artists │ ^P playlists │ ^N queue │ ^S similar │ ? │
 //! └──────────────────────────────────────────────────────────────┘
 
+use std::cell::RefCell;
+
 use crate::app::state::{View, BrowseCategory, InputDialog, ConfirmDialog};
 use crate::app::AppState;
 use crate::services::NavigationService;
+use super::artwork::ArtworkRenderer;
 use super::layout::{AppLayout, FullScreenLayout, centered_rect};
 use super::screens;
 use super::theme::theme;
@@ -25,10 +28,40 @@ use super::widgets;
 use super::widgets::scrollbar::render_scrollbar;
 
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
+
+thread_local! {
+    static BIO_ARTWORK_RENDERER: RefCell<ArtworkRenderer> = RefCell::new(ArtworkRenderer::new());
+}
+
+/// Initialize the bio popup artwork renderer with a pre-detected picker.
+/// Must be called before the event reader task starts consuming stdin.
+pub fn init_bio_artwork_renderer(picker: ratatui_image::picker::Picker) {
+    BIO_ARTWORK_RENDERER.with(|r| {
+        *r.borrow_mut() = ArtworkRenderer::new_with_picker(picker);
+    });
+}
+
+/// Set the bio artwork renderer mode.
+pub fn set_bio_artwork_mode(mode: crate::app::state::ArtworkMode) {
+    BIO_ARTWORK_RENDERER.with(|r| r.borrow_mut().set_mode(mode));
+}
+
+/// Set the bio artwork renderer protocol type.
+pub fn set_bio_artwork_protocol_type(protocol_type: ratatui_image::picker::ProtocolType) {
+    BIO_ARTWORK_RENDERER.with(|r| r.borrow_mut().set_protocol_type(protocol_type));
+}
+
+/// Restore the bio artwork renderer's native protocol.
+pub fn restore_bio_artwork_native_protocol() {
+    BIO_ARTWORK_RENDERER.with(|r| r.borrow_mut().restore_native_protocol());
+}
 
 /// Render the entire UI.
 pub fn render(frame: &mut Frame, state: &AppState) {
+    // Clear hit-test registry for this frame
+    state.hit_regions.borrow_mut().clear();
+
     // Fill entire background with theme color
     let t = theme();
     frame.render_widget(Block::default().style(Style::default().bg(t.colors.bg_primary)), frame.area());
@@ -91,7 +124,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
 
     // Render confirm dialog if present
     if let Some(ref dialog) = state.confirm_dialog {
-        render_confirm_dialog(frame, dialog);
+        render_confirm_dialog(frame, state, dialog);
     }
 
     // Render toast notification if present (bottom-right, non-blocking)
@@ -168,46 +201,18 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
                 (None, None)
             };
 
-            // Split off 1 row for tab bar at the top
-            let full_area = Rect {
-                x: layout.left_panel.x,
-                y: layout.left_panel.y,
-                width: layout.left_panel.width + layout.right_panel.width,
-                height: layout.left_panel.height,
-            };
-            let tab_area = Rect { height: 1, ..full_area };
-            let content_left = Rect {
-                y: layout.left_panel.y + 1,
-                height: layout.left_panel.height.saturating_sub(1),
-                ..layout.left_panel
-            };
-            let content_right = Rect {
-                y: layout.right_panel.y + 1,
-                height: layout.right_panel.height.saturating_sub(1),
-                ..layout.right_panel
-            };
-
-            // Render tab bar
-            render_tab_bar(
-                frame, state, tab_area,
-                &["all", "library", "artist", "album", "mood", "style"],
-                state.genre_tab as usize,
-                state.genre_tab_focused,
-            );
-
-            // Genres with dynamic Miller columns
-            let title = state.genre_tab.name();
+            // Genres view with dynamic Miller columns (category selector in column 0)
             render_browse_miller_columns(
                 frame,
                 state,
                 &state.genre_nav,
-                title,
+                "genres",
                 current_track_key,
                 filter_results,
                 filter_column,
                 false,
-                content_left,
-                content_right,
+                layout.left_panel,
+                layout.right_panel,
             );
         }
         BrowseCategory::Folders => {
@@ -224,19 +229,19 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
         }
     }
 
-    // Transport bar
+    // Chrome: tab bar, transport, command bar
+    render_tab_bar_nav(frame, state, layout.tab_bar);
     render_transport(frame, state, layout.transport);
-
-    // Shortcut bar
-    render_shortcuts(frame, state, layout.shortcuts);
+    render_commands(frame, state, layout.commands);
 }
 
 fn render_queue(frame: &mut Frame, state: &AppState) {
     let layout = FullScreenLayout::new(frame.area());
 
+    render_tab_bar_nav(frame, state, layout.tab_bar);
     screens::now_playing::render_queue_mode(frame, state, layout.content);
     render_transport(frame, state, layout.transport);
-    render_shortcuts(frame, state, layout.shortcuts);
+    render_commands(frame, state, layout.commands);
 }
 
 /// Compute the queue right panel (track list) area for popup centering.
@@ -244,18 +249,20 @@ fn render_queue(frame: &mut Frame, state: &AppState) {
 fn render_now_playing(frame: &mut Frame, state: &AppState) {
     let layout = FullScreenLayout::new(frame.area());
 
+    render_tab_bar_nav(frame, state, layout.tab_bar);
     screens::now_playing::render_visualizer_mode(frame, state, layout.content);
     render_transport(frame, state, layout.transport);
-    render_shortcuts(frame, state, layout.shortcuts);
+    render_commands(frame, state, layout.commands);
 }
 
 fn render_search(frame: &mut Frame, state: &AppState) {
     let layout = FullScreenLayout::new(frame.area());
 
+    render_tab_bar_nav(frame, state, layout.tab_bar);
     // Unified search/filter screen handles all tabs including Global (with 3-column layout)
     screens::filter::render(frame, state, layout.content);
     render_transport(frame, state, layout.transport);
-    render_shortcuts(frame, state, layout.shortcuts);
+    render_commands(frame, state, layout.commands);
 }
 
 fn render_similar(frame: &mut Frame, state: &AppState) {
@@ -275,17 +282,19 @@ fn render_similar(frame: &mut Frame, state: &AppState) {
 fn render_help(frame: &mut Frame, state: &AppState) {
     let layout = FullScreenLayout::new(frame.area());
 
+    render_tab_bar_nav(frame, state, layout.tab_bar);
     screens::help::render(frame, state, layout.content);
     render_transport(frame, state, layout.transport);
-    render_shortcuts(frame, state, layout.shortcuts);
+    render_commands(frame, state, layout.commands);
 }
 
 fn render_settings(frame: &mut Frame, state: &AppState) {
     let layout = FullScreenLayout::new(frame.area());
 
+    render_tab_bar_nav(frame, state, layout.tab_bar);
     screens::settings::render(frame, state, layout.content);
     render_transport(frame, state, layout.transport);
-    render_shortcuts(frame, state, layout.shortcuts);
+    render_commands(frame, state, layout.commands);
 }
 
 /// Render folder browsing view (Miller columns style) with lazy/windowed rendering.
@@ -367,6 +376,37 @@ fn render_folder_view(
 
         // Get currently playing track key once for all columns
         let current_track_key = state.current_track().map(|t| t.rating_key.as_str());
+
+        // Register folder Miller column regions for hit-testing
+        {
+            let mut column_regions = Vec::new();
+            for (vis_idx, col_idx) in (start_col..effective_columns.min(start_col + max_visible)).enumerate() {
+                let col_area = Rect {
+                    x: area.x + (vis_idx as u16 * col_width),
+                    y: area.y,
+                    width: if vis_idx == max_visible - 1 {
+                        area.width - (vis_idx as u16 * col_width)
+                    } else {
+                        col_width
+                    },
+                    height: area.height,
+                };
+                let block_tmp = Block::default().borders(Borders::ALL);
+                let inner_tmp = block_tmp.inner(col_area);
+                column_regions.push(crate::ui::hit_regions::MillerColumnRegion {
+                    col_idx,
+                    area: col_area,
+                    inner: inner_tmp,
+                    rows_per_item: 1, // Folder items are always 1-row
+                    is_art_mode: false,
+                });
+            }
+            let mut hr = state.hit_regions.borrow_mut();
+            hr.miller_columns = Some(crate::ui::hit_regions::MillerRegions {
+                area,
+                columns: column_regions,
+            });
+        }
 
         for (vis_idx, col_idx) in (start_col..effective_columns.min(start_col + max_visible)).enumerate() {
             let col = &folder_state.columns[col_idx];
@@ -537,51 +577,6 @@ fn render_folder_view(
     }
 }
 
-/// Render a horizontal tab bar for Playlists or Genres.
-fn render_tab_bar(
-    frame: &mut Frame,
-    _state: &AppState,
-    area: Rect,
-    labels: &[&str],
-    selected: usize,
-    tab_focused: bool,
-) {
-    let t = theme();
-
-    let titles: Vec<Line> = labels.iter().enumerate().map(|(i, label)| {
-        if i == selected && tab_focused {
-            // Focused tab: selection bar style (same as list selection)
-            Line::from(Span::styled(
-                format!(" {} ", label),
-                Style::default()
-                    .fg(t.colors.selection_text)
-                    .bg(t.colors.selection_bar_bg),
-            ))
-        } else if i == selected {
-            Line::from(Span::styled(
-                format!(" {} ", label),
-                Style::default()
-                    .fg(t.colors.fg_accent)
-                    .add_modifier(Modifier::BOLD),
-            ))
-        } else {
-            Line::from(Span::styled(
-                format!(" {} ", label),
-                Style::default().fg(t.colors.fg_muted),
-            ))
-        }
-    }).collect();
-
-    let tabs = Tabs::new(titles)
-        .select(selected)
-        .highlight_style(Style::default()) // Disable built-in highlight (we handle it ourselves)
-        .style(Style::default().bg(t.colors.bg_primary).fg(t.colors.fg_muted))
-        .divider(Span::styled(" │ ", Style::default().fg(t.colors.fg_muted)))
-        .padding("", "");
-
-    frame.render_widget(tabs, area);
-}
-
 /// Determine if a Miller column should use 2-row display.
 ///
 /// Returns true for:
@@ -700,8 +695,9 @@ fn render_browse_miller_columns(
     // When loading with existing columns, reserve space for a loading indicator column
     let layout_columns = if nav.loading { effective_columns + 1 } else { effective_columns };
 
-    // Show up to 3 columns at a time
-    let max_visible = 3.min(layout_columns);
+    // Show up to 3 columns at a time; always at least 2 (Library/Genre/Playlist always
+    // show a child column, even if empty — Folders is the exception, handled separately)
+    let max_visible = 3.min(layout_columns).max(2);
     let col_width = area.width / max_visible as u16;
 
     // Determine which columns to show (always include focused column)
@@ -711,12 +707,42 @@ fn render_browse_miller_columns(
         0
     };
 
+    // Register Miller column regions for hit-testing
+    {
+        let mut column_regions = Vec::new();
+        for (vis_idx, col_idx) in (start_col..effective_columns.min(start_col + max_visible)).enumerate() {
+            let col = &nav.columns[col_idx];
+            let col_area = Rect {
+                x: area.x + (vis_idx as u16 * col_width),
+                y: area.y,
+                width: if vis_idx == max_visible - 1 {
+                    area.width - (vis_idx as u16 * col_width)
+                } else {
+                    col_width
+                },
+                height: area.height,
+            };
+            let block_tmp = Block::default().borders(Borders::ALL);
+            let inner_tmp = block_tmp.inner(col_area);
+            let is_two_row = is_two_row_column(state, col, col_idx, nav, two_row_tracks);
+            column_regions.push(crate::ui::hit_regions::MillerColumnRegion {
+                col_idx,
+                area: col_area,
+                inner: inner_tmp,
+                rows_per_item: if is_two_row { 2 } else { 1 },
+                is_art_mode: col.artwork_visible,
+            });
+        }
+        let mut hr = state.hit_regions.borrow_mut();
+        hr.miller_columns = Some(crate::ui::hit_regions::MillerRegions {
+            area,
+            columns: column_regions,
+        });
+    }
+
     for (vis_idx, col_idx) in (start_col..effective_columns.min(start_col + max_visible)).enumerate() {
         let col = &nav.columns[col_idx];
-        // Suppress focus highlight when genre/visualizer tab bar is focused
-        let tab_bar_has_focus = state.genre_tab_focused
-            && state.browse_category == crate::app::state::BrowseCategory::Genres;
-        let is_focused = col_idx == nav.focused_column && !tab_bar_has_focus;
+        let is_focused = col_idx == nav.focused_column;
         let is_root = col_idx == 0;
 
         let col_area = Rect {
@@ -754,6 +780,9 @@ fn render_browse_miller_columns(
             .borders(Borders::ALL)
             .border_style(Style::default().fg(border_color))
             .style(Style::default().bg(t.colors.bg_primary));
+        if is_focused {
+            block = block.border_set(ratatui::symbols::border::THICK);
+        }
 
         if !title.is_empty() {
             block = block
@@ -1060,26 +1089,27 @@ fn render_browse_miller_columns(
         }
     }
 
-    // Render loading indicator column when data is being fetched
-    if nav.loading {
-        let real_rendered = effective_columns.min(start_col + max_visible).saturating_sub(start_col);
-        if real_rendered < max_visible {
-            let vis_idx = real_rendered;
-            let loading_area = Rect {
-                x: area.x + (vis_idx as u16 * col_width),
-                y: area.y,
-                width: area.width - (vis_idx as u16 * col_width),
-                height: area.height,
-            };
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(t.colors.border))
-                .style(Style::default().bg(t.colors.bg_primary));
-            let loading_inner = block.inner(loading_area);
-            frame.render_widget(block, loading_area);
+    // Render placeholder columns when fewer real columns than max_visible
+    // (loading indicator or empty column to maintain 2-column minimum)
+    let real_rendered = effective_columns.min(start_col + max_visible).saturating_sub(start_col);
+    if real_rendered < max_visible {
+        let vis_idx = real_rendered;
+        let placeholder_area = Rect {
+            x: area.x + (vis_idx as u16 * col_width),
+            y: area.y,
+            width: area.width - (vis_idx as u16 * col_width),
+            height: area.height,
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(t.colors.border))
+            .style(Style::default().bg(t.colors.bg_primary));
+        let placeholder_inner = block.inner(placeholder_area);
+        frame.render_widget(block, placeholder_area);
+        if nav.loading {
             let loading = Paragraph::new("Loading...")
                 .style(Style::default().fg(t.colors.fg_muted));
-            frame.render_widget(loading, loading_inner);
+            frame.render_widget(loading, placeholder_inner);
         }
     }
 }
@@ -1260,6 +1290,7 @@ fn render_album_art_grid(
                 BrowseItem::Album { key, .. } => Some(key.as_str()),
                 BrowseItem::Artist { key, .. } => Some(key.as_str()),
                 BrowseItem::ArtistRadio { artist_key, .. } => Some(artist_key.as_str()),
+                BrowseItem::AllTracks { artist_key, .. } => Some(artist_key.as_str()),
                 _ => None,
             };
             if let Some(key) = art_key {
@@ -1352,22 +1383,17 @@ fn render_album_art_grid(
         );
     }
 }
-/// Render the transport bar (now playing info).
+/// Render the transport bar (always visible, never hijacked by alt bar).
 fn render_transport(frame: &mut Frame, state: &AppState, area: Rect) {
-    // When alt bar is active, use the transport area for alt bar top row (function keys)
-    if state.alt_bar_until.is_some() {
-        render_alt_bar_row(frame, state, area, true);
-        return;
-    }
     widgets::transport::render(frame, state, area);
 }
 
-/// Render the shortcut bar with consistent layout and current view highlighted.
-fn render_shortcuts(frame: &mut Frame, state: &AppState, area: Rect) {
+/// Render the top tab bar with library name and navigation tabs.
+fn render_tab_bar_nav(frame: &mut Frame, state: &AppState, area: Rect) {
     use crate::app::state::AuthStep;
     let t = theme();
 
-    // Show auth-specific shortcuts for Auth view
+    // Auth view: show auth hints instead of tabs
     if state.view == View::Auth {
         let hint = match state.auth_state.step {
             AuthStep::Login => {
@@ -1387,41 +1413,25 @@ fn render_shortcuts(frame: &mut Frame, state: &AppState, area: Rect) {
         return;
     }
 
-    let show_alt_bar = state.alt_bar_until.is_some();
-
-    // Library name indicator (left-aligned) — hidden when alt bar is active
-    if !show_alt_bar {
-        if let Some(lib_name) = state.active_library.as_ref()
-            .and_then(|key| state.libraries.iter().find(|l| &l.key == key))
-        {
-            let label = if state.has_multiple_servers() {
-                if let Some(server_name) = state.active_server_name() {
-                    format!(" [{} ({})]", lib_name.title, server_name)
-                } else {
-                    format!(" [{}]", lib_name.title)
-                }
+    // Library name (left-aligned)
+    let lib_label = if let Some(lib_name) = state.active_library.as_ref()
+        .and_then(|key| state.libraries.iter().find(|l| &l.key == key))
+    {
+        if state.has_multiple_servers() {
+            if let Some(server_name) = state.active_server_name() {
+                format!(" {} ({}) ", lib_name.title, server_name)
             } else {
-                format!(" [{}]", lib_name.title)
-            };
-            let lib_label = Paragraph::new(
-                Span::styled(
-                    label,
-                    Style::default().fg(t.colors.fg_accent_dim).bg(t.colors.bg_secondary),
-                )
-            ).style(Style::default().bg(t.colors.bg_secondary));
-            frame.render_widget(lib_label, area);
+                format!(" {} ", lib_name.title)
+            }
+        } else {
+            format!(" {} ", lib_name.title)
         }
-    }
+    } else {
+        String::new()
+    };
 
-    if show_alt_bar {
-        // Alt bar bottom row (commands) — top row is rendered in render_transport
-        render_alt_bar_row(frame, state, area, false);
-        return;
-    }
-
-    // Default: navigation shortcuts
-    let mut spans: Vec<Span> = Vec::new();
-    let shortcuts: Vec<(&str, &str, bool)> = vec![
+    // Navigation tabs (centered in remaining space)
+    let tabs: Vec<(&str, &str, bool)> = vec![
         ("^L", "library", state.view == View::Browse && state.browse_category == BrowseCategory::Library),
         ("^P", "playlists", state.view == View::Browse && state.browse_category == BrowseCategory::Playlists),
         ("^G", "genres", state.view == View::Browse && state.browse_category == BrowseCategory::Genres),
@@ -1430,34 +1440,136 @@ fn render_shortcuts(frame: &mut Frame, state: &AppState, area: Rect) {
         ("^N", "now playing", state.view == View::NowPlaying),
     ];
 
-    for (i, (key, label, is_current)) in shortcuts.iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::styled("|", Style::default().fg(t.colors.fg_muted).bg(t.colors.bg_secondary)));
+    // Render library name + quit button on the left
+    let mut tab_bar_regions = crate::ui::hit_regions::TabBarRegions {
+        library_label: None,
+        quit_button: None,
+        tabs: Vec::new(),
+    };
+
+    {
+        // Fill background first
+        let bg = Paragraph::new("").style(Style::default().bg(t.colors.bg_secondary));
+        frame.render_widget(bg, area);
+
+        if !lib_label.is_empty() {
+            let lib_span = Paragraph::new(
+                Span::styled(&lib_label, Style::default().fg(t.colors.fg_accent_dim).bg(t.colors.bg_secondary))
+            ).style(Style::default().bg(t.colors.bg_secondary));
+            let lib_width = lib_label.len() as u16;
+            let lib_area = Rect { width: lib_width.min(area.width), ..area };
+            frame.render_widget(lib_span, lib_area);
+
+            tab_bar_regions.library_label = Some(lib_area);
+
+            // Quit button (styled like bottom bar shortcut buttons)
+            let quit_key = " ^Q ";
+            let quit_label = "quit ";
+            let quit_x = area.x + lib_width;
+            let quit_total_width = (quit_key.len() + quit_label.len()) as u16;
+            let quit_key_area = Rect { x: quit_x, y: area.y, width: quit_key.len() as u16, height: 1 };
+            let quit_label_area = Rect { x: quit_x + quit_key.len() as u16, y: area.y, width: quit_label.len() as u16, height: 1 };
+            if quit_x + quit_total_width <= area.x + area.width {
+                frame.render_widget(
+                    Paragraph::new(quit_key).style(Style::default().fg(t.colors.shortcut_key).bg(t.colors.bg_primary)),
+                    quit_key_area,
+                );
+                frame.render_widget(
+                    Paragraph::new(quit_label).style(Style::default().fg(t.colors.shortcut_text).bg(t.colors.bg_secondary)),
+                    quit_label_area,
+                );
+                tab_bar_regions.quit_button = Some(Rect {
+                    x: quit_x, y: area.y, width: quit_total_width, height: 1,
+                });
+            }
         }
+    }
+
+    // Build tab spans and compute absolute tab positions for hit regions
+    let mut spans: Vec<Span> = Vec::new();
+    let mut tab_total_width: u16 = 0;
+    let mut tab_positions: Vec<(u16, u16, usize)> = Vec::new(); // (rel_start, width, tab_idx)
+
+    for (i, (key, label, is_current)) in tabs.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" ", Style::default().bg(t.colors.bg_secondary)));
+            tab_total_width += 1; // separator
+        }
+
+        let tab_text = format!(" {} {} ", key, label);
+        let tab_width = tab_text.len() as u16;
+        tab_positions.push((tab_total_width, tab_width, i));
+        tab_total_width += tab_width;
 
         if *is_current {
             spans.push(Span::styled(
-                format!(" {} {} ", key, label),
-                Style::default().fg(t.colors.fg_accent).bg(t.colors.bg_secondary).add_modifier(ratatui::style::Modifier::BOLD),
+                tab_text,
+                Style::default()
+                    .fg(t.colors.fg_accent)
+                    .bg(t.colors.bg_primary)
+                    .add_modifier(ratatui::style::Modifier::BOLD),
             ));
         } else {
             spans.push(Span::styled(
-                format!(" {} {} ", key, label),
-                Style::default().fg(t.colors.shortcut_key).bg(t.colors.bg_secondary),
+                tab_text,
+                Style::default().fg(t.colors.fg_muted).bg(t.colors.bg_secondary),
             ));
         }
+    }
+
+    // Compute centered absolute positions for tab hit regions
+    let tab_center_offset = area.x + area.width.saturating_sub(tab_total_width) / 2;
+    for (rel_start, width, idx) in &tab_positions {
+        tab_bar_regions.tabs.push((
+            Rect { x: tab_center_offset + rel_start, y: area.y, width: *width, height: 1 },
+            *idx,
+        ));
+    }
+
+    // Register tab bar hit regions
+    {
+        let mut hr = state.hit_regions.borrow_mut();
+        hr.tab_bar = Some(tab_bar_regions);
     }
 
     let line = Line::from(spans);
     let paragraph = Paragraph::new(line)
         .style(Style::default().bg(t.colors.bg_secondary))
         .alignment(Alignment::Center);
-
     frame.render_widget(paragraph, area);
 }
 
-/// Render one row of the alt bar (top = function keys, bottom = contextual commands).
-fn render_alt_bar_row(frame: &mut Frame, state: &AppState, area: Rect, is_top_row: bool) {
+/// Render the always-visible command bar (3 rows: function keys + spacer + contextual commands).
+fn render_commands(frame: &mut Frame, state: &AppState, area: Rect) {
+    let t = theme();
+
+    // Fill background
+    let bg = Paragraph::new("").style(Style::default().bg(t.colors.bg_secondary));
+    frame.render_widget(bg, area);
+
+    // Split into 3 rows: top commands, spacer, bottom commands
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Length(1), Constraint::Length(1)])
+        .split(area);
+
+    let top_items = render_command_row(frame, state, rows[0], true);  // Function keys
+    // rows[1] is spacer — already filled by bg
+    let bottom_items = render_command_row(frame, state, rows[2], false); // Contextual commands
+
+    // Register command bar hit regions
+    {
+        let mut hr = state.hit_regions.borrow_mut();
+        hr.command_bar = Some(crate::ui::hit_regions::CommandBarRegions {
+            top_row: top_items,
+            bottom_row: bottom_items,
+        });
+    }
+}
+
+/// Render one row of the command bar (top = function keys, bottom = contextual commands).
+/// Returns (Rect, action_key) pairs for hit-test registration.
+fn render_command_row(frame: &mut Frame, state: &AppState, area: Rect, is_top_row: bool) -> Vec<(Rect, String)> {
     let t = theme();
     let alt_cmds = crate::app::available_alt_commands(state);
 
@@ -1487,43 +1599,78 @@ fn render_alt_bar_row(frame: &mut Frame, state: &AppState, area: Rect, is_top_ro
         });
     }
 
-    if filtered.is_empty() {
-        if !is_top_row {
+    // Track positions for hit-test registration
+    let mut total_width: u16 = 0;
+    let mut item_positions: Vec<(u16, u16, String)> = Vec::new(); // (rel_start, width, action_key)
+
+    for (i, cmd) in filtered.iter().enumerate() {
+        let separator_width: u16 = if i > 0 { 1 } else { 0 };
+        if i > 0 {
+            spans.push(Span::styled(" ", Style::default().bg(t.colors.bg_secondary)));
+        }
+        // Button-styled: key has a contrasting background
+        let key_str = if let Some(dk) = cmd.display_key {
+            format!(" {} ", dk)
+        } else {
+            match cmd.modifier {
+                crate::app::CommandModifier::Ctrl => format!(" ^{} ", cmd.key.to_ascii_uppercase()),
+                crate::app::CommandModifier::Alt => format!(" \u{2325}{} ", cmd.key.to_ascii_uppercase()),
+                crate::app::CommandModifier::None => format!(" {} ", cmd.key.to_ascii_uppercase()),
+            }
+        };
+        let label_str = format!("{} ", cmd.label);
+        let item_width = key_str.len() as u16 + label_str.len() as u16;
+
+        // Build action key for lookup (use display_key for F-keys to disambiguate)
+        let action_key = if let Some(dk) = cmd.display_key {
+            format!("fkey:{}", dk)
+        } else {
+            format!("{}:{}", match cmd.modifier {
+                crate::app::CommandModifier::Ctrl => "ctrl",
+                crate::app::CommandModifier::Alt => "alt",
+                crate::app::CommandModifier::None => "none",
+            }, cmd.key)
+        };
+
+        let rel_start = total_width + separator_width;
+        item_positions.push((rel_start, item_width, action_key));
+        total_width = rel_start + item_width;
+
+        if cmd.enabled {
             spans.push(Span::styled(
-                " no commands available ",
+                key_str,
+                Style::default().fg(t.colors.shortcut_key).bg(t.colors.bg_primary),
+            ));
+            spans.push(Span::styled(
+                label_str,
+                Style::default().fg(t.colors.shortcut_text).bg(t.colors.bg_secondary),
+            ));
+        } else {
+            // Disabled: dimmed key and label
+            spans.push(Span::styled(
+                key_str,
+                Style::default().fg(t.colors.fg_muted).bg(t.colors.bg_secondary),
+            ));
+            spans.push(Span::styled(
+                label_str,
                 Style::default().fg(t.colors.fg_muted).bg(t.colors.bg_secondary),
             ));
         }
-    } else {
-        for (i, cmd) in filtered.iter().enumerate() {
-            if i > 0 {
-                spans.push(Span::styled(" | ", Style::default().fg(t.colors.fg_muted).bg(t.colors.bg_secondary)));
-            }
-            let key_str = if let Some(dk) = cmd.display_key {
-                format!(" {} ", dk)
-            } else {
-                match cmd.modifier {
-                    crate::app::CommandModifier::Ctrl => format!(" ^{} ", cmd.key.to_ascii_uppercase()),
-                    crate::app::CommandModifier::Alt => format!(" \u{2325}{} ", cmd.key.to_ascii_uppercase()),
-                    crate::app::CommandModifier::None => format!(" {} ", cmd.key.to_ascii_uppercase()),
-                }
-            };
-            spans.push(Span::styled(
-                key_str,
-                Style::default().fg(t.colors.shortcut_key).bg(t.colors.bg_secondary),
-            ));
-            spans.push(Span::styled(
-                format!("{} ", cmd.label),
-                Style::default().fg(t.colors.shortcut_text).bg(t.colors.bg_secondary),
-            ));
-        }
     }
+
+    // Compute absolute positions (centered)
+    let center_offset = area.x + area.width.saturating_sub(total_width) / 2;
+    let hit_items: Vec<(Rect, String)> = item_positions.into_iter().map(|(rel_start, width, key)| {
+        (Rect { x: center_offset + rel_start, y: area.y, width, height: 1 }, key)
+    }).collect();
 
     let line = Line::from(spans);
     let paragraph = Paragraph::new(line)
         .style(Style::default().bg(t.colors.bg_secondary))
         .alignment(Alignment::Center);
     frame.render_widget(paragraph, area);
+
+    hit_items
 }
 
 /// Render the search popup as a floating dialog.
@@ -1564,14 +1711,15 @@ fn render_library_picker(frame: &mut Frame, state: &AppState) {
         return;
     }
 
-    // Split inner area: library list + help line
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(1),    // library list
-            Constraint::Length(1), // help line
-        ])
-        .split(inner);
+    // Register hit regions for mouse handler
+    {
+        let mut hr = state.hit_regions.borrow_mut();
+        hr.library_picker = Some(crate::ui::hit_regions::PopupListRegions {
+            outer: area,
+            items_area: inner,
+            item_count: all_libs.len(),
+        });
+    }
 
     // Build library list items
     let items: Vec<ListItem> = all_libs.iter().enumerate().map(|(i, (server_id, server_name, lib))| {
@@ -1597,13 +1745,7 @@ fn render_library_picker(frame: &mut Frame, state: &AppState) {
     }).collect();
 
     let list = List::new(items);
-    frame.render_widget(list, chunks[0]);
-
-    // Help line
-    let help = Paragraph::new("Enter: switch | Esc: close")
-        .style(Style::default().fg(t.colors.fg_muted))
-        .alignment(Alignment::Center);
-    frame.render_widget(help, chunks[1]);
+    frame.render_widget(list, inner);
 }
 
 /// Render the artist bio popup (F4).
@@ -1637,27 +1779,111 @@ fn render_artist_bio_popup(frame: &mut Frame, state: &AppState) {
         return;
     }
 
-    // Split inner area: bio text + help line
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(1),    // bio text
-            Constraint::Length(1), // help line
-        ])
-        .split(inner);
+    let bio_area = inner;
 
-    // Render bio with word wrap and scroll
-    let bio_text = Paragraph::new(popup.bio.as_str())
-        .style(Style::default().fg(t.colors.fg_primary))
-        .wrap(Wrap { trim: true })
-        .scroll((popup.scroll, 0));
-    frame.render_widget(bio_text, chunks[0]);
+    // Determine artwork size and whether to show it
+    let has_artwork = popup.artwork_data.is_some() && popup.artwork_thumb.is_some();
+    // Drive layout from height: fill ~60% of bio area vertically, then derive width
+    // from height so a square image fills the rect exactly (terminal cells ≈ 2:1 aspect).
+    let art_h = if has_artwork {
+        let target = (bio_area.height * 3) / 5; // ~60% of bio area
+        target.max(6).min(bio_area.height.saturating_sub(2))
+    } else { 0 };
+    let art_w = if has_artwork { (art_h * 2).min(bio_area.width / 2) } else { 0 };
+    // 1 col gap between text and artwork
+    let gap = if has_artwork && art_w > 0 { 1u16 } else { 0 };
 
-    // Help line
-    let help = Paragraph::new("↑↓: scroll | Esc/F4: close")
-        .style(Style::default().fg(t.colors.fg_muted))
-        .alignment(Alignment::Center);
-    frame.render_widget(help, chunks[1]);
+    // Word-wrap bio text: narrow lines next to artwork, full-width lines below
+    let full_width = bio_area.width as usize;
+    let narrow_width = bio_area.width.saturating_sub(art_w + gap) as usize;
+    let art_rows = art_h as usize;
+    let wrapped = wrap_bio_text(&popup.bio, narrow_width, full_width, art_rows);
+    let total_lines = wrapped.len() as u16;
+    let visible = bio_area.height;
+    let scroll = popup.scroll.min(total_lines.saturating_sub(visible));
+
+    // Render artwork scrolling with text: crop top rows as user scrolls down.
+    let art_visible_h = art_h.saturating_sub(scroll);
+    if has_artwork && art_w > 0 && art_visible_h > 0 {
+        let art_rect = Rect {
+            x: bio_area.x + bio_area.width - art_w,
+            y: bio_area.y,
+            width: art_w,
+            height: art_visible_h,
+        };
+        if let (Some(ref data), Some(ref thumb)) = (&popup.artwork_data, &popup.artwork_thumb) {
+            BIO_ARTWORK_RENDERER.with(|renderer| {
+                let mut renderer = renderer.borrow_mut();
+                let crop_fraction = if scroll > 0 { scroll as f32 / art_h as f32 } else { 0.0 };
+                if renderer.load_image_cropped(data, thumb, crop_fraction) {
+                    renderer.render(frame, art_rect);
+                }
+            });
+        }
+    }
+
+    // Render visible text lines
+    let style = Style::default().fg(t.colors.fg_primary);
+    for (screen_row, line_text) in wrapped.iter().skip(scroll as usize).take(visible as usize).enumerate() {
+        let y = bio_area.y + screen_row as u16;
+        // Narrow width only when artwork is visible on this screen row
+        let in_art_zone = has_artwork && (screen_row as u16) < art_visible_h;
+        let line_width = if in_art_zone { narrow_width as u16 } else { bio_area.width };
+        let line_rect = Rect {
+            x: bio_area.x,
+            y,
+            width: line_width,
+            height: 1,
+        };
+        let p = Paragraph::new(line_text.as_str()).style(style);
+        frame.render_widget(p, line_rect);
+    }
+
+    // Scrollbar
+    if total_lines > visible {
+        render_scrollbar(frame, area, total_lines as usize, visible as usize, scroll as usize);
+    }
+}
+
+/// Word-wrap bio text with a narrow region (next to artwork) and full-width below.
+/// The first `narrow_rows` output lines are wrapped at `narrow_width`;
+/// subsequent lines are wrapped at `full_width`.
+fn wrap_bio_text(text: &str, narrow_width: usize, full_width: usize, narrow_rows: usize) -> Vec<String> {
+    if full_width == 0 {
+        return vec![];
+    }
+    // If no artwork, everything is full width
+    let narrow_width = if narrow_width == 0 || narrow_width >= full_width { full_width } else { narrow_width };
+
+    let mut lines = Vec::new();
+
+    for paragraph in text.split('\n') {
+        if paragraph.trim().is_empty() {
+            lines.push(String::new());
+            continue;
+        }
+
+        let words: Vec<&str> = paragraph.split_whitespace().collect();
+        let mut line = String::new();
+
+        for word in &words {
+            let max_w = if lines.len() < narrow_rows { narrow_width } else { full_width };
+            if line.is_empty() {
+                line.push_str(word);
+            } else if line.len() + 1 + word.len() <= max_w {
+                line.push(' ');
+                line.push_str(word);
+            } else {
+                lines.push(line);
+                line = word.to_string();
+            }
+        }
+        if !line.is_empty() {
+            lines.push(line);
+        }
+    }
+
+    lines
 }
 
 fn render_error_popup(frame: &mut Frame, error: &str) {
@@ -1721,7 +1947,7 @@ fn render_input_dialog(frame: &mut Frame, dialog: &InputDialog) {
     frame.render_widget(hint, chunks[2]);
 }
 
-fn render_confirm_dialog(frame: &mut Frame, dialog: &ConfirmDialog) {
+fn render_confirm_dialog(frame: &mut Frame, state: &AppState, dialog: &ConfirmDialog) {
     let t = theme();
     let area = centered_rect(50, 25, frame.area());
 
@@ -1754,13 +1980,41 @@ fn render_confirm_dialog(frame: &mut Frame, dialog: &ConfirmDialog) {
     let yes_area = Rect { x: yes_x, y: btn_y, width: yes_text.len() as u16, height: 1 };
     let no_area = Rect { x: no_x, y: btn_y, width: no_text.len() as u16, height: 1 };
 
-    let yes_span = Paragraph::new(yes_text)
-        .style(Style::default().fg(t.colors.bg_primary).bg(t.colors.fg_accent));
-    let no_span = Paragraph::new(no_text)
-        .style(Style::default().fg(t.colors.bg_primary).bg(t.colors.fg_muted));
+    // Register hit regions
+    {
+        let mut hr = state.hit_regions.borrow_mut();
+        hr.confirm_dialog = Some(crate::ui::hit_regions::DialogRegions {
+            outer: area,
+            yes_button: yes_area,
+            no_button: no_area,
+        });
+    }
 
-    frame.render_widget(yes_span, yes_area);
-    frame.render_widget(no_span, no_area);
+    // Highlight the selected button with accent, dim the other
+    let (yes_style, no_style) = if dialog.selected_yes {
+        (
+            Style::default().fg(t.colors.bg_primary).bg(t.colors.fg_accent),
+            Style::default().fg(t.colors.fg_muted).bg(t.colors.bg_secondary),
+        )
+    } else {
+        (
+            Style::default().fg(t.colors.fg_muted).bg(t.colors.bg_secondary),
+            Style::default().fg(t.colors.bg_primary).bg(t.colors.fg_accent),
+        )
+    };
+
+    frame.render_widget(Paragraph::new(yes_text).style(yes_style), yes_area);
+    frame.render_widget(Paragraph::new(no_text).style(no_style), no_area);
+
+    // Hint text
+    let hint_y = btn_y.saturating_sub(1);
+    if hint_y > inner.y + 1 {
+        let hint = Paragraph::new("Y/N or Enter to confirm")
+            .style(Style::default().fg(t.colors.fg_muted))
+            .alignment(Alignment::Center);
+        let hint_area = Rect { x: inner.x, y: hint_y, width: inner.width, height: 1 };
+        frame.render_widget(hint, hint_area);
+    }
 }
 
 /// Check if a mouse click hit a confirm dialog button. Returns Some(true) for Yes, Some(false) for No, None for miss.

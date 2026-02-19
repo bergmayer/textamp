@@ -461,19 +461,19 @@ impl EventLoop {
         let follow_ups = match action {
             // System
             Quit | ShowError(_) | ClearError | SetStatus(_) | ClearStatus
-            | RefreshCategory(_) | CheckStaleness(_) | CycleTheme | LoadArtwork | LoadWaveform
+            | RefreshCategory(_) | CheckStaleness(_) | LoadArtwork | LoadWaveform
             | LoadSpectrogram | LoadAlbumArt(_) => {
                 handlers::dispatch_system::dispatch(&self.event_tx, &mut self.config, action, state, client).await?
             }
 
             // Navigation
-            SetView(_) | NextView | PrevView | NextMode | PrevMode
+            SetView(_) | NextView | PrevView
             | SetCategory(_) | ToggleFocus => {
                 handlers::dispatch_navigation::dispatch(&self.event_tx, action, state, client).await?
             }
 
             // Data loading
-            LoadInitialData | LoadLibraries | LoadArtists | LoadAlbums | LoadPlaylists
+            LoadInitialData | LoadArtists | LoadPlaylists
             | LoadArtistAlbums | LoadArtistAllTracks | LoadSelectedAlbumTracks
             | LoadAlbumTracks { .. } | LoadCategoryTracks | GoBackInRightPanel
             | LoadSimilarAlbums { .. } | LoadSimilarTracks { .. }
@@ -496,8 +496,8 @@ impl EventLoop {
             }
 
             // Playback control
-            TogglePlayPause | Pause | Play | Stop | Next | Previous
-            | VolumeUp | VolumeDown | ToggleMute | Seek(_) | SeekRelative(_)
+            TogglePlayPause | Stop | Next | Previous
+            | VolumeUp | VolumeDown | ToggleMute | SetVolume(_) | Seek(_) | SeekRelative(_)
             | StartPendingPlayback | RetryCurrentTrack => {
                 handlers::dispatch_playback::dispatch(&self.event_tx, action, state, client, audio).await?
             }
@@ -521,17 +521,17 @@ impl EventLoop {
             }
 
             // Search and filter
-            ExecuteLocalSearch | ClearSearch | SelectSearchResult
+            ExecuteLocalSearch | SelectSearchResult
             | ActivateListFilter | DeactivateListFilter | FilteredListUp | FilteredListDown
             | SelectFilteredItem | AppendListFilterChar(_) | DeleteListFilterChar
-            | ClearListFilter | ExecuteListFilter | OpenSearchPopup | CloseSearchPopup
-            | OpenRadioLauncher | CloseRadioLauncher | RadioLauncherSearch
+            | OpenSearchPopup | CloseSearchPopup
+            | CloseRadioLauncher | RadioLauncherSearch
             | RadioLauncherSelectResult
             | OpenAdventureLauncher | CloseAdventureLauncher | AdventureLauncherSearch
             | AdventureLauncherDrillArtist { .. } | AdventureLauncherDrillAlbum { .. }
             | AdventureLauncherSelectTrack | AdventureLauncherBack
             | OpenLibraryPicker | CloseLibraryPicker
-            | OpenSortPopup | CloseSortPopup | ApplySortOption
+            | OpenSortPopup | CloseSortPopup
             | OpenArtistRadioPicker | CloseArtistRadioPicker | ArtistRadioPickerSearch
             | ArtistRadioPickerSetCount | ArtistRadioPickerToggleArtist
             | ArtistRadioPickerLaunch
@@ -541,23 +541,21 @@ impl EventLoop {
 
             // Browse modes
             LoadStations | LoadGenres | LoadArtistGenres | LoadAlbumGenres
-            | LoadMoods | LoadStyles | LoadGenreAlbums | LoadArtistGenreAlbums
-            | LoadAlbumGenreAlbums | LoadMoodAlbums | LoadStyleAlbums
-            | CycleGenreContentType | RefreshGenreView
-            | RefreshArtistView | CycleLibrarySubMode
+            | LoadMoods | LoadStyles | LoadGenreAlbums
+            | RefreshGenreView
             | CycleGenreTab | SetGenreTab(_)
-            | ToggleBrowseShuffle => {
+            | DrillGenreCategory { .. } => {
                 handlers::dispatch_browse::dispatch(&self.event_tx, action, state, client).await?
             }
 
             // Folder navigation
-            LoadFolderRoot | NavigateIntoFolder(_) | NavigateUpFolder
+            LoadFolderRoot | NavigateIntoFolder(_)
             | RefreshSubfolder(_) | PlayFolderTracks | PlayFolderTrack { .. } => {
                 handlers::dispatch_folders::dispatch(&self.event_tx, action, state, client, audio).await?
             }
 
             // Radio, stations, and DJ modes
-            StopRadio | JumpToRadioTrack(_)
+            JumpToRadioTrack(_)
             | PlayCurrentRadioTrack
             | StartPlexRadio { .. }
             | PlayStation(_) | DrillIntoStation(_, _) | NavigateStationsBack
@@ -568,19 +566,17 @@ impl EventLoop {
 
             // Settings, auth, adventure, remote players
             Logout | AuthSignIn | AuthSelectServer | OpenSettings | SaveCredentials
-            | SettingsSelect | SettingsSignIn | SettingsDiscoverServers
+            | SettingsSelect | SettingsSignIn
             | SelectServer(_) | SelectLibrary(_) | SelectLibraryOnServer(_, _)
-            | SaveSettings | ClearCache
+            | SaveSettings
             | ClearLibraryCache | ClearArtworkCache | ClearSubfolderCache
             | StartSubfolderCrawl | StopSubfolderCrawl | ToggleKeepSubfolderCache
             | DiscoverPlayers | SetOutputTarget(_)
-            | StartAdventure | SetAdventureStart(_) | SetAdventureEnd(_)
             | SetAdventureLength(_) | CancelAdventure | AdventureComplete(_)
             | AdventureError(_) | ArtistRadioComplete(_) => {
                 handlers::dispatch_settings::dispatch(&self.event_tx, &mut self.config, action, state, client, audio).await?
             }
 
-            _ => vec![],
         };
 
         // Process follow-up actions

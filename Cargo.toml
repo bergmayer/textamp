@@ -72,6 +72,9 @@ rand = "0.9"
 # Unicode display width
 unicode-width = "0.2"
 
+# Open URLs in default browser
+open = "5"
+
 [profile.release]
 lto = true
 strip = true

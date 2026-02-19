@@ -23,41 +23,46 @@ pub fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
         .split(popup_layout[1])[1]
 }
 
-/// Main application layout (musikcube-style).
+/// Main application layout.
 ///
 /// Layout:
 /// ┌─────────────────────────────────────────────────┐
-/// │                 Main Content                    │
-/// │  ┌──────────────┬──────────────────────────────┤
-/// │  │ Category     │ Track List                   │
-/// │  │ List         │ (grouped by album)           │
-/// │  │              │                              │
-/// │  └──────────────┴──────────────────────────────┤
-/// ├─────────────────────────────────────────────────┤
-/// │ Transport: playing [title] by [artist]  vol 65% │
-/// ├─────────────────────────────────────────────────┤
-/// │ b browse | f filter | n queue | s similar | ?  │
+/// │ [Library] ^L library │ ^P playlists │ ^G genres  │  ← tab bar (1 row)
+/// ├──────────────────────────────────────────────────┤
+/// │  ┌──────────────┬──────────────────────────────┐ │
+/// │  │ Category     │ Track List                   │ │
+/// │  │ List         │ (grouped by album)           │ │
+/// │  └──────────────┴──────────────────────────────┘ │
+/// ├──────────────────────────────────────────────────┤
+/// │ ▶ 00:00 ━━●──── 04:32 ⏮  ⏭ │ Track by Artist  │  ← transport (2 rows)
+/// ├──────────────────────────────────────────────────┤
+/// │ F1 help | F2 settings | F3 library | F5 refresh │  ← command bar row 1
+/// │                                                  │  ← spacer row
+/// │ ^E enqueue | ^S sort | ^W save playlist | ...   │  ← command bar row 2
 /// └─────────────────────────────────────────────────┘
 pub struct AppLayout {
+    /// Tab bar at the top (navigation tabs + library name)
+    pub tab_bar: Rect,
     /// Left panel for category list (artists, albums, etc.)
     pub left_panel: Rect,
     /// Right panel for track list
     pub right_panel: Rect,
     /// Transport bar (now playing info, volume, time)
     pub transport: Rect,
-    /// Shortcut bar (keyboard hints)
-    pub shortcuts: Rect,
+    /// Command bar (always-visible alt commands, 3 rows)
+    pub commands: Rect,
 }
 
 impl AppLayout {
     pub fn new(area: Rect) -> Self {
-        // Split vertically: main content | transport | shortcuts
+        // Split vertically: tab bar | main content | transport | command bar
         let main_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
+                Constraint::Length(1),  // Tab bar
                 Constraint::Min(5),     // Main content
                 Constraint::Length(2),  // Transport bar
-                Constraint::Length(1),  // Shortcut bar
+                Constraint::Length(3),  // Command bar (3 rows: top + spacer + bottom)
             ])
             .split(area);
 
@@ -68,25 +73,28 @@ impl AppLayout {
                 Constraint::Length(30), // Left panel (category list)
                 Constraint::Min(40),    // Right panel (track list)
             ])
-            .split(main_chunks[0]);
+            .split(main_chunks[1]);
 
         Self {
+            tab_bar: main_chunks[0],
             left_panel: content_chunks[0],
             right_panel: content_chunks[1],
-            transport: main_chunks[1],
-            shortcuts: main_chunks[2],
+            transport: main_chunks[2],
+            commands: main_chunks[3],
         }
     }
 }
 
 /// Layout for full-screen views (now playing queue, help, search).
 pub struct FullScreenLayout {
+    /// Tab bar at the top
+    pub tab_bar: Rect,
     /// Main content area
     pub content: Rect,
     /// Transport bar
     pub transport: Rect,
-    /// Shortcut bar
-    pub shortcuts: Rect,
+    /// Command bar (always-visible, 3 rows)
+    pub commands: Rect,
 }
 
 impl FullScreenLayout {
@@ -94,16 +102,18 @@ impl FullScreenLayout {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
+                Constraint::Length(1),  // Tab bar
                 Constraint::Min(5),     // Content
                 Constraint::Length(2),  // Transport
-                Constraint::Length(1),  // Shortcuts
+                Constraint::Length(3),  // Command bar (3 rows)
             ])
             .split(area);
 
         Self {
-            content: chunks[0],
-            transport: chunks[1],
-            shortcuts: chunks[2],
+            tab_bar: chunks[0],
+            content: chunks[1],
+            transport: chunks[2],
+            commands: chunks[3],
         }
     }
 }

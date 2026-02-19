@@ -494,20 +494,13 @@ impl PlexClient {
         let token = self.require_token()?.to_string();
         let machine_id = self.get_server_machine_id().await?;
 
-        // Plex playlist items use library:// scheme with URL-encoded paths
-        // Format: library://{machine_id}/item/%2Flibrary%2Fmetadata%2F{key}
-        let uri = track_keys
-            .iter()
-            .map(|key| {
-                let path = format!("/library/metadata/{}", key);
-                format!(
-                    "library://{}/item/{}",
-                    machine_id,
-                    urlencoding::encode(&path)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(",");
+        // Plex playlist URI: single server:// URI with comma-separated ratingKeys
+        // Format: server://{machine_id}/com.plexapp.plugins.library/library/metadata/{key1},{key2},...
+        let rating_keys = track_keys.join(",");
+        let uri = format!(
+            "server://{}/com.plexapp.plugins.library/library/metadata/{}",
+            machine_id, rating_keys
+        );
 
         let path = format!(
             "{}?type=audio&title={}&smart=0&uri={}&{}={}",
@@ -532,6 +525,26 @@ impl PlexClient {
             let status = response.status().as_u16();
             let message = response.text().await.unwrap_or_default();
             tracing::error!("Failed to create playlist: {} - {}", status, message);
+            return Err(ApiError::ServerError { status, message });
+        }
+
+        Ok(())
+    }
+
+    /// Delete a playlist by its rating key.
+    pub async fn delete_playlist(&self, rating_key: &str) -> Result<(), ApiError> {
+        let url = self.build_url(&format!("{}/{}", EP_PLAYLISTS, rating_key))?;
+
+        let response = self
+            .http
+            .delete(&url)
+            .headers(self.build_headers()?)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let message = response.text().await.unwrap_or_default();
             return Err(ApiError::ServerError { status, message });
         }
 

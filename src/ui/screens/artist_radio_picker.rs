@@ -25,6 +25,26 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     // Clear the area behind the popup
     frame.render_widget(Clear, popup_area);
 
+    // Register hit regions for mouse handler
+    {
+        let block_tmp = ratatui::widgets::Block::default().borders(ratatui::widgets::Borders::ALL);
+        let inner_tmp = block_tmp.inner(popup_area);
+        // For SelectArtists step: results start at inner_y + 5 (2 selected + 3 input)
+        let results_y_offset = if matches!(picker.step, ArtistRadioPickerStep::SelectArtists) { 5 } else { 0 };
+        let results_height = inner_tmp.height.saturating_sub(results_y_offset);
+        let mut hr = state.hit_regions.borrow_mut();
+        hr.artist_radio_picker = Some(crate::ui::hit_regions::PopupListRegions {
+            outer: popup_area,
+            items_area: ratatui::layout::Rect::new(
+                inner_tmp.x,
+                inner_tmp.y + results_y_offset,
+                inner_tmp.width,
+                results_height,
+            ),
+            item_count: picker.filtered_artists.len(),
+        });
+    }
+
     match picker.step {
         ArtistRadioPickerStep::EnterCount => render_count_step(frame, picker, popup_area),
         ArtistRadioPickerStep::SelectArtists => render_select_step(frame, picker, popup_area),

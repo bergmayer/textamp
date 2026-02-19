@@ -57,6 +57,39 @@ pub(super) fn handle_similar_keys(key: event::KeyEvent, state: &mut AppState) ->
             }
         }
 
+        KeyCode::Tab => {
+            match state.similar_mode {
+                SimilarMode::Tracks => {
+                    // Tracks → Albums: use stored album key
+                    if let Some(album_key) = state.similar_tab_album_key.clone() {
+                        let title = state.similar_tab_album_title.clone().unwrap_or_default();
+                        return vec![Action::LoadSimilarAlbums {
+                            rating_key: album_key,
+                            title,
+                        }];
+                    } else {
+                        state.set_status("No album context for similar albums.".to_string());
+                    }
+                }
+                SimilarMode::Albums => {
+                    // Albums → Tracks: use current track
+                    if let Some(track) = state.current_track().cloned() {
+                        let title = format!("{} - {}", track.artist_name(), track.title);
+                        // Store album key for Tab back
+                        state.similar_tab_album_key = track.parent_rating_key.clone();
+                        state.similar_tab_album_title = Some(track.album_name().to_string());
+                        return vec![Action::LoadSimilarTracks {
+                            rating_key: track.rating_key.clone(),
+                            title,
+                        }];
+                    } else {
+                        state.set_status("No track playing.".to_string());
+                    }
+                }
+            }
+            vec![]
+        }
+
         // Alphabet jumping
         KeyCode::Char(c) if c.is_ascii_alphabetic() && key.modifiers.is_empty() => {
             let letter_lower = c.to_ascii_lowercase();

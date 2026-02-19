@@ -224,12 +224,6 @@ pub async fn dispatch(
                 }
             }
         }
-        Action::NavigateUpFolder => {
-            // In column view, going up just moves focus left
-            if let Some(ref mut folder_state) = state.folder_state {
-                folder_state.focus_left();
-            }
-        }
         Action::RefreshSubfolder(folder_key) => {
             // Manual refresh of a specific subfolder (F5 when focused on subfolder)
             // This is the ONLY way subfolder caches get manually refreshed.

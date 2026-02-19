@@ -57,8 +57,8 @@ pub(super) fn handle_now_playing_visualizer_keys(key: event::KeyEvent, state: &m
 
     match key.code {
         KeyCode::Esc => {
-            // Esc goes back to Queue view
-            vec![Action::SetView(View::Queue)]
+            // Esc does nothing (use Tab or Ctrl+key to navigate)
+            vec![]
         }
         KeyCode::F(1) | KeyCode::Char('?') => vec![Action::SetView(View::Help)],
 
@@ -82,15 +82,51 @@ pub(super) fn handle_now_playing_visualizer_keys(key: event::KeyEvent, state: &m
 
 /// Handle station panel navigation keys (queue view, stations focused).
 fn handle_station_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
+    // When "◂ back" row is highlighted, handle it before normal dispatch
+    if state.station_back_highlighted {
+        match key.code {
+            KeyCode::Enter => {
+                state.station_back_highlighted = false;
+                return vec![Action::NavigateStationsBack];
+            }
+            KeyCode::Down => {
+                state.station_back_highlighted = false;
+                return vec![];
+            }
+            KeyCode::Up => {
+                // Already at back row, no-op
+                return vec![];
+            }
+            _ => {
+                state.station_back_highlighted = false;
+            }
+        }
+    }
+
     match key.code {
         KeyCode::Esc => {
-            state.now_playing_focus = NowPlayingFocus::Tracks;
+            // If drilled into a sub-column, go back a level first
+            if state.station_nav.can_go_left() {
+                state.station_nav.focus_left();
+                if let Some(col) = state.station_nav.focused() {
+                    state.stations = col.stations.clone();
+                }
+            } else {
+                state.now_playing_focus = NowPlayingFocus::Tracks;
+            }
             vec![]
         }
         KeyCode::F(1) | KeyCode::Char('?') => vec![Action::SetView(View::Help)],
 
         KeyCode::Up => {
             state.station_scroll_pin = None;
+            // At top of non-root column, highlight the "◂ back" row
+            let at_top = state.station_nav.focused().map_or(false, |c| c.selected_index == 0);
+            let is_drilled = state.station_nav.focused().map_or(false, |c| c.key.is_some());
+            if at_top && is_drilled {
+                state.station_back_highlighted = true;
+                return vec![];
+            }
             state.station_nav.move_up();
             // Skip separators
             skip_station_separators(state, true);

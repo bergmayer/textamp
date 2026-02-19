@@ -2,7 +2,6 @@
 //! RefreshCategory, CycleTheme, LoadArtwork, LoadWaveform.
 
 use crate::app::{Action, AppState, Event};
-use crate::cache::LibraryCache;
 use crate::api::PlexClient;
 use crate::config::Config;
 
@@ -14,7 +13,7 @@ use super::helpers;
 /// Dispatch system-level actions. Returns follow-up actions.
 pub async fn dispatch(
     event_tx: &mpsc::Sender<Event>,
-    config: &mut Config,
+    _config: &mut Config,
     action: Action,
     state: &mut AppState,
     client: &mut PlexClient,
@@ -52,7 +51,9 @@ pub async fn dispatch(
                 std::thread::sleep(std::time::Duration::from_millis(200));
             }
 
-            // Save cache to disk before quitting
+            // Build cache data to save after terminal is restored (deferred for fast quit).
+            // Skip if nothing has changed since last save (cache_dirty is false).
+            if state.cache_dirty {
             if let Some(lib_key) = &state.active_library {
                 use crate::cache::CacheData;
 
@@ -102,8 +103,11 @@ pub async fn dispatch(
                 cache_data.moods = state.moods.clone();
                 cache_data.styles = state.styles.clone();
 
-                // Stations
-                cache_data.stations = state.stations.clone();
+                // Stations — save root column (not state.stations which may be drilled children)
+                cache_data.stations = state.station_nav.columns.first()
+                    .map(|c| c.stations.clone())
+                    .unwrap_or_default();
+                cache_data.station_children = state.station_children_cache.clone();
 
                 // All tracks + track-level artists + aliases
                 // Only save if non-empty to avoid overwriting cached data when preload is in-flight
@@ -129,12 +133,9 @@ pub async fn dispatch(
                     }
                 }
 
-                if let Some(cache) = LibraryCache::new() {
-                    if cache.save(&cache_data) {
-                        tracing::info!("Cache saved on quit");
-                    }
-                }
+                state.pending_cache_save = Some(cache_data);
             }
+            } // cache_dirty
 
             state.should_quit = true;
         }
@@ -158,17 +159,6 @@ pub async fn dispatch(
         }
         Action::CheckStaleness(tier1_category) => {
             helpers::check_staleness_on_view_load(event_tx, state, client, tier1_category);
-        }
-        Action::CycleTheme => {
-            state.theme = state.theme.next();
-            crate::ui::theme::set_theme(state.theme);
-            state.set_status(format!("Theme: {}", state.theme.display_name()));
-
-            // Persist theme to config
-            config.ui.theme = state.theme.config_name().to_string();
-            if let Err(e) = crate::config::save_config(config) {
-                tracing::warn!("Failed to save theme preference: {}", e);
-            }
         }
         Action::LoadArtwork => {
             // Get thumb path from current track (clone to avoid borrow)

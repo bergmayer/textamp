@@ -137,6 +137,10 @@ pub struct CacheData {
     #[serde(default)]
     pub stations: Vec<Station>,
 
+    // Station children (mood/style/decade sub-lists, keyed by station key)
+    #[serde(default)]
+    pub station_children: HashMap<String, Vec<Station>>,
+
     // All tracks (for compilation detection + track-level artist derivation)
     #[serde(default)]
     pub all_tracks: Vec<Track>,
@@ -313,7 +317,7 @@ impl LibraryCache {
         Ok(count)
     }
 
-    /// Get total cache size in bytes.
+    /// Get total cache size in bytes (all libraries).
     pub fn total_size(&self) -> u64 {
         if !self.cache_dir.exists() {
             return 0;
@@ -330,6 +334,40 @@ impl LibraryCache {
             }
         }
         total
+    }
+
+    /// Get cache file size for a specific library.
+    pub fn library_size(&self, library_key: &str) -> u64 {
+        let path = self.cache_path(library_key);
+        fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
+    }
+
+    /// Get per-field size breakdown for a specific library's cache.
+    /// Returns vec of (field_name, bytes) sorted by size descending.
+    pub fn library_breakdown(&self, library_key: &str) -> Vec<(String, u64)> {
+        let Some(data) = self.load(library_key) else { return vec![] };
+        fn measure(val: &(impl serde::Serialize + ?Sized)) -> u64 {
+            serde_json::to_string(val).map(|s| s.len() as u64).unwrap_or(0)
+        }
+        let mut sizes = vec![
+            ("tracks".into(), measure(&data.all_tracks)),
+            ("albums".into(), measure(&data.albums)),
+            ("artists".into(), measure(&data.artists)),
+            ("playlist tracks".into(), measure(&data.playlist_tracks)),
+            ("folders".into(), measure(&data.folder_contents)),
+            ("compilations".into(),
+                measure(&data.compilation_albums)
+                + measure(&data.artist_compilation_map)
+                + measure(&data.single_artist_compilations)),
+            ("genres".into(),
+                measure(&data.genres) + measure(&data.artist_genres)
+                + measure(&data.album_genres) + measure(&data.moods)
+                + measure(&data.styles)),
+            ("stations".into(),
+                measure(&data.stations) + measure(&data.station_children)),
+        ];
+        sizes.sort_by(|a, b| b.1.cmp(&a.1));
+        sizes
     }
 }
 

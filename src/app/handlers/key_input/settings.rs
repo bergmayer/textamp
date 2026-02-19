@@ -14,11 +14,11 @@ pub(super) fn handle_help_keys(key: event::KeyEvent, state: &mut AppState) -> Ve
             state.help_scroll = 0;  // Reset scroll when closing
             vec![Action::SetView(View::Browse)]
         }
-        KeyCode::Up | KeyCode::Char('k') => {
+        KeyCode::Up => {
             state.help_scroll = state.help_scroll.saturating_sub(1);
             vec![]
         }
-        KeyCode::Down | KeyCode::Char('j') => {
+        KeyCode::Down => {
             // Cap at max reasonable scroll (help text is ~140 lines)
             let max_scroll = 140u16.saturating_sub(state.terminal_height.saturating_sub(4));
             state.help_scroll = state.help_scroll.saturating_add(1).min(max_scroll);
@@ -116,12 +116,14 @@ pub(super) fn handle_settings_keys(key: event::KeyEvent, state: &mut AppState, c
             if state.settings_state.focus == SettingsFocus::Sections {
                 state.settings_state.focus = SettingsFocus::Content;
                 state.settings_state.item_index = 0;
+                state.settings_state.scroll = 0;
             }
             vec![]
         }
         KeyCode::BackTab | KeyCode::Left => {
             if state.settings_state.focus == SettingsFocus::Content {
                 state.settings_state.focus = SettingsFocus::Sections;
+                state.settings_state.scroll = 0;
             }
             vec![]
         }
@@ -131,11 +133,17 @@ pub(super) fn handle_settings_keys(key: event::KeyEvent, state: &mut AppState, c
                     // Navigate sections
                     state.settings_state.section = state.settings_state.section.prev();
                     state.settings_state.item_index = 0;
+                    state.settings_state.scroll = 0;
                 }
                 SettingsFocus::Content => {
-                    // Navigate items within section
-                    if state.settings_state.item_index > 0 {
-                        state.settings_state.item_index -= 1;
+                    if state.settings_state.section == SettingsSection::About {
+                        // Scroll About content
+                        state.settings_state.scroll = state.settings_state.scroll.saturating_sub(1);
+                    } else {
+                        // Navigate items within section
+                        if state.settings_state.item_index > 0 {
+                            state.settings_state.item_index -= 1;
+                        }
                     }
                 }
             }
@@ -147,36 +155,63 @@ pub(super) fn handle_settings_keys(key: event::KeyEvent, state: &mut AppState, c
                     // Navigate sections
                     state.settings_state.section = state.settings_state.section.next();
                     state.settings_state.item_index = 0;
+                    state.settings_state.scroll = 0;
                 }
                 SettingsFocus::Content => {
-                    // Navigate items within section with bounds check
-                    let max_index = match state.settings_state.section {
-                        SettingsSection::Account => {
-                            if state.settings_state.signing_in {
-                                // username(0), password(1), sign in(2), then servers(3+)
-                                2 + state.available_servers.len()
-                            } else if matches!(state.connection, crate::app::state::ConnectionState::Connected { .. }) {
-                                // libraries(0..lib_count-1), actions(lib_count..lib_count+4), sign out(lib_count+5)
-                                (state.libraries.len() + 6).saturating_sub(1)
-                            } else {
-                                0 // Sign In(0)
+                    if state.settings_state.section == SettingsSection::About {
+                        // Scroll About content (renderer will clamp to max)
+                        state.settings_state.scroll = state.settings_state.scroll.saturating_add(1);
+                    } else {
+                        // Navigate items within section with bounds check
+                        let max_index = match state.settings_state.section {
+                            SettingsSection::Account => {
+                                if state.settings_state.signing_in {
+                                    // username(0), password(1), sign in(2), then servers(3+)
+                                    2 + state.available_servers.len()
+                                } else if matches!(state.connection, crate::app::state::ConnectionState::Connected { .. }) {
+                                    // libraries(0..lib_count-1), actions(lib_count..lib_count+4), sign out(lib_count+5)
+                                    (state.libraries.len() + 6).saturating_sub(1)
+                                } else {
+                                    0 // Sign In(0)
+                                }
                             }
+                            SettingsSection::Textamp => {
+                                // Themes (0..T-1) + Artwork modes (T..T+A-1) + Local(T+A) + remotes(T+A+1..T+A+R) + Refresh(T+A+R+1)
+                                let theme_count = crate::ui::theme::ThemeName::all().len();
+                                let artwork_count = crate::app::state::ArtworkMode::all().len();
+                                theme_count + artwork_count + 1 + state.remote_players.len()
+                            }
+                            SettingsSection::About => 0,
+                        };
+                        if state.settings_state.item_index < max_index {
+                            state.settings_state.item_index += 1;
                         }
-                        SettingsSection::Textamp => {
-                            // Themes (0..T-1) + Artwork modes (T..T+A-1) + Local(T+A) + remotes(T+A+1..T+A+R) + Refresh(T+A+R+1)
-                            let theme_count = crate::ui::theme::ThemeName::all().len();
-                            let artwork_count = crate::app::state::ArtworkMode::all().len();
-                            theme_count + artwork_count + 1 + state.remote_players.len()
-                        }
-                        SettingsSection::About => {
-                            // Display-only, no selectable items
-                            0
-                        }
-                    };
-                    if state.settings_state.item_index < max_index {
-                        state.settings_state.item_index += 1;
                     }
                 }
+            }
+            vec![]
+        }
+        KeyCode::PageUp => {
+            if state.settings_state.section == SettingsSection::About && state.settings_state.focus == SettingsFocus::Content {
+                state.settings_state.scroll = state.settings_state.scroll.saturating_sub(10);
+            }
+            vec![]
+        }
+        KeyCode::PageDown => {
+            if state.settings_state.section == SettingsSection::About && state.settings_state.focus == SettingsFocus::Content {
+                state.settings_state.scroll = state.settings_state.scroll.saturating_add(10);
+            }
+            vec![]
+        }
+        KeyCode::Home => {
+            if state.settings_state.section == SettingsSection::About && state.settings_state.focus == SettingsFocus::Content {
+                state.settings_state.scroll = 0;
+            }
+            vec![]
+        }
+        KeyCode::End => {
+            if state.settings_state.section == SettingsSection::About && state.settings_state.focus == SettingsFocus::Content {
+                state.settings_state.scroll = u16::MAX; // renderer will clamp
             }
             vec![]
         }

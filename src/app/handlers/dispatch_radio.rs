@@ -34,13 +34,6 @@ pub async fn dispatch(
     audio: &mut AudioPlayer,
 ) -> Result<Vec<Action>> {
     match action {
-        Action::StopRadio => {
-            state.radio_state.mode = RadioMode::Off;
-            state.radio_state.seed_track_key = None;
-            state.radio_state.seed_title.clear();
-            state.radio_state.fetching = false;
-            state.radio_state.history.clear();
-        }
         Action::JumpToRadioTrack(idx) => {
             // Report stop for current track before jumping
             // continuing=true because we're jumping to another track
@@ -235,6 +228,18 @@ pub async fn dispatch(
             });
         }
         Action::DrillIntoStation(station_key, station_title) => {
+            // Check cache first for instant loading
+            if let Some(cached_children) = state.station_children_cache.get(&station_key).cloned() {
+                state.station_nav.push_column(crate::app::state::StationColumn::new(
+                    Some(station_key),
+                    station_title,
+                    cached_children.clone(),
+                ));
+                state.stations = cached_children;
+                state.clear_error();
+                return Ok(vec![]);
+            }
+
             // Drill into a station category (e.g., Mood Radio -> sub-moods)
             state.stations_loading = true;
             state.station_nav.loading = true;
@@ -294,6 +299,7 @@ pub async fn dispatch(
             });
         }
         Action::NavigateStationsBack => {
+            state.station_back_highlighted = false;
             // Go back in Miller columns (just move focus left - data already in memory)
             if state.station_nav.can_go_left() {
                 state.station_nav.focus_left();

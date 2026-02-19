@@ -66,12 +66,31 @@ pub async fn dispatch(
                             let lib_title = "Music".to_string();
                             load_from_cache(state, cached, lib_key, &lib_title);
 
+                            // Auto-drill: build second column synchronously from cached data
+                            let drill_actions = auto_drill_from_cache(state);
+
                             // Trigger compilation detection if cache had no compilation data
                             helpers::maybe_detect_compilations(event_tx, state, client);
 
                             // Use two-tier staleness check for the current view
                             if let Some(tier1_cat) = helpers::current_view_category(state) {
                                 helpers::check_staleness_on_view_load(event_tx, state, client, tier1_cat);
+                            }
+
+                            if !drill_actions.is_empty() {
+                                // Fetch libraries in background before returning follow-ups
+                                let tx = event_tx.clone();
+                                let client_clone = client.clone();
+                                tokio::spawn(async move {
+                                    match client_clone.get_libraries().await {
+                                        Ok(libs) => { let _ = tx.send(Event::LibrariesLoaded(libs)).await; }
+                                        Err(e) => {
+                                            tracing::error!("Failed to load libraries: {}", e);
+                                            let _ = tx.send(Event::DataLoadError(format!("Failed to load libraries: {}", e))).await;
+                                        }
+                                    }
+                                });
+                                return Ok(drill_actions);
                             }
                         }
                     }
@@ -93,28 +112,10 @@ pub async fn dispatch(
                 }
             });
         }
-        Action::LoadLibraries => {
-            tracing::info!("Action::LoadLibraries - fetching libraries");
-            match client.get_libraries().await {
-                Ok(libs) => {
-                    tracing::info!("Fetched {} libraries", libs.len());
-                    state.libraries = libs.into_iter().filter(|l| l.is_music()).collect();
-                    if let Some(lib) = state.libraries.first() {
-                        state.active_library = Some(lib.key.clone());
-                    }
-                }
-                Err(e) => {
-                    tracing::error!("Failed to load libraries: {}", e);
-                }
-            }
-        }
         Action::LoadArtists => {
             tracing::info!("Action::LoadArtists - active_library={:?}", state.active_library);
             helpers::load_artists(event_tx, state, client);
             tracing::info!("LoadArtists complete - loaded {} artists", state.artists.len());
-        }
-        Action::LoadAlbums => {
-            helpers::load_albums(event_tx, state, client);
         }
         Action::LoadPlaylists => {
             helpers::load_playlists(event_tx, state, client);
@@ -325,7 +326,10 @@ pub async fn dispatch(
             state.similar_loading = true;
             state.similar_albums.clear();
             state.list_state.similar_index = 0;
-            state.set_view(View::Similar);
+            state.similar_mode = crate::app::state::SimilarMode::Albums;
+            if state.view != View::Similar {
+                state.set_view(View::Similar);
+            }
 
             let event_tx = event_tx.clone();
             let client = client.clone();
@@ -341,7 +345,10 @@ pub async fn dispatch(
             state.similar_loading = true;
             state.similar_tracks.clear();
             state.list_state.similar_index = 0;
-            state.set_view(View::Similar);
+            state.similar_mode = crate::app::state::SimilarMode::Tracks;
+            if state.view != View::Similar {
+                state.set_view(View::Similar);
+            }
 
             let event_tx = event_tx.clone();
             let client = client.clone();
@@ -415,9 +422,20 @@ fn load_from_cache(state: &mut AppState, cached: CacheData, lib_key: &str, lib_t
         state.albums_total = state.albums.len() as u32;
     }
     if !cached.playlists.is_empty() {
-        state.playlists = cached.playlists.clone();
+        let mut playlists = cached.playlists.clone();
+        // Move "Recently Played" to top (matches PlaylistsLoaded behavior)
+        if let Some(pos) = playlists.iter().position(|p| p.title == "Recently Played") {
+            if pos > 0 {
+                let rp = playlists.remove(pos);
+                playlists.insert(0, rp);
+            }
+        }
+        state.playlists = playlists;
         let items = BrowseItem::from_playlists(&state.playlists);
         state.playlist_nav.reset("playlists", items);
+    }
+    if !cached.playlist_tracks.is_empty() {
+        state.playlist_tracks_cache = cached.playlist_tracks;
     }
 
     // Folders
@@ -434,44 +452,17 @@ fn load_from_cache(state: &mut AppState, cached: CacheData, lib_key: &str, lib_t
     }
 
     // Genres, artist genres, album genres, moods, styles
-    if !cached.genres.is_empty() {
-        state.genres = cached.genres;
-        if state.genre_content_type == crate::app::state::GenreContentType::Genres {
-            let items = BrowseItem::from_genres(&state.genres);
-            state.genre_nav.reset("genres", items);
-        }
-    }
-    if !cached.artist_genres.is_empty() {
-        state.artist_genres = cached.artist_genres;
-        if state.genre_content_type == crate::app::state::GenreContentType::ArtistGenres {
-            let items = BrowseItem::from_genres(&state.artist_genres);
-            state.genre_nav.reset("artist genres", items);
-        }
-    }
-    if !cached.album_genres.is_empty() {
-        state.album_genres = cached.album_genres;
-        if state.genre_content_type == crate::app::state::GenreContentType::AlbumGenres {
-            let items = BrowseItem::from_genres(&state.album_genres);
-            state.genre_nav.reset("album genres", items);
-        }
-    }
-    if !cached.moods.is_empty() {
-        state.moods = cached.moods;
-        if state.genre_content_type == crate::app::state::GenreContentType::Moods {
-            let items = BrowseItem::from_genres(&state.moods);
-            state.genre_nav.reset("moods", items);
-        }
-    }
-    if !cached.styles.is_empty() {
-        state.styles = cached.styles;
-        if state.genre_content_type == crate::app::state::GenreContentType::Styles {
-            let items = BrowseItem::from_genres(&state.styles);
-            state.genre_nav.reset("styles", items);
-        }
-    }
+    // Just store the data — genre_nav is populated lazily via DrillGenreCategory
+    if !cached.genres.is_empty() { state.genres = cached.genres; }
+    if !cached.artist_genres.is_empty() { state.artist_genres = cached.artist_genres; }
+    if !cached.album_genres.is_empty() { state.album_genres = cached.album_genres; }
+    if !cached.moods.is_empty() { state.moods = cached.moods; }
+    if !cached.styles.is_empty() { state.styles = cached.styles; }
 
-    // Stations
-    if !cached.stations.is_empty() {
+    // Stations — validate cached data is root stations (not corrupted drilled children)
+    let stations_valid = !cached.stations.is_empty()
+        && cached.stations.iter().any(|s| s.identifier.as_deref() == Some("library"));
+    if stations_valid {
         let mut stations = cached.stations;
         helpers::append_station_action_items(&mut stations, state.shuffle_undo_queue.is_some());
         state.stations = stations.clone();
@@ -482,6 +473,11 @@ fn load_from_cache(state: &mut AppState, cached: CacheData, lib_key: &str, lib_t
             stations,
         ));
         state.station_nav.focused_column = 0;
+    } else if !cached.stations.is_empty() {
+        tracing::warn!("Ignoring corrupted station cache ({} items, missing root identifiers)", cached.stations.len());
+    }
+    if !cached.station_children.is_empty() {
+        state.station_children_cache = cached.station_children;
     }
 
     // All tracks + track-level artists
@@ -517,4 +513,66 @@ fn load_from_cache(state: &mut AppState, cached: CacheData, lib_key: &str, lib_t
         state.artist_nav.update_root_items("artists", items);
     }
 
+}
+
+/// Build the auto-drill child column synchronously from cached data.
+/// Returns follow-up actions (e.g. artwork loading, async playlist track fetch).
+pub fn auto_drill_from_cache(state: &mut crate::app::AppState) -> Vec<Action> {
+    use crate::app::state::{BrowseCategory, BrowseColumn, BrowseItem};
+
+    let mut follow_ups = vec![];
+
+    match state.browse_category {
+        BrowseCategory::Library => {
+            if state.artist_nav.columns.len() == 1 && !state.artist_nav.is_empty() && !state.albums.is_empty() {
+                // "All Artists" (index 0) → show all albums
+                let mut items = vec![BrowseItem::AllTracks {
+                    artist_key: "__all_library__".to_string(),
+                    artist_name: "All Artists".to_string(),
+                    thumb: None,
+                }];
+                items.extend(BrowseItem::from_albums(&state.albums, &state.album_display_artist));
+                let mut col = BrowseColumn::new("all albums", items);
+                col.artwork_visible = state.default_artwork_visible;
+                state.artist_nav.replace_child_column(col);
+
+                // Trigger artwork loading for the new column
+                if state.default_artwork_visible {
+                    let art_batch = super::dispatch_miller::collect_art_to_load(
+                        state.artist_nav.columns.last(),
+                        &state.album_art_cache,
+                        &state.album_art_pending,
+                    );
+                    if !art_batch.is_empty() {
+                        follow_ups.push(Action::LoadAlbumArt(art_batch));
+                    }
+                }
+            }
+        }
+        BrowseCategory::Playlists => {
+            if state.playlist_nav.columns.len() == 1 && !state.playlist_nav.is_empty() {
+                if let Some(playlist_item) = state.playlist_nav.selected_item().cloned() {
+                    let playlist_key = playlist_item.key().to_string();
+                    if let Some(cached) = state.playlist_tracks_cache.get(&playlist_key) {
+                        // Build column synchronously from cached tracks
+                        let tracks = cached.tracks.clone();
+                        let playlist_name = playlist_item.title().to_string();
+                        let title = format!("tracks \u{2014} {}", playlist_name);
+                        let items = BrowseItem::from_tracks(&tracks);
+                        let col = BrowseColumn::new_with_tracks(title, items, tracks);
+                        state.playlist_nav.replace_child_column(col);
+                    } else {
+                        // Async fallback: tracks not in disk cache (e.g. smart playlists)
+                        state.auto_drill_pending = true;
+                        if let Some(action) = super::key_input::auto_drill_playlist_action(state) {
+                            follow_ups.push(action);
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+
+    follow_ups
 }

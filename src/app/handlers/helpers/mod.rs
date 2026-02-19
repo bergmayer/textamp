@@ -21,7 +21,7 @@ mod refresh;
 pub use cache::maybe_save_cache_async;
 pub use connection::{find_working_connection, find_working_connection_from_servers};
 pub use navigation::{
-    adjust_list_index, calc_scroll_offset, load_albums, load_artists,
+    adjust_list_index, calc_scroll_offset, load_artists,
     load_playlists, maybe_load_more, set_list_index,
 };
 pub use playback::{
