@@ -15,7 +15,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 
 /// Render the artist radio picker popup as an overlay.
 pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
-    let picker = match &state.artist_radio_picker {
+    let picker = match &state.popups.artist_radio_picker {
         Some(p) => p,
         None => return,
     };

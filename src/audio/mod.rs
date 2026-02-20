@@ -20,6 +20,15 @@ mod rodio_backend;
 mod streaming;
 mod traits;
 
+/// Lock a mutex, recovering from poisoning.
+///
+/// If another thread panicked while holding the lock, this ignores the poison
+/// and returns the inner data. This is appropriate for audio caches/buffers
+/// where a panic in another thread shouldn't crash the whole app.
+pub(crate) fn lock_or_recover<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 pub use cache::TrackAudioCache;
 pub use player::{AudioEvent, AudioPlayer};
 pub use rodio_backend::RodioBackend;

@@ -20,7 +20,7 @@ pub async fn dispatch(
     audio: &mut AudioPlayer,
 ) -> Result<Vec<Action>> {
     // Remote playback guard: when output is Remote, branch to remote handlers
-    if let crate::app::state::OutputTarget::Remote { ref player_id, ref player_uri, .. } = state.output_target {
+    if let crate::app::state::OutputTarget::Remote { ref player_id, ref player_uri, .. } = state.remote.output_target {
         return dispatch_remote(event_tx, action, state, client, audio, player_id.clone(), player_uri.clone()).await;
     }
 
@@ -106,8 +106,8 @@ pub async fn dispatch(
 
             // Trigger DJ mode processing after every track transition.
             // All DJ modes are continuous: insert tracks after current position.
-            if track_advanced && !state.dj_inserting {
-                if state.active_dj_mode.is_some() {
+            if track_advanced && !state.dj.inserting {
+                if state.dj.active_mode.is_some() {
                     return Ok(vec![Action::DjModeProcess]);
                 }
             }
@@ -321,8 +321,8 @@ async fn dispatch_remote(
             }
 
             // Trigger DJ mode processing after every track transition
-            if track_advanced && !state.dj_inserting {
-                if state.active_dj_mode.is_some() {
+            if track_advanced && !state.dj.inserting {
+                if state.dj.active_mode.is_some() {
                     return Ok(vec![Action::DjModeProcess]);
                 }
             }

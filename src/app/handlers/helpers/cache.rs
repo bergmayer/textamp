@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 
 /// Check if we should save the cache and spawn async save if conditions are met.
 pub fn maybe_save_cache_async(event_tx: &mpsc::Sender<Event>, state: &mut AppState) {
-    if !state.cache_dirty || state.cache_save_in_progress {
+    if !state.cache_mgmt.dirty || state.cache_mgmt.save_in_progress {
         return;
     }
 
@@ -16,30 +16,30 @@ pub fn maybe_save_cache_async(event_tx: &mpsc::Sender<Event>, state: &mut AppSta
     };
 
     let idle_threshold = std::time::Duration::from_secs(30);
-    if state.last_input_time.elapsed() < idle_threshold {
+    if state.cache_mgmt.last_input_time.elapsed() < idle_threshold {
         return;
     }
 
     let save_interval = std::time::Duration::from_secs(120);
-    if state.last_cache_save.elapsed() < save_interval {
+    if state.cache_mgmt.last_save.elapsed() < save_interval {
         return;
     }
 
-    state.cache_save_in_progress = true;
-    state.cache_dirty = false;
-    state.last_cache_save = std::time::Instant::now();
+    state.cache_mgmt.save_in_progress = true;
+    state.cache_mgmt.dirty = false;
+    state.cache_mgmt.last_save = std::time::Instant::now();
 
     use crate::cache::CacheData;
     let mut cache_data = CacheData::new(&lib_key);
     // Write per-category timestamps
-    cache_data.category_timestamps = state.category_timestamps.iter()
+    cache_data.category_timestamps = state.cache_mgmt.category_timestamps.iter()
         .map(|(cat, &ts)| (cat.cache_key().to_string(), ts))
         .collect();
     // Write legacy timestamps for backward compat
-    if let Some(&ts) = state.category_timestamps.get(&crate::app::state::RefreshCategory::Artists) {
+    if let Some(&ts) = state.cache_mgmt.category_timestamps.get(&crate::app::state::RefreshCategory::Artists) {
         cache_data.timestamp = ts;
     }
-    if let Some(&ts) = state.category_timestamps.get(&crate::app::state::RefreshCategory::Playlists) {
+    if let Some(&ts) = state.cache_mgmt.category_timestamps.get(&crate::app::state::RefreshCategory::Playlists) {
         cache_data.playlist_timestamp = ts;
     }
     cache_data.artists = state.artists.clone();
@@ -85,11 +85,11 @@ pub fn maybe_save_cache_async(event_tx: &mpsc::Sender<Event>, state: &mut AppSta
     cache_data.album_display_artist = state.album_display_artist.clone();
 
     // Compilation detection results
-    cache_data.compilation_albums = state.compilation_albums.clone();
-    cache_data.compilation_artist_keys = state.compilation_artist_keys.clone();
-    cache_data.compilation_track_artist_keys = state.compilation_track_artist_keys.clone();
-    cache_data.artist_compilation_map = state.artist_compilation_map.clone();
-    cache_data.single_artist_compilations = state.single_artist_compilations.clone();
+    cache_data.compilation_albums = state.compilations.albums.clone();
+    cache_data.compilation_artist_keys = state.compilations.artist_keys.clone();
+    cache_data.compilation_track_artist_keys = state.compilations.track_artist_keys.clone();
+    cache_data.artist_compilation_map = state.compilations.artist_map.clone();
+    cache_data.single_artist_compilations = state.compilations.single_artist.clone();
 
     // Save non-smart playlist tracks to disk cache
     for (key, cached) in &state.playlist_tracks_cache {

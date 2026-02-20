@@ -59,10 +59,10 @@ pub async fn dispatch(
             state.plex_session_id = Some(helpers::generate_plex_session_id());
 
             // Deactivate DJ mode when starting station/radio
-            state.active_dj_mode = None;
-            state.dj_history.clear();
-            state.dj_inserting = false;
-            state.dj_last_was_inserted = false;
+            state.dj.active_mode = None;
+            state.dj.history.clear();
+            state.dj.inserting = false;
+            state.dj.last_was_inserted = false;
 
             state.radio_state.mode = RadioMode::Active; // Plex decides the actual mix
             state.radio_state.seed_track_key = Some(key.clone());
@@ -148,10 +148,10 @@ pub async fn dispatch(
             state.plex_session_id = Some(helpers::generate_plex_session_id());
 
             // Deactivate DJ mode when starting station
-            state.active_dj_mode = None;
-            state.dj_history.clear();
-            state.dj_inserting = false;
-            state.dj_last_was_inserted = false;
+            state.dj.active_mode = None;
+            state.dj.history.clear();
+            state.dj.inserting = false;
+            state.dj.last_was_inserted = false;
 
             // Find station title from station_nav (Miller columns) or fall back to legacy state.stations
             let station_title = state.station_nav.selected_station()
@@ -299,7 +299,7 @@ pub async fn dispatch(
             });
         }
         Action::NavigateStationsBack => {
-            state.station_back_highlighted = false;
+            state.scroll.station_back_highlighted = false;
             // Go back in Miller columns (just move focus left - data already in memory)
             if state.station_nav.can_go_left() {
                 state.station_nav.focus_left();
@@ -316,16 +316,16 @@ pub async fn dispatch(
         }
         Action::ToggleDjMode(mode) => {
             tracing::info!("ToggleDjMode: {:?}, current_mode={:?}, playback_mode={:?}, queue_len={}, queue_index={:?}, current_track={}",
-                mode, state.active_dj_mode, state.playback_mode,
+                mode, state.dj.active_mode, state.playback_mode,
                 state.queue.len(), state.queue_index,
                 state.current_track().map(|t| t.title.as_str()).unwrap_or("None"));
 
-            if state.active_dj_mode == Some(mode) {
+            if state.dj.active_mode == Some(mode) {
                 // Same mode active → deactivate
-                state.active_dj_mode = None;
-                state.dj_history.clear();
-                state.dj_inserting = false;
-                state.dj_last_was_inserted = false;
+                state.dj.active_mode = None;
+                state.dj.history.clear();
+                state.dj.inserting = false;
+                state.dj.last_was_inserted = false;
                 state.set_status(format!("{} off", mode.name()));
             } else {
                 // DJ + Station mutual exclusivity: convert radio to queue if active
@@ -339,10 +339,10 @@ pub async fn dispatch(
                 }
 
                 // Activate new mode (or switch from a different one)
-                state.active_dj_mode = Some(mode);
-                state.dj_history.clear();
-                state.dj_inserting = false;
-                state.dj_last_was_inserted = false;
+                state.dj.active_mode = Some(mode);
+                state.dj.history.clear();
+                state.dj.inserting = false;
+                state.dj.last_was_inserted = false;
                 state.set_status(format!("{} on", mode.name()));
 
                 // All DJ modes are continuous: insert DJ tracks after current position
@@ -355,13 +355,13 @@ pub async fn dispatch(
         }
         Action::DjModeTracksReady(tracks, _insert_next, error) => {
             // Insert DJ-picked tracks right after the current track position.
-            state.dj_inserting = false;
+            state.dj.inserting = false;
 
             if tracks.is_empty() {
                 // Show specific error or generic hint
                 if let Some(err_msg) = error {
                     state.set_error(err_msg);
-                } else if let Some(mode) = state.active_dj_mode {
+                } else if let Some(mode) = state.dj.active_mode {
                     let hint = match mode {
                         DjMode::Freeze | DjMode::Gemini | DjMode::Stretch =>
                             format!("{}: no similar tracks found (requires Sonic Analysis)", mode.name()),
@@ -374,12 +374,12 @@ pub async fn dispatch(
             }
 
             for track in &tracks {
-                state.dj_history.push(track.rating_key.clone());
+                state.dj.history.push(track.rating_key.clone());
             }
 
             // Mark that the next track to play is a DJ insertion.
             // Interleaving modes use this to alternate: original → DJ → original.
-            state.dj_last_was_inserted = true;
+            state.dj.last_was_inserted = true;
 
             insert_tracks_after_current(state, tracks);
 
@@ -389,7 +389,7 @@ pub async fn dispatch(
         }
         Action::DjModeBatchReady(inserts) => {
             // Inserter mode batch results: interleave into queue
-            state.dj_inserting = false;
+            state.dj.inserting = false;
 
             if inserts.is_empty() {
                 return Ok(vec![]);
@@ -402,7 +402,7 @@ pub async fn dispatch(
             // Add all inserted track keys to history
             for tracks in inserts_map.values() {
                 for track in tracks {
-                    state.dj_history.push(track.rating_key.clone());
+                    state.dj.history.push(track.rating_key.clone());
                 }
             }
 
@@ -576,7 +576,7 @@ async fn dispatch_dj_continuous(
 ) {
     use crate::app::state::DjMode;
 
-    let mode = match state.active_dj_mode {
+    let mode = match state.dj.active_mode {
         Some(m) => m,
         None => {
             tracing::warn!("dispatch_dj_continuous: no active DJ mode");
@@ -589,8 +589,8 @@ async fn dispatch_dj_continuous(
 
     // Interleaving modes: skip insertion when the last track was DJ-inserted
     // (let the next original queue track play through)
-    if mode.is_interleaving() && state.dj_last_was_inserted {
-        state.dj_last_was_inserted = false;
+    if mode.is_interleaving() && state.dj.last_was_inserted {
+        state.dj.last_was_inserted = false;
         tracing::info!("{}: skipping (last was DJ-inserted, letting original play)", mode.name());
         return;
     }
@@ -603,7 +603,7 @@ async fn dispatch_dj_continuous(
         None => {
             tracing::warn!("{}: no current track, cannot process DJ mode", mode.name());
             state.set_status(format!("{}: no track playing", mode.name()));
-            state.dj_inserting = false;
+            state.dj.inserting = false;
             return;
         }
     };
@@ -620,13 +620,13 @@ async fn dispatch_dj_continuous(
         }
     };
 
-    state.dj_inserting = true;
+    state.dj.inserting = true;
 
     let (used_artists, used_albums) = build_diversity_context(state);
 
     let tx = event_tx.clone();
     let client_clone = client.clone();
-    let history = state.dj_history.clone();
+    let history = state.dj.history.clone();
     let lib_key = state.active_library.clone();
 
     tokio::spawn(async move {

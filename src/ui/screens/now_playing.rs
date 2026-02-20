@@ -136,7 +136,7 @@ fn render_artwork(frame: &mut Frame, state: &AppState, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if let (Some(ref data), Some(ref thumb)) = (&state.artwork_data, &state.artwork_thumb) {
+    if let (Some(ref data), Some(ref thumb)) = (&state.artwork.current_data, &state.artwork.current_thumb) {
         ARTWORK_RENDERER.with(|renderer| {
             let mut renderer = renderer.borrow_mut();
             if renderer.load_image(data, thumb) {
@@ -145,7 +145,7 @@ fn render_artwork(frame: &mut Frame, state: &AppState, area: Rect) {
                 render_artwork_placeholder(frame, inner, "Image load failed");
             }
         });
-    } else if state.artwork_loading {
+    } else if state.artwork.loading {
         render_artwork_placeholder(frame, inner, "Loading...");
     } else {
         render_artwork_placeholder(frame, inner, "No artwork");
@@ -220,14 +220,14 @@ fn render_station_panel(frame: &mut Frame, state: &AppState, area: Rect) {
     let total_items = col.stations.len();
     let max_text_width = inner.width.saturating_sub(3) as usize;
 
-    let scroll_offset = match state.station_scroll_pin {
+    let scroll_offset = match state.scroll.station {
         Some(pinned) => pinned,
         None => NavigationService::calc_scroll_offset(selected_idx, station_visible_height, total_items),
     };
 
     // Render "◂ back" row for non-root columns
     if has_back_item {
-        let back_style = if is_focused && state.station_back_highlighted {
+        let back_style = if is_focused && state.scroll.station_back_highlighted {
             Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
         } else if is_focused {
             Style::default().fg(t.colors.shortcut_key)
@@ -241,7 +241,7 @@ fn render_station_panel(frame: &mut Frame, state: &AppState, area: Rect) {
 
     // Determine active station key and active DJ mode for visual indicators
     let active_station_key = state.radio.active_station.as_ref().map(|s| s.key.as_str());
-    let active_dj_mode = state.active_dj_mode;
+    let active_dj_mode = state.dj.active_mode;
     // Ancestor key at current column depth (for ♪ on parent categories)
     let ancestor_key = state.radio.active_station.as_ref().and_then(|_|
         state.radio.playing_station_ancestors
@@ -286,7 +286,7 @@ fn render_station_panel(frame: &mut Frame, state: &AppState, area: Rect) {
             let available_width = max_text_width.saturating_sub(prefix.len() + suffix.len());
             let display_title = truncate_middle(&station.title, available_width);
 
-            let back_active = state.station_back_highlighted;
+            let back_active = state.scroll.station_back_highlighted;
             let style = if is_selected && is_focused && !back_active {
                 Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
             } else if is_selected && !back_active {
@@ -348,7 +348,7 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
         }
         PlaybackMode::Queue | PlaybackMode::None => {
             let mut parts = vec!["queue".to_string()];
-            if let Some(dj) = state.active_dj_mode {
+            if let Some(dj) = state.dj.active_mode {
                 parts.push(format!("({})", dj.name()));
             }
             if state.queue_sort_mode == QueueSortMode::Shuffle {
@@ -397,7 +397,7 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
     let total_display = tracks.len();
 
     // Calculate scroll offset - center on selected item
-    let scroll_offset = match state.queue_scroll_pin {
+    let scroll_offset = match state.scroll.queue {
         Some(pinned) => pinned,
         None => NavigationService::calc_scroll_offset(selected_idx, visible_item_count, total_display),
     };
@@ -617,7 +617,7 @@ fn render_artwork_panel(frame: &mut Frame, state: &AppState, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if let (Some(ref data), Some(ref thumb)) = (&state.artwork_data, &state.artwork_thumb) {
+    if let (Some(ref data), Some(ref thumb)) = (&state.artwork.current_data, &state.artwork.current_thumb) {
         ARTWORK_RENDERER.with(|renderer| {
             let mut renderer = renderer.borrow_mut();
             if renderer.load_image(data, thumb) {
@@ -626,7 +626,7 @@ fn render_artwork_panel(frame: &mut Frame, state: &AppState, area: Rect) {
                 render_artwork_placeholder(frame, inner, "Image load failed");
             }
         });
-    } else if state.artwork_loading {
+    } else if state.artwork.loading {
         render_artwork_placeholder(frame, inner, "Loading...");
     } else {
         render_artwork_placeholder(frame, inner, "No artwork");

@@ -104,7 +104,7 @@ pub fn refresh_current_view(state: &mut AppState) -> Vec<Action> {
     };
 
     if let Some(cat) = category {
-        if !state.background_refresh_in_progress.contains(&cat) {
+        if !state.cache_mgmt.background_refresh.contains(&cat) {
             state.set_status(format!("Refreshing {}...", cat.display_name()));
             return vec![Action::RefreshCategory(cat)];
         }
@@ -191,8 +191,8 @@ pub fn check_staleness_on_view_load(
     let very_stale_threshold = crate::plex::constants::CACHE_VERY_STALE_THRESHOLD_SECS;
 
     // Tier 1: Active category — refresh if >72h old or no timestamp
-    if !state.background_refresh_in_progress.contains(&tier1_category) {
-        let is_stale = match state.category_timestamps.get(&tier1_category) {
+    if !state.cache_mgmt.background_refresh.contains(&tier1_category) {
+        let is_stale = match state.cache_mgmt.category_timestamps.get(&tier1_category) {
             Some(&ts) => now.saturating_sub(ts) > stale_threshold,
             None => true, // No timestamp = never refreshed
         };
@@ -207,10 +207,10 @@ pub fn check_staleness_on_view_load(
         if cat == tier1_category {
             continue;
         }
-        if state.background_refresh_in_progress.contains(&cat) {
+        if state.cache_mgmt.background_refresh.contains(&cat) {
             continue;
         }
-        let is_stale = match state.category_timestamps.get(&cat) {
+        let is_stale = match state.cache_mgmt.category_timestamps.get(&cat) {
             Some(&ts) => now.saturating_sub(ts) > very_stale_threshold,
             None => true, // No timestamp = never loaded, should be fetched
         };
@@ -231,7 +231,7 @@ pub fn spawn_category_refresh(
 ) {
     use crate::app::state::RefreshCategory;
 
-    state.background_refresh_in_progress.insert(category);
+    state.cache_mgmt.background_refresh.insert(category);
 
     let old_count = match category {
         RefreshCategory::Artists | RefreshCategory::AlbumArtists => state.artists.len(),

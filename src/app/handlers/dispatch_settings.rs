@@ -45,7 +45,7 @@ pub async fn dispatch(
             state.available_servers.clear();
             state.connected_server_url = None;
             state.active_server_id = None;
-            state.artwork_cache_stats = None;
+            state.artwork.cache_stats = None;
             state.library_cache_stats = None;
             state.waveform_cache_stats = None;
 
@@ -63,12 +63,12 @@ pub async fn dispatch(
             state.track_artists.clear();
             state.artist_aliases.clear();
             state.album_display_artist.clear();
-            state.compilation_albums.clear();
-            state.compilation_artist_keys.clear();
-            state.compilation_track_artist_keys.clear();
-            state.artist_compilation_map.clear();
-            state.single_artist_compilations.clear();
-            state.compilations_detected = false;
+            state.compilations.albums.clear();
+            state.compilations.artist_keys.clear();
+            state.compilations.track_artist_keys.clear();
+            state.compilations.artist_map.clear();
+            state.compilations.single_artist.clear();
+            state.compilations.detected = false;
 
             state.selected_artist_albums.clear();
             state.selected_album_tracks.clear();
@@ -89,13 +89,13 @@ pub async fn dispatch(
             state.list_state.reset();
 
             // Clear session/runtime state
-            state.category_timestamps.clear();
-            state.background_refresh_in_progress.clear();
-            state.preloads_in_progress.clear();
-            state.preloads_total = 0;
+            state.cache_mgmt.category_timestamps.clear();
+            state.cache_mgmt.background_refresh.clear();
+            state.cache_mgmt.preloads_in_progress.clear();
+            state.cache_mgmt.preloads_total = 0;
             state.plex_session_id = None;
-            state.album_art_cache.clear();
-            state.album_art_pending.clear();
+            state.artwork.grid_cache.clear();
+            state.artwork.grid_pending.clear();
             state.waveform = Default::default();
             state.search_results = None;
             state.playlist_tracks_cache.clear();
@@ -224,7 +224,7 @@ pub async fn dispatch(
             state.settings_state.signing_in = false;
 
             // Auto-discover remote players if connected and list is empty
-            if state.remote_players.is_empty() && !state.discovering_players {
+            if state.remote.players.is_empty() && !state.remote.discovering {
                 follow_ups.push(Action::DiscoverPlayers);
             }
 
@@ -300,7 +300,7 @@ pub async fn dispatch(
                         } else {
                             match idx - lib_count {
                                 0 => {
-                                    state.confirm_dialog = Some(ConfirmDialog {
+                                    state.popups.confirm_dialog = Some(ConfirmDialog {
                                         title: "Clear Library Cache".to_string(),
                                         message: "Clear all cached library data and reload from server?".to_string(),
                                         on_confirm: ConfirmAction::ClearLibraryCache,
@@ -308,7 +308,7 @@ pub async fn dispatch(
                                     });
                                 }
                                 1 => {
-                                    state.confirm_dialog = Some(ConfirmDialog {
+                                    state.popups.confirm_dialog = Some(ConfirmDialog {
                                         title: "Clear Artwork Cache".to_string(),
                                         message: "Delete all cached album artwork from disk?".to_string(),
                                         on_confirm: ConfirmAction::ClearArtworkCache,
@@ -316,7 +316,7 @@ pub async fn dispatch(
                                     });
                                 }
                                 2 => {
-                                    state.confirm_dialog = Some(ConfirmDialog {
+                                    state.popups.confirm_dialog = Some(ConfirmDialog {
                                         title: "Clear Subfolder Cache".to_string(),
                                         message: "Clear all cached subfolder contents?".to_string(),
                                         on_confirm: ConfirmAction::ClearSubfolderCache,
@@ -366,7 +366,7 @@ pub async fn dispatch(
                         // Select artwork mode
                         let mode_idx = idx - theme_count;
                         if let Some(&mode) = crate::app::state::ArtworkMode::all().get(mode_idx) {
-                            state.artwork_mode = mode;
+                            state.artwork.mode = mode;
                             crate::ui::screens::now_playing::set_artwork_mode(mode);
                             crate::ui::artwork::set_grid_artwork_mode(mode);
                             crate::ui::set_bio_artwork_mode(mode);
@@ -398,10 +398,10 @@ pub async fn dispatch(
                     } else if idx == output_offset {
                         // Local output
                         follow_ups.push(Action::SetOutputTarget(crate::app::state::OutputTarget::Local));
-                    } else if idx <= output_offset + state.remote_players.len() {
+                    } else if idx <= output_offset + state.remote.players.len() {
                         // Remote player
                         let player_idx = idx - output_offset - 1;
-                        if let Some(player) = state.remote_players.get(player_idx) {
+                        if let Some(player) = state.remote.players.get(player_idx) {
                             let uri = player.connections.iter().find(|c| c.local)
                                 .or_else(|| player.connections.iter().find(|c| !c.relay))
                                 .or(player.connections.first())
@@ -567,10 +567,10 @@ pub async fn dispatch(
                 state.track_artists.clear();
                 state.artist_aliases.clear();
                 state.album_display_artist.clear();
-                state.compilation_albums.clear();
-                state.compilation_artist_keys.clear();
-                state.compilation_track_artist_keys.clear();
-                state.compilations_detected = false;
+                state.compilations.albums.clear();
+                state.compilations.artist_keys.clear();
+                state.compilations.track_artist_keys.clear();
+                state.compilations.detected = false;
 
                 state.selected_artist_albums.clear();
                 state.selected_album_tracks.clear();
@@ -582,8 +582,8 @@ pub async fn dispatch(
                 state.list_state.reset();
 
                 // Clear cache timestamps (old library's values must not leak to new library)
-                state.category_timestamps.clear();
-                state.cache_dirty = false;
+                state.cache_mgmt.category_timestamps.clear();
+                state.cache_mgmt.dirty = false;
 
                 // Clear Miller column navigation states
                 state.artist_nav = crate::app::state::BrowseNavigationState::new();
@@ -602,7 +602,7 @@ pub async fn dispatch(
                 }
 
                 // Stop remote playback if active
-                if let crate::app::state::OutputTarget::Remote { ref player_id, ref player_uri, .. } = state.output_target {
+                if let crate::app::state::OutputTarget::Remote { ref player_id, ref player_uri, .. } = state.remote.output_target {
                     let target_id = player_id.clone();
                     let p_uri = player_uri.clone();
                     let token = client.token().map(|s| s.to_string()).unwrap_or_default();
@@ -634,9 +634,9 @@ pub async fn dispatch(
 
                 // Clear waveform and artwork (belong to the old library's track)
                 state.waveform = crate::app::state::WaveformState::default();
-                state.artwork_thumb = None;
-                state.artwork_data = None;
-                state.artwork_loading = false;
+                state.artwork.current_thumb = None;
+                state.artwork.current_data = None;
+                state.artwork.loading = false;
 
                 // Find library name for status message
                 let lib_name = state.libraries.iter()
@@ -694,10 +694,10 @@ pub async fn dispatch(
                     state.stations.clear();
                     state.all_tracks.clear();
                     state.track_artists.clear();
-                    state.compilation_albums.clear();
-                    state.compilation_artist_keys.clear();
-                    state.compilation_track_artist_keys.clear();
-                    state.compilations_detected = false;
+                    state.compilations.albums.clear();
+                    state.compilations.artist_keys.clear();
+                    state.compilations.track_artist_keys.clear();
+                    state.compilations.detected = false;
 
                     state.selected_artist_albums.clear();
                     state.selected_album_tracks.clear();
@@ -707,8 +707,8 @@ pub async fn dispatch(
                     state.subfolder_preload_active = false;
                     state.playlist_tracks_cache.clear();
                     state.list_state.reset();
-                    state.category_timestamps.clear();
-                    state.cache_dirty = false;
+                    state.cache_mgmt.category_timestamps.clear();
+                    state.cache_mgmt.dirty = false;
                     state.artist_nav = crate::app::state::BrowseNavigationState::new();
                     state.genre_nav = crate::app::state::BrowseNavigationState::new();
                     state.playlist_nav = crate::app::state::BrowseNavigationState::new();
@@ -821,14 +821,14 @@ pub async fn dispatch(
                         state.stations.clear();
                         state.all_tracks.clear();
                         state.track_artists.clear();
-                        state.compilation_albums.clear();
-                        state.compilation_artist_keys.clear();
-                        state.compilation_track_artist_keys.clear();
-                        state.compilations_detected = false;
+                        state.compilations.albums.clear();
+                        state.compilations.artist_keys.clear();
+                        state.compilations.track_artist_keys.clear();
+                        state.compilations.detected = false;
 
                         state.playlist_tracks_cache.clear();
-                        state.category_timestamps.clear();
-                        state.cache_dirty = true;
+                        state.cache_mgmt.category_timestamps.clear();
+                        state.cache_mgmt.dirty = true;
 
                         // Reload from API
                         if let Some(lib_key) = &state.active_library {
@@ -858,9 +858,9 @@ pub async fn dispatch(
             tracing::info!("Cleared {} artwork cache files", removed);
 
             // Clear in-memory artwork
-            state.album_art_cache.clear();
-            state.album_art_pending.clear();
-            state.artwork_cache_stats = Some((0, 0));
+            state.artwork.grid_cache.clear();
+            state.artwork.grid_pending.clear();
+            state.artwork.cache_stats = Some((0, 0));
 
             state.set_status(format!("Cleared {} artwork cache files", removed));
         }
@@ -869,7 +869,7 @@ pub async fn dispatch(
             state.folder_contents_cache.clear();
             state.subfolder_preload_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
             state.subfolder_preload_active = false;
-            state.cache_dirty = true;
+            state.cache_mgmt.dirty = true;
 
             tracing::info!("Cleared {} subfolder cache entries", count);
             state.set_status(format!("Cleared {} subfolder cache entries", count));
@@ -920,7 +920,7 @@ pub async fn dispatch(
 
         Action::DiscoverPlayers => {
             if let Some(stored) = PlexAuth::load_token() {
-                state.discovering_players = true;
+                state.remote.discovering = true;
                 let event_tx = event_tx.clone();
                 tokio::spawn(async move {
                     let auth = PlexAuth::from_stored_auth(&stored);
@@ -944,7 +944,7 @@ pub async fn dispatch(
             match &target {
                 OutputTarget::Local => {
                     // Switching back to local: stop remote playback if active
-                    if let OutputTarget::Remote { player_id, player_uri, .. } = &state.output_target {
+                    if let OutputTarget::Remote { player_id, player_uri, .. } = &state.remote.output_target {
                         let target_id = player_id.clone();
                         let p_uri = player_uri.clone();
                         let token = client.token().map(|s| s.to_string()).unwrap_or_default();
@@ -959,8 +959,8 @@ pub async fn dispatch(
                             let _ = rc.stop().await;
                         });
                     }
-                    state.output_target = OutputTarget::Local;
-                    state.remote_playback = crate::app::state::RemotePlaybackState::default();
+                    state.remote.output_target = OutputTarget::Local;
+                    state.remote.playback = crate::app::state::RemotePlaybackState::default();
 
                     if was_playing && state.current_track().is_some() {
                         // Transfer playback to local
@@ -976,8 +976,8 @@ pub async fn dispatch(
                     let name = player_name.clone();
                     // Stop local audio
                     audio.stop();
-                    state.output_target = target;
-                    state.remote_playback = crate::app::state::RemotePlaybackState::default();
+                    state.remote.output_target = target;
+                    state.remote.playback = crate::app::state::RemotePlaybackState::default();
 
                     if was_playing && state.current_track().is_some() {
                         // Transfer playback to remote
@@ -994,7 +994,7 @@ pub async fn dispatch(
 
         Action::SetAdventureLength(length) => {
             state.adventure.requested_length = length.clamp(5, 100);
-            state.input_dialog = None;
+            state.popups.input_dialog = None;
             state.adventure.generating = true;
             state.set_status("Adventure: generating sonic bridge...".to_string());
 
@@ -1043,7 +1043,7 @@ pub async fn dispatch(
         }
         Action::CancelAdventure => {
             state.adventure = crate::app::state::AdventureState::default();
-            state.input_dialog = None;
+            state.popups.input_dialog = None;
             state.clear_status();
         }
         Action::AdventureComplete(tracks) => {

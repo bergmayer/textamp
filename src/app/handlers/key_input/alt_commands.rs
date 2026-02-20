@@ -106,9 +106,9 @@ pub fn available_alt_commands(state: &AppState) -> Vec<AltCommand> {
     // Alt global commands
     let lib_enabled = state.active_library.is_some();
     let filter_enabled = state.view == View::Browse && !state.list_filter.active
-        && !state.search_popup_active && state.sort_popup.is_none()
-        && state.radio_launcher.is_none() && state.adventure_launcher.is_none()
-        && state.artist_radio_picker.is_none();
+        && !state.popups.search_active && state.popups.sort.is_none()
+        && state.popups.radio_launcher.is_none() && state.popups.adventure_launcher.is_none()
+        && state.popups.artist_radio_picker.is_none();
     cmds.push(AltCommand { modifier: CommandModifier::Alt, key: 'f', label: "filter", display_key: None,
         enabled: filter_enabled });
     cmds.push(AltCommand { modifier: CommandModifier::Alt, key: 'r', label: "random album", display_key: None,
@@ -158,8 +158,8 @@ fn has_track_context(state: &AppState) -> bool {
                 .unwrap_or(false)
         }
         View::Similar => {
-            state.similar_mode == crate::app::state::SimilarMode::Tracks
-                && !state.similar_tracks.is_empty()
+            state.similar.mode == crate::app::state::SimilarMode::Tracks
+                && !state.similar.tracks.is_empty()
         }
         _ => false,
     }
@@ -191,7 +191,7 @@ fn has_album_context(state: &AppState) -> bool {
             }
         }
         View::Similar => {
-            !state.similar_albums.is_empty()
+            !state.similar.albums.is_empty()
         }
         _ => false,
     }
@@ -255,8 +255,8 @@ fn has_track_with_album(state: &AppState) -> bool {
             }
         }
         View::Similar => {
-            state.similar_mode == crate::app::state::SimilarMode::Tracks
-                && state.similar_tracks.get(state.list_state.similar_index)
+            state.similar.mode == crate::app::state::SimilarMode::Tracks
+                && state.similar.tracks.get(state.list_state.similar_index)
                     .map(|t| t.parent_rating_key.is_some())
                     .unwrap_or(false)
         }

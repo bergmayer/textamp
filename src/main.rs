@@ -428,8 +428,8 @@ async fn run_test_mode() -> Result<()> {
     if let Some(album) = state.albums.get(10) {
         match client.get_similar_albums(&album.rating_key, 10).await {
             Ok(similar) => {
-                state.similar_albums = similar.clone();
-                state.similar_source_title = format!("{} - {}", album.artist_name(), album.title);
+                state.similar.albums = similar.clone();
+                state.similar.source_title = format!("{} - {}", album.artist_name(), album.title);
                 state.view = View::Similar;
                 println!("  PASS - Loaded {} similar albums", similar.len());
                 if let Some(first) = similar.first() {
@@ -583,7 +583,7 @@ fn apply_key_to_state(state: &mut AppState, key: crossterm::event::KeyEvent) {
                         let max = state.queue.len().saturating_sub(1);
                         state.list_state.queue_index = (state.list_state.queue_index + 1).min(max);
                     } else if state.view == View::Similar {
-                        let max = state.similar_albums.len().saturating_sub(1);
+                        let max = state.similar.albums.len().saturating_sub(1);
                         state.list_state.similar_index = (state.list_state.similar_index + 1).min(max);
                     }
                 }

@@ -78,57 +78,57 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     }
 
     // Render search popup if active (floating dialog)
-    if state.search_popup_active {
+    if state.popups.search_active {
         screens::filter::render(frame, state, frame.area());
     }
 
     // Render radio launcher popup if active
-    if state.radio_launcher.is_some() {
+    if state.popups.radio_launcher.is_some() {
         screens::radio_launcher::render(frame, state, frame.area());
     }
 
     // Render adventure launcher popup if active
-    if state.adventure_launcher.is_some() {
+    if state.popups.adventure_launcher.is_some() {
         screens::adventure_launcher::render(frame, state, frame.area());
     }
 
     // Render artist radio picker popup if active
-    if state.artist_radio_picker.is_some() {
+    if state.popups.artist_radio_picker.is_some() {
         screens::artist_radio_picker::render(frame, state, frame.area());
     }
 
     // Render library picker popup if active
-    if state.library_picker_active {
+    if state.popups.library_picker_active {
         render_library_picker(frame, state);
     }
 
     // Render sort popup if active
-    if state.sort_popup.is_some() {
+    if state.popups.sort.is_some() {
         screens::sort_popup::render(frame, state, frame.area());
     }
 
     // Render artist bio popup if active
-    if state.artist_bio_popup.is_some() {
+    if state.popups.artist_bio.is_some() {
         render_artist_bio_popup(frame, state);
     }
 
     // Render error popup if present
-    if let Some(ref error) = state.last_error {
+    if let Some(ref error) = state.notifications.last_error {
         render_error_popup(frame, error);
     }
 
     // Render input dialog if present
-    if let Some(ref dialog) = state.input_dialog {
+    if let Some(ref dialog) = state.popups.input_dialog {
         render_input_dialog(frame, dialog);
     }
 
     // Render confirm dialog if present
-    if let Some(ref dialog) = state.confirm_dialog {
+    if let Some(ref dialog) = state.popups.confirm_dialog {
         render_confirm_dialog(frame, state, dialog);
     }
 
     // Render toast notification if present (bottom-right, non-blocking)
-    if let Some(ref toast) = state.toast_message {
+    if let Some(ref toast) = state.notifications.toast_message {
         render_toast(frame, toast, frame.area());
     }
 }
@@ -497,7 +497,7 @@ fn render_folder_view(
                 } else {
                     selected_idx
                 };
-                let scroll_offset = match state.browse_scroll_pin {
+                let scroll_offset = match state.scroll.browse {
                     Some((pin_col, pinned)) if pin_col == col_idx => pinned,
                     _ => NavigationService::calc_scroll_offset(display_selected_idx, visible_height, total_items),
                 };
@@ -851,7 +851,7 @@ fn render_browse_miller_columns(
                 } else {
                     selected_idx
                 };
-                let scroll_offset = match state.browse_scroll_pin {
+                let scroll_offset = match state.scroll.browse {
                     Some((pin_col, pinned)) if pin_col == col_idx => pinned,
                     _ => NavigationService::calc_scroll_offset(display_selected_idx, visible_item_count, total_display_items),
                 };
@@ -1208,7 +1208,7 @@ fn render_album_art_grid(
     };
 
     // Scroll offset: respect pin, otherwise ensure selected item is visible
-    let scroll_offset = match state.browse_scroll_pin {
+    let scroll_offset = match state.scroll.browse {
         Some((pin_col, pinned)) if pin_col == col_idx => pinned,
         _ => {
             // Simple approach: start from 0, advance until selected is visible
@@ -1294,7 +1294,7 @@ fn render_album_art_grid(
                 _ => None,
             };
             if let Some(key) = art_key {
-                if let Some(data) = state.album_art_cache.get(key) {
+                if let Some(data) = state.artwork.grid_cache.get(key) {
                     rendered_image = super::artwork::render_grid_image(frame, image_area, key, data);
                 }
             }
@@ -1306,7 +1306,7 @@ fn render_album_art_grid(
                     .filter_map(|w| w.chars().next())
                     .take(3)
                     .collect();
-                let placeholder_text = if state.album_art_pending.contains(item.key()) {
+                let placeholder_text = if state.artwork.grid_pending.contains(item.key()) {
                     "...".to_string()
                 } else if initials.is_empty() {
                     "?".to_string()
@@ -1723,7 +1723,7 @@ fn render_library_picker(frame: &mut Frame, state: &AppState) {
 
     // Build library list items
     let items: Vec<ListItem> = all_libs.iter().enumerate().map(|(i, (server_id, server_name, lib))| {
-        let is_selected = i == state.library_picker_index;
+        let is_selected = i == state.popups.library_picker_index;
         let is_active = state.active_library.as_deref() == Some(lib.key.as_str())
             && state.active_server_id.as_deref() == Some(*server_id);
 
@@ -1750,7 +1750,7 @@ fn render_library_picker(frame: &mut Frame, state: &AppState) {
 
 /// Render the artist bio popup (F4).
 fn render_artist_bio_popup(frame: &mut Frame, state: &AppState) {
-    let popup = match &state.artist_bio_popup {
+    let popup = match &state.popups.artist_bio {
         Some(p) => p,
         None => return,
     };

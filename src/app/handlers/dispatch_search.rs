@@ -221,36 +221,36 @@ pub async fn dispatch(
                 state.list_filter.loading = false;
                 state.list_filter.selected = 0;
             }
-            state.search_popup_active = true;
+            state.popups.search_active = true;
             state.search_focus = SearchFocus::Input;
             state.search_query.clear();
             state.search_results = None;
         }
         Action::CloseSearchPopup => {
-            state.search_popup_active = false;
+            state.popups.search_active = false;
         }
 
         // Library picker popup actions
         Action::OpenLibraryPicker => {
-            state.library_picker_active = true;
+            state.popups.library_picker_active = true;
             if state.has_multiple_servers() {
                 let all_libs = state.all_libraries_with_servers();
-                state.library_picker_index = all_libs.iter()
+                state.popups.library_picker_index = all_libs.iter()
                     .position(|(sid, _, lib)| {
                         state.active_library.as_deref() == Some(lib.key.as_str())
                             && state.active_server_id.as_deref() == Some(*sid)
                     })
                     .unwrap_or(0);
             } else if let Some(ref active_key) = state.active_library {
-                state.library_picker_index = state.libraries.iter()
+                state.popups.library_picker_index = state.libraries.iter()
                     .position(|lib| lib.key == *active_key)
                     .unwrap_or(0);
             } else {
-                state.library_picker_index = 0;
+                state.popups.library_picker_index = 0;
             }
         }
         Action::CloseLibraryPicker => {
-            state.library_picker_active = false;
+            state.popups.library_picker_active = false;
         }
 
         // Sort popup actions
@@ -289,18 +289,18 @@ pub async fn dispatch(
                         col.artwork_visible,
                         is_playlist,
                     );
-                    state.sort_popup = Some(popup);
+                    state.popups.sort = Some(popup);
                 }
             }
         }
         Action::CloseSortPopup => {
-            state.sort_popup = None;
+            state.popups.sort = None;
         }
         Action::CloseRadioLauncher => {
-            state.radio_launcher = None;
+            state.popups.radio_launcher = None;
         }
         Action::RadioLauncherSearch => {
-            if let Some(ref mut launcher) = state.radio_launcher {
+            if let Some(ref mut launcher) = state.popups.radio_launcher {
                 if launcher.query.is_empty() {
                     launcher.results = None;
                     launcher.loading = false;
@@ -376,7 +376,7 @@ pub async fn dispatch(
 
         // Adventure launcher popup actions
         Action::OpenAdventureLauncher => {
-            state.adventure_launcher = Some(crate::app::state::AdventureLauncherState {
+            state.popups.adventure_launcher = Some(crate::app::state::AdventureLauncherState {
                 step: crate::app::state::AdventureStep::FindStartTrack,
                 query: String::new(),
                 results: None,
@@ -391,14 +391,14 @@ pub async fn dispatch(
             });
         }
         Action::CloseAdventureLauncher => {
-            state.adventure_launcher = None;
+            state.popups.adventure_launcher = None;
         }
         Action::AdventureLauncherSearch => {
             adventure_launcher_search(event_tx, state, client).await?;
         }
         Action::AdventureLauncherDrillArtist { key, name } => {
             // Async fetch artist albums
-            if let Some(ref mut launcher) = state.adventure_launcher {
+            if let Some(ref mut launcher) = state.popups.adventure_launcher {
                 launcher.loading = true;
             }
             let event_tx = event_tx.clone();
@@ -423,7 +423,7 @@ pub async fn dispatch(
             });
         }
         Action::AdventureLauncherDrillAlbum { key, title, artist_name } => {
-            if let Some(ref mut launcher) = state.adventure_launcher {
+            if let Some(ref mut launcher) = state.popups.adventure_launcher {
                 launcher.loading = true;
             }
             let event_tx = event_tx.clone();
@@ -456,7 +456,7 @@ pub async fn dispatch(
 
         // Multi-artist radio picker actions
         Action::OpenArtistRadioPicker => {
-            state.artist_radio_picker = Some(crate::app::state::ArtistRadioPickerState {
+            state.popups.artist_radio_picker = Some(crate::app::state::ArtistRadioPickerState {
                 step: crate::app::state::ArtistRadioPickerStep::EnterCount,
                 max_artists: 0,
                 count_input: String::new(),
@@ -469,10 +469,10 @@ pub async fn dispatch(
             });
         }
         Action::CloseArtistRadioPicker => {
-            state.artist_radio_picker = None;
+            state.popups.artist_radio_picker = None;
         }
         Action::ArtistRadioPickerSetCount => {
-            if let Some(ref mut picker) = state.artist_radio_picker {
+            if let Some(ref mut picker) = state.popups.artist_radio_picker {
                 let count = picker.count_input.parse::<usize>().unwrap_or(0).clamp(1, 12);
                 picker.max_artists = count;
                 picker.step = crate::app::state::ArtistRadioPickerStep::SelectArtists;
@@ -484,7 +484,7 @@ pub async fn dispatch(
             }
         }
         Action::ArtistRadioPickerSearch => {
-            if let Some(ref mut picker) = state.artist_radio_picker {
+            if let Some(ref mut picker) = state.popups.artist_radio_picker {
                 if picker.query.is_empty() {
                     picker.filtered_artists = state.artists.clone();
                 } else {
@@ -509,7 +509,7 @@ pub async fn dispatch(
             }
         }
         Action::ArtistRadioPickerToggleArtist => {
-            if let Some(ref mut picker) = state.artist_radio_picker {
+            if let Some(ref mut picker) = state.popups.artist_radio_picker {
                 if let Some(artist) = picker.filtered_artists.get(picker.item_index).cloned() {
                     // Toggle: remove if already selected, add if not
                     if let Some(pos) = picker.selected_artists.iter().position(|a| a.rating_key == artist.rating_key) {
@@ -539,7 +539,7 @@ pub async fn dispatch(
         // Artist bio popup (F4)
         Action::ShowArtistBio { artist_key, artist_name } => {
             // Initialize popup in loading state
-            state.artist_bio_popup = Some(crate::app::state::ArtistBioPopup {
+            state.popups.artist_bio = Some(crate::app::state::ArtistBioPopup {
                 artist_name: artist_name.clone(),
                 bio: String::new(),
                 scroll: 0,
@@ -583,7 +583,7 @@ pub async fn dispatch(
         }
 
         Action::ArtistRadioPickerLaunch => {
-            if let Some(picker) = state.artist_radio_picker.take() {
+            if let Some(picker) = state.popups.artist_radio_picker.take() {
                 if picker.selected_artists.is_empty() {
                     return Ok(vec![]);
                 }
@@ -652,7 +652,7 @@ pub async fn dispatch(
 
 /// Handle radio launcher result selection — start Plex radio from the selected item.
 fn select_radio_launcher_result(state: &mut AppState) -> Vec<Action> {
-    let launcher = match state.radio_launcher.take() {
+    let launcher = match state.popups.radio_launcher.take() {
         Some(l) => l,
         None => return vec![],
     };
@@ -718,7 +718,7 @@ fn select_search_result(state: &mut AppState) -> Vec<Action> {
                 let artist_key = artist.rating_key.clone();
                 state.search_query.clear();
 
-                state.search_popup_active = false;
+                state.popups.search_active = false;
                 state.browse_category = BrowseCategory::Library;
                 state.set_view(View::Browse);
 
@@ -741,7 +741,7 @@ fn select_search_result(state: &mut AppState) -> Vec<Action> {
                 let artist_key = album.parent_rating_key.clone();
                 state.search_query.clear();
 
-                state.search_popup_active = false;
+                state.popups.search_active = false;
                 state.browse_category = BrowseCategory::Library;
                 state.set_view(View::Browse);
                 state.pending_album_key = Some(album_key);
@@ -778,7 +778,7 @@ fn select_search_result(state: &mut AppState) -> Vec<Action> {
                 let track_owned = track.clone();
                 state.search_query.clear();
 
-                state.search_popup_active = false;
+                state.popups.search_active = false;
                 state.browse_category = BrowseCategory::Library;
                 state.set_view(View::Browse);
                 state.pending_album_key = album_key;
@@ -807,7 +807,7 @@ fn select_search_result(state: &mut AppState) -> Vec<Action> {
                 let playlist_key = playlist.rating_key.clone();
                 state.search_query.clear();
 
-                state.search_popup_active = false;
+                state.popups.search_active = false;
                 state.browse_category = BrowseCategory::Playlists;
                 state.set_view(View::Browse);
 
@@ -828,7 +828,7 @@ fn select_search_result(state: &mut AppState) -> Vec<Action> {
                 let genre_key = genre.effective_key().to_string();
                 state.search_query.clear();
 
-                state.search_popup_active = false;
+                state.popups.search_active = false;
                 state.browse_category = BrowseCategory::Genres;
                 state.set_view(View::Browse);
 
@@ -912,7 +912,7 @@ async fn execute_list_filter(
     let column = state.list_filter.column;
 
     let aliases = state.artist_aliases.clone();
-    let comp_keys = state.compilation_artist_keys.clone();
+    let comp_keys = state.compilations.artist_keys.clone();
     let empty_comp_keys = std::collections::HashSet::new();
 
     match category {
@@ -975,7 +975,7 @@ async fn adventure_launcher_search(
     state: &mut AppState,
     client: &mut PlexClient,
 ) -> Result<()> {
-    let launcher = match state.adventure_launcher.as_mut() {
+    let launcher = match state.popups.adventure_launcher.as_mut() {
         Some(l) => l,
         None => return Ok(()),
     };
@@ -1065,7 +1065,7 @@ async fn adventure_launcher_select_track(
 ) -> Result<Vec<Action>> {
     use crate::app::state::{AdventureStep, AdventureDrillLevel};
 
-    let launcher = match state.adventure_launcher.as_mut() {
+    let launcher = match state.popups.adventure_launcher.as_mut() {
         Some(l) => l,
         None => return Ok(vec![]),
     };
@@ -1126,7 +1126,7 @@ async fn adventure_launcher_select_track(
             let count = count_str.parse::<usize>().unwrap_or(20).clamp(5, 100);
 
             // Close launcher before starting generation
-            state.adventure_launcher = None;
+            state.popups.adventure_launcher = None;
 
             if let Some(start_track) = start {
                 state.set_status("Adventure: generating sonic bridge...".to_string());
@@ -1158,7 +1158,7 @@ async fn adventure_launcher_select_track(
 fn adventure_launcher_back(state: &mut AppState) {
     use crate::app::state::{AdventureStep, AdventureDrillLevel};
 
-    let launcher = match state.adventure_launcher.as_mut() {
+    let launcher = match state.popups.adventure_launcher.as_mut() {
         Some(l) => l,
         None => return,
     };
@@ -1180,7 +1180,7 @@ fn adventure_launcher_back(state: &mut AppState) {
             match launcher.step {
                 AdventureStep::FindStartTrack => {
                     // Close the launcher
-                    state.adventure_launcher = None;
+                    state.popups.adventure_launcher = None;
                 }
                 AdventureStep::EnterTrackCount => {
                     // Go back to FindStartTrack
@@ -1192,7 +1192,7 @@ fn adventure_launcher_back(state: &mut AppState) {
                     // Pre-populate with all artists
                     let _ = launcher;
                     let artists = state.artists.clone();
-                    if let Some(ref mut l) = state.adventure_launcher {
+                    if let Some(ref mut l) = state.popups.adventure_launcher {
                         l.results = Some(SearchResults {
                             artists,
                             albums: vec![],

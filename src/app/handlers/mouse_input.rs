@@ -64,12 +64,12 @@ fn handle_filtered_column_click(
     // Detect "second click": item is already selected AND there was a recent click
     // (distinguishes "auto-selected by filter typing" from "selected by prior click")
     let is_drill = col_selected_index == item_idx
-        && state.browse_click_time
+        && state.scroll.browse_click_time
             .map(|t| t.elapsed().as_millis() < 2000)
             .unwrap_or(false);
 
-    state.browse_scroll_pin = Some((col_idx, scroll_offset));
-    state.browse_click_time = Some(std::time::Instant::now());
+    state.scroll.browse = Some((col_idx, scroll_offset));
+    state.scroll.browse_click_time = Some(std::time::Instant::now());
 
     if is_drill {
         // Second click → deactivate filter, caller dispatches drill-down
@@ -109,7 +109,7 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
     let transport_start = state.terminal_height.saturating_sub(5); // 2 rows above commands
 
     // Confirm dialog intercepts mouse clicks when active
-    if state.confirm_dialog.is_some() {
+    if state.popups.confirm_dialog.is_some() {
         if let crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) = event.kind {
             // Read registered regions (drop borrow before mutating state)
             let regions = {
@@ -133,10 +133,10 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
                 };
 
                 if let Some(clicked_yes) = clicked_yes {
-                    if let Some(dialog) = state.confirm_dialog.as_ref() {
+                    if let Some(dialog) = state.popups.confirm_dialog.as_ref() {
                         let already_selected = clicked_yes == dialog.selected_yes;
                         if already_selected {
-                            let dialog = state.confirm_dialog.take().unwrap();
+                            let dialog = state.popups.confirm_dialog.take().unwrap();
                             if clicked_yes {
                                 use crate::app::state::ConfirmAction;
                                 return match dialog.on_confirm {
@@ -149,7 +149,7 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
                             }
                             return vec![];
                         } else {
-                            state.confirm_dialog.as_mut().unwrap().selected_yes = clicked_yes;
+                            state.popups.confirm_dialog.as_mut().unwrap().selected_yes = clicked_yes;
                             return vec![];
                         }
                     }
@@ -160,12 +160,12 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
     }
 
     // Library picker popup intercepts all mouse events when active
-    if state.library_picker_active {
+    if state.popups.library_picker_active {
         return handle_library_picker_mouse(event, state);
     }
 
     // Search popup intercepts mouse clicks when active
-    if state.search_popup_active {
+    if state.popups.search_active {
         if let crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) = event.kind {
             let shift = event.modifiers.contains(crossterm::event::KeyModifiers::SHIFT);
             return handle_search_popup_click(click_row, click_col, shift, state);
@@ -174,7 +174,7 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
     }
 
     // Artist radio picker popup intercepts mouse clicks when active
-    if state.artist_radio_picker.is_some() {
+    if state.popups.artist_radio_picker.is_some() {
         if let crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) = event.kind {
             return handle_artist_radio_picker_click(click_row, click_col, state);
         }
@@ -182,7 +182,7 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
     }
 
     // Adventure launcher popup intercepts mouse clicks when active
-    if state.adventure_launcher.is_some() {
+    if state.popups.adventure_launcher.is_some() {
         if let crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) = event.kind {
             return handle_adventure_launcher_click(click_row, click_col, state);
         }
@@ -190,20 +190,20 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
     }
 
     // Artist bio popup intercepts all mouse events when active
-    if state.artist_bio_popup.is_some() {
+    if state.popups.artist_bio.is_some() {
         match event.kind {
             crossterm::event::MouseEventKind::ScrollDown => {
-                if let Some(ref mut popup) = state.artist_bio_popup {
+                if let Some(ref mut popup) = state.popups.artist_bio {
                     popup.scroll = popup.scroll.saturating_add(3);
                 }
             }
             crossterm::event::MouseEventKind::ScrollUp => {
-                if let Some(ref mut popup) = state.artist_bio_popup {
+                if let Some(ref mut popup) = state.popups.artist_bio {
                     popup.scroll = popup.scroll.saturating_sub(3);
                 }
             }
             crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
-                state.artist_bio_popup = None;
+                state.popups.artist_bio = None;
                 crate::ui::screens::now_playing::clear_artwork_cache();
             }
             _ => {}
@@ -212,7 +212,7 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
     }
 
     // Sort popup intercepts mouse clicks when active
-    if state.sort_popup.is_some() {
+    if state.popups.sort.is_some() {
         if let crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) = event.kind {
             return handle_sort_popup_click(click_row, click_col, state);
         }
@@ -298,7 +298,7 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
 
         // Mouse drag - scrollbar drag, seek drag, or volume drag
         MouseEventKind::Drag(MouseButton::Left) => {
-            if state.scrollbar_drag.is_some() {
+            if state.scroll.scrollbar_drag.is_some() {
                 return handle_scrollbar_drag(click_row, state);
             }
             if state.volume_drag {
@@ -330,7 +330,7 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
         MouseEventKind::Up(MouseButton::Left) => {
             state.seeking_drag = false;
             state.volume_drag = false;
-            state.scrollbar_drag = None;
+            state.scroll.scrollbar_drag = None;
         }
 
         // Scroll wheel
@@ -371,7 +371,7 @@ fn handle_library_picker_mouse(event: crossterm::event::MouseEvent, state: &mut 
                     let clicked_idx = (click_row - regions.items_area.y) as usize;
 
                     if clicked_idx < regions.item_count {
-                        let already_highlighted = state.library_picker_index == clicked_idx;
+                        let already_highlighted = state.popups.library_picker_index == clicked_idx;
                         if already_highlighted {
                             // Second click on highlighted item: select it
                             let multi_server = state.has_multiple_servers();
@@ -399,7 +399,7 @@ fn handle_library_picker_mouse(event: crossterm::event::MouseEvent, state: &mut 
                             }
                         } else {
                             // First click: just highlight
-                            state.library_picker_index = clicked_idx;
+                            state.popups.library_picker_index = clicked_idx;
                         }
                     }
                 }
@@ -408,13 +408,13 @@ fn handle_library_picker_mouse(event: crossterm::event::MouseEvent, state: &mut 
             }
         }
         MouseEventKind::ScrollUp if inside_popup => {
-            if state.library_picker_index > 0 {
-                state.library_picker_index -= 1;
+            if state.popups.library_picker_index > 0 {
+                state.popups.library_picker_index -= 1;
             }
         }
         MouseEventKind::ScrollDown if inside_popup => {
-            if state.library_picker_index + 1 < regions.item_count {
-                state.library_picker_index += 1;
+            if state.popups.library_picker_index + 1 < regions.item_count {
+                state.popups.library_picker_index += 1;
             }
         }
         _ => {}
@@ -439,7 +439,7 @@ fn handle_search_tab_click(rel_col: u16, state: &mut AppState) -> Vec<Action> {
         state.search_tab = new_tab;
         state.search_focus = crate::app::state::SearchFocus::Input;
         state.list_state.search_item_index = 0;
-        state.search_scroll_pin = None;
+        state.scroll.search = None;
         if !state.search_query.is_empty() {
             return vec![Action::ExecuteLocalSearch];
         }
@@ -461,7 +461,7 @@ fn handle_search_result_click(visual_row: usize, results_height: usize, state: &
     let was_focused = matches!(state.search_focus, crate::app::state::SearchFocus::Results);
 
     // Check if this is a rapid click (within 500ms) - if so, don't open on second click
-    let is_rapid_click = state.search_click_time
+    let is_rapid_click = state.scroll.search_click_time
         .map(|t| t.elapsed().as_millis() < 500)
         .unwrap_or(false);
 
@@ -488,7 +488,7 @@ fn handle_search_result_click(visual_row: usize, results_height: usize, state: &
             let display_selected = entries.iter()
                 .position(|e| *e == Some(state.list_state.search_item_index))
                 .unwrap_or(0);
-            let scroll_offset = match state.search_scroll_pin {
+            let scroll_offset = match state.scroll.search {
                 Some(pinned) => pinned,
                 None => NavigationService::calc_scroll_offset(
                     display_selected, results_height, entries.len(),
@@ -499,8 +499,8 @@ fn handle_search_result_click(visual_row: usize, results_height: usize, state: &
                 let already_selected = was_focused && *idx == prev_idx;
                 state.search_focus = crate::app::state::SearchFocus::Results;
                 state.list_state.search_item_index = *idx;
-                state.search_scroll_pin = Some(scroll_offset);
-                state.search_click_time = Some(std::time::Instant::now());
+                state.scroll.search = Some(scroll_offset);
+                state.scroll.search_click_time = Some(std::time::Instant::now());
                 // Open in library only if already selected AND not a rapid click
                 if already_selected && !is_rapid_click {
                     return vec![Action::SelectSearchResult];
@@ -516,7 +516,7 @@ fn handle_search_result_click(visual_row: usize, results_height: usize, state: &
                 SearchTab::Genres => results.genres.len(),
                 _ => 0,
             };
-            let scroll_offset = match state.search_scroll_pin {
+            let scroll_offset = match state.scroll.search {
                 Some(pinned) => pinned,
                 None => NavigationService::calc_scroll_offset(
                     state.list_state.search_item_index, results_height, total,
@@ -527,8 +527,8 @@ fn handle_search_result_click(visual_row: usize, results_height: usize, state: &
                 let already_selected = was_focused && actual_idx == prev_idx;
                 state.search_focus = crate::app::state::SearchFocus::Results;
                 state.list_state.search_item_index = actual_idx;
-                state.search_scroll_pin = Some(scroll_offset);
-                state.search_click_time = Some(std::time::Instant::now());
+                state.scroll.search = Some(scroll_offset);
+                state.scroll.search_click_time = Some(std::time::Instant::now());
                 // Open in library only if already selected AND not a rapid click
                 if already_selected && !is_rapid_click {
                     return vec![Action::SelectSearchResult];
@@ -608,7 +608,7 @@ fn handle_tab_bar_click(click_col: u16, state: &mut AppState) -> Vec<Action> {
     if let Some(quit_rect) = &regions.quit_button {
         if click_col >= quit_rect.x && click_col < quit_rect.right() {
             use crate::app::state::{ConfirmDialog, ConfirmAction};
-            state.confirm_dialog = Some(ConfirmDialog {
+            state.popups.confirm_dialog = Some(ConfirmDialog {
                 title: "Quit".to_string(),
                 message: "Are you sure you want to quit?".to_string(),
                 on_confirm: ConfirmAction::Quit,
@@ -704,7 +704,7 @@ fn alt_bar_item_action(cmd: &crate::app::handlers::key_input::AltCommand, state:
         }
         (CommandModifier::Ctrl, 's') => vec![Action::OpenSortPopup],
         (CommandModifier::Ctrl, 'f') => {
-            if state.search_popup_active {
+            if state.popups.search_active {
                 vec![Action::CloseSearchPopup]
             } else {
                 vec![Action::OpenSearchPopup]
@@ -712,7 +712,7 @@ fn alt_bar_item_action(cmd: &crate::app::handlers::key_input::AltCommand, state:
         }
         (CommandModifier::Ctrl, 'q') => {
             use crate::app::state::{ConfirmDialog, ConfirmAction};
-            state.confirm_dialog = Some(ConfirmDialog {
+            state.popups.confirm_dialog = Some(ConfirmDialog {
                 title: "Quit".to_string(),
                 message: "Are you sure you want to quit?".to_string(),
                 on_confirm: ConfirmAction::Quit,
@@ -1060,7 +1060,7 @@ fn miller_hit_test(
         let click_offset = (click_row - inner_y) as usize;
 
         // Use pinned scroll offset if set for this column
-        let pinned = state.browse_scroll_pin.and_then(|(pc, po)| if pc == col_idx { Some(po) } else { None });
+        let pinned = state.scroll.browse.and_then(|(pc, po)| if pc == col_idx { Some(po) } else { None });
 
         // Check if this column has artwork_visible enabled
         if col.artwork_visible {
@@ -1203,7 +1203,7 @@ fn folder_hit_test(
         let visible_height = inner_height as usize;
 
         // Use pinned scroll offset if set for this column
-        let pinned = state.browse_scroll_pin.and_then(|(pc, po)| if pc == col_idx { Some(po) } else { None });
+        let pinned = state.scroll.browse.and_then(|(pc, po)| if pc == col_idx { Some(po) } else { None });
 
         // Check if filter is active on this folder column with actual results
         let filter_on_col = state.list_filter.active
@@ -1316,8 +1316,8 @@ fn handle_browse_click(click_row: u16, click_col: u16, shift_held: bool, state: 
 
                 // If clicking a different column, change focus
                 if col_idx != nav.focused_column {
-                    state.browse_scroll_pin = Some((col_idx, scroll_offset));
-                    state.browse_click_time = Some(std::time::Instant::now());
+                    state.scroll.browse = Some((col_idx, scroll_offset));
+                    state.scroll.browse_click_time = Some(std::time::Instant::now());
                     nav.focused_column = col_idx;
                     nav.truncate_right();
                     if let Some(col) = nav.columns.get_mut(col_idx) {
@@ -1348,8 +1348,8 @@ fn handle_browse_click(click_row: u16, click_col: u16, shift_held: bool, state: 
                     drill
                 } else {
                     // No filter: click highlights, Enter key activates
-                    state.browse_scroll_pin = Some((col_idx, scroll_offset));
-                    state.browse_click_time = Some(std::time::Instant::now());
+                    state.scroll.browse = Some((col_idx, scroll_offset));
+                    state.scroll.browse_click_time = Some(std::time::Instant::now());
                     // Update selection
                     if let Some(col) = nav.columns.get_mut(col_idx) {
                         col.selected_index = item_idx;
@@ -1388,8 +1388,10 @@ fn handle_browse_click(click_row: u16, click_col: u16, shift_held: bool, state: 
                         return browse_drill_down_action(item, col_idx, item_idx, state);
                     }
                 } else if !filter_on_click_col {
-                    // Auto-drill: always update child column so right panel
-                    // reflects the highlighted item
+                    // Auto-drill: update child column so right panel
+                    // reflects the highlighted item.
+                    // Exception: Track items only play on second click
+                    // (first click highlights, matching keyboard behavior).
                     let nav = match state.browse_category {
                         BrowseCategory::Library => &state.artist_nav,
                         BrowseCategory::Genres => &state.genre_nav,
@@ -1397,20 +1399,38 @@ fn handle_browse_click(click_row: u16, click_col: u16, shift_held: bool, state: 
                         _ => return vec![],
                     };
                     if let Some(item) = nav.columns.get(col_idx).and_then(|c| c.items.get(item_idx)).cloned() {
-                        let drill_actions = browse_drill_down_action(item, col_idx, item_idx, state);
-                        if !drill_actions.is_empty() {
-                            state.auto_drill_pending = true;
-                            return drill_actions;
+                        let is_track = matches!(item, BrowseItem::Track { .. });
+                        if is_track {
+                            // Track: only play if already highlighted (second click)
+                            if col_sel == item_idx {
+                                return browse_drill_down_action(item, col_idx, item_idx, state);
+                            }
+                            // First click on track: just highlight (already done above),
+                            // truncate child columns
+                            let nav = match state.browse_category {
+                                BrowseCategory::Library => &mut state.artist_nav,
+                                BrowseCategory::Genres => &mut state.genre_nav,
+                                BrowseCategory::Playlists => &mut state.playlist_nav,
+                                _ => return vec![],
+                            };
+                            nav.truncate_right();
+                        } else {
+                            let drill_actions = browse_drill_down_action(item, col_idx, item_idx, state);
+                            if !drill_actions.is_empty() {
+                                state.auto_drill_pending = true;
+                                return drill_actions;
+                            }
                         }
+                    } else {
+                        // Non-drillable item: truncate child columns
+                        let nav = match state.browse_category {
+                            BrowseCategory::Library => &mut state.artist_nav,
+                            BrowseCategory::Genres => &mut state.genre_nav,
+                            BrowseCategory::Playlists => &mut state.playlist_nav,
+                            _ => return vec![],
+                        };
+                        nav.truncate_right();
                     }
-                    // Non-drillable item: truncate child columns
-                    let nav = match state.browse_category {
-                        BrowseCategory::Library => &mut state.artist_nav,
-                        BrowseCategory::Genres => &mut state.genre_nav,
-                        BrowseCategory::Playlists => &mut state.playlist_nav,
-                        _ => return vec![],
-                    };
-                    nav.truncate_right();
                 }
             }
         }
@@ -1560,8 +1580,8 @@ fn handle_folder_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
 
         // If clicking a different column, change focus (clears filter)
         if col_idx != folder_state.focused_column {
-            state.browse_scroll_pin = Some((col_idx, scroll_offset));
-            state.browse_click_time = Some(std::time::Instant::now());
+            state.scroll.browse = Some((col_idx, scroll_offset));
+            state.scroll.browse_click_time = Some(std::time::Instant::now());
             folder_state.focused_column = col_idx;
             folder_state.truncate_right_columns();
             if let Some(col) = folder_state.columns.get_mut(col_idx) {
@@ -1584,8 +1604,8 @@ fn handle_folder_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
             }
             drill
         } else {
-            state.browse_scroll_pin = Some((col_idx, scroll_offset));
-            state.browse_click_time = Some(std::time::Instant::now());
+            state.scroll.browse = Some((col_idx, scroll_offset));
+            state.scroll.browse_click_time = Some(std::time::Instant::now());
             if col_sel == item_idx {
                 true
             } else {
@@ -1661,7 +1681,7 @@ fn handle_now_playing_down(click_row: u16, click_col: u16, modifiers: crossterm:
 
                     // Compute scroll offset once, respecting existing pin
                     let scroll_offset = if let Some(col) = state.station_nav.focused() {
-                        state.station_scroll_pin.unwrap_or_else(|| {
+                        state.scroll.station.unwrap_or_else(|| {
                             helpers::calc_scroll_offset(
                                 col.selected_index, visible_height, col.stations.len(),
                             )
@@ -1724,7 +1744,7 @@ fn handle_now_playing_down(click_row: u16, click_col: u16, modifiers: crossterm:
                             }
                         } else {
                             // Pin current scroll offset to prevent viewport jump on selection change
-                            state.station_scroll_pin = Some(scroll_offset);
+                            state.scroll.station = Some(scroll_offset);
                             if let Some(col) = state.station_nav.focused_mut() {
                                 col.selected_index = idx;
                             }
@@ -1758,7 +1778,7 @@ fn handle_now_playing_down(click_row: u16, click_col: u16, modifiers: crossterm:
 
                 // Match the renderer's scroll offset calculation
                 let selected = state.list_state.queue_index;
-                let scroll_offset = match state.queue_scroll_pin {
+                let scroll_offset = match state.scroll.queue {
                     Some(pinned) => pinned,
                     None => helpers::calc_scroll_offset(selected, visible_item_count, tracks_len),
                 };
@@ -1772,7 +1792,7 @@ fn handle_now_playing_down(click_row: u16, click_col: u16, modifiers: crossterm:
                         } else {
                             state.queue_selected.insert(actual_idx);
                         }
-                        state.queue_scroll_pin = Some(scroll_offset);
+                        state.scroll.queue = Some(scroll_offset);
                         state.list_state.queue_index = actual_idx;
                         return vec![];
                     }
@@ -1783,7 +1803,7 @@ fn handle_now_playing_down(click_row: u16, click_col: u16, modifiers: crossterm:
                     }
 
                     let already_selected = state.list_state.queue_index == actual_idx;
-                    state.queue_scroll_pin = Some(scroll_offset);
+                    state.scroll.queue = Some(scroll_offset);
                     state.list_state.queue_index = actual_idx;
 
                     // Click already-selected item: play it (same as Enter)
@@ -2126,7 +2146,7 @@ fn settings_visual_row_to_item(visual_row: usize, state: &AppState) -> Option<us
             let theme_count = crate::ui::theme::ThemeName::all().len();
             let artwork_count = crate::app::state::ArtworkMode::all().len();
             let output_offset = theme_count + artwork_count;
-            let player_count = state.remote_players.len();
+            let player_count = state.remote.players.len();
 
             // Theme items: rows 1..theme_count
             if visual_row >= 1 && visual_row < 1 + theme_count {
@@ -2204,16 +2224,16 @@ fn handle_similar_click(click_row: u16, click_col: u16, shift_held: bool, state:
     let inner_height = (content_bottom - regions.inner.y) as usize;
     let visible_item_count = inner_height / rows_per_item;
 
-    let total = match state.similar_mode {
-        SimilarMode::Albums => state.similar_albums.len(),
-        SimilarMode::Tracks => state.similar_tracks.len(),
+    let total = match state.similar.mode {
+        SimilarMode::Albums => state.similar.albums.len(),
+        SimilarMode::Tracks => state.similar.tracks.len(),
     };
 
     if total == 0 {
         return vec![];
     }
 
-    let scroll_offset = match state.similar_scroll_pin {
+    let scroll_offset = match state.scroll.similar {
         Some(pinned) => pinned,
         None => helpers::calc_scroll_offset(state.list_state.similar_index, visible_item_count, total),
     };
@@ -2226,11 +2246,11 @@ fn handle_similar_click(click_row: u16, click_col: u16, shift_held: bool, state:
     // Shift+click: add to queue and play (like Shift+Enter)
     if shift_held {
         state.list_state.similar_index = clicked_idx;
-        state.similar_scroll_pin = Some(scroll_offset);
-        match state.similar_mode {
+        state.scroll.similar = Some(scroll_offset);
+        match state.similar.mode {
             SimilarMode::Albums => {
                 // Shift+click: play this album and enqueue all following albums
-                let albums_to_enqueue: Vec<_> = state.similar_albums[clicked_idx..].to_vec();
+                let albums_to_enqueue: Vec<_> = state.similar.albums[clicked_idx..].to_vec();
                 if albums_to_enqueue.is_empty() {
                     return vec![];
                 }
@@ -2251,7 +2271,7 @@ fn handle_similar_click(click_row: u16, click_col: u16, shift_held: bool, state:
             }
             SimilarMode::Tracks => {
                 // Shift+click: play this track and all following tracks
-                let tracks: Vec<_> = state.similar_tracks[clicked_idx..].to_vec();
+                let tracks: Vec<_> = state.similar.tracks[clicked_idx..].to_vec();
                 if !tracks.is_empty() {
                     return vec![Action::EnqueueTracksNext(tracks)];
                 }
@@ -2260,9 +2280,14 @@ fn handle_similar_click(click_row: u16, click_col: u16, shift_held: bool, state:
         return vec![];
     }
 
-    // Click just highlights, Enter key activates
-    state.similar_scroll_pin = Some(scroll_offset);
+    // Click highlights; second click on already-highlighted item activates
+    let already_selected = state.list_state.similar_index == clicked_idx;
+    state.scroll.similar = Some(scroll_offset);
     state.list_state.similar_index = clicked_idx;
+
+    if already_selected {
+        return super::key_input::similar::activate_similar_item(state);
+    }
 
     vec![]
 }
@@ -2271,12 +2296,12 @@ fn handle_similar_click(click_row: u16, click_col: u16, shift_held: bool, state:
 fn handle_scroll(up: bool, click_row: u16, click_col: u16, state: &mut AppState) -> Vec<Action> {
     // Coalesce rapid scroll events (normal mouse wheel can fire multiple events per tick)
     let now = std::time::Instant::now();
-    if let Some(last) = state.scroll_cooldown {
+    if let Some(last) = state.scroll.scroll_cooldown {
         if now.duration_since(last).as_millis() < 50 {
             return vec![];
         }
     }
-    state.scroll_cooldown = Some(now);
+    state.scroll.scroll_cooldown = Some(now);
 
     match state.view {
         View::Browse => {
@@ -2295,7 +2320,7 @@ fn handle_scroll(up: bool, click_row: u16, click_col: u16, state: &mut AppState)
             let station_focused = state.now_playing_focus == crate::app::state::NowPlayingFocus::Stations;
             if in_station_area || station_focused {
                 // Station panel scroll: clear pin so view follows selection
-                state.station_scroll_pin = None;
+                state.scroll.station = None;
                 let delta: i32 = if up { -1 } else { 1 };
                 if let Some(col) = state.station_nav.focused_mut() {
                     let max = col.stations.len().saturating_sub(1);
@@ -2307,7 +2332,7 @@ fn handle_scroll(up: bool, click_row: u16, click_col: u16, state: &mut AppState)
             }
 
             // Scroll queue (includes play history + current tracks)
-            state.queue_scroll_pin = None;
+            state.scroll.queue = None;
             let delta: i32 = if up { -1 } else { 1 };
             let tracks_len = if state.playback_mode == PlaybackMode::Radio {
                 state.radio.tracks.len()
@@ -2328,11 +2353,11 @@ fn handle_scroll(up: bool, click_row: u16, click_col: u16, state: &mut AppState)
             state.help_scroll = new_scroll;
         }
         View::Similar => {
-            state.similar_scroll_pin = None;
+            state.scroll.similar = None;
             let delta: i32 = if up { -1 } else { 1 };
-            let total = match state.similar_mode {
-                crate::app::state::SimilarMode::Albums => state.similar_albums.len(),
-                crate::app::state::SimilarMode::Tracks => state.similar_tracks.len(),
+            let total = match state.similar.mode {
+                crate::app::state::SimilarMode::Albums => state.similar.albums.len(),
+                crate::app::state::SimilarMode::Tracks => state.similar.tracks.len(),
             };
             let max = total.saturating_sub(1);
             let new_idx = (state.list_state.similar_index as i32 + delta).clamp(0, max as i32) as usize;
@@ -2348,14 +2373,14 @@ fn handle_scroll(up: bool, click_row: u16, click_col: u16, state: &mut AppState)
 fn handle_browse_scroll(up: bool, click_row: u16, click_col: u16, state: &mut AppState) -> Vec<Action> {
     // If a mouse click recently set the scroll pin, ignore scroll events
     // to prevent trackpad inertia from clearing the pin and re-centering.
-    if let Some(click_time) = state.browse_click_time {
+    if let Some(click_time) = state.scroll.browse_click_time {
         if click_time.elapsed() < std::time::Duration::from_millis(400) {
             return vec![];
         }
-        state.browse_click_time = None;
+        state.scroll.browse_click_time = None;
     }
     // Clear scroll pin — scrolling should use fresh calc_scroll_offset
-    state.browse_scroll_pin = None;
+    state.scroll.browse = None;
 
     match state.browse_category {
         BrowseCategory::Folders => {
@@ -2412,12 +2437,12 @@ fn handle_browse_scroll(up: bool, click_row: u16, click_col: u16, state: &mut Ap
                 // Throttle cover art scrolling to prevent trackpad momentum
                 if is_art_scroll {
                     let now = std::time::Instant::now();
-                    if let Some(last) = state.art_scroll_cooldown {
+                    if let Some(last) = state.scroll.art_cooldown {
                         if now.duration_since(last).as_millis() < 120 {
                             return vec![];
                         }
                     }
-                    state.art_scroll_cooldown = Some(now);
+                    state.scroll.art_cooldown = Some(now);
                 }
 
                 let delta: i32 = if up { -1 } else { 1 };
@@ -2521,7 +2546,7 @@ fn handle_artist_radio_picker_click(click_row: u16, click_col: u16, state: &mut 
         return vec![Action::CloseArtistRadioPicker];
     }
 
-    let picker = match &state.artist_radio_picker {
+    let picker = match &state.popups.artist_radio_picker {
         Some(p) => p,
         None => return vec![],
     };
@@ -2557,7 +2582,7 @@ fn handle_artist_radio_picker_click(click_row: u16, click_col: u16, state: &mut 
     }
 
     // First click — highlight (set scroll pin)
-    if let Some(ref mut picker) = state.artist_radio_picker {
+    if let Some(ref mut picker) = state.popups.artist_radio_picker {
         picker.scroll_pin = Some(scroll_offset);
         picker.item_index = clicked_idx;
         picker.focus = SearchFocus::Results;
@@ -2583,7 +2608,7 @@ fn handle_adventure_launcher_click(click_row: u16, click_col: u16, state: &mut A
         return vec![Action::CloseAdventureLauncher];
     }
 
-    let launcher = match &state.adventure_launcher {
+    let launcher = match &state.popups.adventure_launcher {
         Some(l) => l,
         None => return vec![],
     };
@@ -2711,7 +2736,7 @@ fn handle_adventure_launcher_click(click_row: u16, click_col: u16, state: &mut A
     }
 
     // First click — highlight (set scroll pin)
-    if let Some(ref mut launcher) = state.adventure_launcher {
+    if let Some(ref mut launcher) = state.popups.adventure_launcher {
         launcher.scroll_pin = Some(scroll_offset);
         launcher.item_index = item_idx;
         launcher.focus = SearchFocus::Results;
@@ -2791,7 +2816,7 @@ fn start_scrollbar_drag(
         scroll_offset_from_y(click_row, track_y_start, track_height, total_items, visible_items, grab_offset)
     };
 
-    state.scrollbar_drag = Some(ScrollbarDrag {
+    state.scroll.scrollbar_drag = Some(ScrollbarDrag {
         view,
         col_idx,
         total_items,
@@ -2806,7 +2831,7 @@ fn start_scrollbar_drag(
 
 /// Handle scrollbar drag events (MouseDrag while scrollbar_drag is active).
 fn handle_scrollbar_drag(mouse_y: u16, state: &mut AppState) -> Vec<Action> {
-    let drag = match state.scrollbar_drag.as_ref() {
+    let drag = match state.scroll.scrollbar_drag.as_ref() {
         Some(d) => d.clone(),
         None => return vec![],
     };
@@ -2822,8 +2847,8 @@ fn handle_scrollbar_drag(mouse_y: u16, state: &mut AppState) -> Vec<Action> {
 
     match drag.view {
         ScrollbarView::Browse | ScrollbarView::Folder => {
-            state.browse_scroll_pin = Some((drag.col_idx, new_offset));
-            state.browse_click_time = Some(std::time::Instant::now());
+            state.scroll.browse = Some((drag.col_idx, new_offset));
+            state.scroll.browse_click_time = Some(std::time::Instant::now());
 
             // Adjust selected index to stay within the visible range
             let first_visible = new_offset;
@@ -2859,13 +2884,13 @@ fn handle_scrollbar_drag(mouse_y: u16, state: &mut AppState) -> Vec<Action> {
             }
         }
         ScrollbarView::Queue => {
-            state.queue_scroll_pin = Some(new_offset);
+            state.scroll.queue = Some(new_offset);
         }
         ScrollbarView::Station => {
-            state.station_scroll_pin = Some(new_offset);
+            state.scroll.station = Some(new_offset);
         }
         ScrollbarView::Similar => {
-            state.similar_scroll_pin = Some(new_offset);
+            state.scroll.similar = Some(new_offset);
         }
         ScrollbarView::Help => {
             state.help_scroll = new_offset as u16;
@@ -2915,7 +2940,7 @@ fn try_browse_scrollbar_click(
             let art_row_height = (inner_height as u16 / target_visible).max(3) as usize;
             let mut y = 0usize;
             let mut count = 0;
-            let offset = state.browse_scroll_pin.and_then(|(pc, po)| if pc == col_idx { Some(po) } else { None }).unwrap_or(0);
+            let offset = state.scroll.browse.and_then(|(pc, po)| if pc == col_idx { Some(po) } else { None }).unwrap_or(0);
             for i in offset..total_items {
                 let h = if is_one_row_item(&col.items[i]) { 1 } else { art_row_height };
                 let spacer = if i + 1 < total_items && is_one_row_item(&col.items[i]) && !is_one_row_item(&col.items[i + 1]) { 1 } else { 0 };
@@ -2929,7 +2954,7 @@ fn try_browse_scrollbar_click(
             inner_height / rows_per_item
         };
 
-        let pinned = state.browse_scroll_pin.and_then(|(pc, po)| if pc == col_idx { Some(po) } else { None });
+        let pinned = state.scroll.browse.and_then(|(pc, po)| if pc == col_idx { Some(po) } else { None });
         let scroll_offset = pinned.unwrap_or_else(|| helpers::calc_scroll_offset(col.selected_index, visible_items, total_items));
 
         if let Some((track_y_start, track_height, thumb_pos, thumb_size, _)) =
@@ -2939,8 +2964,8 @@ fn try_browse_scrollbar_click(
                 click_row, track_y_start, track_height, thumb_pos, thumb_size,
                 total_items, visible_items, ScrollbarView::Browse, col_idx, state,
             );
-            state.browse_scroll_pin = Some((col_idx, new_offset));
-            state.browse_click_time = Some(std::time::Instant::now());
+            state.scroll.browse = Some((col_idx, new_offset));
+            state.scroll.browse_click_time = Some(std::time::Instant::now());
             return Some(vec![]);
         }
     }
@@ -2976,7 +3001,7 @@ fn try_folder_scrollbar_click(
 
         let inner_height = col_reg.inner.height as usize;
         let visible_items = inner_height;
-        let pinned = state.browse_scroll_pin.and_then(|(pc, po)| if pc == col_idx { Some(po) } else { None });
+        let pinned = state.scroll.browse.and_then(|(pc, po)| if pc == col_idx { Some(po) } else { None });
         let scroll_offset = pinned.unwrap_or_else(|| helpers::calc_scroll_offset(col.selected_index, visible_items, total_items));
 
         if let Some((track_y_start, track_height, thumb_pos, thumb_size, _)) =
@@ -2986,8 +3011,8 @@ fn try_folder_scrollbar_click(
                 click_row, track_y_start, track_height, thumb_pos, thumb_size,
                 total_items, visible_items, ScrollbarView::Folder, col_idx, state,
             );
-            state.browse_scroll_pin = Some((col_idx, new_offset));
-            state.browse_click_time = Some(std::time::Instant::now());
+            state.scroll.browse = Some((col_idx, new_offset));
+            state.scroll.browse_click_time = Some(std::time::Instant::now());
             return Some(vec![]);
         }
     }
@@ -3021,7 +3046,7 @@ fn try_queue_scrollbar_click(
     let inner_height = qr.track_list_inner.height as usize;
     let visible_items = inner_height / 2;
     let selected = state.list_state.queue_index;
-    let scroll_offset = state.queue_scroll_pin.unwrap_or_else(|| helpers::calc_scroll_offset(selected, visible_items, tracks_len));
+    let scroll_offset = state.scroll.queue.unwrap_or_else(|| helpers::calc_scroll_offset(selected, visible_items, tracks_len));
 
     if let Some((track_y_start, track_height, thumb_pos, thumb_size, _)) =
         scrollbar_hit_test_bordered(click_col, click_row, qr.track_list.x, qr.track_list.width, qr.track_list.y, qr.track_list.height, tracks_len, visible_items, scroll_offset)
@@ -3030,7 +3055,7 @@ fn try_queue_scrollbar_click(
             click_row, track_y_start, track_height, thumb_pos, thumb_size,
             tracks_len, visible_items, ScrollbarView::Queue, 0, state,
         );
-        state.queue_scroll_pin = Some(new_offset);
+        state.scroll.queue = Some(new_offset);
         return Some(vec![]);
     }
 
@@ -3061,7 +3086,7 @@ fn try_station_scrollbar_click(
     let inner_height = qr.station_inner.height as usize;
     let visible_items = inner_height;
     let selected = state.station_nav.focused().map(|c| c.selected_index).unwrap_or(0);
-    let scroll_offset = state.station_scroll_pin.unwrap_or_else(|| helpers::calc_scroll_offset(selected, visible_items, total_items));
+    let scroll_offset = state.scroll.station.unwrap_or_else(|| helpers::calc_scroll_offset(selected, visible_items, total_items));
 
     if let Some((track_y_start, track_height, thumb_pos, thumb_size, _)) =
         scrollbar_hit_test_bordered(click_col, click_row, qr.station_panel.x, qr.station_panel.width, qr.station_panel.y, qr.station_panel.height, total_items, visible_items, scroll_offset)
@@ -3070,7 +3095,7 @@ fn try_station_scrollbar_click(
             click_row, track_y_start, track_height, thumb_pos, thumb_size,
             total_items, visible_items, ScrollbarView::Station, 0, state,
         );
-        state.station_scroll_pin = Some(new_offset);
+        state.scroll.station = Some(new_offset);
         return Some(vec![]);
     }
 
@@ -3090,9 +3115,9 @@ fn try_similar_scrollbar_click(
         hr.similar_content.clone()
     }?;
 
-    let total_items = match state.similar_mode {
-        SimilarMode::Albums => state.similar_albums.len(),
-        SimilarMode::Tracks => state.similar_tracks.len(),
+    let total_items = match state.similar.mode {
+        SimilarMode::Albums => state.similar.albums.len(),
+        SimilarMode::Tracks => state.similar.tracks.len(),
     };
     if total_items == 0 {
         return None;
@@ -3101,7 +3126,7 @@ fn try_similar_scrollbar_click(
     let rows_per_item = sr.rows_per_item as usize;
     let inner_height = sr.inner.height.saturating_sub(1) as usize; // -1 for footer
     let visible_items = inner_height / rows_per_item;
-    let scroll_offset = state.similar_scroll_pin.unwrap_or_else(|| helpers::calc_scroll_offset(state.list_state.similar_index, visible_items, total_items));
+    let scroll_offset = state.scroll.similar.unwrap_or_else(|| helpers::calc_scroll_offset(state.list_state.similar_index, visible_items, total_items));
 
     if let Some((track_y_start, track_height, thumb_pos, thumb_size, _)) =
         scrollbar_hit_test_bordered(click_col, click_row, sr.outer.x, sr.outer.width, sr.outer.y, sr.outer.height, total_items, visible_items, scroll_offset)
@@ -3110,7 +3135,7 @@ fn try_similar_scrollbar_click(
             click_row, track_y_start, track_height, thumb_pos, thumb_size,
             total_items, visible_items, ScrollbarView::Similar, 0, state,
         );
-        state.similar_scroll_pin = Some(new_offset);
+        state.scroll.similar = Some(new_offset);
         return Some(vec![]);
     }
 
@@ -3154,7 +3179,7 @@ fn try_help_scrollbar_click(
 
 /// Handle mouse click on the sort popup overlay.
 fn handle_sort_popup_click(click_row: u16, click_col: u16, state: &mut AppState) -> Vec<Action> {
-    if state.sort_popup.is_none() {
+    if state.popups.sort.is_none() {
         return vec![];
     }
 
@@ -3177,10 +3202,15 @@ fn handle_sort_popup_click(click_row: u16, click_col: u16, state: &mut AppState)
     if click_row >= regions.inner.y && click_row < options_end {
         let option_idx = (click_row - regions.inner.y) as usize;
         if option_idx < regions.option_count {
-            if let Some(p) = &mut state.sort_popup {
+            let already_selected = state.popups.sort.as_ref()
+                .map(|p| p.selected_index == option_idx)
+                .unwrap_or(false);
+            if let Some(p) = &mut state.popups.sort {
                 p.selected_index = option_idx;
             }
-            return super::key_input::sort_popup::apply_selected_option(state);
+            if already_selected {
+                return super::key_input::sort_popup::apply_selected_option(state);
+            }
         }
     }
 

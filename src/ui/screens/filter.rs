@@ -140,7 +140,7 @@ fn render_search_input(frame: &mut Frame, state: &AppState, area: Rect) {
 }
 
 fn render_results(frame: &mut Frame, state: &AppState, area: Rect) {
-    let scroll_pin = state.search_scroll_pin;
+    let scroll_pin = state.scroll.search;
     let t = theme();
 
     let results = match &state.search_results {

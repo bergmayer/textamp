@@ -157,7 +157,7 @@ pub async fn dispatch(
             let follow_up = enqueue_search_result(state);
             follow_ups.extend(follow_up);
             // Close search popup and navigate to queue
-            state.search_popup_active = false;
+            state.popups.search_active = false;
             state.set_view(View::Queue);
         }
         Action::EnqueueSearchResultNext => {
@@ -165,7 +165,7 @@ pub async fn dispatch(
             let follow_up = enqueue_search_result_next(state);
             follow_ups.extend(follow_up);
             // Close search popup and navigate to queue
-            state.search_popup_active = false;
+            state.popups.search_active = false;
             state.set_view(View::Queue);
         }
         Action::EnqueueAlbumNext { rating_key, title } => {
@@ -325,7 +325,7 @@ pub async fn dispatch(
                 helpers::play_current_track(event_tx, state, client, audio).await;
 
                 // Trigger DJ mode processing after jump (all modes are continuous)
-                if !state.dj_inserting && state.active_dj_mode.is_some() {
+                if !state.dj.inserting && state.dj.active_mode.is_some() {
                     follow_ups.push(Action::DjModeProcess);
                 }
             }
@@ -353,9 +353,9 @@ pub async fn dispatch(
                     })
                 }
                 View::Similar => {
-                    match state.similar_mode {
+                    match state.similar.mode {
                         SimilarMode::Albums => {
-                            state.similar_albums.get(state.list_state.similar_index)
+                            state.similar.albums.get(state.list_state.similar_index)
                                 .map(|a| (a.rating_key.clone(), a.title.clone()))
                         }
                         _ => None,
@@ -393,10 +393,10 @@ pub async fn dispatch(
                     }
                 }
                 View::Similar => {
-                    match state.similar_mode {
+                    match state.similar.mode {
                         SimilarMode::Tracks => {
                             let idx = state.list_state.similar_index;
-                            state.similar_tracks[idx..].to_vec()
+                            state.similar.tracks[idx..].to_vec()
                         }
                         _ => vec![],
                     }
@@ -466,9 +466,9 @@ pub async fn dispatch(
                     })
                 }
                 View::Similar => {
-                    match state.similar_mode {
+                    match state.similar.mode {
                         SimilarMode::Albums => {
-                            state.similar_albums.get(state.list_state.similar_index)
+                            state.similar.albums.get(state.list_state.similar_index)
                                 .map(|a| (a.rating_key.clone(), a.title.clone()))
                         }
                         _ => None,
@@ -507,11 +507,11 @@ pub async fn dispatch(
                     }
                 }
                 View::Similar => {
-                    match state.similar_mode {
+                    match state.similar.mode {
                         SimilarMode::Tracks => {
                             // Get selected track + all following
                             let idx = state.list_state.similar_index;
-                            state.similar_tracks[idx..].to_vec()
+                            state.similar.tracks[idx..].to_vec()
                         }
                         _ => vec![],
                     }
@@ -555,7 +555,7 @@ pub async fn dispatch(
                 } else {
                     "Save Station as Playlist"
                 };
-                state.input_dialog = Some(crate::app::state::InputDialog {
+                state.popups.input_dialog = Some(crate::app::state::InputDialog {
                     title: title.to_string(),
                     input: String::new(),
                     action_type: crate::app::state::InputDialogAction::SavePlaylist,

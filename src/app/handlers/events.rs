@@ -496,7 +496,7 @@ pub fn handle_app_event(
         Event::DataLoadError(msg) => {
             state.set_error(msg);
             state.right_panel_loading = false;
-            state.similar_loading = false;
+            state.similar.loading = false;
             state.artist_nav.loading = false;
             vec![]
         }
@@ -509,16 +509,16 @@ pub fn handle_app_event(
             vec![Action::LoadAllAlbumsForMiller]
         }
         Event::SimilarAlbumsLoaded(albums) => {
-            state.similar_albums = albums;
-            state.similar_mode = crate::app::state::SimilarMode::Albums;
-            state.similar_loading = false;
+            state.similar.albums = albums;
+            state.similar.mode = crate::app::state::SimilarMode::Albums;
+            state.similar.loading = false;
             state.list_state.similar_index = 0;
             vec![]
         }
         Event::SimilarTracksLoaded(tracks) => {
-            state.similar_tracks = tracks;
-            state.similar_mode = crate::app::state::SimilarMode::Tracks;
-            state.similar_loading = false;
+            state.similar.tracks = tracks;
+            state.similar.mode = crate::app::state::SimilarMode::Tracks;
+            state.similar.loading = false;
             state.list_state.similar_index = 0;
             vec![]
         }
@@ -532,7 +532,7 @@ pub fn handle_app_event(
             use crate::services::search_tracks_with_ranking;
             if version == u64::MAX {
                 // Radio launcher track search result — re-rank by query
-                if let Some(ref mut launcher) = state.radio_launcher {
+                if let Some(ref mut launcher) = state.popups.radio_launcher {
                     let ranked = search_tracks_with_ranking(&tracks, &launcher.query, 50);
                     if let Some(ref mut results) = launcher.results {
                         results.tracks = ranked;
@@ -541,7 +541,7 @@ pub fn handle_app_event(
                 }
             } else if version == u64::MAX - 1 {
                 // Adventure launcher track search result — re-rank by query
-                if let Some(ref mut launcher) = state.adventure_launcher {
+                if let Some(ref mut launcher) = state.popups.adventure_launcher {
                     let ranked = search_tracks_with_ranking(&tracks, &launcher.query, 50);
                     if let Some(ref mut results) = launcher.results {
                         results.tracks = ranked;
@@ -560,7 +560,7 @@ pub fn handle_app_event(
             vec![]
         }
         Event::AdventureLauncherAlbumsLoaded { artist_key, artist_name, albums } => {
-            if let Some(ref mut launcher) = state.adventure_launcher {
+            if let Some(ref mut launcher) = state.popups.adventure_launcher {
                 launcher.drill = crate::app::state::AdventureDrillLevel::ArtistAlbums {
                     artist_key, artist_name, albums,
                 };
@@ -571,7 +571,7 @@ pub fn handle_app_event(
             vec![]
         }
         Event::AdventureLauncherTracksLoaded { album_key, album_title, artist_name, tracks } => {
-            if let Some(ref mut launcher) = state.adventure_launcher {
+            if let Some(ref mut launcher) = state.popups.adventure_launcher {
                 launcher.drill = crate::app::state::AdventureDrillLevel::AlbumTracks {
                     album_key, album_title, artist_name, tracks,
                 };
@@ -669,13 +669,13 @@ pub fn handle_app_event(
             // After 8 consecutive failures, show error to user
             state.consecutive_playback_errors = 0;
             if msg.contains("404") || msg.to_lowercase().contains("not found") {
-                state.confirm_dialog = Some(crate::app::state::ConfirmDialog {
+                state.popups.confirm_dialog = Some(crate::app::state::ConfirmDialog {
                     title: "Track Not Found".to_string(),
                     message: "This track may have been removed. Refresh cache?".to_string(),
                     on_confirm: crate::app::state::ConfirmAction::RefreshCache,
                     selected_yes: true,
                 });
-            } else if let crate::app::state::OutputTarget::Remote { ref player_name, .. } = state.output_target {
+            } else if let crate::app::state::OutputTarget::Remote { ref player_name, .. } = state.remote.output_target {
                 state.set_error(format!("Playback failed — {} may not be running", player_name));
             } else {
                 state.set_error("Playback stopped after multiple consecutive errors".to_string());
@@ -699,24 +699,24 @@ pub fn handle_app_event(
             vec![]
         }
         Event::ArtworkLoaded { thumb_path, data } => {
-            state.artwork_thumb = Some(thumb_path);
-            state.artwork_data = Some(data);
-            state.artwork_loading = false;
+            state.artwork.current_thumb = Some(thumb_path);
+            state.artwork.current_data = Some(data);
+            state.artwork.loading = false;
             vec![]
         }
         Event::ArtworkFailed { thumb_path: _ } => {
-            state.artwork_thumb = None;
-            state.artwork_data = None;
-            state.artwork_loading = false;
+            state.artwork.current_thumb = None;
+            state.artwork.current_data = None;
+            state.artwork.loading = false;
             vec![]
         }
         Event::AlbumArtLoaded { key, data } => {
-            state.album_art_pending.remove(&key);
-            state.album_art_cache.insert(key, data);
+            state.artwork.grid_pending.remove(&key);
+            state.artwork.grid_cache.insert(key, data);
             vec![]
         }
         Event::AlbumArtFailed { key } => {
-            state.album_art_pending.remove(&key);
+            state.artwork.grid_pending.remove(&key);
             vec![]
         }
         Event::FoldersPreloaded { library_key, folder_state } => {
@@ -730,8 +730,8 @@ pub fn handle_app_event(
                 state.folder_state = Some(folder_state);
                 tracing::debug!("Folders preloaded and ready");
             }
-            state.preloads_in_progress.remove("Folders");
-            if state.preloads_in_progress.is_empty() { state.preloads_total = 0; }
+            state.cache_mgmt.preloads_in_progress.remove("Folders");
+            if state.cache_mgmt.preloads_in_progress.is_empty() { state.cache_mgmt.preloads_total = 0; }
             vec![]
         }
         Event::SubfoldersPreloaded { library_key, entries, done } => {
@@ -745,7 +745,7 @@ pub fn handle_app_event(
                 for (key, cached_folder) in entries {
                     state.folder_contents_cache.insert(key, cached_folder);
                 }
-                state.cache_dirty = true;
+                state.cache_mgmt.dirty = true;
             }
             if done {
                 state.subfolder_preload_active = false;
@@ -756,7 +756,7 @@ pub fn handle_app_event(
         Event::SubfolderRefreshed { folder_key, cached_folder } => {
             // Background warm-cache re-fetch completed — update cache and refresh UI
             state.folder_contents_cache.insert(folder_key.clone(), cached_folder.clone());
-            state.cache_dirty = true;
+            state.cache_mgmt.dirty = true;
             tracing::debug!("Warm subfolder re-fetched: {} ({} items)", folder_key, cached_folder.items.len());
 
             // Update the currently displayed column if it matches
@@ -802,13 +802,13 @@ pub fn handle_app_event(
             if let Some(cached) = state.folder_contents_cache.get_mut(&folder_key) {
                 if cached.path.is_none() {
                     cached.path = Some(path);
-                    state.cache_dirty = true;
+                    state.cache_mgmt.dirty = true;
                 }
             }
             vec![]
         }
         Event::ArtworkCacheStats { count, total_bytes } => {
-            state.artwork_cache_stats = Some((count, total_bytes));
+            state.artwork.cache_stats = Some((count, total_bytes));
             vec![]
         }
         Event::LibraryCacheStats { total_bytes, breakdown } => {
@@ -839,8 +839,8 @@ pub fn handle_app_event(
             }
             // Artists now loaded — try compilation detection (needs both artists + albums)
             helpers::maybe_detect_compilations(event_tx, state, client);
-            state.preloads_in_progress.remove("Artists");
-            if state.preloads_in_progress.is_empty() { state.preloads_total = 0; }
+            state.cache_mgmt.preloads_in_progress.remove("Artists");
+            if state.cache_mgmt.preloads_in_progress.is_empty() { state.cache_mgmt.preloads_total = 0; }
             vec![]
         }
         Event::AlbumsPreloaded { library_key, mut albums } => {
@@ -859,8 +859,8 @@ pub fn handle_app_event(
 
             // Spawn background compilation detection if not already done
             helpers::maybe_detect_compilations(event_tx, state, client);
-            state.preloads_in_progress.remove("Albums");
-            if state.preloads_in_progress.is_empty() { state.preloads_total = 0; }
+            state.cache_mgmt.preloads_in_progress.remove("Albums");
+            if state.cache_mgmt.preloads_in_progress.is_empty() { state.cache_mgmt.preloads_total = 0; }
             vec![]
         }
         Event::PlaylistsPreloaded { library_key, playlists } => {
@@ -911,8 +911,8 @@ pub fn handle_app_event(
                 }
                 // else: preload returned empty but we have cached data — keep cached
             }
-            state.preloads_in_progress.remove("Playlists");
-            if state.preloads_in_progress.is_empty() { state.preloads_total = 0; }
+            state.cache_mgmt.preloads_in_progress.remove("Playlists");
+            if state.cache_mgmt.preloads_in_progress.is_empty() { state.cache_mgmt.preloads_total = 0; }
             vec![]
         }
         Event::GenresPreloaded { library_key, genres } => {
@@ -940,8 +940,8 @@ pub fn handle_app_event(
                     }
                 }
             }
-            state.preloads_in_progress.remove("Genres");
-            if state.preloads_in_progress.is_empty() { state.preloads_total = 0; }
+            state.cache_mgmt.preloads_in_progress.remove("Genres");
+            if state.cache_mgmt.preloads_in_progress.is_empty() { state.cache_mgmt.preloads_total = 0; }
             vec![]
         }
         Event::ArtistGenresPreloaded { library_key, genres } => {
@@ -968,8 +968,8 @@ pub fn handle_app_event(
                     }
                 }
             }
-            state.preloads_in_progress.remove("Artist Genres");
-            if state.preloads_in_progress.is_empty() { state.preloads_total = 0; }
+            state.cache_mgmt.preloads_in_progress.remove("Artist Genres");
+            if state.cache_mgmt.preloads_in_progress.is_empty() { state.cache_mgmt.preloads_total = 0; }
             vec![]
         }
         Event::AlbumGenresPreloaded { library_key, genres } => {
@@ -996,8 +996,8 @@ pub fn handle_app_event(
                     }
                 }
             }
-            state.preloads_in_progress.remove("Album Genres");
-            if state.preloads_in_progress.is_empty() { state.preloads_total = 0; }
+            state.cache_mgmt.preloads_in_progress.remove("Album Genres");
+            if state.cache_mgmt.preloads_in_progress.is_empty() { state.cache_mgmt.preloads_total = 0; }
             vec![]
         }
         Event::MoodsPreloaded { library_key, moods } => {
@@ -1024,8 +1024,8 @@ pub fn handle_app_event(
                     }
                 }
             }
-            state.preloads_in_progress.remove("Moods");
-            if state.preloads_in_progress.is_empty() { state.preloads_total = 0; }
+            state.cache_mgmt.preloads_in_progress.remove("Moods");
+            if state.cache_mgmt.preloads_in_progress.is_empty() { state.cache_mgmt.preloads_total = 0; }
             vec![]
         }
         Event::StylesPreloaded { library_key, styles } => {
@@ -1052,8 +1052,8 @@ pub fn handle_app_event(
                     }
                 }
             }
-            state.preloads_in_progress.remove("Styles");
-            if state.preloads_in_progress.is_empty() { state.preloads_total = 0; }
+            state.cache_mgmt.preloads_in_progress.remove("Styles");
+            if state.cache_mgmt.preloads_in_progress.is_empty() { state.cache_mgmt.preloads_total = 0; }
             vec![]
         }
         Event::StationsPreloaded { library_key, mut stations } => {
@@ -1076,8 +1076,8 @@ pub fn handle_app_event(
                 ));
                 state.station_nav.focused_column = 0;
             }
-            state.preloads_in_progress.remove("Stations");
-            if state.preloads_in_progress.is_empty() { state.preloads_total = 0; }
+            state.cache_mgmt.preloads_in_progress.remove("Stations");
+            if state.cache_mgmt.preloads_in_progress.is_empty() { state.cache_mgmt.preloads_total = 0; }
             vec![]
         }
         Event::AllTracksPreloaded { library_key, tracks } => {
@@ -1089,7 +1089,7 @@ pub fn handle_app_event(
             let count = tracks.len();
             state.all_tracks = tracks;
             tracing::debug!("All tracks {}: {} items", if was_refresh { "refreshed" } else { "preloaded" }, count);
-            state.cache_dirty = true;
+            state.cache_mgmt.dirty = true;
 
             // Build track-level artist list and artist aliases
             state.build_track_artists();
@@ -1097,7 +1097,7 @@ pub fn handle_app_event(
 
             if was_refresh {
                 // On refresh: re-detect compilations (reset flag so maybe_detect runs)
-                state.compilations_detected = false;
+                state.compilations.detected = false;
                 helpers::maybe_detect_compilations(event_tx, state, client);
 
                 // Re-render All Artists album column if active (so album_display_artist updates show)
@@ -1135,30 +1135,30 @@ pub fn handle_app_event(
                 }
             }
 
-            state.preloads_in_progress.remove("Tracks");
-            if state.preloads_in_progress.is_empty() { state.preloads_total = 0; }
+            state.cache_mgmt.preloads_in_progress.remove("Tracks");
+            if state.cache_mgmt.preloads_in_progress.is_empty() { state.cache_mgmt.preloads_total = 0; }
             vec![]
         }
         Event::PreloadFailed { category } => {
             tracing::warn!("Preload failed for category: {}", category);
-            state.preloads_in_progress.remove(&category);
-            if state.preloads_in_progress.is_empty() { state.preloads_total = 0; }
+            state.cache_mgmt.preloads_in_progress.remove(&category);
+            if state.cache_mgmt.preloads_in_progress.is_empty() { state.cache_mgmt.preloads_total = 0; }
             vec![]
         }
         Event::CompilationsDetected { library_key, albums, artist_only_keys, track_artist_keys, artist_compilation_map, single_artist_compilations } => {
             if state.active_library.as_ref() != Some(&library_key) {
                 return vec![];
             }
-            state.compilation_albums = albums;
-            state.compilation_artist_keys = artist_only_keys;
-            state.compilation_track_artist_keys = track_artist_keys;
-            state.artist_compilation_map = artist_compilation_map;
-            state.single_artist_compilations = single_artist_compilations;
-            state.compilations_detected = true;
-            state.cache_dirty = true;
+            state.compilations.albums = albums;
+            state.compilations.artist_keys = artist_only_keys;
+            state.compilations.track_artist_keys = track_artist_keys;
+            state.compilations.artist_map = artist_compilation_map;
+            state.compilations.single_artist = single_artist_compilations;
+            state.compilations.detected = true;
+            state.cache_mgmt.dirty = true;
 
             // Update artist root column if currently viewing Library
-            if !state.compilation_albums.is_empty() || !state.compilation_artist_keys.is_empty() {
+            if !state.compilations.albums.is_empty() || !state.compilations.artist_keys.is_empty() {
                 let items = state.build_artist_root_items();
                 state.artist_nav.update_root_items("artists", items);
             }
@@ -1174,15 +1174,15 @@ pub fn handle_app_event(
             }
 
             // Clear expired toasts (5 second display)
-            if let Some(show_time) = state.toast_show_time {
+            if let Some(show_time) = state.notifications.toast_show_time {
                 if show_time.elapsed() > Duration::from_secs(5) {
-                    state.toast_message = None;
-                    state.toast_show_time = None;
+                    state.notifications.toast_message = None;
+                    state.notifications.toast_show_time = None;
                 }
             }
 
             // Clear expired status messages (5 second display)
-            if let Some(show_time) = state.status_show_time {
+            if let Some(show_time) = state.notifications.status_show_time {
                 if show_time.elapsed() > Duration::from_secs(5) {
                     state.clear_status();
                 }
@@ -1212,7 +1212,7 @@ pub fn handle_app_event(
             // Limit concurrent in-flight requests to avoid overwhelming the Plex transcoder
             // Album art loading: lazy-load for columns with artwork_visible
             if state.view == crate::app::state::View::Browse
-                && state.album_art_pending.len() < 4
+                && state.artwork.grid_pending.len() < 4
             {
                 let nav = match state.browse_category {
                     crate::app::state::BrowseCategory::Library => &state.artist_nav,
@@ -1233,28 +1233,28 @@ pub fn handle_app_event(
                         );
                         let end = (scroll_offset + visible_rows).min(total_items);
 
-                        let max_batch = 4usize.saturating_sub(state.album_art_pending.len());
+                        let max_batch = 4usize.saturating_sub(state.artwork.grid_pending.len());
                         let mut to_load: Vec<(String, String)> = Vec::new();
                         for item in &col.items[scroll_offset..end] {
                             if to_load.len() >= max_batch { break; }
                             match item {
                                 BrowseItem::Album { key, thumb: Some(thumb), .. } => {
-                                    if !state.album_art_cache.contains_key(key)
-                                        && !state.album_art_pending.contains(key)
+                                    if !state.artwork.grid_cache.contains_key(key)
+                                        && !state.artwork.grid_pending.contains(key)
                                     {
                                         to_load.push((key.clone(), thumb.clone()));
                                     }
                                 }
                                 BrowseItem::AllTracks { artist_key, thumb: Some(thumb), .. } => {
-                                    if !state.album_art_cache.contains_key(artist_key)
-                                        && !state.album_art_pending.contains(artist_key)
+                                    if !state.artwork.grid_cache.contains_key(artist_key)
+                                        && !state.artwork.grid_pending.contains(artist_key)
                                     {
                                         to_load.push((artist_key.clone(), thumb.clone()));
                                     }
                                 }
                                 BrowseItem::Artist { key, thumb: Some(thumb), .. } => {
-                                    if !state.album_art_cache.contains_key(key)
-                                        && !state.album_art_pending.contains(key)
+                                    if !state.artwork.grid_cache.contains_key(key)
+                                        && !state.artwork.grid_pending.contains(key)
                                     {
                                         to_load.push((key.clone(), thumb.clone()));
                                     }
@@ -1331,7 +1331,7 @@ pub fn handle_app_event(
             if !cached.category_timestamps.is_empty() {
                 for (key, ts) in &cached.category_timestamps {
                     if let Some(cat) = crate::app::state::RefreshCategory::from_cache_key(key) {
-                        state.category_timestamps.insert(cat, *ts);
+                        state.cache_mgmt.category_timestamps.insert(cat, *ts);
                     }
                 }
             } else {
@@ -1342,7 +1342,7 @@ pub fn handle_app_event(
                     use crate::app::state::RefreshCategory;
                     for cat in RefreshCategory::all() {
                         let ts = if cat.is_playlist_group() { playlist_ts } else { lib_ts };
-                        state.category_timestamps.insert(*cat, ts);
+                        state.cache_mgmt.category_timestamps.insert(*cat, ts);
                     }
                 }
             }
@@ -1449,12 +1449,12 @@ pub fn handle_app_event(
 
             // Compilation detection results
             if !cached.compilation_albums.is_empty() || !cached.compilation_artist_keys.is_empty() {
-                state.compilation_albums = cached.compilation_albums;
-                state.compilation_artist_keys = cached.compilation_artist_keys;
-                state.compilation_track_artist_keys = cached.compilation_track_artist_keys;
-                state.artist_compilation_map = cached.artist_compilation_map;
-                state.single_artist_compilations = cached.single_artist_compilations;
-                state.compilations_detected = true;
+                state.compilations.albums = cached.compilation_albums;
+                state.compilations.artist_keys = cached.compilation_artist_keys;
+                state.compilations.track_artist_keys = cached.compilation_track_artist_keys;
+                state.compilations.artist_map = cached.artist_compilation_map;
+                state.compilations.single_artist = cached.single_artist_compilations;
+                state.compilations.detected = true;
                 // Re-build artist root items with compilation data
                 let items = state.build_artist_root_items();
                 state.artist_nav.update_root_items("artists", items);
@@ -1474,20 +1474,20 @@ pub fn handle_app_event(
             vec![]
         }
         Event::CacheSaved => {
-            state.cache_save_in_progress = false;
+            state.cache_mgmt.save_in_progress = false;
             tracing::debug!("Periodic cache save completed");
             vec![]
         }
         Event::CacheRefreshCompleted { category, changed } => {
-            state.background_refresh_in_progress.remove(&category);
-            state.cache_dirty = true;
+            state.cache_mgmt.background_refresh.remove(&category);
+            state.cache_mgmt.dirty = true;
             // Data was refreshed from the server — update the per-category timestamp
             let now = crate::cache::CacheData::now();
-            state.category_timestamps.insert(category, now);
+            state.cache_mgmt.category_timestamps.insert(category, now);
 
             // Clear the "Refreshing X..." status message if it matches this category
             let refresh_msg = format!("Refreshing {}...", category.display_name());
-            if state.status_message.as_ref() == Some(&refresh_msg) {
+            if state.notifications.status_message.as_ref() == Some(&refresh_msg) {
                 state.clear_status();
             }
 
@@ -1631,7 +1631,7 @@ pub fn handle_app_event(
 
             // Cache children for instant loading next time
             state.station_children_cache.insert(station_key.clone(), children.clone());
-            state.cache_dirty = true;
+            state.cache_mgmt.dirty = true;
 
             // Push new column with children (Miller columns style)
             state.station_nav.push_column(crate::app::state::StationColumn::new(
@@ -1687,7 +1687,7 @@ pub fn handle_app_event(
             state.playlist_nav.loading = false;
             let auto_drill = std::mem::take(&mut state.auto_drill_pending);
             state.playlist_tracks_cache.insert(playlist_key, crate::plex::CachedPlaylistTracks::new(tracks.clone()));
-            state.cache_dirty = true;
+            state.cache_mgmt.dirty = true;
             // Get playlist name from the focused column's selected item
             let playlist_name = state.playlist_nav.focused()
                 .and_then(|c| c.selected_item())
@@ -1713,7 +1713,7 @@ pub fn handle_app_event(
         Event::PlaylistTracksPreloaded { playlist_key, tracks } => {
             if !tracks.is_empty() {
                 state.playlist_tracks_cache.insert(playlist_key, crate::plex::CachedPlaylistTracks::new(tracks));
-                state.cache_dirty = true;
+                state.cache_mgmt.dirty = true;
             }
             vec![]
         }
@@ -1741,7 +1741,7 @@ pub fn handle_app_event(
 
         // Artist bio popup loaded
         Event::ArtistBioLoaded { artist_name, bio, thumb } => {
-            if let Some(ref mut popup) = state.artist_bio_popup {
+            if let Some(ref mut popup) = state.popups.artist_bio {
                 popup.loading = false;
                 popup.artist_name = artist_name;
                 popup.bio = bio;
@@ -1753,7 +1753,7 @@ pub fn handle_app_event(
 
         // Artist bio artwork loaded
         Event::ArtistBioArtworkLoaded { data, thumb } => {
-            if let Some(ref mut popup) = state.artist_bio_popup {
+            if let Some(ref mut popup) = state.popups.artist_bio {
                 popup.artwork_data = Some(data);
                 popup.artwork_thumb = Some(thumb);
             }
@@ -1782,9 +1782,9 @@ pub fn handle_app_event(
         }
         // Remote player control events
         Event::PlayersDiscovered(players) => {
-            state.discovering_players = false;
-            state.remote_players = players;
-            let count = state.remote_players.len();
+            state.remote.discovering = false;
+            state.remote.players = players;
+            let count = state.remote.players.len();
             if count > 0 {
                 state.set_status(format!("Found {} player{}", count, if count == 1 { "" } else { "s" }));
             } else {
@@ -1793,14 +1793,14 @@ pub fn handle_app_event(
             vec![]
         }
         Event::PlayerDiscoveryFailed(err) => {
-            state.discovering_players = false;
+            state.remote.discovering = false;
             state.set_error(format!("Player discovery failed: {}", err));
             vec![]
         }
         Event::RemotePlayerStatus { session_found, playing, position_ms: _, track_key: _, finished } => {
-            state.remote_playback.last_poll = Some(std::time::Instant::now());
+            state.remote.playback.last_poll = Some(std::time::Instant::now());
 
-            if let crate::app::state::OutputTarget::Remote { .. } = &state.output_target {
+            if let crate::app::state::OutputTarget::Remote { .. } = &state.remote.output_target {
                 if !session_found {
                     return vec![];
                 }

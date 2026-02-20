@@ -24,7 +24,7 @@ const MAX_RETRIES: u32 = 3;
 
 /// A cached audio track with access timestamp for LRU eviction.
 struct CachedTrack {
-    data: Vec<u8>,
+    data: Arc<Vec<u8>>,
     accessed: Instant,
 }
 
@@ -46,9 +46,9 @@ impl TrackAudioCache {
     }
 
     /// Get cached audio data, updating the access timestamp.
-    /// Returns a clone of the data.
-    pub fn get(&self, key: &str) -> Option<Vec<u8>> {
-        let mut entries = self.entries.lock().unwrap();
+    /// Returns an Arc clone (cheap pointer copy, not a full data copy).
+    pub fn get(&self, key: &str) -> Option<Arc<Vec<u8>>> {
+        let mut entries = super::lock_or_recover(&self.entries);
         if let Some(entry) = entries.get_mut(key) {
             entry.accessed = Instant::now();
             Some(entry.data.clone())
@@ -59,11 +59,11 @@ impl TrackAudioCache {
 
     /// Insert audio data into the cache, evicting LRU entries if limits exceeded.
     pub fn insert(&self, key: String, data: Vec<u8>) {
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = super::lock_or_recover(&self.entries);
 
         let data_size = data.len();
         entries.insert(key, CachedTrack {
-            data,
+            data: Arc::new(data),
             accessed: Instant::now(),
         });
 
@@ -100,7 +100,7 @@ impl TrackAudioCache {
 
     /// Check if a key is cached (without cloning data).
     pub fn contains(&self, key: &str) -> bool {
-        self.entries.lock().unwrap().contains_key(key)
+        super::lock_or_recover(&self.entries).contains_key(key)
     }
 
     /// Mark a key as currently being downloaded.
@@ -109,24 +109,24 @@ impl TrackAudioCache {
         if self.contains(key) {
             return false;
         }
-        let mut in_flight = self.in_flight.lock().unwrap();
+        let mut in_flight = super::lock_or_recover(&self.in_flight);
         in_flight.insert(key.to_string())
     }
 
     /// Remove a key from the in-flight set (download finished or failed).
     pub fn finish_fetch(&self, key: &str) {
-        self.in_flight.lock().unwrap().remove(key);
+        super::lock_or_recover(&self.in_flight).remove(key);
     }
 
     /// Remove a specific entry (e.g., corrupt data fallback).
     pub fn remove(&self, key: &str) {
-        self.entries.lock().unwrap().remove(key);
+        super::lock_or_recover(&self.entries).remove(key);
     }
 
     /// Clear all entries and in-flight state.
     pub fn flush(&self) {
-        self.entries.lock().unwrap().clear();
-        self.in_flight.lock().unwrap().clear();
+        super::lock_or_recover(&self.entries).clear();
+        super::lock_or_recover(&self.in_flight).clear();
         tracing::debug!("Track cache flushed");
     }
 
@@ -141,8 +141,8 @@ impl TrackAudioCache {
 
 impl std::fmt::Debug for TrackAudioCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let entries = self.entries.lock().unwrap();
-        let in_flight = self.in_flight.lock().unwrap();
+        let entries = super::lock_or_recover(&self.entries);
+        let in_flight = super::lock_or_recover(&self.in_flight);
         f.debug_struct("TrackAudioCache")
             .field("entries", &entries.len())
             .field("in_flight", &in_flight.len())

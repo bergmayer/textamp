@@ -16,7 +16,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs};
 
 /// Render the adventure launcher popup as an overlay.
 pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
-    let launcher = match &state.adventure_launcher {
+    let launcher = match &state.popups.adventure_launcher {
         Some(l) => l,
         None => return,
     };

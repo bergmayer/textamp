@@ -142,7 +142,7 @@ pub async fn play_current_track(
     audio: &mut AudioPlayer,
 ) {
     // Remote playback guard: when output is Remote, use remote player instead of local audio
-    if let crate::app::state::OutputTarget::Remote { ref player_id, ref player_uri, .. } = state.output_target {
+    if let crate::app::state::OutputTarget::Remote { ref player_id, ref player_uri, .. } = state.remote.output_target {
         play_current_track_remote(event_tx, state, client, player_id.clone(), player_uri.clone()).await;
         return;
     }
@@ -169,9 +169,9 @@ pub async fn play_current_track(
 
         // Load artwork for the new track (non-blocking)
         if let Some(thumb_path) = track.best_thumb() {
-            if state.artwork_thumb.as_deref() != Some(thumb_path) {
+            if state.artwork.current_thumb.as_deref() != Some(thumb_path) {
                 if let Some(server_url) = client.server_url() {
-                    state.artwork_loading = true;
+                    state.artwork.loading = true;
                     let thumb_path_owned = thumb_path.to_string();
                     let event_tx = event_tx.clone();
                     let server_url = server_url.to_string();
@@ -205,16 +205,16 @@ pub async fn play_current_track(
                         }
                     });
                 } else {
-                    state.artwork_loading = false;
-                    state.artwork_data = None;
+                    state.artwork.loading = false;
+                    state.artwork.current_data = None;
                 }
             } else {
-                state.artwork_loading = false;
+                state.artwork.loading = false;
             }
         } else if let Some(artist_thumb) = find_artist_thumb(&track, &state.artists) {
-            if state.artwork_thumb.as_deref() != Some(&artist_thumb) {
+            if state.artwork.current_thumb.as_deref() != Some(&artist_thumb) {
                 if let Some(server_url) = client.server_url() {
-                    state.artwork_loading = true;
+                    state.artwork.loading = true;
                     let thumb_path_owned = artist_thumb.clone();
                     let event_tx = event_tx.clone();
                     let server_url = server_url.to_string();
@@ -248,16 +248,16 @@ pub async fn play_current_track(
                         }
                     });
                 } else {
-                    state.artwork_loading = false;
-                    state.artwork_data = None;
+                    state.artwork.loading = false;
+                    state.artwork.current_data = None;
                 }
             } else {
-                state.artwork_loading = false;
+                state.artwork.loading = false;
             }
         } else {
-            state.artwork_thumb = None;
-            state.artwork_data = None;
-            state.artwork_loading = false;
+            state.artwork.current_thumb = None;
+            state.artwork.current_data = None;
+            state.artwork.loading = false;
         }
 
         // Check track cache first (pre-fetched audio data)
@@ -504,9 +504,9 @@ async fn play_current_track_remote(
 
         // Load artwork for the new track (same as local)
         if let Some(thumb_path) = track.best_thumb() {
-            if state.artwork_thumb.as_deref() != Some(thumb_path) {
+            if state.artwork.current_thumb.as_deref() != Some(thumb_path) {
                 if let Some(server_url) = client.server_url() {
-                    state.artwork_loading = true;
+                    state.artwork.loading = true;
                     let thumb_path_owned = thumb_path.to_string();
                     let event_tx_clone = event_tx.clone();
                     let server_url = server_url.to_string();
@@ -535,9 +535,9 @@ async fn play_current_track_remote(
                 }
             }
         } else if let Some(artist_thumb) = find_artist_thumb(&track, &state.artists) {
-            if state.artwork_thumb.as_deref() != Some(&artist_thumb) {
+            if state.artwork.current_thumb.as_deref() != Some(&artist_thumb) {
                 if let Some(server_url) = client.server_url() {
-                    state.artwork_loading = true;
+                    state.artwork.loading = true;
                     let thumb_path_owned = artist_thumb.clone();
                     let event_tx_clone = event_tx.clone();
                     let server_url = server_url.to_string();
@@ -566,9 +566,9 @@ async fn play_current_track_remote(
                 }
             }
         } else {
-            state.artwork_thumb = None;
-            state.artwork_data = None;
-            state.artwork_loading = false;
+            state.artwork.current_thumb = None;
+            state.artwork.current_data = None;
+            state.artwork.loading = false;
         }
 
         // Send playMedia to remote player via server

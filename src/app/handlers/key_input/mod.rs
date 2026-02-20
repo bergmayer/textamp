@@ -13,7 +13,7 @@ mod browse;
 mod now_playing;
 mod radio_launcher;
 mod search;
-mod similar;
+pub(in crate::app::handlers) mod similar;
 mod settings;
 
 // Re-export public items used by other handler modules.
@@ -45,9 +45,9 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
     ) && !key.modifiers.contains(KeyModifiers::SHIFT)
       && !key.modifiers.contains(KeyModifiers::CONTROL);
     if !preserve_pin {
-        state.browse_scroll_pin = None;
+        state.scroll.browse = None;
     }
-    state.browse_click_time = None;
+    state.scroll.browse_click_time = None;
 
     // Track modifier bar display.
     // Alt+/ or Ctrl+/ toggles the contextual shortcut bar on/off.
@@ -71,13 +71,13 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
     }
 
     // Clear error on any key
-    if state.last_error.is_some() {
+    if state.notifications.last_error.is_some() {
         state.clear_error();
         return vec![];
     }
 
     // Handle confirm dialog if active
-    if let Some(mut dialog) = state.confirm_dialog.take() {
+    if let Some(mut dialog) = state.popups.confirm_dialog.take() {
         // Pressing the same shortcut again (e.g. Ctrl+Q Ctrl+Q) confirms immediately
         if matches!(dialog.on_confirm, crate::app::state::ConfirmAction::Quit)
             && key.modifiers == KeyModifiers::CONTROL
@@ -116,23 +116,23 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
             }
             KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::BackTab => {
                 dialog.selected_yes = !dialog.selected_yes;
-                state.confirm_dialog = Some(dialog);
+                state.popups.confirm_dialog = Some(dialog);
                 return vec![];
             }
             _ => {
-                state.confirm_dialog = Some(dialog);
+                state.popups.confirm_dialog = Some(dialog);
                 return vec![];
             }
         }
     }
 
     // Handle input dialog if active
-    if let Some(ref mut dialog) = state.input_dialog {
+    if let Some(ref mut dialog) = state.popups.input_dialog {
         match key.code {
             KeyCode::Esc => {
                 // Cancel dialog and adventure if it was for adventure length
                 let was_adventure = matches!(dialog.action_type, crate::app::state::InputDialogAction::AdventureLength);
-                state.input_dialog = None;
+                state.popups.input_dialog = None;
                 if was_adventure {
                     return vec![Action::CancelAdventure];
                 }
@@ -141,7 +141,7 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
                 // Confirm dialog
                 let input = dialog.input.clone();
                 let action_type = dialog.action_type.clone();
-                state.input_dialog = None;
+                state.popups.input_dialog = None;
                 match action_type {
                     crate::app::state::InputDialogAction::SavePlaylist => {
                         return vec![Action::SaveQueueAsPlaylist(input)];
@@ -186,7 +186,7 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
         // Quit: Ctrl+Q (with confirmation)
         (KeyModifiers::CONTROL, KeyCode::Char('q')) => {
             use crate::app::state::{ConfirmDialog, ConfirmAction};
-            state.confirm_dialog = Some(ConfirmDialog {
+            state.popups.confirm_dialog = Some(ConfirmDialog {
                 title: "Quit".to_string(),
                 message: "Are you sure you want to quit?".to_string(),
                 on_confirm: ConfirmAction::Quit,
@@ -198,7 +198,7 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
         // Global navigation shortcuts
         (KeyModifiers::CONTROL, KeyCode::Char('f')) => {
             // Ctrl+F = Search/Filter popup (floating dialog)
-            if state.search_popup_active {
+            if state.popups.search_active {
                 return vec![Action::CloseSearchPopup];
             } else {
                 return vec![Action::OpenSearchPopup];
@@ -309,14 +309,14 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
             return helpers::refresh_current_view(state);
         }
         // Playback controls
-        (_, KeyCode::Char(' ')) if state.view != View::Search && !state.list_filter.active && !state.search_popup_active && state.radio_launcher.is_none() && state.adventure_launcher.is_none() && state.artist_radio_picker.is_none() => {
+        (_, KeyCode::Char(' ')) if state.view != View::Search && !state.list_filter.active && !state.popups.search_active && state.popups.radio_launcher.is_none() && state.popups.adventure_launcher.is_none() && state.popups.artist_radio_picker.is_none() => {
             return vec![Action::TogglePlayPause];
         }
         // < and > for prev/next track (crossterm reports these with NONE modifiers, not SHIFT)
-        (_, KeyCode::Char('<')) if state.view != View::Search && !state.list_filter.active && !state.search_popup_active && state.radio_launcher.is_none() && state.adventure_launcher.is_none() => {
+        (_, KeyCode::Char('<')) if state.view != View::Search && !state.list_filter.active && !state.popups.search_active && state.popups.radio_launcher.is_none() && state.popups.adventure_launcher.is_none() => {
             return vec![Action::Previous];
         }
-        (_, KeyCode::Char('>')) if state.view != View::Search && !state.list_filter.active && !state.search_popup_active && state.radio_launcher.is_none() && state.adventure_launcher.is_none() => {
+        (_, KeyCode::Char('>')) if state.view != View::Search && !state.list_filter.active && !state.popups.search_active && state.popups.radio_launcher.is_none() && state.popups.adventure_launcher.is_none() => {
             return vec![Action::Next];
         }
         // Ctrl+Shift+Up/Down: multi-select in Queue view, volume elsewhere
@@ -361,11 +361,11 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
         (KeyModifiers::SHIFT, KeyCode::Right) => return vec![Action::SeekRelative(10000)],
         // Action commands (Ctrl+key) — gated by availability check
         // Ctrl+E: Add to TOP of queue and play (skip if in search popup - handled there)
-        (KeyModifiers::CONTROL, KeyCode::Char('e')) if !state.search_popup_active && alt_commands::is_action_command_available(state, 'e') => {
+        (KeyModifiers::CONTROL, KeyCode::Char('e')) if !state.popups.search_active && alt_commands::is_action_command_available(state, 'e') => {
             return vec![Action::EnqueueSelectionNext];
         }
         // Ctrl+Shift+E: Add to END of queue (skip if in search popup - handled there)
-        (mods, KeyCode::Char('e')) | (mods, KeyCode::Char('E')) if !state.search_popup_active && mods == KeyModifiers::CONTROL | KeyModifiers::SHIFT && alt_commands::is_action_command_available(state, 'e') => {
+        (mods, KeyCode::Char('e')) | (mods, KeyCode::Char('E')) if !state.popups.search_active && mods == KeyModifiers::CONTROL | KeyModifiers::SHIFT && alt_commands::is_action_command_available(state, 'e') => {
             return vec![Action::EnqueueSelection];
         }
         (KeyModifiers::CONTROL, KeyCode::Char('m')) if alt_commands::is_action_command_available(state, 'm') => {
@@ -384,9 +384,9 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
         (KeyModifiers::ALT, KeyCode::Char('f')) => {
             // Alt+F = Activate inline filter (Browse view only)
             if state.view == View::Browse && !state.list_filter.active
-                && !state.search_popup_active && state.sort_popup.is_none()
-                && state.radio_launcher.is_none() && state.adventure_launcher.is_none()
-                && state.artist_radio_picker.is_none()
+                && !state.popups.search_active && state.popups.sort.is_none()
+                && state.popups.radio_launcher.is_none() && state.popups.adventure_launcher.is_none()
+                && state.popups.artist_radio_picker.is_none()
             {
                 return vec![Action::ActivateListFilter];
             }
@@ -438,37 +438,37 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
     }
 
     // Sort popup handling (takes priority over view-specific handling)
-    if state.sort_popup.is_some() {
+    if state.popups.sort.is_some() {
         return sort_popup::handle_sort_popup_keys(key, state);
     }
 
     // Adventure launcher popup handling (takes priority over view-specific handling)
-    if state.adventure_launcher.is_some() {
+    if state.popups.adventure_launcher.is_some() {
         return adventure_launcher::handle_adventure_launcher_keys(key, state);
     }
 
     // Radio launcher popup handling (takes priority over view-specific handling)
-    if state.radio_launcher.is_some() {
+    if state.popups.radio_launcher.is_some() {
         return radio_launcher::handle_radio_launcher_keys(key, state);
     }
 
     // Artist radio picker popup handling
-    if state.artist_radio_picker.is_some() {
+    if state.popups.artist_radio_picker.is_some() {
         return artist_radio_picker::handle_artist_radio_picker_keys(key, state);
     }
 
     // Search popup handling (takes priority over view-specific handling)
-    if state.search_popup_active {
+    if state.popups.search_active {
         return search::handle_search_keys(key, state);
     }
 
     // Artist bio popup handling
-    if state.artist_bio_popup.is_some() {
+    if state.popups.artist_bio.is_some() {
         return handle_artist_bio_popup_keys(key, state);
     }
 
     // Library picker popup handling
-    if state.library_picker_active {
+    if state.popups.library_picker_active {
         return handle_library_picker_keys(key, state);
     }
 
@@ -501,7 +501,7 @@ fn handle_library_picker_keys(key: event::KeyEvent, state: &mut AppState) -> Vec
 
     let lib_count = all_libs.len();
     if lib_count == 0 {
-        state.library_picker_active = false;
+        state.popups.library_picker_active = false;
         return vec![];
     }
 
@@ -510,23 +510,23 @@ fn handle_library_picker_keys(key: event::KeyEvent, state: &mut AppState) -> Vec
             return vec![Action::CloseLibraryPicker];
         }
         KeyCode::Up => {
-            if state.library_picker_index > 0 {
-                state.library_picker_index -= 1;
+            if state.popups.library_picker_index > 0 {
+                state.popups.library_picker_index -= 1;
             }
         }
         KeyCode::Down => {
-            if state.library_picker_index + 1 < lib_count {
-                state.library_picker_index += 1;
+            if state.popups.library_picker_index + 1 < lib_count {
+                state.popups.library_picker_index += 1;
             }
         }
         KeyCode::Home => {
-            state.library_picker_index = 0;
+            state.popups.library_picker_index = 0;
         }
         KeyCode::End => {
-            state.library_picker_index = lib_count.saturating_sub(1);
+            state.popups.library_picker_index = lib_count.saturating_sub(1);
         }
         KeyCode::Enter => {
-            if let Some((server_id, _, lib)) = all_libs.get(state.library_picker_index) {
+            if let Some((server_id, _, lib)) = all_libs.get(state.popups.library_picker_index) {
                 let lib_key = lib.key.clone();
                 let is_different_server = state.active_server_id.as_deref() != Some(*server_id);
 
@@ -549,30 +549,30 @@ fn handle_library_picker_keys(key: event::KeyEvent, state: &mut AppState) -> Vec
 fn handle_artist_bio_popup_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
     match key.code {
         KeyCode::Esc | KeyCode::F(4) => {
-            state.artist_bio_popup = None;
+            state.popups.artist_bio = None;
         }
         KeyCode::Up => {
-            if let Some(ref mut popup) = state.artist_bio_popup {
+            if let Some(ref mut popup) = state.popups.artist_bio {
                 popup.scroll = popup.scroll.saturating_sub(1);
             }
         }
         KeyCode::Down => {
-            if let Some(ref mut popup) = state.artist_bio_popup {
+            if let Some(ref mut popup) = state.popups.artist_bio {
                 popup.scroll = popup.scroll.saturating_add(1);
             }
         }
         KeyCode::PageUp => {
-            if let Some(ref mut popup) = state.artist_bio_popup {
+            if let Some(ref mut popup) = state.popups.artist_bio {
                 popup.scroll = popup.scroll.saturating_sub(10);
             }
         }
         KeyCode::PageDown => {
-            if let Some(ref mut popup) = state.artist_bio_popup {
+            if let Some(ref mut popup) = state.popups.artist_bio {
                 popup.scroll = popup.scroll.saturating_add(10);
             }
         }
         KeyCode::Home => {
-            if let Some(ref mut popup) = state.artist_bio_popup {
+            if let Some(ref mut popup) = state.popups.artist_bio {
                 popup.scroll = 0;
             }
         }
@@ -714,8 +714,8 @@ pub(crate) fn get_similar_action(state: &mut AppState) -> Vec<Action> {
     // 1. Highlighted track → LoadSimilarTracks
     if let Some(track) = get_selected_track(state) {
         let title = format!("{} - {}", track.artist_name(), track.title);
-        state.similar_tab_album_key = track.parent_rating_key.clone();
-        state.similar_tab_album_title = Some(track.album_name().to_string());
+        state.similar.tab_album_key = track.parent_rating_key.clone();
+        state.similar.tab_album_title = Some(track.album_name().to_string());
         return vec![Action::LoadSimilarTracks {
             rating_key: track.rating_key.clone(),
             title,
@@ -724,8 +724,8 @@ pub(crate) fn get_similar_action(state: &mut AppState) -> Vec<Action> {
 
     // 2. Highlighted album → LoadSimilarAlbums
     if let Some((rating_key, title)) = get_selected_album(state) {
-        state.similar_tab_album_key = None;
-        state.similar_tab_album_title = None;
+        state.similar.tab_album_key = None;
+        state.similar.tab_album_title = None;
         return vec![Action::LoadSimilarAlbums {
             rating_key,
             title,
@@ -735,8 +735,8 @@ pub(crate) fn get_similar_action(state: &mut AppState) -> Vec<Action> {
     // 3. Fallback: now-playing track → LoadSimilarTracks
     if let Some(track) = state.current_track().cloned() {
         let title = format!("{} - {}", track.artist_name(), track.title);
-        state.similar_tab_album_key = track.parent_rating_key.clone();
-        state.similar_tab_album_title = Some(track.album_name().to_string());
+        state.similar.tab_album_key = track.parent_rating_key.clone();
+        state.similar.tab_album_title = Some(track.album_name().to_string());
         return vec![Action::LoadSimilarTracks {
             rating_key: track.rating_key.clone(),
             title,
@@ -958,8 +958,8 @@ fn get_selected_track(state: &AppState) -> Option<Track> {
         // Similar view - return highlighted track when in Tracks mode
         View::Similar => {
             use crate::app::state::SimilarMode;
-            if state.similar_mode == SimilarMode::Tracks {
-                state.similar_tracks.get(state.list_state.similar_index).cloned()
+            if state.similar.mode == SimilarMode::Tracks {
+                state.similar.tracks.get(state.list_state.similar_index).cloned()
             } else {
                 None
             }
@@ -1001,8 +1001,8 @@ fn get_selected_album(state: &AppState) -> Option<(String, String)> {
         }
         View::Similar => {
             use crate::app::state::SimilarMode;
-            if state.similar_mode == SimilarMode::Albums {
-                state.similar_albums.get(state.list_state.similar_index).map(|a| {
+            if state.similar.mode == SimilarMode::Albums {
+                state.similar.albums.get(state.list_state.similar_index).map(|a| {
                     (a.rating_key.clone(), format!("{} - {}", a.artist_name(), a.title))
                 })
             } else {

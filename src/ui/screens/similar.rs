@@ -21,11 +21,11 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     let popup_area = centered_rect(65, 80, area);
     frame.render_widget(Clear, popup_area);
 
-    let mode_label = match state.similar_mode {
+    let mode_label = match state.similar.mode {
         SimilarMode::Albums => "albums",
         SimilarMode::Tracks => "tracks",
     };
-    let title = format!(" similar {} to: {} ", mode_label, state.similar_source_title);
+    let title = format!(" similar {} to: {} ", mode_label, state.similar.source_title);
     let block = Block::default()
         .title(title)
         .title_style(Style::default().fg(t.colors.fg_accent))
@@ -45,8 +45,8 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         });
     }
 
-    if state.similar_loading {
-        let msg = match state.similar_mode {
+    if state.similar.loading {
+        let msg = match state.similar.mode {
             SimilarMode::Albums => "Loading similar albums...",
             SimilarMode::Tracks => "Loading similar tracks...",
         };
@@ -62,7 +62,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     let content_area = Rect::new(inner.x, inner.y, inner.width, content_height);
     let footer_area = Rect::new(inner.x, inner.y + content_height, inner.width, 1);
 
-    match state.similar_mode {
+    match state.similar.mode {
         SimilarMode::Albums => render_albums(frame, state, content_area, popup_area),
         SimilarMode::Tracks => render_tracks(frame, state, content_area, popup_area),
     }
@@ -73,9 +73,9 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         Span::styled("close", Style::default().fg(t.colors.fg_muted)),
     ];
 
-    match state.similar_mode {
+    match state.similar.mode {
         SimilarMode::Tracks => {
-            if let Some(ref album_title) = state.similar_tab_album_title {
+            if let Some(ref album_title) = state.similar.tab_album_title {
                 footer_spans.push(Span::styled("  [Tab] ", Style::default().fg(t.colors.shortcut_key)));
                 footer_spans.push(Span::styled(
                     format!("similar albums to: {}", album_title),
@@ -101,7 +101,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
 fn render_albums(frame: &mut Frame, state: &AppState, inner: Rect, popup_area: Rect) {
     let t = theme();
 
-    if state.similar_albums.is_empty() {
+    if state.similar.albums.is_empty() {
         let empty = Paragraph::new("No similar albums found")
             .style(Style::default().fg(t.colors.fg_muted))
             .alignment(Alignment::Center);
@@ -112,9 +112,9 @@ fn render_albums(frame: &mut Frame, state: &AppState, inner: Rect, popup_area: R
     let selected_idx = state.list_state.similar_index;
     let rows_per_item = 2usize;
     let visible_item_count = inner.height as usize / rows_per_item;
-    let total = state.similar_albums.len();
+    let total = state.similar.albums.len();
 
-    let scroll_offset = match state.similar_scroll_pin {
+    let scroll_offset = match state.scroll.similar {
         Some(pinned) => pinned,
         None => NavigationService::calc_scroll_offset(selected_idx, visible_item_count, total),
     };
@@ -122,7 +122,7 @@ fn render_albums(frame: &mut Frame, state: &AppState, inner: Rect, popup_area: R
     let max_text_width = inner.width.saturating_sub(4) as usize;
 
     let items: Vec<ListItem> = state
-        .similar_albums
+        .similar.albums
         .iter()
         .enumerate()
         .skip(scroll_offset)
@@ -200,7 +200,7 @@ fn render_albums(frame: &mut Frame, state: &AppState, inner: Rect, popup_area: R
 fn render_tracks(frame: &mut Frame, state: &AppState, inner: Rect, popup_area: Rect) {
     let t = theme();
 
-    if state.similar_tracks.is_empty() {
+    if state.similar.tracks.is_empty() {
         let empty = Paragraph::new("No similar tracks found")
             .style(Style::default().fg(t.colors.fg_muted))
             .alignment(Alignment::Center);
@@ -211,9 +211,9 @@ fn render_tracks(frame: &mut Frame, state: &AppState, inner: Rect, popup_area: R
     let selected_idx = state.list_state.similar_index;
     let rows_per_item = 2usize;
     let visible_item_count = inner.height as usize / rows_per_item;
-    let total = state.similar_tracks.len();
+    let total = state.similar.tracks.len();
 
-    let scroll_offset = match state.similar_scroll_pin {
+    let scroll_offset = match state.scroll.similar {
         Some(pinned) => pinned,
         None => NavigationService::calc_scroll_offset(selected_idx, visible_item_count, total),
     };
@@ -221,7 +221,7 @@ fn render_tracks(frame: &mut Frame, state: &AppState, inner: Rect, popup_area: R
     let max_text_width = inner.width.saturating_sub(4) as usize;
 
     let items: Vec<ListItem> = state
-        .similar_tracks
+        .similar.tracks
         .iter()
         .enumerate()
         .skip(scroll_offset)

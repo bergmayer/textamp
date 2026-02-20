@@ -8,7 +8,19 @@ use super::traits::{AudioBackend, AudioError};
 use rodio::{Decoder, OutputStream, OutputStreamBuilder, Sink};
 use std::io::Cursor;
 use std::panic::{self, AssertUnwindSafe};
+use std::sync::Arc;
 use std::time::Duration;
+
+/// Wrapper around `Arc<Vec<u8>>` that implements `AsRef<[u8]>`,
+/// enabling zero-copy use with `Cursor` for rodio decoding.
+#[derive(Clone)]
+struct SharedBytes(Arc<Vec<u8>>);
+
+impl AsRef<[u8]> for SharedBytes {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
 
 /// Audio backend using rodio for playback.
 ///
@@ -43,7 +55,7 @@ impl RodioBackend {
     /// Some audio files can cause symphonia to panic due to bugs
     /// in the decoder. This method catches those panics and returns
     /// a proper error instead.
-    fn try_decode(data: Vec<u8>) -> Result<Decoder<Cursor<Vec<u8>>>, AudioError> {
+    fn try_decode(data: Arc<Vec<u8>>) -> Result<Decoder<Cursor<SharedBytes>>, AudioError> {
         let prev_hook = panic::take_hook();
         panic::set_hook(Box::new(|_| {
             // Silently ignore panics during decode
@@ -52,7 +64,7 @@ impl RodioBackend {
         let byte_len = data.len() as u64;
 
         let result = panic::catch_unwind(AssertUnwindSafe(|| {
-            let cursor = Cursor::new(data);
+            let cursor = Cursor::new(SharedBytes(data));
             Decoder::builder()
                 .with_data(cursor)
                 .with_byte_len(byte_len)
@@ -119,7 +131,7 @@ impl RodioBackend {
 }
 
 impl AudioBackend for RodioBackend {
-    fn play_data(&mut self, data: Vec<u8>) -> Result<(), AudioError> {
+    fn play_data(&mut self, data: Arc<Vec<u8>>) -> Result<(), AudioError> {
         // Stop any existing playback first
         if let Some(sink) = self.sink.take() {
             sink.stop();

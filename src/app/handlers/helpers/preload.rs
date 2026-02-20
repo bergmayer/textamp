@@ -444,8 +444,8 @@ pub fn preload_all_library_data(event_tx: &mpsc::Sender<Event>, lib_key: &str, l
         "Artists", "Folders", "Albums", "Tracks", "Genres",
         "Artist Genres", "Album Genres", "Moods", "Styles", "Stations", "Playlists",
     ];
-    state.preloads_in_progress = categories.iter().map(|s| s.to_string()).collect();
-    state.preloads_total = categories.len();
+    state.cache_mgmt.preloads_in_progress = categories.iter().map(|s| s.to_string()).collect();
+    state.cache_mgmt.preloads_total = categories.len();
 
     preload_data(event_tx, PreloadType::Artists, lib_key, client);
     preload_data(event_tx, PreloadType::Folders { lib_title: lib_title.to_string() }, lib_key, client);

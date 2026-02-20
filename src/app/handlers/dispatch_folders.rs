@@ -204,7 +204,7 @@ pub async fn dispatch(
 
                         // Store in cache with timestamp for future use
                         state.folder_contents_cache.insert(folder_key.clone(), CachedFolder::with_path(items.clone(), folder_path));
-                        state.cache_dirty = true;
+                        state.cache_mgmt.dirty = true;
                         tracing::debug!("Cached folder: {} ({} items)", folder_key, items.len());
 
                         // If we couldn't determine the path, probe a child folder in background
@@ -236,7 +236,7 @@ pub async fn dispatch(
 
                     // Update the cache with fresh data and new timestamp
                     state.folder_contents_cache.insert(folder_key.clone(), CachedFolder::with_path(items.clone(), folder_path));
-                    state.cache_dirty = true;
+                    state.cache_mgmt.dirty = true;
                     tracing::info!("Refreshed subfolder cache: {} ({} items)", folder_key, items.len());
 
                     // Update the currently displayed column if it matches

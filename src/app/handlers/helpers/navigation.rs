@@ -148,9 +148,9 @@ pub fn adjust_list_index(state: &mut AppState, delta: isize) {
             }
         }
         View::Similar => {
-            let len = match state.similar_mode {
-                crate::app::state::SimilarMode::Albums => state.similar_albums.len(),
-                crate::app::state::SimilarMode::Tracks => state.similar_tracks.len(),
+            let len = match state.similar.mode {
+                crate::app::state::SimilarMode::Albums => state.similar.albums.len(),
+                crate::app::state::SimilarMode::Tracks => state.similar.tracks.len(),
             };
             if len > 0 {
                 let idx = state.list_state.similar_index as isize + delta;
@@ -215,9 +215,9 @@ pub fn set_list_index(state: &mut AppState, index: isize) {
             };
         }
         View::Similar => {
-            let len = match state.similar_mode {
-                crate::app::state::SimilarMode::Albums => state.similar_albums.len(),
-                crate::app::state::SimilarMode::Tracks => state.similar_tracks.len(),
+            let len = match state.similar.mode {
+                crate::app::state::SimilarMode::Albums => state.similar.albums.len(),
+                crate::app::state::SimilarMode::Tracks => state.similar.tracks.len(),
             };
             state.list_state.similar_index = if index == isize::MAX {
                 len.saturating_sub(1)

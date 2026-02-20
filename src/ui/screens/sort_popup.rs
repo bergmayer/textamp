@@ -9,7 +9,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem};
 
 /// Render the sort popup as an overlay.
 pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
-    let popup = match &state.sort_popup {
+    let popup = match &state.popups.sort {
         Some(p) => p,
         None => return,
     };

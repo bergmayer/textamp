@@ -8,7 +8,7 @@ use crate::app::AppState;
 
 /// Handle adventure launcher popup keys.
 pub(super) fn handle_adventure_launcher_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
-    let launcher = match state.adventure_launcher.as_mut() {
+    let launcher = match state.popups.adventure_launcher.as_mut() {
         Some(l) => l,
         None => return vec![],
     };
@@ -25,7 +25,7 @@ pub(super) fn handle_adventure_launcher_keys(key: event::KeyEvent, state: &mut A
 
 /// Handle keys for step 1/3 (find start/end track with search + drill-down).
 fn handle_track_finder_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
-    let launcher = match state.adventure_launcher.as_mut() {
+    let launcher = match state.popups.adventure_launcher.as_mut() {
         Some(l) => l,
         None => return vec![],
     };
@@ -224,7 +224,7 @@ fn handle_enter_on_result(launcher: &mut crate::app::state::AdventureLauncherSta
 
 /// Handle keys for step 2 (enter track count).
 fn handle_track_count_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
-    let launcher = match state.adventure_launcher.as_mut() {
+    let launcher = match state.popups.adventure_launcher.as_mut() {
         Some(l) => l,
         None => return vec![],
     };

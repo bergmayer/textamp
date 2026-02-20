@@ -8,7 +8,7 @@ use crate::app::AppState;
 
 /// Handle radio launcher popup keys.
 pub(super) fn handle_radio_launcher_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
-    let launcher = match state.radio_launcher.as_mut() {
+    let launcher = match state.popups.radio_launcher.as_mut() {
         Some(l) => l,
         None => return vec![],
     };

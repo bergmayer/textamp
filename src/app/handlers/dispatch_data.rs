@@ -134,14 +134,10 @@ pub async fn dispatch(
             state.selected_artist_albums.clear();
             state.list_state.right_albums_index = 0;
 
-            let event_tx = event_tx.clone();
-            let client = client.clone();
-            tokio::spawn(async move {
-                match client.get_artist_albums(&artist_key).await {
-                    Ok(albums) => { let _ = event_tx.send(Event::ArtistAlbumsLoaded(albums)).await; }
-                    Err(e) => { let _ = event_tx.send(Event::DataLoadError(format!("Failed to load albums: {}", e))).await; }
-                }
-            });
+            helpers::spawn_api_call(event_tx, client,
+                move |c| async move { c.get_artist_albums(&artist_key).await },
+                Event::ArtistAlbumsLoaded, "Failed to load albums",
+            );
         }
         Action::LoadArtistAllTracks => {
             // Load all tracks by the selected artist
@@ -153,14 +149,10 @@ pub async fn dispatch(
                 state.selected_album_tracks.clear();
                 state.list_state.tracks_index = 0;
 
-                let event_tx = event_tx.clone();
-                let client = client.clone();
-                tokio::spawn(async move {
-                    match client.get_artist_all_tracks(&artist_key).await {
-                        Ok(tracks) => { let _ = event_tx.send(Event::ArtistAllTracksLoaded(tracks)).await; }
-                        Err(e) => { let _ = event_tx.send(Event::DataLoadError(format!("Failed to load tracks: {}", e))).await; }
-                    }
-                });
+                helpers::spawn_api_call(event_tx, client,
+                    move |c| async move { c.get_artist_all_tracks(&artist_key).await },
+                    Event::ArtistAllTracksLoaded, "Failed to load tracks",
+                );
             }
         }
         Action::LoadSelectedAlbumTracks => {
@@ -175,14 +167,10 @@ pub async fn dispatch(
                 state.selected_album_tracks.clear();
                 state.list_state.tracks_index = 0;
 
-                let event_tx = event_tx.clone();
-                let client = client.clone();
-                tokio::spawn(async move {
-                    match client.get_album_tracks(&album_key).await {
-                        Ok(tracks) => { let _ = event_tx.send(Event::AlbumTracksLoaded(tracks)).await; }
-                        Err(e) => { let _ = event_tx.send(Event::DataLoadError(format!("Failed to load tracks: {}", e))).await; }
-                    }
-                });
+                helpers::spawn_api_call(event_tx, client,
+                    move |c| async move { c.get_album_tracks(&album_key).await },
+                    Event::AlbumTracksLoaded, "Failed to load tracks",
+                );
             }
         }
         Action::LoadAlbumTracks { rating_key } => {
@@ -192,14 +180,10 @@ pub async fn dispatch(
             state.selected_album_tracks.clear();
             state.list_state.tracks_index = 0;
 
-            let event_tx = event_tx.clone();
-            let client = client.clone();
-            tokio::spawn(async move {
-                match client.get_album_tracks(&rating_key).await {
-                    Ok(tracks) => { let _ = event_tx.send(Event::AlbumTracksLoaded(tracks)).await; }
-                    Err(e) => { let _ = event_tx.send(Event::DataLoadError(format!("Failed to load album tracks: {}", e))).await; }
-                }
-            });
+            helpers::spawn_api_call(event_tx, client,
+                move |c| async move { c.get_album_tracks(&rating_key).await },
+                Event::AlbumTracksLoaded, "Failed to load album tracks",
+            );
         }
         Action::LoadCategoryTracks => {
             // Load tracks directly (for Playlists category)
@@ -322,42 +306,34 @@ pub async fn dispatch(
             }
         }
         Action::LoadSimilarAlbums { rating_key, title } => {
-            state.similar_source_title = title;
-            state.similar_loading = true;
-            state.similar_albums.clear();
+            state.similar.source_title = title;
+            state.similar.loading = true;
+            state.similar.albums.clear();
             state.list_state.similar_index = 0;
-            state.similar_mode = crate::app::state::SimilarMode::Albums;
+            state.similar.mode = crate::app::state::SimilarMode::Albums;
             if state.view != View::Similar {
                 state.set_view(View::Similar);
             }
 
-            let event_tx = event_tx.clone();
-            let client = client.clone();
-            tokio::spawn(async move {
-                match client.get_similar_albums(&rating_key, 50).await {
-                    Ok(albums) => { let _ = event_tx.send(Event::SimilarAlbumsLoaded(albums)).await; }
-                    Err(e) => { let _ = event_tx.send(Event::DataLoadError(format!("Failed to load similar albums: {}", e))).await; }
-                }
-            });
+            helpers::spawn_api_call(event_tx, client,
+                move |c| async move { c.get_similar_albums(&rating_key, 50).await },
+                Event::SimilarAlbumsLoaded, "Failed to load similar albums",
+            );
         }
         Action::LoadSimilarTracks { rating_key, title } => {
-            state.similar_source_title = title;
-            state.similar_loading = true;
-            state.similar_tracks.clear();
+            state.similar.source_title = title;
+            state.similar.loading = true;
+            state.similar.tracks.clear();
             state.list_state.similar_index = 0;
-            state.similar_mode = crate::app::state::SimilarMode::Tracks;
+            state.similar.mode = crate::app::state::SimilarMode::Tracks;
             if state.view != View::Similar {
                 state.set_view(View::Similar);
             }
 
-            let event_tx = event_tx.clone();
-            let client = client.clone();
-            tokio::spawn(async move {
-                match client.get_similar_tracks(&rating_key, 50).await {
-                    Ok(tracks) => { let _ = event_tx.send(Event::SimilarTracksLoaded(tracks)).await; }
-                    Err(e) => { let _ = event_tx.send(Event::DataLoadError(format!("Failed to load similar tracks: {}", e))).await; }
-                }
-            });
+            helpers::spawn_api_call(event_tx, client,
+                move |c| async move { c.get_similar_tracks(&rating_key, 50).await },
+                Event::SimilarTracksLoaded, "Failed to load similar tracks",
+            );
         }
         Action::ListUp => {
             helpers::adjust_list_index(state, -1);
@@ -392,7 +368,7 @@ fn load_from_cache(state: &mut AppState, cached: CacheData, lib_key: &str, lib_t
     if !cached.category_timestamps.is_empty() {
         for (key, ts) in &cached.category_timestamps {
             if let Some(cat) = crate::app::state::RefreshCategory::from_cache_key(key) {
-                state.category_timestamps.insert(cat, *ts);
+                state.cache_mgmt.category_timestamps.insert(cat, *ts);
             }
         }
     } else {
@@ -403,7 +379,7 @@ fn load_from_cache(state: &mut AppState, cached: CacheData, lib_key: &str, lib_t
             use crate::app::state::RefreshCategory;
             for cat in RefreshCategory::all() {
                 let ts = if cat.is_playlist_group() { playlist_ts } else { lib_ts };
-                state.category_timestamps.insert(*cat, ts);
+                state.cache_mgmt.category_timestamps.insert(*cat, ts);
             }
         }
     }
@@ -502,12 +478,12 @@ fn load_from_cache(state: &mut AppState, cached: CacheData, lib_key: &str, lib_t
 
     // Compilation detection results
     if !cached.compilation_albums.is_empty() || !cached.compilation_artist_keys.is_empty() {
-        state.compilation_albums = cached.compilation_albums;
-        state.compilation_artist_keys = cached.compilation_artist_keys;
-        state.compilation_track_artist_keys = cached.compilation_track_artist_keys;
-        state.artist_compilation_map = cached.artist_compilation_map;
-        state.single_artist_compilations = cached.single_artist_compilations;
-        state.compilations_detected = true;
+        state.compilations.albums = cached.compilation_albums;
+        state.compilations.artist_keys = cached.compilation_artist_keys;
+        state.compilations.track_artist_keys = cached.compilation_track_artist_keys;
+        state.compilations.artist_map = cached.artist_compilation_map;
+        state.compilations.single_artist = cached.single_artist_compilations;
+        state.compilations.detected = true;
         // Re-build artist root items with compilation data
         let items = state.build_artist_root_items();
         state.artist_nav.update_root_items("artists", items);
@@ -533,15 +509,15 @@ pub fn auto_drill_from_cache(state: &mut crate::app::AppState) -> Vec<Action> {
                 }];
                 items.extend(BrowseItem::from_albums(&state.albums, &state.album_display_artist));
                 let mut col = BrowseColumn::new("all albums", items);
-                col.artwork_visible = state.default_artwork_visible;
+                col.artwork_visible = state.artwork.default_visible;
                 state.artist_nav.replace_child_column(col);
 
                 // Trigger artwork loading for the new column
-                if state.default_artwork_visible {
+                if state.artwork.default_visible {
                     let art_batch = super::dispatch_miller::collect_art_to_load(
                         state.artist_nav.columns.last(),
-                        &state.album_art_cache,
-                        &state.album_art_pending,
+                        &state.artwork.grid_cache,
+                        &state.artwork.grid_pending,
                     );
                     if !art_batch.is_empty() {
                         follow_ups.push(Action::LoadAlbumArt(art_batch));

@@ -11,6 +11,7 @@
 //! - Data-driven (accepts bytes, not URLs) to separate fetching from playback
 //! - Minimal (only essential playback controls)
 
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Error type for audio operations.
@@ -63,7 +64,7 @@ pub trait AudioBackend {
     /// This method decodes and begins playback immediately.
     ///
     /// If audio is already playing, it should be stopped first.
-    fn play_data(&mut self, data: Vec<u8>) -> Result<(), AudioError>;
+    fn play_data(&mut self, data: Arc<Vec<u8>>) -> Result<(), AudioError>;
 
     /// Check if this backend supports streaming playback.
     ///

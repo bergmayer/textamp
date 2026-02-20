@@ -186,7 +186,7 @@ fn build_right_content(state: &AppState) -> RightContent {
     let mut slider_bar = None;
 
     // Remote output indicator
-    if let crate::app::state::OutputTarget::Remote { ref player_name, .. } = state.output_target {
+    if let crate::app::state::OutputTarget::Remote { ref player_name, .. } = state.remote.output_target {
         right.push_str(&format!("-> {} ", truncate_str(player_name, 15)));
     }
 

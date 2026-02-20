@@ -105,10 +105,10 @@ impl EventLoop {
         crate::ui::theme::set_theme(state.theme);
 
         // Restore cover art view preference
-        state.default_artwork_visible = self.config.ui.cover_art_view;
+        state.artwork.default_visible = self.config.ui.cover_art_view;
 
         // Restore artwork mode preference
-        state.artwork_mode = crate::app::state::ArtworkMode::from_config(&self.config.ui.artwork_mode);
+        state.artwork.mode = crate::app::state::ArtworkMode::from_config(&self.config.ui.artwork_mode);
 
         // Start authentication in background
         self.start_auth_task(state);
@@ -126,7 +126,7 @@ impl EventLoop {
             // Update remote playback position from local clock before every render
             // (not just on tick) so the bottom bar progress stays smooth.
             if state.playback.status == PlayStatus::Playing {
-                if let crate::app::state::OutputTarget::Remote { .. } = &state.output_target {
+                if let crate::app::state::OutputTarget::Remote { .. } = &state.remote.output_target {
                     if let Some(started) = state.playback.playback_started_at {
                         let pos = started.elapsed().as_millis() as u64;
                         state.playback.position_ms = pos;
@@ -159,13 +159,13 @@ impl EventLoop {
                     if last_tick.elapsed() >= tick_rate {
                         // Remote mode: poll for state transitions regardless of play/pause
                         // (the remote player may resume after a seek while we think it's paused)
-                        if let crate::app::state::OutputTarget::Remote { ref player_id, ref player_uri, .. } = state.output_target {
-                            let should_poll = state.remote_playback.last_poll
+                        if let crate::app::state::OutputTarget::Remote { ref player_id, ref player_uri, .. } = state.remote.output_target {
+                            let should_poll = state.remote.playback.last_poll
                                 .map(|t| t.elapsed() >= Duration::from_secs(2))
                                 .unwrap_or(true);
 
                             if should_poll {
-                                state.remote_playback.last_poll = Some(Instant::now());
+                                state.remote.playback.last_poll = Some(Instant::now());
                                 let target_id = player_id.clone();
                                 let p_uri = player_uri.clone();
                                 let token = client.token().map(|s| s.to_string()).unwrap_or_default();
@@ -199,7 +199,7 @@ impl EventLoop {
 
                         // Tick: update playback position
                         if state.playback.status == PlayStatus::Playing {
-                            if let crate::app::state::OutputTarget::Remote { .. } = state.output_target {
+                            if let crate::app::state::OutputTarget::Remote { .. } = state.remote.output_target {
                                 // Position handled before render (above). Nothing else needed here.
                             } else {
                                 // Local mode: existing position tracking and end detection
@@ -436,7 +436,7 @@ impl EventLoop {
     fn handle_event(&self, event: Event, state: &mut AppState, client: &mut PlexClient) -> Vec<Action> {
         match event {
             Event::Key(key) => {
-                state.last_input_time = std::time::Instant::now();
+                state.cache_mgmt.last_input_time = std::time::Instant::now();
                 handlers::key_input::handle_key(key, state, &self.config)
             }
             Event::Resize(w, h) => {

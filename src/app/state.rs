@@ -469,6 +469,28 @@ pub enum SortColumnType {
     AllTracks,
 }
 
+impl SortColumnType {
+    /// Available sort modes for this column type.
+    pub fn available_modes(&self) -> &'static [ColumnSortMode] {
+        match self {
+            SortColumnType::Artist => &[ColumnSortMode::Default, ColumnSortMode::Shuffled],
+            SortColumnType::Album => &[ColumnSortMode::Default, ColumnSortMode::ByTitle, ColumnSortMode::ByArtist, ColumnSortMode::Shuffled],
+            SortColumnType::Track => &[ColumnSortMode::Default, ColumnSortMode::ByTitle, ColumnSortMode::ByDuration, ColumnSortMode::Shuffled],
+            SortColumnType::AllTracks => &[ColumnSortMode::Default, ColumnSortMode::ByArtist, ColumnSortMode::ByAlbum, ColumnSortMode::ByTitle, ColumnSortMode::ByDuration, ColumnSortMode::Shuffled],
+        }
+    }
+
+    /// Context-specific label for the "Default" sort mode.
+    pub fn default_label(&self, is_playlist: bool) -> &'static str {
+        match self {
+            SortColumnType::Artist => "Artist",
+            SortColumnType::Album => if is_playlist { "Title" } else { "Year" },
+            SortColumnType::Track => "Track #",
+            SortColumnType::AllTracks => if is_playlist { "Playlist order" } else { "Library order" },
+        }
+    }
+}
+
 /// An option in the sort popup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortPopupOption {
@@ -502,22 +524,9 @@ impl SortPopupState {
     pub fn new(column_idx: usize, column_title: String, column_type: SortColumnType, current_mode: ColumnSortMode, _artwork_visible: bool, is_playlist: bool) -> Self {
         let mut options = Vec::new();
 
-        // Context-specific label for "Default" sort mode
-        let default_label = match column_type {
-            SortColumnType::Artist => "Artist",
-            SortColumnType::Album => if is_playlist { "Title" } else { "Year" },
-            SortColumnType::Track => "Track #",
-            SortColumnType::AllTracks => if is_playlist { "Playlist order" } else { "Library order" },
-        };
-
-        // Sort mode options depend on column type
-        let modes = match column_type {
-            SortColumnType::Artist => vec![ColumnSortMode::Default, ColumnSortMode::Shuffled],
-            SortColumnType::Album => vec![ColumnSortMode::Default, ColumnSortMode::ByTitle, ColumnSortMode::ByArtist, ColumnSortMode::Shuffled],
-            SortColumnType::Track => vec![ColumnSortMode::Default, ColumnSortMode::ByTitle, ColumnSortMode::ByDuration, ColumnSortMode::Shuffled],
-            SortColumnType::AllTracks => vec![ColumnSortMode::Default, ColumnSortMode::ByArtist, ColumnSortMode::ByAlbum, ColumnSortMode::ByTitle, ColumnSortMode::ByDuration, ColumnSortMode::Shuffled],
-        };
-        for mode in &modes {
+        let default_label = column_type.default_label(is_playlist);
+        let modes = column_type.available_modes();
+        for mode in modes {
             options.push(SortPopupOption::SortMode(*mode));
         }
 
@@ -555,21 +564,9 @@ impl SortPopupState {
         let old_selection = self.options.get(self.selected_index).copied();
         self.options.clear();
 
-        // Update default_label based on current column type
-        self.default_label = match self.column_type {
-            SortColumnType::Artist => "Artist",
-            SortColumnType::Album => if self.is_playlist { "Title" } else { "Year" },
-            SortColumnType::Track => "Track #",
-            SortColumnType::AllTracks => if self.is_playlist { "Playlist order" } else { "Library order" },
-        };
-
-        let modes = match self.column_type {
-            SortColumnType::Artist => vec![ColumnSortMode::Default, ColumnSortMode::Shuffled],
-            SortColumnType::Album => vec![ColumnSortMode::Default, ColumnSortMode::ByTitle, ColumnSortMode::ByArtist, ColumnSortMode::Shuffled],
-            SortColumnType::Track => vec![ColumnSortMode::Default, ColumnSortMode::ByTitle, ColumnSortMode::ByDuration, ColumnSortMode::Shuffled],
-            SortColumnType::AllTracks => vec![ColumnSortMode::Default, ColumnSortMode::ByArtist, ColumnSortMode::ByAlbum, ColumnSortMode::ByTitle, ColumnSortMode::ByDuration, ColumnSortMode::Shuffled],
-        };
-        for mode in &modes {
+        self.default_label = self.column_type.default_label(self.is_playlist);
+        let modes = self.column_type.available_modes();
+        for mode in modes {
             self.options.push(SortPopupOption::SortMode(*mode));
         }
 
@@ -688,11 +685,7 @@ impl BrowseColumn {
         self.original_tracks = if self.tracks.is_empty() { None } else { Some(self.tracks.clone()) };
 
         // Count pinned items at start (AllArtists, AllTracks, Compilations, CompilationTracks, ArtistRadio)
-        let start = self.items.iter().take_while(|item| {
-            matches!(item, BrowseItem::AllArtists | BrowseItem::AllTracks { .. }
-                | BrowseItem::ArtistRadio { .. } | BrowseItem::Compilations
-                | BrowseItem::CompilationTracks { .. })
-        }).count();
+        let start = self.pinned_count();
 
         // Find placeholder items pinned at end
         let placeholder_start = self.items.iter().rposition(|item| !item.is_placeholder_item())
@@ -754,19 +747,12 @@ impl BrowseColumn {
             self.original_tracks = if self.tracks.is_empty() { None } else { Some(self.tracks.clone()) };
         }
         // Count how many pinned items are at the start
-        let start = self.items.iter().take_while(|item| {
-            matches!(item, BrowseItem::AllArtists | BrowseItem::AllTracks { .. }
-                | BrowseItem::ArtistRadio { .. } | BrowseItem::Compilations
-                | BrowseItem::CompilationTracks { .. })
-        }).count();
-        self.items[start..].sort_by(|a, b| {
-            let a_artist = if let BrowseItem::Album { artist, .. } = a { artist.to_lowercase() } else { String::new() };
-            let b_artist = if let BrowseItem::Album { artist, .. } = b { artist.to_lowercase() } else { String::new() };
-            a_artist.cmp(&b_artist).then_with(|| {
-                let a_year = if let BrowseItem::Album { year, .. } = a { *year } else { None };
-                let b_year = if let BrowseItem::Album { year, .. } = b { *year } else { None };
-                a_year.cmp(&b_year)
-            })
+        let start = self.pinned_count();
+        self.items[start..].sort_by_cached_key(|item| {
+            match item {
+                BrowseItem::Album { artist, year, .. } => (artist.to_lowercase(), *year),
+                _ => (String::new(), None),
+            }
         });
         self.sort_mode = ColumnSortMode::ByArtist;
         self.selected_index = 0;
@@ -779,14 +765,10 @@ impl BrowseColumn {
         self.save_originals();
         let start = self.pinned_count();
         // Sort items
-        self.items[start..].sort_by(|a, b| {
-            a.title().to_lowercase().cmp(&b.title().to_lowercase())
-        });
+        self.items[start..].sort_by_cached_key(|item| item.title().to_lowercase());
         // Sort tracks in parallel
         if start < self.tracks.len() {
-            self.tracks[start..].sort_by(|a, b| {
-                a.title.to_lowercase().cmp(&b.title.to_lowercase())
-            });
+            self.tracks[start..].sort_by_cached_key(|t| t.title.to_lowercase());
         }
         self.sort_mode = ColumnSortMode::ByTitle;
         self.selected_index = 0;
@@ -821,20 +803,18 @@ impl BrowseColumn {
         self.save_originals();
         let start = self.pinned_count();
         // Sort items
-        self.items[start..].sort_by(|a, b| {
-            let a_album = if let BrowseItem::Track { album_name, .. } = a { album_name.as_deref().unwrap_or("").to_lowercase() } else { String::new() };
-            let b_album = if let BrowseItem::Track { album_name, .. } = b { album_name.as_deref().unwrap_or("").to_lowercase() } else { String::new() };
-            a_album.cmp(&b_album).then_with(|| {
-                let a_num = if let BrowseItem::Track { track_number, .. } = a { *track_number } else { None };
-                let b_num = if let BrowseItem::Track { track_number, .. } = b { *track_number } else { None };
-                a_num.cmp(&b_num)
-            })
+        self.items[start..].sort_by_cached_key(|item| {
+            match item {
+                BrowseItem::Track { album_name, track_number, .. } => {
+                    (album_name.as_deref().unwrap_or("").to_lowercase(), *track_number)
+                }
+                _ => (String::new(), None),
+            }
         });
         // Sort tracks in parallel
         if start < self.tracks.len() {
-            self.tracks[start..].sort_by(|a, b| {
-                a.album_name().to_lowercase().cmp(&b.album_name().to_lowercase())
-                    .then_with(|| a.index.cmp(&b.index))
+            self.tracks[start..].sort_by_cached_key(|t| {
+                (t.album_name().to_lowercase(), t.index)
             });
         }
         self.sort_mode = ColumnSortMode::ByAlbum;
@@ -1138,6 +1118,161 @@ impl ArtworkMode {
     }
 }
 
+/// Cache management state.
+#[derive(Debug)]
+pub struct CacheManagement {
+    /// Per-category timestamps (Unix epoch secs) for when each category was last refreshed.
+    pub category_timestamps: HashMap<RefreshCategory, u64>,
+    pub dirty: bool,
+    pub last_input_time: std::time::Instant,
+    pub last_save: std::time::Instant,
+    pub save_in_progress: bool,
+    pub background_refresh: std::collections::HashSet<RefreshCategory>,
+    /// Categories currently being preloaded from the server (initial load, not refresh).
+    pub preloads_in_progress: std::collections::HashSet<String>,
+    /// Total number of preloads started in the current batch (for progress display).
+    pub preloads_total: usize,
+}
+
+impl Default for CacheManagement {
+    fn default() -> Self {
+        Self {
+            category_timestamps: HashMap::new(),
+            dirty: false,
+            last_input_time: std::time::Instant::now(),
+            last_save: std::time::Instant::now(),
+            save_in_progress: false,
+            background_refresh: std::collections::HashSet::new(),
+            preloads_in_progress: std::collections::HashSet::new(),
+            preloads_total: 0,
+        }
+    }
+}
+
+/// Notification/toast state.
+#[derive(Debug, Clone, Default)]
+pub struct Notifications {
+    pub toast_message: Option<String>,
+    pub toast_show_time: Option<std::time::Instant>,
+    pub last_error: Option<String>,
+    pub status_message: Option<String>,
+    pub status_show_time: Option<std::time::Instant>,
+}
+
+/// Scroll pin state for viewport preservation on click.
+#[derive(Debug, Clone, Default)]
+pub struct ScrollPins {
+    pub browse: Option<(usize, usize)>,
+    pub browse_click_time: Option<std::time::Instant>,
+    pub search: Option<usize>,
+    pub station: Option<usize>,
+    pub queue: Option<usize>,
+    pub queue_click_time: Option<std::time::Instant>,
+    pub similar: Option<usize>,
+    pub similar_click_time: Option<std::time::Instant>,
+    pub search_click_time: Option<std::time::Instant>,
+    pub art_cooldown: Option<std::time::Instant>,
+    pub scroll_cooldown: Option<std::time::Instant>,
+    pub scrollbar_drag: Option<ScrollbarDrag>,
+    pub station_back_highlighted: bool,
+}
+
+/// Popup state container.
+#[derive(Debug, Clone, Default)]
+pub struct Popups {
+    pub sort: Option<SortPopupState>,
+    pub radio_launcher: Option<RadioLauncherState>,
+    pub adventure_launcher: Option<AdventureLauncherState>,
+    pub artist_radio_picker: Option<ArtistRadioPickerState>,
+    pub artist_bio: Option<ArtistBioPopup>,
+    pub input_dialog: Option<InputDialog>,
+    pub confirm_dialog: Option<ConfirmDialog>,
+    pub library_picker_active: bool,
+    pub library_picker_index: usize,
+    pub search_active: bool,
+}
+
+/// Artwork state.
+#[derive(Debug)]
+pub struct ArtworkState {
+    pub current_thumb: Option<String>,
+    pub current_data: Option<Vec<u8>>,
+    pub loading: bool,
+    pub grid_cache: HashMap<String, Vec<u8>>,
+    pub grid_pending: std::collections::HashSet<String>,
+    pub cache_stats: Option<(usize, u64)>,
+    pub default_visible: bool,
+    pub mode: ArtworkMode,
+}
+
+impl Default for ArtworkState {
+    fn default() -> Self {
+        Self {
+            current_thumb: None,
+            current_data: None,
+            loading: false,
+            grid_cache: HashMap::new(),
+            grid_pending: std::collections::HashSet::new(),
+            cache_stats: None,
+            default_visible: false,
+            mode: ArtworkMode::default(),
+        }
+    }
+}
+
+/// Remote player control state.
+#[derive(Debug, Default)]
+pub struct RemoteControl {
+    pub output_target: OutputTarget,
+    pub players: Vec<RemotePlayer>,
+    pub discovering: bool,
+    pub playback: RemotePlaybackState,
+}
+
+/// DJ mode state (Guest DJ modes that modify queue behavior).
+#[derive(Debug, Clone, Default)]
+pub struct DjState {
+    pub active_mode: Option<DjMode>,
+    /// Track keys already inserted by DJ, to avoid repeats.
+    pub history: Vec<String>,
+    /// True while a DJ insert is in-flight (prevents duplicates).
+    pub inserting: bool,
+    /// True when the last track played was a DJ-inserted track.
+    pub last_was_inserted: bool,
+}
+
+/// Similar content view state (Plex sonic similarity).
+#[derive(Debug, Clone, Default)]
+pub struct SimilarViewState {
+    pub albums: Vec<Album>,
+    pub tracks: Vec<Track>,
+    pub mode: SimilarMode,
+    pub loading: bool,
+    pub source_title: String,
+    /// Album key for Tab cycling in Similar view (tracks → albums).
+    pub tab_album_key: Option<String>,
+    /// Album title for Tab cycling footer display.
+    pub tab_album_title: Option<String>,
+}
+
+/// Compilation detection state.
+#[derive(Debug, Clone, Default)]
+pub struct CompilationState {
+    /// Albums confirmed as true compilations (multi-artist).
+    pub albums: Vec<Album>,
+    /// Artist keys that appear ONLY on compilations (no solo albums) — hidden from artist list.
+    pub artist_keys: std::collections::HashSet<String>,
+    /// All artist keys that appear on any compilation track — used to show "Compilation Tracks" item.
+    pub track_artist_keys: std::collections::HashSet<String>,
+    /// Maps artist_key → Vec<album_rating_key> for compilation appearances.
+    pub artist_map: std::collections::HashMap<String, Vec<String>>,
+    /// Single-artist "compilations" (greatest hits etc.) mapped to their actual artist.
+    /// Maps artist_key → Vec<Album> so they can appear as normal albums under that artist.
+    pub single_artist: std::collections::HashMap<String, Vec<Album>>,
+    /// Whether compilation detection has run for current library.
+    pub detected: bool,
+}
+
 /// Root application state.
 #[derive(Debug)]
 pub struct AppState {
@@ -1184,19 +1319,7 @@ pub struct AppState {
     pub track_artists: Vec<Artist>,
 
     // Compilation detection
-    /// Albums confirmed as true compilations (multi-artist).
-    pub compilation_albums: Vec<Album>,
-    /// Artist keys that appear ONLY on compilations (no solo albums) — hidden from artist list.
-    pub compilation_artist_keys: std::collections::HashSet<String>,
-    /// All artist keys that appear on any compilation track — used to show "Compilation Tracks" item.
-    pub compilation_track_artist_keys: std::collections::HashSet<String>,
-    /// Maps artist_key → Vec<album_rating_key> for compilation appearances.
-    pub artist_compilation_map: std::collections::HashMap<String, Vec<String>>,
-    /// Single-artist "compilations" (greatest hits etc.) mapped to their actual artist.
-    /// Maps artist_key → Vec<Album> so they can appear as normal albums under that artist.
-    pub single_artist_compilations: std::collections::HashMap<String, Vec<Album>>,
-    /// Whether compilation detection has run for current library.
-    pub compilations_detected: bool,
+    pub compilations: CompilationState,
 
     // Artist aliases (uniform track artists that differ from album artist)
     /// Maps album_artist_key → set of alias names (e.g. Robert Pollard → {"Guided by Voices"})
@@ -1234,15 +1357,7 @@ pub struct AppState {
     pub right_panel_loading: bool,
 
     // Similar content (Plex sonic similarity)
-    pub similar_albums: Vec<Album>,
-    pub similar_tracks: Vec<Track>,
-    pub similar_mode: SimilarMode,
-    pub similar_loading: bool,
-    pub similar_source_title: String,
-    /// Album key for Tab cycling in Similar view (tracks → albums)
-    pub similar_tab_album_key: Option<String>,
-    /// Album title for Tab cycling footer display
-    pub similar_tab_album_title: Option<String>,
+    pub similar: SimilarViewState,
 
     // Playback
     pub playback: PlaybackState,
@@ -1282,12 +1397,10 @@ pub struct AppState {
     pub should_quit: bool,
     /// Cache data built during quit, saved after terminal is restored.
     pub pending_cache_save: Option<crate::plex::CacheData>,
-    pub last_error: Option<String>,
-    pub status_message: Option<String>,
-    pub status_show_time: Option<std::time::Instant>,
+    pub notifications: Notifications,
 
-    // Input dialog state (for playlist naming, etc.)
-    pub input_dialog: Option<InputDialog>,
+    // Popups (sort, radio launcher, adventure, artist radio picker, bio, dialogs, library picker, search)
+    pub popups: Popups,
 
     // Modifier bar display: shows Alt or Ctrl+Alt bar until this deadline.
     // Set on any Alt+key / Ctrl+Alt+key press; cleared on non-modifier keypress or timeout.
@@ -1332,9 +1445,7 @@ pub struct AppState {
     pub playlist_tracks_cache: HashMap<String, CachedPlaylistTracks>,
 
     // Artwork state
-    pub artwork_thumb: Option<String>,
-    pub artwork_data: Option<Vec<u8>>,
-    pub artwork_loading: bool,
+    pub artwork: ArtworkState,
 
     // Radio mode state (legacy)
     pub radio_state: RadioState,
@@ -1361,15 +1472,7 @@ pub struct AppState {
     pub adventure: AdventureState,
 
     // DJ mode state (Guest DJ modes that modify queue behavior)
-    pub active_dj_mode: Option<DjMode>,
-    /// Track keys already inserted by DJ, to avoid repeats
-    pub dj_history: Vec<String>,
-    /// True while a DJ insert is in-flight (prevents duplicates)
-    pub dj_inserting: bool,
-    /// True when the last track played was a DJ-inserted track.
-    /// Interleaving modes (Gemini/Twofer/Stretch) skip when this is true
-    /// so that original queue tracks still play in alternation.
-    pub dj_last_was_inserted: bool,
+    pub dj: DjState,
 
     // Now Playing panel focus (track list vs stations)
     pub now_playing_focus: NowPlayingFocus,
@@ -1385,17 +1488,7 @@ pub struct AppState {
     pub genre_tab_focused: bool,
 
     // Cache management
-    /// Per-category timestamps (Unix epoch secs) for when each category was last refreshed.
-    pub category_timestamps: HashMap<RefreshCategory, u64>,
-    pub cache_dirty: bool,
-    pub last_input_time: std::time::Instant,
-    pub last_cache_save: std::time::Instant,
-    pub cache_save_in_progress: bool,
-    pub background_refresh_in_progress: std::collections::HashSet<RefreshCategory>,
-    /// Categories currently being preloaded from the server (initial load, not refresh).
-    pub preloads_in_progress: std::collections::HashSet<String>,
-    /// Total number of preloads started in the current batch (for progress display).
-    pub preloads_total: usize,
+    pub cache_mgmt: CacheManagement,
 
     // Waveform seekbar state
     pub waveform: WaveformState,
@@ -1403,27 +1496,14 @@ pub struct AppState {
     // Spectrogram state
     pub spectrogram: SpectrogramState,
 
-    // Toast notification
-    pub toast_message: Option<String>,
-    pub toast_show_time: Option<std::time::Instant>,
+    // (toast and status notifications are in `notifications` field above)
 
-    // Confirmation dialog
-    pub confirm_dialog: Option<ConfirmDialog>,
+    // (confirm_dialog moved to popups)
 
     // Inline list filter state (/ key in browse view)
     pub list_filter: ListFilterState,
 
-    // Search popup state (Ctrl+F - floating dialog, not a full view)
-    pub search_popup_active: bool,
-
-    // Radio launcher popup state
-    pub radio_launcher: Option<RadioLauncherState>,
-
-    // Adventure launcher popup state (Sonic Adventure from Radio section)
-    pub adventure_launcher: Option<AdventureLauncherState>,
-
-    // Multi-artist radio picker popup state
-    pub artist_radio_picker: Option<ArtistRadioPickerState>,
+    // (search_popup_active, radio_launcher, adventure_launcher, artist_radio_picker moved to popups)
 
     // Queue undo state
     pub queue_undo_snapshot: Option<QueueSnapshot>,
@@ -1432,15 +1512,7 @@ pub struct AppState {
     /// Saved queue index for shuffle toggle undo
     pub shuffle_undo_index: Option<usize>,
 
-    // Library picker popup state (F3)
-    pub library_picker_active: bool,
-    pub library_picker_index: usize,
-
-    // Sort popup state (Ctrl+S)
-    pub sort_popup: Option<SortPopupState>,
-
-    // Artist bio popup state (F4)
-    pub artist_bio_popup: Option<ArtistBioPopup>,
+    // (library_picker, sort_popup, artist_bio_popup moved to popups)
 
     /// Auto-drill flag: when true, the next load action replaces the child column
     /// instead of pushing a new one, and does not change focus.
@@ -1459,52 +1531,15 @@ pub struct AppState {
     pub library_loading: bool,
 
     // Remote player control
-    pub output_target: OutputTarget,
-    pub remote_players: Vec<RemotePlayer>,
-    pub discovering_players: bool,
-    pub remote_playback: RemotePlaybackState,
+    pub remote: RemoteControl,
 
-    /// Default artwork visibility for new album columns (from config).
-    pub default_artwork_visible: bool,
-    /// Artwork rendering mode (Auto / Halfblocks / Braille).
-    pub artwork_mode: ArtworkMode,
-    pub album_art_cache: HashMap<String, Vec<u8>>,
-    pub album_art_pending: std::collections::HashSet<String>,
-    /// Artwork disk cache stats: (file_count, total_bytes). Computed on startup and after clears.
-    pub artwork_cache_stats: Option<(usize, u64)>,
+    // (default_artwork_visible, artwork_mode, album_art_cache, album_art_pending, artwork_cache_stats moved to artwork)
     /// Library cache total bytes on disk. Computed on startup and after clears.
     pub library_cache_stats: Option<(u64, Vec<(String, u64)>)>,
     /// Waveform cache stats: (file_count, total_bytes). Computed on startup and after clears.
     pub waveform_cache_stats: Option<(usize, u64)>,
-    /// Scroll cooldown for cover art mode (prevents trackpad momentum).
-    pub art_scroll_cooldown: Option<std::time::Instant>,
-    /// General scroll cooldown (coalesces multiple scroll events per mouse wheel tick).
-    pub scroll_cooldown: Option<std::time::Instant>,
-    /// Pinned scroll offset after mouse click to prevent viewport jumping.
-    /// (col_idx, scroll_offset) — renderer uses this instead of calc_scroll_offset.
-    pub browse_scroll_pin: Option<(usize, usize)>,
-    /// When the scroll pin was set by a click.  Scroll events within 400ms
-    /// of this timestamp are ignored to prevent trackpad inertia from
-    /// clearing the pin and re-centering the viewport.
-    pub browse_click_time: Option<std::time::Instant>,
-    /// Pinned scroll offset for search results after mouse click.
-    pub search_scroll_pin: Option<usize>,
-    /// Pinned scroll offset for station panel after mouse click.
-    pub station_scroll_pin: Option<usize>,
-    /// Whether the "◂ back" row in the station panel is highlighted (keyboard nav).
-    pub station_back_highlighted: bool,
-    /// Pinned scroll offset for queue track list after mouse click.
-    pub queue_scroll_pin: Option<usize>,
-    /// Last click time in queue view (for double-click detection).
-    pub queue_click_time: Option<std::time::Instant>,
-    /// Pinned scroll offset for similar view after mouse click.
-    pub similar_scroll_pin: Option<usize>,
-    /// Last click time in similar view (for double-click detection).
-    pub similar_click_time: Option<std::time::Instant>,
-    /// Last click time in search popup (to prevent double-click from opening).
-    pub search_click_time: Option<std::time::Instant>,
-    /// Active scrollbar drag state (click-and-drag on scrollbar thumb/track).
-    pub scrollbar_drag: Option<ScrollbarDrag>,
+    // Scroll pins and cooldowns
+    pub scroll: ScrollPins,
 }
 
 /// Which view a scrollbar drag is operating on.
@@ -1856,12 +1891,7 @@ impl AppState {
             playlists_loading: false,
             all_tracks: Vec::new(),
             track_artists: Vec::new(),
-            compilation_albums: Vec::new(),
-            compilation_artist_keys: std::collections::HashSet::new(),
-            compilation_track_artist_keys: std::collections::HashSet::new(),
-            artist_compilation_map: std::collections::HashMap::new(),
-            single_artist_compilations: std::collections::HashMap::new(),
-            compilations_detected: false,
+            compilations: CompilationState::default(),
             artist_aliases: std::collections::HashMap::new(),
             album_display_artist: std::collections::HashMap::new(),
             genres: Vec::new(),
@@ -1885,13 +1915,7 @@ impl AppState {
             selected_artist_name: String::new(),
             selected_album_title: String::new(),
             right_panel_loading: false,
-            similar_albums: Vec::new(),
-            similar_tracks: Vec::new(),
-            similar_mode: SimilarMode::Albums,
-            similar_loading: false,
-            similar_source_title: String::new(),
-            similar_tab_album_key: None,
-            similar_tab_album_title: None,
+            similar: SimilarViewState::default(),
             playback: PlaybackState::default(),
             queue: Vec::new(),
             queue_index: None,
@@ -1914,10 +1938,8 @@ impl AppState {
             list_state: ListStates::default(),
             should_quit: false,
             pending_cache_save: None,
-            last_error: None,
-            status_message: None,
-            status_show_time: None,
-            input_dialog: None,
+            notifications: Notifications::default(),
+            popups: Popups::default(),
             alt_bar_until: None,
             volume_slider_until: None,
             search_tab: SearchTab::default(),
@@ -1934,9 +1956,7 @@ impl AppState {
             genre_nav: BrowseNavigationState::new(),
             playlist_nav: BrowseNavigationState::new(),
             playlist_tracks_cache: HashMap::new(),
-            artwork_thumb: None,
-            artwork_data: None,
-            artwork_loading: false,
+            artwork: ArtworkState::default(),
             radio_state: RadioState::default(),
             playback_mode: PlaybackMode::None,
             radio: RadioPlaybackState::default(),
@@ -1946,69 +1966,31 @@ impl AppState {
             station_children_cache: std::collections::HashMap::new(),
             theme: ThemeName::default(),
             adventure: AdventureState::default(),
-            active_dj_mode: None,
-            dj_history: Vec::new(),
-            dj_inserting: false,
-            dj_last_was_inserted: false,
+            dj: DjState::default(),
             now_playing_focus: NowPlayingFocus::default(),
             visualizer_tab: VisualizerTab::default(),
             visualizer_tab_focused: false,
             genre_tab: GenreTab::default(),
             genre_tab_focused: false,
-            category_timestamps: HashMap::new(),
-            cache_dirty: false,
-            last_input_time: std::time::Instant::now(),
-            last_cache_save: std::time::Instant::now(),
-            cache_save_in_progress: false,
-            background_refresh_in_progress: std::collections::HashSet::new(),
-            preloads_in_progress: std::collections::HashSet::new(),
-            preloads_total: 0,
+            cache_mgmt: CacheManagement::default(),
             waveform: WaveformState::default(),
             spectrogram: SpectrogramState::default(),
-            toast_message: None,
-            toast_show_time: None,
-            confirm_dialog: None,
+            // (toast, confirm_dialog in notifications/popups above)
             list_filter: ListFilterState::default(),
-            search_popup_active: false,
-            radio_launcher: None,
-            adventure_launcher: None,
-            artist_radio_picker: None,
+            // (search_popup, radio_launcher, etc. in popups above)
             queue_undo_snapshot: None,
             shuffle_undo_queue: None,
             shuffle_undo_index: None,
-            library_picker_active: false,
-            library_picker_index: 0,
-            sort_popup: None,
-            artist_bio_popup: None,
+            // (library_picker, sort_popup, artist_bio in popups above)
             auto_drill_pending: false,
             marquee: std::cell::RefCell::new(MarqueeState::default()),
             marquee_subtitle: std::cell::RefCell::new(MarqueeState::default()),
             hit_regions: std::cell::RefCell::new(crate::ui::hit_regions::HitRegions::default()),
             library_loading: false,
-            output_target: OutputTarget::default(),
-            remote_players: Vec::new(),
-            discovering_players: false,
-            remote_playback: RemotePlaybackState::default(),
-            default_artwork_visible: false,
-            artwork_mode: ArtworkMode::Auto,
-            album_art_cache: HashMap::new(),
-            album_art_pending: std::collections::HashSet::new(),
-            artwork_cache_stats: None,
+            remote: RemoteControl::default(),
             library_cache_stats: None,
             waveform_cache_stats: None,
-            art_scroll_cooldown: None,
-            scroll_cooldown: None,
-            browse_scroll_pin: None,
-            browse_click_time: None,
-            search_scroll_pin: None,
-            station_scroll_pin: None,
-            station_back_highlighted: false,
-            queue_scroll_pin: None,
-            queue_click_time: None,
-            similar_scroll_pin: None,
-            similar_click_time: None,
-            search_click_time: None,
-            scrollbar_drag: None,
+            scroll: ScrollPins::default(),
         }
     }
 
@@ -2036,11 +2018,11 @@ impl AppState {
 
     /// Build artist root items, using compilation-aware version if compilations are detected.
     pub fn build_artist_root_items(&self) -> Vec<BrowseItem> {
-        if self.compilations_detected {
+        if self.compilations.detected {
             BrowseItem::artist_root_items_with_compilations(
                 &self.artists,
-                !self.compilation_albums.is_empty(),
-                &self.compilation_artist_keys,
+                !self.compilations.albums.is_empty(),
+                &self.compilations.artist_keys,
             )
         } else {
             BrowseItem::artist_root_items(&self.artists)
@@ -2139,24 +2121,24 @@ impl AppState {
     }
 
     pub fn set_error(&mut self, msg: String) {
-        self.last_error = Some(msg);
+        self.notifications.last_error = Some(msg);
     }
 
     /// Clear the current error.
     pub fn clear_error(&mut self) {
-        self.last_error = None;
+        self.notifications.last_error = None;
     }
 
     /// Set a status message (auto-clears after 5 seconds).
     pub fn set_status(&mut self, msg: String) {
-        self.status_message = Some(msg);
-        self.status_show_time = Some(std::time::Instant::now());
+        self.notifications.status_message = Some(msg);
+        self.notifications.status_show_time = Some(std::time::Instant::now());
     }
 
     /// Clear the status message.
     pub fn clear_status(&mut self) {
-        self.status_message = None;
-        self.status_show_time = None;
+        self.notifications.status_message = None;
+        self.notifications.status_show_time = None;
     }
 
     /// Convert radio playback to queue mode, returning a snapshot for undo.
@@ -2215,7 +2197,7 @@ impl AppState {
                     BrowseItem::CompilationTracks { .. } => return true,
                     // Compilation album track column
                     BrowseItem::Album { key, .. } => {
-                        if self.compilation_albums.iter().any(|a| a.rating_key == *key) {
+                        if self.compilations.albums.iter().any(|a| a.rating_key == *key) {
                             return true;
                         }
                     }
@@ -2252,8 +2234,8 @@ impl AppState {
 
     /// Set a toast notification (auto-clears after 5 seconds).
     pub fn set_toast(&mut self, msg: impl Into<String>) {
-        self.toast_message = Some(msg.into());
-        self.toast_show_time = Some(std::time::Instant::now());
+        self.notifications.toast_message = Some(msg.into());
+        self.notifications.toast_show_time = Some(std::time::Instant::now());
     }
 
     /// Get the current notification to display (ongoing takes priority over toast).
@@ -2270,9 +2252,9 @@ impl AppState {
         }
 
         // Priority 3: Preloads in progress (initial library data loading)
-        if !self.preloads_in_progress.is_empty() {
-            let done = self.preloads_total.saturating_sub(self.preloads_in_progress.len());
-            let total = self.preloads_total;
+        if !self.cache_mgmt.preloads_in_progress.is_empty() {
+            let done = self.cache_mgmt.preloads_total.saturating_sub(self.cache_mgmt.preloads_in_progress.len());
+            let total = self.cache_mgmt.preloads_total;
             let msg = if total > 0 {
                 format!("Loading library data ({}/{})...", done, total)
             } else {
@@ -2287,8 +2269,8 @@ impl AppState {
         }
 
         // Priority 5: Background refresh (ongoing)
-        if !self.background_refresh_in_progress.is_empty() {
-            let categories: Vec<_> = self.background_refresh_in_progress
+        if !self.cache_mgmt.background_refresh.is_empty() {
+            let categories: Vec<_> = self.cache_mgmt.background_refresh
                 .iter()
                 .map(|c| c.display_name())
                 .collect();
@@ -2306,17 +2288,17 @@ impl AppState {
         }
 
         // Priority 7: Cache saving (ongoing)
-        if self.cache_save_in_progress {
+        if self.cache_mgmt.save_in_progress {
             return Some(Notification::ongoing("Saving cache..."));
         }
 
         // Priority 8: Toast notifications (transient)
-        if let Some(ref msg) = self.toast_message {
+        if let Some(ref msg) = self.notifications.toast_message {
             return Some(Notification::toast(msg.clone()));
         }
 
         // Priority 9: Status messages (transient)
-        if let Some(ref msg) = self.status_message {
+        if let Some(ref msg) = self.notifications.status_message {
             return Some(Notification::toast(msg.clone()));
         }
 

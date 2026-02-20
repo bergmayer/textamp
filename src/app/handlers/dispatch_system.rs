@@ -8,6 +8,23 @@ use crate::config::Config;
 use anyhow::Result;
 use tokio::sync::mpsc;
 
+/// Download audio data from a stream URL for analysis (waveform/spectrogram generation).
+async fn download_audio_for_analysis(stream_url: &str, token: Option<&str>) -> Result<Vec<u8>, String> {
+    let http_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_default();
+    let mut request = http_client.get(stream_url);
+    if let Some(token) = token {
+        request = request.header("X-Plex-Token", token);
+    }
+    let response = request.send().await
+        .map_err(|e| format!("Request failed: {}", e))?;
+    let bytes = response.bytes().await
+        .map_err(|e| format!("Download failed: {}", e))?;
+    Ok(bytes.to_vec())
+}
+
 use super::helpers;
 
 /// Dispatch system-level actions. Returns follow-up actions.
@@ -31,7 +48,7 @@ pub async fn dispatch(
             }
 
             // Stop remote player if active
-            if let crate::app::state::OutputTarget::Remote { ref player_id, ref player_uri, .. } = state.output_target {
+            if let crate::app::state::OutputTarget::Remote { ref player_id, ref player_uri, .. } = state.remote.output_target {
                 let target_id = player_id.clone();
                 let p_uri = player_uri.clone();
                 let token = client.token().map(|s| s.to_string()).unwrap_or_default();
@@ -53,20 +70,20 @@ pub async fn dispatch(
 
             // Build cache data to save after terminal is restored (deferred for fast quit).
             // Skip if nothing has changed since last save (cache_dirty is false).
-            if state.cache_dirty {
+            if state.cache_mgmt.dirty {
             if let Some(lib_key) = &state.active_library {
                 use crate::cache::CacheData;
 
                 let mut cache_data = CacheData::new(lib_key);
                 // Write per-category timestamps
-                cache_data.category_timestamps = state.category_timestamps.iter()
+                cache_data.category_timestamps = state.cache_mgmt.category_timestamps.iter()
                     .map(|(cat, &ts)| (cat.cache_key().to_string(), ts))
                     .collect();
                 // Write legacy timestamps for backward compat
-                if let Some(&ts) = state.category_timestamps.get(&crate::app::state::RefreshCategory::Artists) {
+                if let Some(&ts) = state.cache_mgmt.category_timestamps.get(&crate::app::state::RefreshCategory::Artists) {
                     cache_data.timestamp = ts;
                 }
-                if let Some(&ts) = state.category_timestamps.get(&crate::app::state::RefreshCategory::Playlists) {
+                if let Some(&ts) = state.cache_mgmt.category_timestamps.get(&crate::app::state::RefreshCategory::Playlists) {
                     cache_data.playlist_timestamp = ts;
                 }
 
@@ -119,11 +136,11 @@ pub async fn dispatch(
                 cache_data.album_display_artist = state.album_display_artist.clone();
 
                 // Compilation detection results
-                cache_data.compilation_albums = state.compilation_albums.clone();
-                cache_data.compilation_artist_keys = state.compilation_artist_keys.clone();
-                cache_data.compilation_track_artist_keys = state.compilation_track_artist_keys.clone();
-                cache_data.artist_compilation_map = state.artist_compilation_map.clone();
-                cache_data.single_artist_compilations = state.single_artist_compilations.clone();
+                cache_data.compilation_albums = state.compilations.albums.clone();
+                cache_data.compilation_artist_keys = state.compilations.artist_keys.clone();
+                cache_data.compilation_track_artist_keys = state.compilations.track_artist_keys.clone();
+                cache_data.artist_compilation_map = state.compilations.artist_map.clone();
+                cache_data.single_artist_compilations = state.compilations.single_artist.clone();
 
                 // Save non-smart playlist tracks to disk cache
                 for (key, cached) in &state.playlist_tracks_cache {
@@ -167,25 +184,25 @@ pub async fn dispatch(
 
             if let Some(thumb_path) = thumb_path {
                 // Check if we need to load new artwork
-                if state.artwork_thumb.as_deref() != Some(&thumb_path) {
-                    state.artwork_loading = true;
+                if state.artwork.current_thumb.as_deref() != Some(&thumb_path) {
+                    state.artwork.loading = true;
                     match client.fetch_artwork(&thumb_path, 300).await {
                         Ok(data) => {
-                            state.artwork_thumb = Some(thumb_path);
-                            state.artwork_data = Some(data);
+                            state.artwork.current_thumb = Some(thumb_path);
+                            state.artwork.current_data = Some(data);
                         }
                         Err(e) => {
                             tracing::warn!("Failed to load artwork: {}", e);
-                            state.artwork_thumb = None;
-                            state.artwork_data = None;
+                            state.artwork.current_thumb = None;
+                            state.artwork.current_data = None;
                         }
                     }
-                    state.artwork_loading = false;
+                    state.artwork.loading = false;
                 }
             } else {
                 // No artwork available or no current track
-                state.artwork_thumb = None;
-                state.artwork_data = None;
+                state.artwork.current_thumb = None;
+                state.artwork.current_data = None;
             }
         }
         Action::LoadWaveform => {
@@ -267,66 +284,42 @@ pub async fn dispatch(
                             }
 
                             // Download audio with timeout and generate waveform (+ spectrogram if not cached)
-                            let http_client = reqwest::Client::builder()
-                                .timeout(std::time::Duration::from_secs(30))
-                                .build()
-                                .unwrap_or_default();
-                            let mut request = http_client.get(&stream_url);
-                            if let Some(ref token) = token {
-                                request = request.header("X-Plex-Token", token);
-                            }
-
-                            match request.send().await {
-                                Ok(response) => {
-                                    match response.bytes().await {
-                                        Ok(audio_data) => {
-                                            match crate::services::generate_waveform(
-                                                track_key.clone(),
-                                                duration_ms,
-                                                audio_data.to_vec(),
-                                            ) {
-                                                Ok(data) => {
-                                                    waveform_cache.save(&data);
-                                                    let _ = event_tx.send(Event::WaveformGenerated {
-                                                        track_key: track_key.clone(),
-                                                        data,
-                                                    }).await;
-                                                }
-                                                Err(e) => {
-                                                    let _ = event_tx.send(Event::WaveformFailed {
-                                                        track_key: track_key.clone(),
-                                                        error: e.to_string(),
-                                                    }).await;
-                                                }
-                                            }
-
-                                            // Co-compute spectrogram from same audio data if not cached
-                                            if also_generate_spectrogram && spectrogram_cached.is_none() {
-                                                match crate::services::generate_spectrogram(
-                                                    track_key.clone(), duration_ms, audio_data.to_vec(),
-                                                ) {
-                                                    Ok(sg_data) => {
-                                                        spectrogram_cache.save(&sg_data);
-                                                        let _ = event_tx.send(Event::SpectrogramGenerated {
-                                                            track_key, data: sg_data,
-                                                        }).await;
-                                                    }
-                                                    Err(e) => {
-                                                        let _ = event_tx.send(Event::SpectrogramFailed {
-                                                            track_key, error: e.to_string(),
-                                                        }).await;
-                                                    }
-                                                }
-                                            }
+                            match download_audio_for_analysis(&stream_url, token.as_deref()).await {
+                                Ok(audio_data) => {
+                                    match crate::services::generate_waveform(
+                                        track_key.clone(),
+                                        duration_ms,
+                                        audio_data.clone(),
+                                    ) {
+                                        Ok(data) => {
+                                            waveform_cache.save(&data);
+                                            let _ = event_tx.send(Event::WaveformGenerated {
+                                                track_key: track_key.clone(),
+                                                data,
+                                            }).await;
                                         }
                                         Err(e) => {
                                             let _ = event_tx.send(Event::WaveformFailed {
                                                 track_key: track_key.clone(),
-                                                error: format!("Download failed: {}", e),
+                                                error: e.to_string(),
                                             }).await;
-                                            if also_generate_spectrogram && spectrogram_cached.is_none() {
+                                        }
+                                    }
+
+                                    // Co-compute spectrogram from same audio data if not cached
+                                    if also_generate_spectrogram && spectrogram_cached.is_none() {
+                                        match crate::services::generate_spectrogram(
+                                            track_key.clone(), duration_ms, audio_data,
+                                        ) {
+                                            Ok(sg_data) => {
+                                                spectrogram_cache.save(&sg_data);
+                                                let _ = event_tx.send(Event::SpectrogramGenerated {
+                                                    track_key, data: sg_data,
+                                                }).await;
+                                            }
+                                            Err(e) => {
                                                 let _ = event_tx.send(Event::SpectrogramFailed {
-                                                    track_key, error: format!("Download failed: {}", e),
+                                                    track_key, error: e.to_string(),
                                                 }).await;
                                             }
                                         }
@@ -335,11 +328,11 @@ pub async fn dispatch(
                                 Err(e) => {
                                     let _ = event_tx.send(Event::WaveformFailed {
                                         track_key: track_key.clone(),
-                                        error: format!("Request failed: {}", e),
+                                        error: e.clone(),
                                     }).await;
                                     if also_generate_spectrogram && spectrogram_cached.is_none() {
                                         let _ = event_tx.send(Event::SpectrogramFailed {
-                                            track_key, error: format!("Request failed: {}", e),
+                                            track_key, error: e,
                                         }).await;
                                     }
                                 }
@@ -388,50 +381,32 @@ pub async fn dispatch(
                             let token = client.token().map(|s| s.to_string());
 
                             tokio::spawn(async move {
-                                let http_client = reqwest::Client::builder()
-                                    .timeout(std::time::Duration::from_secs(30))
-                                    .build()
-                                    .unwrap_or_default();
-                                let mut request = http_client.get(&stream_url);
-                                if let Some(ref token) = token {
-                                    request = request.header("X-Plex-Token", token);
-                                }
-
-                                match request.send().await {
-                                    Ok(response) => {
-                                        match response.bytes().await {
-                                            Ok(audio_data) => {
-                                                match crate::services::generate_spectrogram(
-                                                    track_key.clone(), duration_ms, audio_data.to_vec(),
-                                                ) {
-                                                    Ok(data) => {
-                                                        let sg_cache_dir = dirs::cache_dir()
-                                                            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-                                                            .join("textamp")
-                                                            .join("spectrograms");
-                                                        let sg_cache = crate::services::SpectrogramCache::new(sg_cache_dir);
-                                                        sg_cache.save(&data);
-                                                        let _ = event_tx.send(Event::SpectrogramGenerated {
-                                                            track_key, data,
-                                                        }).await;
-                                                    }
-                                                    Err(e) => {
-                                                        let _ = event_tx.send(Event::SpectrogramFailed {
-                                                            track_key, error: e.to_string(),
-                                                        }).await;
-                                                    }
-                                                }
+                                match download_audio_for_analysis(&stream_url, token.as_deref()).await {
+                                    Ok(audio_data) => {
+                                        match crate::services::generate_spectrogram(
+                                            track_key.clone(), duration_ms, audio_data,
+                                        ) {
+                                            Ok(data) => {
+                                                let sg_cache_dir = dirs::cache_dir()
+                                                    .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+                                                    .join("textamp")
+                                                    .join("spectrograms");
+                                                let sg_cache = crate::services::SpectrogramCache::new(sg_cache_dir);
+                                                sg_cache.save(&data);
+                                                let _ = event_tx.send(Event::SpectrogramGenerated {
+                                                    track_key, data,
+                                                }).await;
                                             }
                                             Err(e) => {
                                                 let _ = event_tx.send(Event::SpectrogramFailed {
-                                                    track_key, error: format!("Download failed: {}", e),
+                                                    track_key, error: e.to_string(),
                                                 }).await;
                                             }
                                         }
                                     }
                                     Err(e) => {
                                         let _ = event_tx.send(Event::SpectrogramFailed {
-                                            track_key, error: format!("Request failed: {}", e),
+                                            track_key, error: e,
                                         }).await;
                                     }
                                 }
@@ -446,13 +421,13 @@ pub async fn dispatch(
             let warm_threshold = crate::plex::constants::CACHE_VERY_STALE_THRESHOLD_SECS;
 
             for (key, thumb_path) in batch {
-                if state.album_art_pending.contains(&key) {
+                if state.artwork.grid_pending.contains(&key) {
                     continue;
                 }
 
                 // Check disk cache with warm support (no TTL deletion, serve stale entries)
                 if let Some((data, is_warm)) = artwork_cache.load_warm(&key, warm_threshold) {
-                    state.album_art_cache.insert(key.clone(), data);
+                    state.artwork.grid_cache.insert(key.clone(), data);
 
                     // If warm (>= 32 days), re-fetch in background to update the cache file
                     if is_warm {
@@ -480,7 +455,7 @@ pub async fn dispatch(
                     continue;
                 }
 
-                state.album_art_pending.insert(key.clone());
+                state.artwork.grid_pending.insert(key.clone());
 
                 let event_tx = event_tx.clone();
                 let client = client.clone();

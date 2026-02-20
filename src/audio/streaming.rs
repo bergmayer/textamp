@@ -60,47 +60,47 @@ impl StreamingBuffer {
     ///
     /// Called by the download task as chunks arrive.
     pub fn append(&self, chunk: &[u8]) {
-        let mut state = self.inner.lock().unwrap();
+        let mut state = super::lock_or_recover(&self.inner);
         state.data.extend_from_slice(chunk);
     }
 
     /// Mark the download as complete.
     pub fn set_complete(&self) {
-        let mut state = self.inner.lock().unwrap();
+        let mut state = super::lock_or_recover(&self.inner);
         state.complete = true;
     }
 
     /// Mark an error occurred during download.
     pub fn set_error(&self, error: String) {
-        let mut state = self.inner.lock().unwrap();
+        let mut state = super::lock_or_recover(&self.inner);
         state.error = Some(error);
         state.complete = true;
     }
 
     /// Check if minimum buffer for playback is available.
     pub fn has_min_buffer(&self) -> bool {
-        let state = self.inner.lock().unwrap();
+        let state = super::lock_or_recover(&self.inner);
         state.data.len() >= MIN_BUFFER_SIZE || state.complete
     }
 
     /// Get current buffered size.
     pub fn buffered_size(&self) -> usize {
-        self.inner.lock().unwrap().data.len()
+        super::lock_or_recover(&self.inner).data.len()
     }
 
     /// Check if download is complete.
     pub fn is_complete(&self) -> bool {
-        self.inner.lock().unwrap().complete
+        super::lock_or_recover(&self.inner).complete
     }
 
     /// Get download error if any.
     pub fn error(&self) -> Option<String> {
-        self.inner.lock().unwrap().error.clone()
+        super::lock_or_recover(&self.inner).error.clone()
     }
 
     /// Get download progress as a fraction (0.0 to 1.0).
     pub fn progress(&self) -> f64 {
-        let state = self.inner.lock().unwrap();
+        let state = super::lock_or_recover(&self.inner);
         match state.total_size {
             Some(total) if total > 0 => state.data.len() as f64 / total as f64,
             _ if state.complete => 1.0,
@@ -120,7 +120,7 @@ impl StreamingBuffer {
 
     /// Get total data as bytes (for compatibility with existing code).
     pub fn into_bytes(self) -> Vec<u8> {
-        let state = self.inner.lock().unwrap();
+        let state = super::lock_or_recover(&self.inner);
         state.data.clone()
     }
 }
@@ -142,7 +142,7 @@ pub struct BufferReader {
 
 impl Read for BufferReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let state = self.buffer.lock().unwrap();
+        let state = super::lock_or_recover(&self.buffer);
 
         // Check for download error
         if let Some(ref err) = state.error {
@@ -176,7 +176,7 @@ impl Read for BufferReader {
 
 impl Seek for BufferReader {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
-        let state = self.buffer.lock().unwrap();
+        let state = super::lock_or_recover(&self.buffer);
 
         let new_pos = match pos {
             SeekFrom::Start(offset) => offset as i64,
@@ -230,7 +230,7 @@ impl Read for BlockingReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         loop {
             {
-                let state = self.buffer.lock().unwrap();
+                let state = super::lock_or_recover(&self.buffer);
 
                 if let Some(ref err) = state.error {
                     return Err(io::Error::new(io::ErrorKind::Other, err.clone()));
@@ -260,7 +260,7 @@ impl Seek for BlockingReader {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
         loop {
             {
-                let state = self.buffer.lock().unwrap();
+                let state = super::lock_or_recover(&self.buffer);
 
                 let target_pos = match pos {
                     SeekFrom::Start(offset) => offset as i64,

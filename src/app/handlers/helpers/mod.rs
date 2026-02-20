@@ -337,16 +337,16 @@ pub fn get_artist_for_bio(state: &crate::app::state::AppState) -> Option<(String
         }
         View::Similar => {
             // Check similar albums/tracks
-            match state.similar_mode {
+            match state.similar.mode {
                 crate::app::state::SimilarMode::Albums => {
-                    if let Some(album) = state.similar_albums.get(state.list_state.similar_index) {
+                    if let Some(album) = state.similar.albums.get(state.list_state.similar_index) {
                         if let (Some(key), Some(name)) = (&album.parent_rating_key, &album.parent_title) {
                             return Some((key.clone(), name.clone()));
                         }
                     }
                 }
                 crate::app::state::SimilarMode::Tracks => {
-                    if let Some(track) = state.similar_tracks.get(state.list_state.similar_index) {
+                    if let Some(track) = state.similar.tracks.get(state.list_state.similar_index) {
                         if let Some(result) = artist_from_track(track) {
                             return Some(result);
                         }
@@ -365,6 +365,32 @@ pub fn get_artist_for_bio(state: &crate::app::state::AppState) -> Option<(String
     }
 
     None
+}
+
+/// Spawn a simple async API call that sends an event on success or `DataLoadError` on failure.
+///
+/// Reduces boilerplate for the common pattern of:
+/// clone client + event_tx → spawn → match client.method().await → send event.
+pub fn spawn_api_call<T, F, Fut>(
+    event_tx: &tokio::sync::mpsc::Sender<crate::app::Event>,
+    client: &crate::api::PlexClient,
+    call: F,
+    on_success: fn(T) -> crate::app::Event,
+    error_msg: &str,
+) where
+    F: FnOnce(crate::api::PlexClient) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<T, crate::api::ApiError>> + Send,
+    T: Send + 'static,
+{
+    let tx = event_tx.clone();
+    let c = client.clone();
+    let msg = error_msg.to_string();
+    tokio::spawn(async move {
+        match call(c).await {
+            Ok(data) => { let _ = tx.send(on_success(data)).await; }
+            Err(e) => { let _ = tx.send(crate::app::Event::DataLoadError(format!("{}: {}", msg, e))).await; }
+        }
+    });
 }
 
 #[cfg(test)]

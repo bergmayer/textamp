@@ -155,7 +155,7 @@ impl AudioPlayer {
     /// Returns `Ok(true)` if playback started, `Ok(false)` if no pending data
     /// (e.g., stale BufferingEnd event after audio was stopped).
     pub fn start_pending_playback(&mut self) -> Result<bool> {
-        let pending = self.pending_playback.lock().unwrap().take();
+        let pending = super::lock_or_recover(&self.pending_playback).take();
         if let Some((buffer, byte_len_hint)) = pending {
             let reader = BlockingReader::new(&buffer);
             self.backend.play_streaming(reader, byte_len_hint)
@@ -170,7 +170,7 @@ impl AudioPlayer {
     /// Play audio from raw bytes.
     ///
     /// Use this when you already have the audio data (e.g., from cache).
-    pub fn play_data(&mut self, data: Vec<u8>) -> Result<()> {
+    pub fn play_data(&mut self, data: Arc<Vec<u8>>) -> Result<()> {
         self._stream_buffer = None;
         self.backend
             .play_data(data)
@@ -189,7 +189,7 @@ impl AudioPlayer {
 
     /// Stop playback and clear pending state.
     pub fn stop(&mut self) {
-        *self.pending_playback.lock().unwrap() = None;
+        *super::lock_or_recover(&self.pending_playback) = None;
         self._stream_buffer = None;
         self.backend.stop();
     }
@@ -362,7 +362,7 @@ async fn fetch_and_buffer(
         let buffer = Arc::new(StreamingBuffer::with_size_hint(size));
         buffer.append(&data);
         buffer.set_complete();
-        *pending.lock().unwrap() = Some((buffer, size as u64));
+        *super::lock_or_recover(pending) = Some((buffer, size as u64));
         let _ = event_tx.send(AudioEvent::BufferingReady).await;
         return Ok(());
     }
@@ -412,7 +412,7 @@ async fn fetch_and_buffer(
     }
 
     // Deliver buffer and signal ready
-    *pending.lock().unwrap() = Some((buffer, byte_len_hint));
+    *super::lock_or_recover(pending) = Some((buffer, byte_len_hint));
     let _ = event_tx.send(AudioEvent::BufferingReady).await;
     Ok(())
 }

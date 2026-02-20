@@ -18,7 +18,7 @@ pub fn maybe_detect(
     _client: &PlexClient,
 ) {
     // Already detected (or currently detecting)
-    if state.compilations_detected {
+    if state.compilations.detected {
         return;
     }
     // Need artists, albums, and all_tracks loaded

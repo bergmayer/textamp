@@ -83,14 +83,14 @@ pub(super) fn handle_now_playing_visualizer_keys(key: event::KeyEvent, state: &m
 /// Handle station panel navigation keys (queue view, stations focused).
 fn handle_station_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
     // When "◂ back" row is highlighted, handle it before normal dispatch
-    if state.station_back_highlighted {
+    if state.scroll.station_back_highlighted {
         match key.code {
             KeyCode::Enter => {
-                state.station_back_highlighted = false;
+                state.scroll.station_back_highlighted = false;
                 return vec![Action::NavigateStationsBack];
             }
             KeyCode::Down => {
-                state.station_back_highlighted = false;
+                state.scroll.station_back_highlighted = false;
                 return vec![];
             }
             KeyCode::Up => {
@@ -98,7 +98,7 @@ fn handle_station_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action
                 return vec![];
             }
             _ => {
-                state.station_back_highlighted = false;
+                state.scroll.station_back_highlighted = false;
             }
         }
     }
@@ -119,12 +119,12 @@ fn handle_station_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action
         KeyCode::F(1) | KeyCode::Char('?') => vec![Action::SetView(View::Help)],
 
         KeyCode::Up => {
-            state.station_scroll_pin = None;
+            state.scroll.station = None;
             // At top of non-root column, highlight the "◂ back" row
             let at_top = state.station_nav.focused().map_or(false, |c| c.selected_index == 0);
             let is_drilled = state.station_nav.focused().map_or(false, |c| c.key.is_some());
             if at_top && is_drilled {
-                state.station_back_highlighted = true;
+                state.scroll.station_back_highlighted = true;
                 return vec![];
             }
             state.station_nav.move_up();
@@ -134,7 +134,7 @@ fn handle_station_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action
             vec![]
         }
         KeyCode::Down => {
-            state.station_scroll_pin = None;
+            state.scroll.station = None;
             state.station_nav.move_down();
             // Skip separators
             skip_station_separators(state, false);
@@ -142,7 +142,7 @@ fn handle_station_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action
             vec![]
         }
         KeyCode::PageUp => {
-            state.station_scroll_pin = None;
+            state.scroll.station = None;
             if let Some(col) = state.station_nav.focused_mut() {
                 col.selected_index = col.selected_index.saturating_sub(10);
             }
@@ -150,7 +150,7 @@ fn handle_station_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action
             vec![]
         }
         KeyCode::PageDown => {
-            state.station_scroll_pin = None;
+            state.scroll.station = None;
             if let Some(col) = state.station_nav.focused_mut() {
                 let max = col.stations.len().saturating_sub(1);
                 col.selected_index = (col.selected_index + 10).min(max);
@@ -159,7 +159,7 @@ fn handle_station_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action
             vec![]
         }
         KeyCode::Home => {
-            state.station_scroll_pin = None;
+            state.scroll.station = None;
             if let Some(col) = state.station_nav.focused_mut() {
                 col.selected_index = 0;
             }
@@ -167,7 +167,7 @@ fn handle_station_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action
             vec![]
         }
         KeyCode::End => {
-            state.station_scroll_pin = None;
+            state.scroll.station = None;
             if let Some(col) = state.station_nav.focused_mut() {
                 col.selected_index = col.stations.len().saturating_sub(1);
             }
@@ -369,36 +369,36 @@ fn handle_queue_track_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Ac
         }
 
         KeyCode::Up => {
-            state.queue_scroll_pin = None;
+            state.scroll.queue = None;
             if state.list_state.queue_index > 0 {
                 state.list_state.queue_index -= 1;
             }
             vec![]
         }
         KeyCode::Down => {
-            state.queue_scroll_pin = None;
+            state.scroll.queue = None;
             let max = get_max_index(state);
             state.list_state.queue_index = (state.list_state.queue_index + 1).min(max);
             vec![]
         }
         KeyCode::PageUp => {
-            state.queue_scroll_pin = None;
+            state.scroll.queue = None;
             state.list_state.queue_index = state.list_state.queue_index.saturating_sub(10);
             vec![]
         }
         KeyCode::PageDown => {
-            state.queue_scroll_pin = None;
+            state.scroll.queue = None;
             let max = get_max_index(state);
             state.list_state.queue_index = (state.list_state.queue_index + 10).min(max);
             vec![]
         }
         KeyCode::Home => {
-            state.queue_scroll_pin = None;
+            state.scroll.queue = None;
             state.list_state.queue_index = 0;
             vec![]
         }
         KeyCode::End => {
-            state.queue_scroll_pin = None;
+            state.scroll.queue = None;
             let max = get_max_index(state);
             state.list_state.queue_index = max;
             vec![]

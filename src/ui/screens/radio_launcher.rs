@@ -14,7 +14,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs};
 
 /// Render the radio launcher popup as an overlay.
 pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
-    let launcher = match &state.radio_launcher {
+    let launcher = match &state.popups.radio_launcher {
         Some(l) => l,
         None => return,
     };

@@ -271,13 +271,13 @@ fn render_account_content(frame: &mut Frame, state: &AppState, outer: Rect, area
                 format_count(*count)
             };
             let age_str = cat
-                .and_then(|c| state.category_timestamps.get(&c))
+                .and_then(|c| state.cache_mgmt.category_timestamps.get(&c))
                 .map(|&ts| {
                     let age = std::time::Duration::from_secs(now_ts.saturating_sub(ts));
                     format!("  {} ago", format_duration(age))
                 })
                 .unwrap_or_default();
-            let refreshing = cat.map_or(false, |c| state.background_refresh_in_progress.contains(&c));
+            let refreshing = cat.map_or(false, |c| state.cache_mgmt.background_refresh.contains(&c));
             let suffix = if refreshing { "  refreshing..." } else { "" };
             lines.push(Line::from(Span::styled(
                 format!("  {:12}{:>8}{}{}", label, count_str, age_str, suffix),
@@ -305,7 +305,7 @@ fn render_account_content(frame: &mut Frame, state: &AppState, outer: Rect, area
         }
 
         // Artwork cache
-        if let Some((art_count, art_bytes)) = state.artwork_cache_stats {
+        if let Some((art_count, art_bytes)) = state.artwork.cache_stats {
             lines.push(Line::from(Span::styled(
                 format!("  artwork: {} images, {}", art_count, format_size(art_bytes)),
                 Style::default().fg(t.colors.fg_muted),
@@ -542,7 +542,7 @@ fn render_textamp_content(frame: &mut Frame, state: &AppState, outer: Rect, area
     let artwork_modes = crate::app::state::ArtworkMode::all();
     for (i, mode) in artwork_modes.iter().enumerate() {
         let item_idx = theme_count + i;
-        let is_active = *mode == state.artwork_mode;
+        let is_active = *mode == state.artwork.mode;
         let is_selected = is_focused && state.settings_state.item_index == item_idx;
         if is_selected { selected_line = Some(lines.len()); }
         let prefix = if is_active { "  ♪ " } else { "  " };
@@ -563,7 +563,7 @@ fn render_textamp_content(frame: &mut Frame, state: &AppState, outer: Rect, area
     )));
 
     // Local output
-    let is_local = matches!(state.output_target, OutputTarget::Local);
+    let is_local = matches!(state.remote.output_target, OutputTarget::Local);
     let local_idx = output_offset;
     let is_selected = is_focused && state.settings_state.item_index == local_idx;
     if is_selected { selected_line = Some(lines.len()); }
@@ -575,9 +575,9 @@ fn render_textamp_content(frame: &mut Frame, state: &AppState, outer: Rect, area
     )));
 
     // Remote players
-    for (i, player) in state.remote_players.iter().enumerate() {
+    for (i, player) in state.remote.players.iter().enumerate() {
         let item_idx = output_offset + 1 + i;
-        let is_active = match &state.output_target {
+        let is_active = match &state.remote.output_target {
             OutputTarget::Remote { player_id, .. } => *player_id == player.client_identifier,
             _ => false,
         };
@@ -592,7 +592,7 @@ fn render_textamp_content(frame: &mut Frame, state: &AppState, outer: Rect, area
     }
 
     // Refresh players
-    let refresh_idx = output_offset + 1 + state.remote_players.len();
+    let refresh_idx = output_offset + 1 + state.remote.players.len();
     let is_selected = is_focused && refresh_idx == state.settings_state.item_index;
     if is_selected { selected_line = Some(lines.len() + 1); } // +1 for the blank line before
     let prefix = "  ";
@@ -603,7 +603,7 @@ fn render_textamp_content(frame: &mut Frame, state: &AppState, outer: Rect, area
         style,
     )));
 
-    if state.discovering_players {
+    if state.remote.discovering {
         lines.push(Line::from(Span::styled(
             "  discovering...",
             Style::default().fg(t.colors.fg_muted),

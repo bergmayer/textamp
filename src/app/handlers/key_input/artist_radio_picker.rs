@@ -8,7 +8,7 @@ use crate::app::AppState;
 
 /// Handle artist radio picker popup keys.
 pub(super) fn handle_artist_radio_picker_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
-    let picker = match state.artist_radio_picker.as_mut() {
+    let picker = match state.popups.artist_radio_picker.as_mut() {
         Some(p) => p,
         None => return vec![],
     };
