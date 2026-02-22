@@ -30,6 +30,7 @@ pub enum Action {
     GoBackInRightPanel,    // Go from tracks back to albums view
     LoadSimilarAlbums { rating_key: String, title: String },
     LoadSimilarTracks { rating_key: String, title: String },
+    LoadRelated { artist_key: String, title: String },
 
     // Playback control
     TogglePlayPause,

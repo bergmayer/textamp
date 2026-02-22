@@ -35,7 +35,8 @@ COMMANDS
 
   F1 Help  F2 Settings  F3 Switch library  F4 Artist bio  F5 Refresh
   
-  Ctrl+F  Search        Ctrl+M  Similar   Ctrl+J  Jump to album 
+  Ctrl+F  Search        Ctrl+M  Similar   Ctrl+R  Related
+  Ctrl+J  Jump to album
   Ctrl+S  Sort          Ctrl+Q  Quit      Ctrl+W  Save playlist
   Ctrl+X  Clear queue   Ctrl+Z  Undo
   

@@ -335,6 +335,152 @@ pub async fn dispatch(
                 Event::SimilarTracksLoaded, "Failed to load similar tracks",
             );
         }
+        Action::LoadRelated { artist_key, title } => {
+            state.related.source_title = title;
+            state.related.source_key = artist_key.clone();
+            state.related.loading = true;
+            state.related.groups.clear();
+            state.list_state.related_index = 0;
+            state.scroll.related = None;
+            if state.view != View::Related {
+                state.previous_view = Some(state.view);
+                state.set_view(View::Related);
+            }
+
+            // Collect alias data before spawning async task.
+            // Two kinds:
+            // - "real" aliases: alias name matches a Plex artist → fetch their albums from API
+            // - "synthetic" aliases: alias name has no Plex artist → use albums from state
+            //   (these are albums filed under the source artist where all tracks say the alias name)
+            use crate::app::state::{RelatedArtistGroup, RelatedSource};
+
+            let mut real_alias_artists: Vec<crate::api::models::Artist> = Vec::new();
+            let mut synthetic_alias_groups: Vec<RelatedArtistGroup> = Vec::new();
+
+            if let Some(alias_names) = state.artist_aliases.get(&artist_key) {
+                // Build reverse lookup: alias_name → albums from album_display_artist
+                let album_by_key: std::collections::HashMap<&str, &crate::api::models::Album> = state.albums.iter()
+                    .map(|a| (a.rating_key.as_str(), a))
+                    .collect();
+
+                for alias_name in alias_names {
+                    if alias_name.eq_ignore_ascii_case("Various Artists") {
+                        continue;
+                    }
+                    if let Some(artist) = state.artists.iter().find(|a| {
+                        a.title.eq_ignore_ascii_case(alias_name)
+                    }) {
+                        // Real Plex artist — will fetch albums from API
+                        real_alias_artists.push(artist.clone());
+                    } else {
+                        // No Plex artist entry — build group from source artist's albums
+                        // where album_display_artist says this alias name
+                        let mut albums: Vec<crate::api::models::Album> = Vec::new();
+                        for (album_key, display_name) in &state.album_display_artist {
+                            if display_name.eq_ignore_ascii_case(alias_name) {
+                                if let Some(album) = album_by_key.get(album_key.as_str()) {
+                                    albums.push((*album).clone());
+                                }
+                            }
+                        }
+                        if !albums.is_empty() {
+                            albums.sort_by(|a, b| a.year.cmp(&b.year));
+                            synthetic_alias_groups.push(RelatedArtistGroup {
+                                artist: crate::api::models::Artist {
+                                    title: alias_name.clone(),
+                                    rating_key: format!("alias:{}", alias_name),
+                                    ..Default::default()
+                                },
+                                albums,
+                                source: RelatedSource::Alias,
+                            });
+                        }
+                    }
+                }
+            }
+
+            let tx = event_tx.clone();
+            let c = client.clone();
+            tokio::spawn(async move {
+                let mut groups = Vec::new();
+
+                // 1. Fetch Plex related artists
+                let plex_artists = match c.get_related_artists(&artist_key).await {
+                    Ok(artists) => artists,
+                    Err(e) => {
+                        tracing::warn!("Failed to load related artists: {}", e);
+                        vec![]
+                    }
+                };
+
+                // Filter out: the source artist itself and "Various Artists"
+                let filtered_artists: Vec<_> = plex_artists.into_iter()
+                    .filter(|a| a.rating_key != artist_key
+                        && !a.title.eq_ignore_ascii_case("Various Artists"))
+                    .collect();
+
+                // Collect Plex keys to dedup real aliases
+                let plex_keys: std::collections::HashSet<String> = filtered_artists.iter()
+                    .map(|a| a.rating_key.clone())
+                    .collect();
+
+                // 2. Fetch albums for each Plex related artist (parallel)
+                let mut handles = Vec::new();
+                for artist in &filtered_artists {
+                    let c2 = c.clone();
+                    let key = artist.rating_key.clone();
+                    handles.push(tokio::spawn(async move {
+                        c2.get_artist_albums(&key).await.unwrap_or_default()
+                    }));
+                }
+
+                let mut plex_results: Vec<Vec<crate::api::models::Album>> = Vec::new();
+                for handle in handles {
+                    plex_results.push(handle.await.unwrap_or_default());
+                }
+
+                for (artist, albums) in filtered_artists.into_iter().zip(plex_results) {
+                    if !albums.is_empty() {
+                        groups.push(RelatedArtistGroup {
+                            artist,
+                            albums,
+                            source: RelatedSource::Plex,
+                        });
+                    }
+                }
+
+                // 3. Add real alias artists that have Plex entries (dedup against Plex results)
+                let mut alias_handles = Vec::new();
+                let mut alias_artist_vec = Vec::new();
+                for artist in &real_alias_artists {
+                    if !plex_keys.contains(&artist.rating_key) {
+                        let c2 = c.clone();
+                        let key = artist.rating_key.clone();
+                        alias_artist_vec.push(artist.clone());
+                        alias_handles.push(tokio::spawn(async move {
+                            c2.get_artist_albums(&key).await.unwrap_or_default()
+                        }));
+                    }
+                }
+
+                for (artist, handle) in alias_artist_vec.into_iter().zip(alias_handles) {
+                    let albums = handle.await.unwrap_or_default();
+                    if !albums.is_empty() {
+                        groups.push(RelatedArtistGroup {
+                            artist,
+                            albums,
+                            source: RelatedSource::Alias,
+                        });
+                    }
+                }
+
+                // 4. Add synthetic alias groups (aliases without Plex artist entries,
+                //    albums derived from source artist's library)
+                groups.extend(synthetic_alias_groups);
+
+                let _ = tx.send(Event::RelatedDataLoaded { groups }).await;
+            });
+        }
         Action::ListUp => {
             helpers::adjust_list_index(state, -1);
         }

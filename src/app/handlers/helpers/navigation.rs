@@ -157,6 +157,13 @@ pub fn adjust_list_index(state: &mut AppState, delta: isize) {
                 state.list_state.similar_index = idx.clamp(0, len as isize - 1) as usize;
             }
         }
+        View::Related => {
+            let len = related_flat_count(&state.related.groups);
+            if len > 0 {
+                let idx = state.list_state.related_index as isize + delta;
+                state.list_state.related_index = idx.clamp(0, len as isize - 1) as usize;
+            }
+        }
         View::Search => {
             // Search results navigation handled in search key handler
         }
@@ -225,8 +232,39 @@ pub fn set_list_index(state: &mut AppState, index: isize) {
                 (index as usize).min(len.saturating_sub(1))
             };
         }
+        View::Related => {
+            let len = related_flat_count(&state.related.groups);
+            state.list_state.related_index = if index == isize::MAX {
+                len.saturating_sub(1)
+            } else {
+                (index as usize).min(len.saturating_sub(1))
+            };
+        }
         _ => {}
     }
+}
+
+/// Count total flat items in related groups (1 header + N albums per group).
+pub fn related_flat_count(groups: &[crate::app::state::RelatedArtistGroup]) -> usize {
+    groups.iter().map(|g| 1 + g.albums.len()).sum()
+}
+
+/// Resolve flat index into (group_idx, is_header, album_idx_within_group).
+pub fn related_flat_resolve(groups: &[crate::app::state::RelatedArtistGroup], flat_idx: usize) -> Option<(usize, bool, usize)> {
+    let mut offset = 0;
+    for (gi, group) in groups.iter().enumerate() {
+        let group_size = 1 + group.albums.len();
+        if flat_idx < offset + group_size {
+            let local = flat_idx - offset;
+            if local == 0 {
+                return Some((gi, true, 0));
+            } else {
+                return Some((gi, false, local - 1));
+            }
+        }
+        offset += group_size;
+    }
+    None
 }
 
 /// Merge `new_items` into an already-sorted vec, maintaining sort order.

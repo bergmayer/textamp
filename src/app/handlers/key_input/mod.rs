@@ -14,6 +14,7 @@ mod now_playing;
 mod radio_launcher;
 mod search;
 pub(in crate::app::handlers) mod similar;
+pub(in crate::app::handlers) mod related;
 mod settings;
 
 // Re-export public items used by other handler modules.
@@ -371,6 +372,9 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
         (KeyModifiers::CONTROL, KeyCode::Char('m')) if alt_commands::is_action_command_available(state, 'm') => {
             return get_similar_action(state);
         }
+        (KeyModifiers::CONTROL, KeyCode::Char('r')) if alt_commands::is_action_command_available(state, 'r') => {
+            return get_related_action(state);
+        }
         (KeyModifiers::CONTROL, KeyCode::Char('j')) if alt_commands::is_action_command_available(state, 'j') => {
             return navigate_to_album(state);
         }
@@ -480,6 +484,7 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
         View::NowPlaying => now_playing::handle_now_playing_visualizer_keys(key, state),
         View::Search => search::handle_search_keys(key, state),
         View::Similar => similar::handle_similar_keys(key, state),
+        View::Related => related::handle_related_keys(key, state),
         View::Help => settings::handle_help_keys(key, state),
         View::Settings => settings::handle_settings_keys(key, state, config),
     }
@@ -741,6 +746,52 @@ pub(crate) fn get_similar_action(state: &mut AppState) -> Vec<Action> {
             rating_key: track.rating_key.clone(),
             title,
         }];
+    }
+
+    vec![]
+}
+
+/// Get the related artists action based on current context.
+///
+/// Priority: highlighted artist → highlighted album's artist → highlighted track's artist → now-playing track's artist.
+pub(crate) fn get_related_action(state: &mut AppState) -> Vec<Action> {
+    state.previous_view = Some(state.view);
+
+    // 1. Highlighted artist in Browse nav
+    if state.view == View::Browse {
+        if let Some(nav) = state.browse_nav() {
+            if let Some(item) = nav.selected_item() {
+                if let BrowseItem::Artist { key, title, .. } = item {
+                    return vec![Action::LoadRelated { artist_key: key.clone(), title: title.clone() }];
+                }
+            }
+        }
+    }
+
+    // 2. Highlighted album → use album's parent artist
+    if let Some((_album_key, _album_title)) = get_selected_album(state) {
+        if let Some(nav) = state.browse_nav() {
+            if let Some(artist_key) = find_artist_key_in_nav(nav) {
+                let artist_name = find_artist_name_in_nav(nav, state);
+                return vec![Action::LoadRelated { artist_key, title: artist_name }];
+            }
+        }
+    }
+
+    // 3. Highlighted track → use track's grandparent artist
+    if let Some(track) = get_selected_track(state) {
+        if let Some(artist_key) = track.grandparent_rating_key.clone() {
+            let artist_name = track.artist_name().to_string();
+            return vec![Action::LoadRelated { artist_key, title: artist_name }];
+        }
+    }
+
+    // 4. Now-playing track → use its artist
+    if let Some(track) = state.current_track().cloned() {
+        if let Some(artist_key) = track.grandparent_rating_key.clone() {
+            let artist_name = track.artist_name().to_string();
+            return vec![Action::LoadRelated { artist_key, title: artist_name }];
+        }
     }
 
     vec![]

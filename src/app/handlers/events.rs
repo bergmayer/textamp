@@ -522,6 +522,13 @@ pub fn handle_app_event(
             state.list_state.similar_index = 0;
             vec![]
         }
+        Event::RelatedDataLoaded { groups } => {
+            state.related.groups = groups;
+            state.related.loading = false;
+            state.list_state.related_index = 0;
+            state.scroll.related = None;
+            vec![]
+        }
         Event::SearchCompleted(results) => {
             // Legacy handler for non-debounced search
             state.list_state.search_item_index = 0;

@@ -57,6 +57,9 @@ pub struct HitRegions {
     /// Similar popup (outer rect).
     pub similar_content: Option<SimilarRegions>,
 
+    /// Related popup (outer rect).
+    pub related_content: Option<RelatedRegions>,
+
 }
 
 impl HitRegions {
@@ -222,4 +225,15 @@ pub struct SimilarRegions {
     pub inner: Rect,
     /// Rows per item (always 2 for similar view).
     pub rows_per_item: u16,
+    /// Footer [Tab] hint clickable area.
+    pub tab_hint: Option<Rect>,
+}
+
+/// Related popup regions.
+#[derive(Debug, Clone)]
+pub struct RelatedRegions {
+    /// Outer popup rect.
+    pub outer: Rect,
+    /// Inner content area (border excluded).
+    pub inner: Rect,
 }

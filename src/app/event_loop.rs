@@ -477,6 +477,7 @@ impl EventLoop {
             | LoadArtistAlbums | LoadArtistAllTracks | LoadSelectedAlbumTracks
             | LoadAlbumTracks { .. } | LoadCategoryTracks | GoBackInRightPanel
             | LoadSimilarAlbums { .. } | LoadSimilarTracks { .. }
+            | LoadRelated { .. }
             | ListUp | ListDown | ListPageUp | ListPageDown | ListTop | ListBottom => {
                 handlers::dispatch_data::dispatch(&self.event_tx, &self.config, action, state, client).await?
             }

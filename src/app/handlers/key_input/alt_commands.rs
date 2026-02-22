@@ -69,6 +69,11 @@ pub fn available_alt_commands(state: &AppState) -> Vec<AltCommand> {
     cmds.push(AltCommand { modifier: CommandModifier::Ctrl, key: 'm', label: "similar", display_key: None,
         enabled: similar_enabled });
 
+    // Ctrl+R related artists
+    let related_enabled = has_artist_context(state) || has_track || has_album || has_playing;
+    cmds.push(AltCommand { modifier: CommandModifier::Ctrl, key: 'r', label: "related", display_key: None,
+        enabled: related_enabled });
+
     // Ctrl+J jump to album
     // In Library view, only useful when now-playing track is from a different album
     // than the one currently viewed in Miller columns.
@@ -123,6 +128,20 @@ pub fn is_action_command_available(state: &AppState, key: char) -> bool {
 }
 
 // --- Context helpers ---
+
+/// Is there an artist highlighted in the current view?
+fn has_artist_context(state: &AppState) -> bool {
+    if state.view == View::Browse {
+        if let Some(nav) = state.browse_nav() {
+            if let Some(item) = nav.selected_item() {
+                if matches!(item, BrowseItem::Artist { .. }) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
 
 /// Is there a track highlighted/selected in the current view?
 fn has_track_context(state: &AppState) -> bool {
@@ -192,6 +211,12 @@ fn has_album_context(state: &AppState) -> bool {
         }
         View::Similar => {
             !state.similar.albums.is_empty()
+        }
+        View::Related => {
+            // Album row selected in related view
+            let idx = state.list_state.related_index;
+            let resolved = super::super::helpers::navigation::related_flat_resolve(&state.related.groups, idx);
+            resolved.map(|(_, is_header, _)| !is_header).unwrap_or(false)
         }
         _ => false,
     }

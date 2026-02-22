@@ -575,7 +575,7 @@ fn apply_key_to_state(state: &mut AppState, key: crossterm::event::KeyEvent) {
                 _ => {}
             }
         }
-        View::Queue | View::NowPlaying | View::Similar => {
+        View::Queue | View::NowPlaying | View::Similar | View::Related => {
             match key.code {
                 KeyCode::Esc | KeyCode::Char('b') => state.view = View::Browse,
                 KeyCode::Down => {

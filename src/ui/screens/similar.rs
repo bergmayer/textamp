@@ -35,13 +35,14 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     let inner = block.inner(popup_area);
     frame.render_widget(block, popup_area);
 
-    // Register hit regions for mouse handler
+    // Register hit regions for mouse handler (tab_hint set below after footer rendering)
     {
         let mut hr = state.hit_regions.borrow_mut();
         hr.similar_content = Some(crate::ui::hit_regions::SimilarRegions {
             outer: popup_area,
             inner,
             rows_per_item: 2,
+            tab_hint: None,
         });
     }
 
@@ -73,9 +74,14 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         Span::styled("close", Style::default().fg(t.colors.fg_muted)),
     ];
 
+    // Track width before [Tab] to compute click region
+    let esc_width: u16 = " [Esc] close".len() as u16;
+    let mut has_tab_hint = false;
+
     match state.similar.mode {
         SimilarMode::Tracks => {
             if let Some(ref album_title) = state.similar.tab_album_title {
+                has_tab_hint = true;
                 footer_spans.push(Span::styled("  [Tab] ", Style::default().fg(t.colors.shortcut_key)));
                 footer_spans.push(Span::styled(
                     format!("similar albums to: {}", album_title),
@@ -85,6 +91,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         }
         SimilarMode::Albums => {
             if let Some(track) = state.current_track() {
+                has_tab_hint = true;
                 footer_spans.push(Span::styled("  [Tab] ", Style::default().fg(t.colors.shortcut_key)));
                 footer_spans.push(Span::styled(
                     format!("similar tracks to: {} - {}", track.artist_name(), track.title),
@@ -96,6 +103,17 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
 
     let footer = Paragraph::new(Line::from(footer_spans));
     frame.render_widget(footer, footer_area);
+
+    // Register [Tab] hint click region
+    if has_tab_hint {
+        let tab_x = footer_area.x + esc_width;
+        let tab_width = footer_area.width.saturating_sub(esc_width);
+        let tab_rect = Rect::new(tab_x, footer_area.y, tab_width, 1);
+        let mut hr = state.hit_regions.borrow_mut();
+        if let Some(ref mut regions) = hr.similar_content {
+            regions.tab_hint = Some(tab_rect);
+        }
+    }
 }
 
 fn render_albums(frame: &mut Frame, state: &AppState, inner: Rect, popup_area: Rect) {

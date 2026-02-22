@@ -84,9 +84,25 @@ fn apply_sort_mode(state: &mut AppState, col_idx: usize, mode: ColumnSortMode) -
         nav.focused_column = col_idx;
     }
 
-    // Rebuild popup options (Direction availability may have changed)
-    if let Some(popup) = &mut state.popups.sort {
-        popup.rebuild_options(mode);
+    // Non-Shuffle sort modes are permanent edits: clear originals so the new order
+    // becomes the baseline. Only Shuffle is a reversible toggle.
+    if mode != ColumnSortMode::Shuffled && mode != ColumnSortMode::Default {
+        let nav = match state.browse_nav_mut() {
+            Some(n) => n,
+            None => return vec![],
+        };
+        if let Some(col) = nav.columns.get_mut(col_idx) {
+            col.clear_originals();
+        }
+        // Rebuild popup with Default as the active mode
+        if let Some(popup) = &mut state.popups.sort {
+            popup.rebuild_options(ColumnSortMode::Default);
+        }
+    } else {
+        // Rebuild popup options (Direction availability may have changed)
+        if let Some(popup) = &mut state.popups.sort {
+            popup.rebuild_options(mode);
+        }
     }
 
     // Auto-drill to repopulate child column after sort change

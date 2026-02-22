@@ -86,6 +86,11 @@ pub fn compute_aliases(
             continue;
         }
 
+        // "Various Artists" is never a real alias — skip it
+        if uniform_name.eq_ignore_ascii_case("Various Artists") {
+            continue;
+        }
+
         // Record the alias
         artist_aliases.entry(artist_key)
             .or_insert_with(HashSet::new)

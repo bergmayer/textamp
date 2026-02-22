@@ -11,7 +11,7 @@
 mod cache;
 mod compilations;
 mod connection;
-mod navigation;
+pub(in crate::app::handlers) mod navigation;
 mod playback;
 mod preload;
 mod refresh;

@@ -73,6 +73,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         View::NowPlaying => render_now_playing(frame, state),
         View::Search => render_search(frame, state),
         View::Similar => render_similar(frame, state),
+        View::Related => render_related(frame, state),
         View::Help => render_help(frame, state),
         View::Settings => render_settings(frame, state),
     }
@@ -277,6 +278,20 @@ fn render_similar(frame: &mut Frame, state: &AppState) {
 
     // Overlay the similar popup
     screens::similar::render(frame, state, frame.area());
+}
+
+fn render_related(frame: &mut Frame, state: &AppState) {
+    // Render the previous view behind the popup
+    let prev = state.previous_view.unwrap_or(View::Browse);
+    match prev {
+        View::Queue => render_queue(frame, state),
+        View::NowPlaying => render_now_playing(frame, state),
+        View::Browse => render_browse(frame, state),
+        _ => render_browse(frame, state),
+    }
+
+    // Overlay the related popup
+    screens::related::render(frame, state, frame.area());
 }
 
 fn render_help(frame: &mut Frame, state: &AppState) {

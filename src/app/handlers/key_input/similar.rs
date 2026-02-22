@@ -7,7 +7,7 @@ use crate::app::state::View;
 use crate::app::AppState;
 
 /// Handle Similar view keys.
-pub(super) fn handle_similar_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
+pub(in crate::app::handlers) fn handle_similar_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
     use crate::app::state::SimilarMode;
 
     match key.code {
@@ -91,7 +91,7 @@ pub(super) fn handle_similar_keys(key: event::KeyEvent, state: &mut AppState) ->
 }
 
 /// Activate the currently highlighted similar item (Enter or second click).
-/// Albums: navigate to album in library. Tracks: play the track.
+/// Albums: navigate to album in library (Miller columns). Tracks: play the track.
 pub(in crate::app::handlers) fn activate_similar_item(state: &mut AppState) -> Vec<Action> {
     use crate::app::state::SimilarMode;
 
@@ -104,12 +104,26 @@ pub(in crate::app::handlers) fn activate_similar_item(state: &mut AppState) -> V
                 state.selected_artist_name = album.artist_name().to_string();
                 state.set_view(View::Browse);
                 state.browse_category = crate::app::state::BrowseCategory::Library;
-                if let Some(artist_key) = &album.parent_rating_key {
-                    if let Some(idx) = state.artists.iter().position(|a| &a.rating_key == artist_key) {
-                        state.list_state.artists_index = idx;
+                if let Some(ref artist_key) = album.parent_rating_key {
+                    // Select artist in Miller column 0
+                    if let Some(pos) = state.artist_nav.columns.first()
+                        .and_then(|col| col.items.iter().position(|i| i.key() == artist_key.as_str()))
+                    {
+                        if let Some(col) = state.artist_nav.columns.first_mut() {
+                            col.selected_index = pos;
+                        }
                     }
+                    state.artist_nav.focused_column = 0;
+                    state.artist_nav.truncate_right();
+                    return vec![Action::LoadArtistAlbumsForMiller { artist_key: artist_key.clone() }];
                 }
-                vec![Action::LoadArtistAlbums]
+                // No parent artist key — try All Artists
+                if let Some(col) = state.artist_nav.columns.first_mut() {
+                    col.selected_index = 0;
+                }
+                state.artist_nav.focused_column = 0;
+                state.artist_nav.truncate_right();
+                vec![Action::LoadAllAlbumsForMiller]
             } else {
                 vec![]
             }

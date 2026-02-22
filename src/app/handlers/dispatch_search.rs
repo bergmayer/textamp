@@ -772,33 +772,9 @@ fn select_search_result(state: &mut AppState) -> Vec<Action> {
         }
         SearchTab::Tracks => {
             if let Some(track) = results.tracks.get(local_idx) {
-                let artist_key = track.grandparent_rating_key.clone();
-                let album_key = track.parent_rating_key.clone();
-                let track_key = track.rating_key.clone();
                 let track_owned = track.clone();
                 state.search_query.clear();
-
                 state.popups.search_active = false;
-                state.browse_category = BrowseCategory::Library;
-                state.set_view(View::Browse);
-                state.pending_album_key = album_key;
-                state.pending_track_key = Some(track_key);
-
-                if let Some(ref ak) = artist_key {
-                    state.selected_artist_name = track.artist_name().to_string();
-                    if let Some(col) = state.artist_nav.columns.get_mut(0) {
-                        if let Some(pos) = col.items.iter().position(|i| i.key() == ak.as_str()) {
-                            col.selected_index = pos;
-                            state.artist_nav.focused_column = 0;
-                            state.artist_nav.truncate_right();
-                            return vec![Action::LoadArtistAlbumsForMiller { artist_key: ak.clone() }];
-                        }
-                    }
-                    return vec![Action::LoadArtistAlbumsForMiller { artist_key: ak.clone() }];
-                }
-                // No artist key — play the track directly
-                state.pending_album_key = None;
-                state.pending_track_key = None;
                 return vec![Action::PlayTrack(track_owned)];
             }
         }

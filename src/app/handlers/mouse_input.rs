@@ -167,8 +167,7 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
     // Search popup intercepts mouse clicks when active
     if state.popups.search_active {
         if let crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) = event.kind {
-            let shift = event.modifiers.contains(crossterm::event::KeyModifiers::SHIFT);
-            return handle_search_popup_click(click_row, click_col, shift, state);
+            return handle_search_popup_click(click_row, click_col, state);
         }
         return vec![];
     }
@@ -273,15 +272,13 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
                     return handle_auth_click(click_row, click_col, state);
                 }
                 View::Browse => {
-                    let shift = event.modifiers.contains(crossterm::event::KeyModifiers::SHIFT);
-                    return handle_browse_click(click_row, click_col, shift, state);
+                    return handle_browse_click(click_row, click_col, state);
                 }
                 View::Queue | View::NowPlaying => {
                     return handle_now_playing_down(click_row, click_col, event.modifiers, state);
                 }
                 View::Search => {
-                    let shift = event.modifiers.contains(crossterm::event::KeyModifiers::SHIFT);
-                    return handle_search_click(click_row, click_col, shift, state);
+                    return handle_search_click(click_row, click_col, state);
                 }
                 View::Settings => {
                     return handle_settings_click(click_row, click_col, state);
@@ -290,8 +287,10 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
                     return handle_help_click(click_row, click_col, state);
                 }
                 View::Similar => {
-                    let shift = event.modifiers.contains(crossterm::event::KeyModifiers::SHIFT);
-                    return handle_similar_click(click_row, click_col, shift, state);
+                    return handle_similar_click(click_row, click_col, state);
+                }
+                View::Related => {
+                    return handle_related_click(click_row, click_col, state);
                 }
             }
         }
@@ -540,7 +539,7 @@ fn handle_search_result_click(visual_row: usize, results_height: usize, state: &
 }
 
 /// Handle mouse click when the search popup is active.
-fn handle_search_popup_click(click_row: u16, click_col: u16, shift_held: bool, state: &mut AppState) -> Vec<Action> {
+fn handle_search_popup_click(click_row: u16, click_col: u16, state: &mut AppState) -> Vec<Action> {
     // Read registered regions (drop borrow before mutating state)
     let regions = {
         let hr = state.hit_regions.borrow();
@@ -579,9 +578,6 @@ fn handle_search_popup_click(click_row: u16, click_col: u16, shift_held: bool, s
         let visual_row = (click_row - regions.results_area.y) as usize;
         let results_height = regions.results_area.height as usize;
         let actions = handle_search_result_click(visual_row, results_height, state);
-        if shift_held {
-            return vec![Action::PlaySearchResult];
-        }
         return actions;
     }
 
@@ -1266,7 +1262,7 @@ fn miller_column_at(click_col: u16, _nav: &BrowseNavigationState, state: &AppSta
 // ============================================================================
 
 /// Handle click in Browse view using Miller column hit-testing.
-fn handle_browse_click(click_row: u16, click_col: u16, shift_held: bool, state: &mut AppState) -> Vec<Action> {
+fn handle_browse_click(click_row: u16, click_col: u16, state: &mut AppState) -> Vec<Action> {
     // Check scrollbar click first (before item selection)
     match state.browse_category {
         BrowseCategory::Folders => {
@@ -1354,20 +1350,6 @@ fn handle_browse_click(click_row: u16, click_col: u16, shift_held: bool, state: 
                     if let Some(col) = nav.columns.get_mut(col_idx) {
                         col.selected_index = item_idx;
                     }
-                    // Shift+click: enqueue
-                    if shift_held {
-                        if let Some(item) = {
-                            let nav = match state.browse_category {
-                                BrowseCategory::Library => &state.artist_nav,
-                                BrowseCategory::Genres => &state.genre_nav,
-                                BrowseCategory::Playlists => &state.playlist_nav,
-                                _ => return vec![],
-                            };
-                            nav.columns.get(col_idx).and_then(|c| c.items.get(item_idx)).cloned()
-                        } {
-                            return browse_enqueue_action(&item, col_idx, state);
-                        }
-                    }
                     // Click just highlights, never drills down
                     false
                 };
@@ -1382,9 +1364,6 @@ fn handle_browse_click(click_row: u16, click_col: u16, shift_held: bool, state: 
                         };
                         nav.columns.get(col_idx).and_then(|c| c.items.get(item_idx)).cloned()
                     } {
-                        if shift_held {
-                            return browse_enqueue_action(&item, col_idx, state);
-                        }
                         return browse_drill_down_action(item, col_idx, item_idx, state);
                     }
                 } else if !filter_on_click_col {
@@ -1437,41 +1416,6 @@ fn handle_browse_click(click_row: u16, click_col: u16, shift_held: bool, state: 
     }
 
     vec![]
-}
-
-/// Return the play+enqueue action for shift-clicking an item in a browse Miller column.
-/// Artist/Album → load all tracks and play. Track → play track + following from column.
-fn browse_enqueue_action(item: &BrowseItem, col_idx: usize, state: &AppState) -> Vec<Action> {
-    match item {
-        BrowseItem::Artist { key, .. } => {
-            vec![Action::PlayArtistTracks { artist_key: key.clone() }]
-        }
-        BrowseItem::Album { key, .. } => {
-            vec![Action::PlayAlbum { rating_key: key.clone() }]
-        }
-        BrowseItem::Track { .. } => {
-            let nav = match state.browse_category {
-                BrowseCategory::Library => &state.artist_nav,
-                BrowseCategory::Genres => &state.genre_nav,
-                BrowseCategory::Playlists => &state.playlist_nav,
-                _ => return vec![],
-            };
-            let item_idx = nav.columns.get(col_idx).map(|c| c.selected_index).unwrap_or(0);
-            match state.browse_category {
-                BrowseCategory::Library => {
-                    vec![Action::PlayTrackFromMiller { column_index: col_idx, track_index: item_idx, single_track: false }]
-                }
-                BrowseCategory::Genres => {
-                    vec![Action::PlayGenreTrackFromMiller { column_index: col_idx, track_index: item_idx, single_track: false }]
-                }
-                BrowseCategory::Playlists => {
-                    vec![Action::PlayPlaylistTrackFromMiller { column_index: col_idx, track_index: item_idx, single_track: false }]
-                }
-                _ => vec![],
-            }
-        }
-        _ => vec![],
-    }
 }
 
 /// Return the drill-down action for clicking an already-selected item in a browse Miller column.
@@ -1913,7 +1857,7 @@ fn handle_visualizer_drag(click_col: u16, state: &AppState) -> Vec<Action> {
 }
 
 /// Handle click in Search view.
-fn handle_search_click(click_row: u16, click_col: u16, shift_held: bool, state: &mut AppState) -> Vec<Action> {
+fn handle_search_click(click_row: u16, click_col: u16, state: &mut AppState) -> Vec<Action> {
     // Read registered search popup regions (drop borrow before mutating state)
     let regions = {
         let hr = state.hit_regions.borrow();
@@ -1943,9 +1887,6 @@ fn handle_search_click(click_row: u16, click_col: u16, shift_held: bool, state: 
         let visual_row = (click_row - sp.results_area.y) as usize;
         let results_height = sp.results_area.height as usize;
         let actions = handle_search_result_click(visual_row, results_height, state);
-        if shift_held {
-            return vec![Action::PlaySearchResult];
-        }
         return actions;
     }
 
@@ -2191,7 +2132,7 @@ fn handle_help_click(click_row: u16, click_col: u16, state: &mut AppState) -> Ve
 }
 
 /// Handle click in Similar view (popup overlay).
-fn handle_similar_click(click_row: u16, click_col: u16, shift_held: bool, state: &mut AppState) -> Vec<Action> {
+fn handle_similar_click(click_row: u16, click_col: u16, state: &mut AppState) -> Vec<Action> {
     use crate::app::state::SimilarMode;
 
     // Read registered regions (drop borrow before mutating state)
@@ -2206,6 +2147,19 @@ fn handle_similar_click(click_row: u16, click_col: u16, shift_held: bool, state:
         || click_row < regions.outer.y || click_row >= regions.outer.bottom()
     {
         return vec![Action::SetView(state.previous_view.unwrap_or(View::Browse))];
+    }
+
+    // Check [Tab] hint click (footer area)
+    if let Some(tab_rect) = &regions.tab_hint {
+        if click_row >= tab_rect.y && click_row < tab_rect.bottom()
+            && click_col >= tab_rect.x && click_col < tab_rect.right()
+        {
+            // Trigger same logic as Tab key handler
+            return super::key_input::similar::handle_similar_keys(
+                crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Tab, crossterm::event::KeyModifiers::NONE),
+                state,
+            );
+        }
     }
 
     // Check scrollbar click first
@@ -2243,43 +2197,6 @@ fn handle_similar_click(click_row: u16, click_col: u16, shift_held: bool, state:
         return vec![];
     }
 
-    // Shift+click: add to queue and play (like Shift+Enter)
-    if shift_held {
-        state.list_state.similar_index = clicked_idx;
-        state.scroll.similar = Some(scroll_offset);
-        match state.similar.mode {
-            SimilarMode::Albums => {
-                // Shift+click: play this album and enqueue all following albums
-                let albums_to_enqueue: Vec<_> = state.similar.albums[clicked_idx..].to_vec();
-                if albums_to_enqueue.is_empty() {
-                    return vec![];
-                }
-                let mut actions = Vec::new();
-                // First album: play it
-                let first = &albums_to_enqueue[0];
-                actions.push(Action::PlayAlbum {
-                    rating_key: first.rating_key.clone(),
-                });
-                // Remaining albums: append to end of queue
-                for album in albums_to_enqueue.iter().skip(1) {
-                    actions.push(Action::EnqueueAlbum {
-                        rating_key: album.rating_key.clone(),
-                        title: album.title.clone(),
-                    });
-                }
-                return actions;
-            }
-            SimilarMode::Tracks => {
-                // Shift+click: play this track and all following tracks
-                let tracks: Vec<_> = state.similar.tracks[clicked_idx..].to_vec();
-                if !tracks.is_empty() {
-                    return vec![Action::EnqueueTracksNext(tracks)];
-                }
-            }
-        }
-        return vec![];
-    }
-
     // Click highlights; second click on already-highlighted item activates
     let already_selected = state.list_state.similar_index == clicked_idx;
     state.scroll.similar = Some(scroll_offset);
@@ -2287,6 +2204,65 @@ fn handle_similar_click(click_row: u16, click_col: u16, shift_held: bool, state:
 
     if already_selected {
         return super::key_input::similar::activate_similar_item(state);
+    }
+
+    vec![]
+}
+
+/// Handle click in Related view (popup overlay).
+fn handle_related_click(click_row: u16, click_col: u16, state: &mut AppState) -> Vec<Action> {
+    // Read registered regions (drop borrow before mutating state)
+    let regions = {
+        let hr = state.hit_regions.borrow();
+        hr.related_content.clone()
+    };
+    let Some(regions) = regions else { return vec![] };
+
+    // Click outside popup: close related view
+    if click_col < regions.outer.x || click_col >= regions.outer.right()
+        || click_row < regions.outer.y || click_row >= regions.outer.bottom()
+    {
+        return vec![Action::SetView(state.previous_view.unwrap_or(View::Browse))];
+    }
+
+    // Check scrollbar click first
+    if let Some(actions) = try_related_scrollbar_click(click_col, click_row, state) {
+        return actions;
+    }
+
+    // Content area: inner minus footer (1 row at bottom)
+    let content_bottom = regions.inner.y + regions.inner.height.saturating_sub(1);
+    if click_row < regions.inner.y || click_row >= content_bottom {
+        return vec![];
+    }
+
+    let inner_row = (click_row - regions.inner.y) as usize;
+    let inner_height = (content_bottom - regions.inner.y) as usize;
+    let visible_item_count = inner_height; // 1 row per item
+
+    let total = helpers::navigation::related_flat_count(&state.related.groups);
+    if total == 0 {
+        return vec![];
+    }
+
+    let scroll_offset = match state.scroll.related {
+        Some(pinned) => pinned,
+        None => helpers::calc_scroll_offset(state.list_state.related_index, visible_item_count, total),
+    };
+    let clicked_idx = scroll_offset + inner_row;
+
+    if clicked_idx >= total {
+        return vec![];
+    }
+
+    // Click highlights; second click on already-highlighted item activates
+    let already_selected = state.list_state.related_index == clicked_idx;
+    state.scroll.related = Some(scroll_offset);
+    state.scroll.related_click_time = Some(std::time::Instant::now());
+    state.list_state.related_index = clicked_idx;
+
+    if already_selected {
+        return super::key_input::related::activate_related_item(state);
     }
 
     vec![]
@@ -2362,6 +2338,14 @@ fn handle_scroll(up: bool, click_row: u16, click_col: u16, state: &mut AppState)
             let max = total.saturating_sub(1);
             let new_idx = (state.list_state.similar_index as i32 + delta).clamp(0, max as i32) as usize;
             state.list_state.similar_index = new_idx;
+        }
+        View::Related => {
+            state.scroll.related = None;
+            let delta: i32 = if up { -1 } else { 1 };
+            let total = helpers::navigation::related_flat_count(&state.related.groups);
+            let max = total.saturating_sub(1);
+            let new_idx = (state.list_state.related_index as i32 + delta).clamp(0, max as i32) as usize;
+            state.list_state.related_index = new_idx;
         }
         _ => {}
     }
@@ -2892,6 +2876,9 @@ fn handle_scrollbar_drag(mouse_y: u16, state: &mut AppState) -> Vec<Action> {
         ScrollbarView::Similar => {
             state.scroll.similar = Some(new_offset);
         }
+        ScrollbarView::Related => {
+            state.scroll.related = Some(new_offset);
+        }
         ScrollbarView::Help => {
             state.help_scroll = new_offset as u16;
         }
@@ -3136,6 +3123,40 @@ fn try_similar_scrollbar_click(
             total_items, visible_items, ScrollbarView::Similar, 0, state,
         );
         state.scroll.similar = Some(new_offset);
+        return Some(vec![]);
+    }
+
+    None
+}
+
+/// Try to handle a scrollbar click in the related popup.
+fn try_related_scrollbar_click(
+    click_col: u16,
+    click_row: u16,
+    state: &mut AppState,
+) -> Option<Vec<Action>> {
+    let sr = {
+        let hr = state.hit_regions.borrow();
+        hr.related_content.clone()
+    }?;
+
+    let total_items = helpers::navigation::related_flat_count(&state.related.groups);
+    if total_items == 0 {
+        return None;
+    }
+
+    let inner_height = sr.inner.height.saturating_sub(1) as usize; // -1 for footer
+    let visible_items = inner_height; // 1 row per item
+    let scroll_offset = state.scroll.related.unwrap_or_else(|| helpers::calc_scroll_offset(state.list_state.related_index, visible_items, total_items));
+
+    if let Some((track_y_start, track_height, thumb_pos, thumb_size, _)) =
+        scrollbar_hit_test_bordered(click_col, click_row, sr.outer.x, sr.outer.width, sr.outer.y, sr.outer.height, total_items, visible_items, scroll_offset)
+    {
+        let new_offset = start_scrollbar_drag(
+            click_row, track_y_start, track_height, thumb_pos, thumb_size,
+            total_items, visible_items, ScrollbarView::Related, 0, state,
+        );
+        state.scroll.related = Some(new_offset);
         return Some(vec![]);
     }
 

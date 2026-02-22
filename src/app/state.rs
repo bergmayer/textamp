@@ -724,6 +724,14 @@ impl BrowseColumn {
         self.selected_index = 0;
     }
 
+    /// Clear stored originals so current order becomes the new baseline.
+    /// Resets sort mode to Default without restoring previous order.
+    pub fn clear_originals(&mut self) {
+        self.original_items = None;
+        self.original_tracks = None;
+        self.sort_mode = ColumnSortMode::Default;
+    }
+
     /// Restore original order (clears sort mode to Default).
     pub fn unshuffle(&mut self) {
         if let Some(items) = self.original_items.take() {
@@ -1170,6 +1178,8 @@ pub struct ScrollPins {
     pub queue_click_time: Option<std::time::Instant>,
     pub similar: Option<usize>,
     pub similar_click_time: Option<std::time::Instant>,
+    pub related: Option<usize>,
+    pub related_click_time: Option<std::time::Instant>,
     pub search_click_time: Option<std::time::Instant>,
     pub art_cooldown: Option<std::time::Instant>,
     pub scroll_cooldown: Option<std::time::Instant>,
@@ -1253,6 +1263,32 @@ pub struct SimilarViewState {
     pub tab_album_key: Option<String>,
     /// Album title for Tab cycling footer display.
     pub tab_album_title: Option<String>,
+}
+
+/// Source of a related artist entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RelatedSource {
+    /// From Plex /related API.
+    Plex,
+    /// From textamp artist_aliases.
+    Alias,
+}
+
+/// A group of albums under a related artist.
+#[derive(Debug, Clone)]
+pub struct RelatedArtistGroup {
+    pub artist: Artist,
+    pub albums: Vec<Album>,
+    pub source: RelatedSource,
+}
+
+/// Related artists view state (Ctrl+R).
+#[derive(Debug, Clone, Default)]
+pub struct RelatedViewState {
+    pub groups: Vec<RelatedArtistGroup>,
+    pub loading: bool,
+    pub source_title: String,
+    pub source_key: String,
 }
 
 /// Compilation detection state.
@@ -1358,6 +1394,9 @@ pub struct AppState {
 
     // Similar content (Plex sonic similarity)
     pub similar: SimilarViewState,
+
+    // Related artists (Ctrl+R)
+    pub related: RelatedViewState,
 
     // Playback
     pub playback: PlaybackState,
@@ -1550,6 +1589,7 @@ pub enum ScrollbarView {
     Queue,
     Station,
     Similar,
+    Related,
     Help,
 }
 
@@ -1916,6 +1956,7 @@ impl AppState {
             selected_album_title: String::new(),
             right_panel_loading: false,
             similar: SimilarViewState::default(),
+            related: RelatedViewState::default(),
             playback: PlaybackState::default(),
             queue: Vec::new(),
             queue_index: None,
@@ -2442,6 +2483,8 @@ pub enum View {
     Search,
     /// Similar albums view
     Similar,
+    /// Related artists view (Ctrl+R)
+    Related,
     /// Help / keybindings
     Help,
     /// Settings screen
@@ -2934,6 +2977,7 @@ pub struct ListStates {
     pub tracks_index: usize,
     pub queue_index: usize,
     pub similar_index: usize,
+    pub related_index: usize,
     pub search_item_index: usize,
 }
 

@@ -361,6 +361,16 @@ pub async fn dispatch(
                         _ => None,
                     }
                 }
+                View::Related => {
+                    let idx = state.list_state.related_index;
+                    let resolved = super::helpers::navigation::related_flat_resolve(&state.related.groups, idx);
+                    resolved.and_then(|(gi, is_header, ai)| {
+                        if is_header { return None; }
+                        state.related.groups.get(gi)
+                            .and_then(|g| g.albums.get(ai))
+                            .map(|a| (a.rating_key.clone(), a.title.clone()))
+                    })
+                }
                 _ => None,
             };
 
@@ -473,6 +483,16 @@ pub async fn dispatch(
                         }
                         _ => None,
                     }
+                }
+                View::Related => {
+                    let idx = state.list_state.related_index;
+                    let resolved = super::helpers::navigation::related_flat_resolve(&state.related.groups, idx);
+                    resolved.and_then(|(gi, is_header, ai)| {
+                        if is_header { return None; }
+                        state.related.groups.get(gi)
+                            .and_then(|g| g.albums.get(ai))
+                            .map(|a| (a.rating_key.clone(), a.title.clone()))
+                    })
                 }
                 _ => None,
             };
