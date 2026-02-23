@@ -721,6 +721,8 @@ pub(crate) fn get_similar_action(state: &mut AppState) -> Vec<Action> {
         let title = format!("{} - {}", track.artist_name(), track.title);
         state.similar.tab_album_key = track.parent_rating_key.clone();
         state.similar.tab_album_title = Some(track.album_name().to_string());
+        state.similar.tab_track_key = Some(track.rating_key.clone());
+        state.similar.tab_track_title = Some(title.clone());
         return vec![Action::LoadSimilarTracks {
             rating_key: track.rating_key.clone(),
             title,
@@ -731,6 +733,8 @@ pub(crate) fn get_similar_action(state: &mut AppState) -> Vec<Action> {
     if let Some((rating_key, title)) = get_selected_album(state) {
         state.similar.tab_album_key = None;
         state.similar.tab_album_title = None;
+        state.similar.tab_track_key = None;
+        state.similar.tab_track_title = None;
         return vec![Action::LoadSimilarAlbums {
             rating_key,
             title,
@@ -742,6 +746,8 @@ pub(crate) fn get_similar_action(state: &mut AppState) -> Vec<Action> {
         let title = format!("{} - {}", track.artist_name(), track.title);
         state.similar.tab_album_key = track.parent_rating_key.clone();
         state.similar.tab_album_title = Some(track.album_name().to_string());
+        state.similar.tab_track_key = Some(track.rating_key.clone());
+        state.similar.tab_track_title = Some(title.clone());
         return vec![Action::LoadSimilarTracks {
             rating_key: track.rating_key.clone(),
             title,

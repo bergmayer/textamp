@@ -90,11 +90,17 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
             }
         }
         SimilarMode::Albums => {
-            if let Some(track) = state.current_track() {
+            // Prefer stored original track title, fall back to current track
+            let track_label = if let Some(ref title) = state.similar.tab_track_title {
+                Some(title.clone())
+            } else {
+                state.current_track().map(|t| format!("{} - {}", t.artist_name(), t.title))
+            };
+            if let Some(label) = track_label {
                 has_tab_hint = true;
                 footer_spans.push(Span::styled("  [Tab] ", Style::default().fg(t.colors.shortcut_key)));
                 footer_spans.push(Span::styled(
-                    format!("similar tracks to: {} - {}", track.artist_name(), track.title),
+                    format!("similar tracks to: {}", label),
                     Style::default().fg(t.colors.fg_muted),
                 ));
             }

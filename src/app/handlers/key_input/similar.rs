@@ -42,9 +42,18 @@ pub(in crate::app::handlers) fn handle_similar_keys(key: event::KeyEvent, state:
                     }
                 }
                 SimilarMode::Albums => {
-                    // Albums → Tracks: use current track
-                    if let Some(track) = state.current_track().cloned() {
+                    // Albums → Tracks: prefer stored original track, fall back to current track
+                    if let Some(track_key) = state.similar.tab_track_key.clone() {
+                        let title = state.similar.tab_track_title.clone().unwrap_or_default();
+                        return vec![Action::LoadSimilarTracks {
+                            rating_key: track_key,
+                            title,
+                        }];
+                    } else if let Some(track) = state.current_track().cloned() {
                         let title = format!("{} - {}", track.artist_name(), track.title);
+                        // Store track key for Tab back
+                        state.similar.tab_track_key = Some(track.rating_key.clone());
+                        state.similar.tab_track_title = Some(title.clone());
                         // Store album key for Tab back
                         state.similar.tab_album_key = track.parent_rating_key.clone();
                         state.similar.tab_album_title = Some(track.album_name().to_string());

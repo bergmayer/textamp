@@ -1263,6 +1263,10 @@ pub struct SimilarViewState {
     pub tab_album_key: Option<String>,
     /// Album title for Tab cycling footer display.
     pub tab_album_title: Option<String>,
+    /// Track key for Tab cycling in Similar view (albums → tracks).
+    pub tab_track_key: Option<String>,
+    /// Track title for Tab cycling footer display.
+    pub tab_track_title: Option<String>,
 }
 
 /// Source of a related artist entry.
