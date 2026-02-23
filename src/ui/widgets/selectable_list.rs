@@ -107,38 +107,38 @@ pub fn render_position_footer(frame: &mut Frame, selected: usize, total: usize, 
 
 // Implement DisplayItem for common types
 
-impl DisplayItem for crate::api::models::Artist {
+impl DisplayItem for crate::plex::models::Artist {
     fn display_text(&self) -> Cow<'_, str> {
         Cow::Borrowed(&self.title)
     }
 }
 
-impl DisplayItem for crate::api::models::Album {
+impl DisplayItem for crate::plex::models::Album {
     fn display_text(&self) -> Cow<'_, str> {
         let year = self.year.map(|y| format!(" ({})", y)).unwrap_or_default();
         Cow::Owned(format!("{} - {}{}", self.artist_name(), self.title, year))
     }
 }
 
-impl DisplayItem for crate::api::models::Track {
+impl DisplayItem for crate::plex::models::Track {
     fn display_text(&self) -> Cow<'_, str> {
         Cow::Owned(format!("{} - {}", self.track_artist(), self.title))
     }
 }
 
-impl DisplayItem for crate::api::models::Playlist {
+impl DisplayItem for crate::plex::models::Playlist {
     fn display_text(&self) -> Cow<'_, str> {
         Cow::Owned(format!("{} ({} tracks)", self.title, self.track_count()))
     }
 }
 
-impl DisplayItem for crate::api::models::Genre {
+impl DisplayItem for crate::plex::models::Genre {
     fn display_text(&self) -> Cow<'_, str> {
         Cow::Borrowed(&self.title)
     }
 }
 
-impl DisplayItem for crate::api::models::Station {
+impl DisplayItem for crate::plex::models::Station {
     fn display_text(&self) -> Cow<'_, str> {
         Cow::Borrowed(&self.title)
     }

@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 use std::env;
-use textamp::api::{PlexAuth, PlexClient, PlexClientInfo};
+use textamp::plex::{PlexAuth, PlexClient, PlexClientInfo};
 use textamp::app::{AppState, EventLoop};
 use textamp::audio::AudioPlayer;
 use textamp::config::{self, Config};

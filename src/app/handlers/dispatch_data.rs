@@ -5,9 +5,9 @@
 
 use crate::app::{Action, AppState, Event};
 use crate::app::state::{BrowseCategory, BrowseItem, Focus, RightPanelMode, View};
-use crate::api::PlexClient;
-use crate::api::models::Track;
-use crate::cache::{CacheData, LibraryCache};
+use crate::plex::PlexClient;
+use crate::plex::models::Track;
+use crate::plex::{CacheData, LibraryCache};
 use crate::config::Config;
 use crate::services::{FolderColumn, FolderNavigationState};
 
@@ -271,7 +271,7 @@ pub async fn dispatch(
                                     Err(e) => Err(e),
                                 }
                             } else {
-                                Err(crate::api::ApiError::NoServerSelected)
+                                Err(crate::plex::ApiError::NoServerSelected)
                             }
                         }
                         BrowseCategory::Folders => unreachable!(),
@@ -354,12 +354,12 @@ pub async fn dispatch(
             //   (these are albums filed under the source artist where all tracks say the alias name)
             use crate::app::state::{RelatedArtistGroup, RelatedSource};
 
-            let mut real_alias_artists: Vec<crate::api::models::Artist> = Vec::new();
+            let mut real_alias_artists: Vec<crate::plex::models::Artist> = Vec::new();
             let mut synthetic_alias_groups: Vec<RelatedArtistGroup> = Vec::new();
 
             if let Some(alias_names) = state.artist_aliases.get(&artist_key) {
                 // Build reverse lookup: alias_name → albums from album_display_artist
-                let album_by_key: std::collections::HashMap<&str, &crate::api::models::Album> = state.albums.iter()
+                let album_by_key: std::collections::HashMap<&str, &crate::plex::models::Album> = state.albums.iter()
                     .map(|a| (a.rating_key.as_str(), a))
                     .collect();
 
@@ -375,7 +375,7 @@ pub async fn dispatch(
                     } else {
                         // No Plex artist entry — build group from source artist's albums
                         // where album_display_artist says this alias name
-                        let mut albums: Vec<crate::api::models::Album> = Vec::new();
+                        let mut albums: Vec<crate::plex::models::Album> = Vec::new();
                         for (album_key, display_name) in &state.album_display_artist {
                             if display_name.eq_ignore_ascii_case(alias_name) {
                                 if let Some(album) = album_by_key.get(album_key.as_str()) {
@@ -386,7 +386,7 @@ pub async fn dispatch(
                         if !albums.is_empty() {
                             albums.sort_by(|a, b| a.year.cmp(&b.year));
                             synthetic_alias_groups.push(RelatedArtistGroup {
-                                artist: crate::api::models::Artist {
+                                artist: crate::plex::models::Artist {
                                     title: alias_name.clone(),
                                     rating_key: format!("alias:{}", alias_name),
                                     ..Default::default()
@@ -434,7 +434,7 @@ pub async fn dispatch(
                     }));
                 }
 
-                let mut plex_results: Vec<Vec<crate::api::models::Album>> = Vec::new();
+                let mut plex_results: Vec<Vec<crate::plex::models::Album>> = Vec::new();
                 for handle in handles {
                     plex_results.push(handle.await.unwrap_or_default());
                 }

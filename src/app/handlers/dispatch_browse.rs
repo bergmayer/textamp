@@ -8,7 +8,7 @@ use crate::app::state::{
     BrowseColumn, BrowseItem,
     GenreContentType, GenreTab, RefreshCategory, StationColumn,
 };
-use crate::api::PlexClient;
+use crate::plex::PlexClient;
 
 use anyhow::Result;
 

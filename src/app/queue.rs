@@ -1,6 +1,6 @@
 //! Play queue management.
 
-use crate::api::models::Track;
+use crate::plex::models::Track;
 use rand::seq::SliceRandom;
 
 /// Play queue with history support.

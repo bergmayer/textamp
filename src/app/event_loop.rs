@@ -6,7 +6,7 @@ use super::{Action, AppState, Event};
 use super::state::{ConnectionState, PlayStatus};
 use super::handlers;
 use super::handlers::helpers;
-use crate::api::{PlexAuth, PlexClient};
+use crate::plex::{PlexAuth, PlexClient};
 use crate::audio::AudioPlayer;
 use crate::config::Config;
 use crate::ui;

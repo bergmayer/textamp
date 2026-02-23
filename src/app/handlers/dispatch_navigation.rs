@@ -3,7 +3,7 @@
 
 use crate::app::{Action, AppState, Event};
 use crate::app::state::{BrowseCategory, Focus, GenreContentType, RightPanelMode, View};
-use crate::api::PlexClient;
+use crate::plex::PlexClient;
 
 use anyhow::Result;
 use tokio::sync::mpsc;
@@ -186,4 +186,146 @@ pub async fn dispatch(
         _ => unreachable!("dispatch_navigation called with non-navigation action: {:?}", action),
     }
     Ok(follow_ups)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plex::PlexClientInfo;
+
+    fn setup() -> (mpsc::Sender<Event>, mpsc::Receiver<Event>, AppState, PlexClient) {
+        let (tx, rx) = mpsc::channel(100);
+        let state = AppState::new();
+        let client = PlexClient::new(PlexClientInfo::default());
+        (tx, rx, state, client)
+    }
+
+    #[tokio::test]
+    async fn toggle_focus_left_to_right() {
+        let (tx, _rx, mut state, mut client) = setup();
+        state.focus = Focus::Left;
+
+        dispatch(&tx, Action::ToggleFocus, &mut state, &mut client).await.unwrap();
+        assert_eq!(state.focus, Focus::Right);
+    }
+
+    #[tokio::test]
+    async fn toggle_focus_right_to_left() {
+        let (tx, _rx, mut state, mut client) = setup();
+        state.focus = Focus::Right;
+
+        dispatch(&tx, Action::ToggleFocus, &mut state, &mut client).await.unwrap();
+        assert_eq!(state.focus, Focus::Left);
+    }
+
+    #[tokio::test]
+    async fn set_view_changes_state() {
+        let (tx, _rx, mut state, mut client) = setup();
+
+        dispatch(&tx, Action::SetView(View::Queue), &mut state, &mut client).await.unwrap();
+        assert_eq!(state.view, View::Queue);
+
+        dispatch(&tx, Action::SetView(View::Help), &mut state, &mut client).await.unwrap();
+        assert_eq!(state.view, View::Help);
+    }
+
+    #[tokio::test]
+    async fn set_view_queue_requests_load_stations() {
+        let (tx, _rx, mut state, mut client) = setup();
+
+        let follow_ups = dispatch(&tx, Action::SetView(View::Queue), &mut state, &mut client).await.unwrap();
+        assert!(follow_ups.iter().any(|a| matches!(a, Action::LoadStations)));
+    }
+
+    #[tokio::test]
+    async fn set_view_now_playing_requests_waveform() {
+        let (tx, _rx, mut state, mut client) = setup();
+
+        let follow_ups = dispatch(&tx, Action::SetView(View::NowPlaying), &mut state, &mut client).await.unwrap();
+        assert!(follow_ups.iter().any(|a| matches!(a, Action::LoadWaveform)));
+        assert!(follow_ups.iter().any(|a| matches!(a, Action::LoadSpectrogram)));
+    }
+
+    #[tokio::test]
+    async fn next_view_cycles_library_to_playlists() {
+        let (tx, _rx, mut state, mut client) = setup();
+        state.view = View::Browse;
+        state.browse_category = BrowseCategory::Library;
+
+        let follow_ups = dispatch(&tx, Action::NextView, &mut state, &mut client).await.unwrap();
+        // Should request SetCategory(Playlists) as a follow-up
+        assert!(follow_ups.iter().any(|a| matches!(a, Action::SetCategory(BrowseCategory::Playlists))));
+    }
+
+    #[tokio::test]
+    async fn next_view_playlists_to_queue() {
+        let (tx, _rx, mut state, mut client) = setup();
+        state.view = View::Browse;
+        state.browse_category = BrowseCategory::Playlists;
+
+        dispatch(&tx, Action::NextView, &mut state, &mut client).await.unwrap();
+        assert_eq!(state.view, View::Queue);
+    }
+
+    #[tokio::test]
+    async fn next_view_queue_to_now_playing() {
+        let (tx, _rx, mut state, mut client) = setup();
+        state.view = View::Queue;
+
+        dispatch(&tx, Action::NextView, &mut state, &mut client).await.unwrap();
+        assert_eq!(state.view, View::NowPlaying);
+    }
+
+    #[tokio::test]
+    async fn next_view_now_playing_to_library() {
+        let (tx, _rx, mut state, mut client) = setup();
+        state.view = View::NowPlaying;
+
+        let follow_ups = dispatch(&tx, Action::NextView, &mut state, &mut client).await.unwrap();
+        assert_eq!(state.view, View::Browse);
+        assert!(follow_ups.iter().any(|a| matches!(a, Action::SetCategory(BrowseCategory::Library))));
+    }
+
+    #[tokio::test]
+    async fn prev_view_library_to_now_playing() {
+        let (tx, _rx, mut state, mut client) = setup();
+        state.view = View::Browse;
+        state.browse_category = BrowseCategory::Library;
+
+        dispatch(&tx, Action::PrevView, &mut state, &mut client).await.unwrap();
+        assert_eq!(state.view, View::NowPlaying);
+    }
+
+    #[tokio::test]
+    async fn prev_view_now_playing_to_queue() {
+        let (tx, _rx, mut state, mut client) = setup();
+        state.view = View::NowPlaying;
+
+        dispatch(&tx, Action::PrevView, &mut state, &mut client).await.unwrap();
+        assert_eq!(state.view, View::Queue);
+    }
+
+    #[tokio::test]
+    async fn set_category_changes_and_resets_focus() {
+        let (tx, _rx, mut state, mut client) = setup();
+        state.view = View::Browse;
+        state.browse_category = BrowseCategory::Library;
+        state.focus = Focus::Right;
+
+        dispatch(&tx, Action::SetCategory(BrowseCategory::Genres), &mut state, &mut client).await.unwrap();
+        assert_eq!(state.browse_category, BrowseCategory::Genres);
+        assert_eq!(state.focus, Focus::Left);
+    }
+
+    #[tokio::test]
+    async fn set_category_same_is_noop() {
+        let (tx, _rx, mut state, mut client) = setup();
+        state.view = View::Browse;
+        state.browse_category = BrowseCategory::Library;
+        state.focus = Focus::Right; // keep right focus
+
+        dispatch(&tx, Action::SetCategory(BrowseCategory::Library), &mut state, &mut client).await.unwrap();
+        // Category didn't change, so focus should remain Right
+        assert_eq!(state.focus, Focus::Right);
+    }
 }

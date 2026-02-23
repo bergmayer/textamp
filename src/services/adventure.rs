@@ -3,8 +3,8 @@
 //! Creates a smooth sonic journey between two tracks by finding
 //! tracks that bridge the sonic space between start and end.
 
-use crate::api::models::Track;
-use crate::api::{ApiError, PlexClient};
+use crate::plex::models::Track;
+use crate::plex::{ApiError, PlexClient};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Number of recent artists to avoid (not just immediate previous).

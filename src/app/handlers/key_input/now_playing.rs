@@ -5,7 +5,7 @@ use crossterm::event::{self, KeyCode, KeyModifiers};
 use crate::app::Action;
 use crate::app::state::{NowPlayingFocus, PlaybackMode, View};
 use crate::app::AppState;
-use crate::api::models::Track;
+use crate::plex::models::Track;
 
 /// Handle Queue view keys (track list + stations panel).
 pub(super) fn handle_queue_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {

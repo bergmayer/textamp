@@ -4,7 +4,7 @@
 
 use crate::app::{Action, AppState, Event};
 use crate::app::state::{DjMode, PlaybackMode, RadioMode, View};
-use crate::api::PlexClient;
+use crate::plex::PlexClient;
 use crate::audio::AudioPlayer;
 
 use anyhow::Result;
@@ -396,7 +396,7 @@ pub async fn dispatch(
             }
 
             // Collect inserts into a map: original_index -> tracks_to_insert_after
-            let inserts_map: std::collections::HashMap<usize, Vec<crate::api::models::Track>> =
+            let inserts_map: std::collections::HashMap<usize, Vec<crate::plex::models::Track>> =
                 inserts.into_iter().collect();
 
             // Add all inserted track keys to history
@@ -444,7 +444,7 @@ pub async fn dispatch(
 
 /// Insert tracks right after the current playback position.
 /// Works for both Queue and Radio modes.
-fn insert_tracks_after_current(state: &mut AppState, tracks: Vec<crate::api::models::Track>) {
+fn insert_tracks_after_current(state: &mut AppState, tracks: Vec<crate::plex::models::Track>) {
     match state.playback_mode {
         PlaybackMode::Queue | PlaybackMode::None => {
             let insert_at = state.queue_index.unwrap_or(0) + 1;
@@ -476,7 +476,7 @@ fn build_diversity_context(state: &AppState) -> (std::collections::HashSet<Strin
     }
 
     // Gather from nearby queue tracks
-    let nearby: &[crate::api::models::Track] = match state.playback_mode {
+    let nearby: &[crate::plex::models::Track] = match state.playback_mode {
         PlaybackMode::Queue | PlaybackMode::None => {
             let idx = state.queue_index.unwrap_or(0);
             let start = idx.saturating_sub(NEARBY_TRACKS_WINDOW);
@@ -514,12 +514,12 @@ fn build_diversity_context(state: &AppState) -> (std::collections::HashSet<Strin
 /// 2. Relax: just different track (not in history)
 /// 3. Last resort: any candidate not already picked in this batch
 fn pick_diverse(
-    candidates: Vec<crate::api::models::Track>,
+    candidates: Vec<crate::plex::models::Track>,
     count: usize,
     history: &[String],
     used_artists: &std::collections::HashSet<String>,
     used_albums: &std::collections::HashSet<String>,
-) -> Vec<crate::api::models::Track> {
+) -> Vec<crate::plex::models::Track> {
     let mut result = Vec::with_capacity(count);
     let mut picked_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut picked_artists: std::collections::HashSet<String> = used_artists.clone();
@@ -631,7 +631,7 @@ async fn dispatch_dj_continuous(
 
     tokio::spawn(async move {
         tracing::info!("{}: spawning async task for track key={}", mode.name(), current_track.rating_key);
-        let result: Vec<crate::api::models::Track> = match mode {
+        let result: Vec<crate::plex::models::Track> = match mode {
             DjMode::Gemini => {
                 dispatch_dj_gemini(&client_clone, &current_track, &history, &used_artists, &used_albums).await
             }
@@ -661,11 +661,11 @@ async fn dispatch_dj_continuous(
 /// DJ Gemini (continuous): insert the most sonically similar track after current.
 async fn dispatch_dj_gemini(
     client: &PlexClient,
-    current_track: &crate::api::models::Track,
+    current_track: &crate::plex::models::Track,
     history: &[String],
     used_artists: &std::collections::HashSet<String>,
     used_albums: &std::collections::HashSet<String>,
-) -> Vec<crate::api::models::Track> {
+) -> Vec<crate::plex::models::Track> {
     match client.get_similar_tracks(&current_track.rating_key, SIMILAR_TRACKS_FETCH_LIMIT).await {
         Ok(tracks) => pick_diverse(tracks, 1, history, used_artists, used_albums),
         Err(e) => {
@@ -679,10 +679,10 @@ async fn dispatch_dj_gemini(
 /// Skips insertion if the next track is already by the same artist.
 async fn dispatch_dj_twofer(
     client: &PlexClient,
-    current_track: &crate::api::models::Track,
-    next_track: Option<&crate::api::models::Track>,
+    current_track: &crate::plex::models::Track,
+    next_track: Option<&crate::plex::models::Track>,
     history: &[String],
-) -> Vec<crate::api::models::Track> {
+) -> Vec<crate::plex::models::Track> {
     let current_artist = current_track.grandparent_rating_key.as_deref().unwrap_or("");
     if current_artist.is_empty() {
         return vec![];
@@ -726,12 +726,12 @@ async fn dispatch_dj_twofer(
 /// Uses looser sonic distance (0.5) to find a midpoint bridge.
 async fn dispatch_dj_stretch(
     client: &PlexClient,
-    current_track: &crate::api::models::Track,
-    next_track: Option<&crate::api::models::Track>,
+    current_track: &crate::plex::models::Track,
+    next_track: Option<&crate::plex::models::Track>,
     history: &[String],
     used_artists: &std::collections::HashSet<String>,
     used_albums: &std::collections::HashSet<String>,
-) -> Vec<crate::api::models::Track> {
+) -> Vec<crate::plex::models::Track> {
     let next = match next_track {
         Some(t) => t,
         None => {
@@ -798,11 +798,11 @@ async fn dispatch_dj_stretch(
 /// Used when the probe call was not made (non-Freeze modes that fall back here won't use this).
 async fn dispatch_dj_freeze(
     client: &PlexClient,
-    current_track: &crate::api::models::Track,
+    current_track: &crate::plex::models::Track,
     history: &[String],
     used_artists: &std::collections::HashSet<String>,
     used_albums: &std::collections::HashSet<String>,
-) -> Vec<crate::api::models::Track> {
+) -> Vec<crate::plex::models::Track> {
     let distances = [0.25f32, 0.5, 0.75];
     for &distance in &distances {
         let result = client.get_similar_tracks_with_distance(
@@ -832,12 +832,12 @@ async fn dispatch_dj_freeze(
 /// DJ Contempo: tracks from the same era/decade.
 async fn dispatch_dj_contempo(
     client: &PlexClient,
-    current_track: &crate::api::models::Track,
+    current_track: &crate::plex::models::Track,
     history: &[String],
     used_artists: &std::collections::HashSet<String>,
     used_albums: &std::collections::HashSet<String>,
     lib_key: Option<&str>,
-) -> Vec<crate::api::models::Track> {
+) -> Vec<crate::plex::models::Track> {
     let year = current_track.year.or(current_track.parent_year).unwrap_or(0);
     let decade = (year / 10) * 10;
     if decade == 0 {
@@ -859,10 +859,10 @@ async fn dispatch_dj_contempo(
 /// Falls back to same-artist-only if related artists endpoint fails.
 async fn dispatch_dj_groupie(
     client: &PlexClient,
-    current_track: &crate::api::models::Track,
+    current_track: &crate::plex::models::Track,
     history: &[String],
     used_albums: &std::collections::HashSet<String>,
-) -> Vec<crate::api::models::Track> {
+) -> Vec<crate::plex::models::Track> {
     let artist_key = current_track.grandparent_rating_key.as_deref().unwrap_or("");
     if artist_key.is_empty() {
         return vec![];

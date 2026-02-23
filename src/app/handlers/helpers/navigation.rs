@@ -5,7 +5,7 @@ use crate::app::state::{
     BrowseCategory, Focus,
     RightPanelMode, View,
 };
-use crate::api::PlexClient;
+use crate::plex::PlexClient;
 use super::{sort_key, PAGE_SIZE};
 use tokio::sync::mpsc;
 
@@ -315,5 +315,266 @@ fn sorted_merge<T>(existing: &mut Vec<T>, mut new_items: Vec<T>, key_fn: impl Fn
             }
             (None, None) => break,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::state::{SimilarMode, RelatedArtistGroup, RelatedSource};
+    use crate::plex::models::{Artist, Album, Track};
+
+    fn make_track(key: &str, title: &str) -> Track {
+        Track {
+            rating_key: key.to_string(),
+            title: title.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn make_artist(key: &str, title: &str) -> Artist {
+        Artist {
+            rating_key: key.to_string(),
+            title: title.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn make_album(key: &str, title: &str) -> Album {
+        Album {
+            rating_key: key.to_string(),
+            title: title.to_string(),
+            ..Default::default()
+        }
+    }
+
+    // --- adjust_list_index tests ---
+
+    #[test]
+    fn adjust_queue_index_down() {
+        let mut state = AppState::new();
+        state.view = View::NowPlaying;
+        state.queue = vec![make_track("1", "A"), make_track("2", "B"), make_track("3", "C")];
+        state.list_state.queue_index = 0;
+
+        adjust_list_index(&mut state, 1);
+        assert_eq!(state.list_state.queue_index, 1);
+
+        adjust_list_index(&mut state, 1);
+        assert_eq!(state.list_state.queue_index, 2);
+    }
+
+    #[test]
+    fn adjust_queue_index_up() {
+        let mut state = AppState::new();
+        state.view = View::NowPlaying;
+        state.queue = vec![make_track("1", "A"), make_track("2", "B"), make_track("3", "C")];
+        state.list_state.queue_index = 2;
+
+        adjust_list_index(&mut state, -1);
+        assert_eq!(state.list_state.queue_index, 1);
+    }
+
+    #[test]
+    fn adjust_queue_clamps_at_boundaries() {
+        let mut state = AppState::new();
+        state.view = View::NowPlaying;
+        state.queue = vec![make_track("1", "A"), make_track("2", "B")];
+        state.list_state.queue_index = 0;
+
+        // Clamp at top
+        adjust_list_index(&mut state, -5);
+        assert_eq!(state.list_state.queue_index, 0);
+
+        // Clamp at bottom
+        adjust_list_index(&mut state, 100);
+        assert_eq!(state.list_state.queue_index, 1);
+    }
+
+    #[test]
+    fn adjust_queue_empty_is_noop() {
+        let mut state = AppState::new();
+        state.view = View::NowPlaying;
+        // queue is empty
+
+        adjust_list_index(&mut state, 1);
+        assert_eq!(state.list_state.queue_index, 0);
+    }
+
+    #[test]
+    fn adjust_similar_albums() {
+        let mut state = AppState::new();
+        state.view = View::Similar;
+        state.similar.mode = SimilarMode::Albums;
+        state.similar.albums = vec![make_album("1", "A"), make_album("2", "B"), make_album("3", "C")];
+        state.list_state.similar_index = 0;
+
+        adjust_list_index(&mut state, 2);
+        assert_eq!(state.list_state.similar_index, 2);
+
+        // Clamp at end
+        adjust_list_index(&mut state, 5);
+        assert_eq!(state.list_state.similar_index, 2);
+    }
+
+    #[test]
+    fn adjust_similar_tracks() {
+        let mut state = AppState::new();
+        state.view = View::Similar;
+        state.similar.mode = SimilarMode::Tracks;
+        state.similar.tracks = vec![make_track("1", "A"), make_track("2", "B")];
+        state.list_state.similar_index = 1;
+
+        adjust_list_index(&mut state, -1);
+        assert_eq!(state.list_state.similar_index, 0);
+    }
+
+    #[test]
+    fn adjust_browse_left_category() {
+        let mut state = AppState::new();
+        state.view = View::Browse;
+        state.focus = Focus::Left;
+        state.browse_category = BrowseCategory::Library;
+        state.artists = vec![make_artist("1", "A"), make_artist("2", "B"), make_artist("3", "C")];
+        state.list_state.artists_index = 0;
+
+        adjust_list_index(&mut state, 1);
+        assert_eq!(state.list_state.artists_index, 1);
+    }
+
+    // --- set_list_index tests ---
+
+    #[test]
+    fn set_queue_index_absolute() {
+        let mut state = AppState::new();
+        state.view = View::NowPlaying;
+        state.queue = vec![make_track("1", "A"), make_track("2", "B"), make_track("3", "C")];
+        state.list_state.queue_index = 0;
+
+        set_list_index(&mut state, 2);
+        assert_eq!(state.list_state.queue_index, 2);
+    }
+
+    #[test]
+    fn set_queue_index_max_jumps_to_end() {
+        let mut state = AppState::new();
+        state.view = View::NowPlaying;
+        state.queue = vec![make_track("1", "A"), make_track("2", "B"), make_track("3", "C")];
+        state.list_state.queue_index = 0;
+
+        set_list_index(&mut state, isize::MAX);
+        assert_eq!(state.list_state.queue_index, 2);
+    }
+
+    #[test]
+    fn set_queue_index_zero_jumps_to_start() {
+        let mut state = AppState::new();
+        state.view = View::NowPlaying;
+        state.queue = vec![make_track("1", "A"), make_track("2", "B"), make_track("3", "C")];
+        state.list_state.queue_index = 2;
+
+        set_list_index(&mut state, 0);
+        assert_eq!(state.list_state.queue_index, 0);
+    }
+
+    // --- related_flat_count / related_flat_resolve tests ---
+
+    fn make_related_groups() -> Vec<RelatedArtistGroup> {
+        vec![
+            RelatedArtistGroup {
+                artist: make_artist("a1", "Artist 1"),
+                albums: vec![make_album("al1", "Album 1"), make_album("al2", "Album 2")],
+                source: RelatedSource::Plex,
+            },
+            RelatedArtistGroup {
+                artist: make_artist("a2", "Artist 2"),
+                albums: vec![make_album("al3", "Album 3")],
+                source: RelatedSource::Plex,
+            },
+        ]
+    }
+
+    #[test]
+    fn related_flat_count_sums_correctly() {
+        let groups = make_related_groups();
+        // Group 1: 1 header + 2 albums = 3
+        // Group 2: 1 header + 1 album = 2
+        assert_eq!(related_flat_count(&groups), 5);
+    }
+
+    #[test]
+    fn related_flat_resolve_header_and_albums() {
+        let groups = make_related_groups();
+
+        // Index 0 = header of group 0
+        assert_eq!(related_flat_resolve(&groups, 0), Some((0, true, 0)));
+        // Index 1 = first album of group 0
+        assert_eq!(related_flat_resolve(&groups, 1), Some((0, false, 0)));
+        // Index 2 = second album of group 0
+        assert_eq!(related_flat_resolve(&groups, 2), Some((0, false, 1)));
+        // Index 3 = header of group 1
+        assert_eq!(related_flat_resolve(&groups, 3), Some((1, true, 0)));
+        // Index 4 = first album of group 1
+        assert_eq!(related_flat_resolve(&groups, 4), Some((1, false, 0)));
+        // Index 5 = out of bounds
+        assert_eq!(related_flat_resolve(&groups, 5), None);
+    }
+
+    #[test]
+    fn related_flat_empty_groups() {
+        let groups: Vec<RelatedArtistGroup> = vec![];
+        assert_eq!(related_flat_count(&groups), 0);
+        assert_eq!(related_flat_resolve(&groups, 0), None);
+    }
+
+    // --- calc_scroll_offset tests ---
+
+    #[test]
+    fn scroll_offset_near_top() {
+        assert_eq!(calc_scroll_offset(2, 20, 100), 0);
+    }
+
+    #[test]
+    fn scroll_offset_middle() {
+        // selected=50, viewport=20, half=10 → offset = 50 - 10 = 40
+        assert_eq!(calc_scroll_offset(50, 20, 100), 40);
+    }
+
+    #[test]
+    fn scroll_offset_near_bottom() {
+        // selected=95, viewport=20, half=10
+        // 95 + 10 >= 100, so offset = 100 - 20 = 80
+        assert_eq!(calc_scroll_offset(95, 20, 100), 80);
+    }
+
+    #[test]
+    fn scroll_offset_empty_or_zero() {
+        assert_eq!(calc_scroll_offset(0, 0, 0), 0);
+        assert_eq!(calc_scroll_offset(0, 20, 0), 0);
+        assert_eq!(calc_scroll_offset(5, 0, 100), 0);
+    }
+
+    // --- sorted_merge tests ---
+
+    #[test]
+    fn sorted_merge_basic() {
+        let mut existing = vec!["apple", "cherry", "elephant"];
+        let new_items = vec!["banana", "dog"];
+        sorted_merge(&mut existing, new_items, |s| s.to_string());
+        assert_eq!(existing, vec!["apple", "banana", "cherry", "dog", "elephant"]);
+    }
+
+    #[test]
+    fn sorted_merge_empty_new() {
+        let mut existing = vec!["a", "b"];
+        sorted_merge(&mut existing, vec![], |s| s.to_string());
+        assert_eq!(existing, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn sorted_merge_empty_existing() {
+        let mut existing: Vec<&str> = vec![];
+        sorted_merge(&mut existing, vec!["x", "y"], |s| s.to_string());
+        assert_eq!(existing, vec!["x", "y"]);
     }
 }

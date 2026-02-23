@@ -6,8 +6,8 @@
 
 use crate::app::{Action, AppState, Event};
 use crate::app::state::{BrowseCategory, SearchFocus, SearchTab, View};
-use crate::api::PlexClient;
-use crate::api::models::SearchResults;
+use crate::plex::PlexClient;
+use crate::plex::models::SearchResults;
 
 use anyhow::Result;
 use tokio::sync::mpsc;
@@ -596,7 +596,7 @@ pub async fn dispatch(
                 tokio::spawn(async move {
                     use std::collections::HashSet;
 
-                    let mut all_tracks: Vec<Vec<crate::api::models::Track>> = Vec::new();
+                    let mut all_tracks: Vec<Vec<crate::plex::models::Track>> = Vec::new();
 
                     // Fetch radio for each artist in parallel
                     let mut handles = Vec::new();

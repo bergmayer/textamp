@@ -150,7 +150,7 @@ fn render_results(frame: &mut Frame, launcher: &crate::app::state::RadioLauncher
 /// Render the All tab with artists section header.
 fn render_all_tab(
     frame: &mut Frame,
-    results: &crate::api::models::SearchResults,
+    results: &crate::plex::models::SearchResults,
     is_focused: bool,
     selected_idx: usize,
     area: Rect,

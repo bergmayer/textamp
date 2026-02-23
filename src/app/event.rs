@@ -2,7 +2,7 @@
 //!
 //! Events represent things that happen (input, async completions, etc.).
 
-use crate::api::models::{Album, Artist, Genre, Hub, Library, Playlist, PlexServer, Station, Track, SearchResults};
+use crate::plex::models::{Album, Artist, Genre, Hub, Library, Playlist, PlexServer, Station, Track, SearchResults};
 use crate::services::WaveformData;
 use crossterm::event::{KeyEvent, MouseEvent};
 

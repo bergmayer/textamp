@@ -2,7 +2,7 @@
 //!
 //! Run with: cargo run --example test_stations_auth --release
 
-use textamp::api::{PlexAuth, PlexClient};
+use textamp::plex::{PlexAuth, PlexClient};
 
 #[tokio::main]
 async fn main() {

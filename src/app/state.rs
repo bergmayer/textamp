@@ -5,7 +5,7 @@
 
 use std::collections::VecDeque;
 
-use crate::api::models::{Album, Artist, Genre, Library, Playlist, PlexServer, RemotePlayer, Station, Track, SearchResults};
+use crate::plex::models::{Album, Artist, Genre, Library, Playlist, PlexServer, RemotePlayer, Station, Track, SearchResults};
 use crate::miller::{MillerColumn, MillerState};
 use crate::plex::{CachedFolder, CachedPlaylistTracks};
 use crate::services::{FolderNavigationState, WaveformData, MAX_HISTORY_SIZE};

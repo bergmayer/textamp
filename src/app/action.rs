@@ -2,7 +2,7 @@
 //!
 //! Actions are commands that modify state or trigger side effects.
 
-use crate::api::models::Track;
+use crate::plex::models::Track;
 use super::state::{BrowseCategory, View};
 
 /// Application actions/commands.
@@ -255,7 +255,7 @@ pub enum Action {
     ArtistRadioPickerSetCount,
     ArtistRadioPickerToggleArtist,
     ArtistRadioPickerLaunch,
-    ArtistRadioComplete(Vec<crate::api::models::Track>),
+    ArtistRadioComplete(Vec<crate::plex::models::Track>),
 
     // Remote player control
     DiscoverPlayers,

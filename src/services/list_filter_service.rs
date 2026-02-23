@@ -216,7 +216,7 @@ pub fn filter_folder_items(
 
 /// Wrapper for filtering stations.
 pub fn filter_stations(
-    items: &[crate::api::models::Station],
+    items: &[crate::plex::models::Station],
     query: &str,
     max_results: usize,
 ) -> ListFilterResults {
@@ -297,10 +297,10 @@ where
 /// Same priorities as `search_with_ranking`, plus:
 /// 7. Year matches query
 pub fn search_albums_with_ranking(
-    albums: &[crate::api::models::Album],
+    albums: &[crate::plex::models::Album],
     query: &str,
     max_results: usize,
-) -> Vec<crate::api::models::Album> {
+) -> Vec<crate::plex::models::Album> {
     if query.is_empty() {
         return vec![];
     }
@@ -366,10 +366,10 @@ pub fn search_albums_with_ranking(
 /// 7. Artist name contains query
 /// 8. Normalized contains (either field)
 pub fn search_tracks_with_ranking(
-    tracks: &[crate::api::models::Track],
+    tracks: &[crate::plex::models::Track],
     query: &str,
     max_results: usize,
-) -> Vec<crate::api::models::Track> {
+) -> Vec<crate::plex::models::Track> {
     if query.is_empty() {
         return vec![];
     }

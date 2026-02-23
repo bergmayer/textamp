@@ -162,3 +162,240 @@ impl<C: MillerColumn> MillerState<C> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Clone, Debug)]
+    struct TestColumn {
+        items: Vec<String>,
+        selected: usize,
+    }
+
+    impl TestColumn {
+        fn new(items: &[&str]) -> Self {
+            Self {
+                items: items.iter().map(|s| s.to_string()).collect(),
+                selected: 0,
+            }
+        }
+    }
+
+    impl MillerColumn for TestColumn {
+        fn item_count(&self) -> usize {
+            self.items.len()
+        }
+        fn selected_index(&self) -> usize {
+            self.selected
+        }
+        fn set_selected_index(&mut self, idx: usize) {
+            self.selected = idx;
+        }
+    }
+
+    fn col(items: &[&str]) -> TestColumn {
+        TestColumn::new(items)
+    }
+
+    #[test]
+    fn new_state_is_empty() {
+        let state: MillerState<TestColumn> = MillerState::new();
+        assert!(state.is_empty());
+        assert_eq!(state.column_count(), 0);
+        assert_eq!(state.focused_column, 0);
+        assert!(state.focused().is_none());
+    }
+
+    #[test]
+    fn push_column_adds_and_focuses() {
+        let mut state = MillerState::new();
+        state.push_column(col(&["a", "b", "c"]));
+        assert_eq!(state.column_count(), 1);
+        assert_eq!(state.focused_column, 0);
+        assert!(state.is_at_root());
+
+        state.push_column(col(&["x", "y"]));
+        assert_eq!(state.column_count(), 2);
+        assert_eq!(state.focused_column, 1);
+        assert!(!state.is_at_root());
+    }
+
+    #[test]
+    fn push_column_truncates_right() {
+        let mut state = MillerState::new();
+        state.push_column(col(&["a"]));
+        state.push_column(col(&["b"]));
+        state.push_column(col(&["c"]));
+        assert_eq!(state.column_count(), 3);
+
+        // Go back to col 0 and push — cols 1,2 should be removed
+        state.focused_column = 0;
+        state.push_column(col(&["d"]));
+        assert_eq!(state.column_count(), 2);
+        assert_eq!(state.focused_column, 1);
+        assert_eq!(state.focused().unwrap().items[0], "d");
+    }
+
+    #[test]
+    fn truncate_right_removes_after_focus() {
+        let mut state = MillerState::new();
+        state.push_column(col(&["a"]));
+        state.push_column(col(&["b"]));
+        state.push_column(col(&["c"]));
+
+        state.focused_column = 1;
+        state.truncate_right();
+        assert_eq!(state.column_count(), 2);
+    }
+
+    #[test]
+    fn truncate_right_at_end_is_noop() {
+        let mut state = MillerState::new();
+        state.push_column(col(&["a"]));
+        state.push_column(col(&["b"]));
+        // focused is already at 1 (last)
+        state.truncate_right();
+        assert_eq!(state.column_count(), 2);
+    }
+
+    #[test]
+    fn focus_left() {
+        let mut state = MillerState::new();
+        state.push_column(col(&["a"]));
+        state.push_column(col(&["b"]));
+        assert_eq!(state.focused_column, 1);
+        assert!(state.can_go_left());
+
+        state.focus_left();
+        assert_eq!(state.focused_column, 0);
+    }
+
+    #[test]
+    fn focus_left_at_zero() {
+        let mut state = MillerState::new();
+        state.push_column(col(&["a"]));
+        state.focused_column = 0;
+        assert!(!state.can_go_left());
+
+        state.focus_left();
+        assert_eq!(state.focused_column, 0);
+    }
+
+    #[test]
+    fn focus_right() {
+        let mut state = MillerState::new();
+        state.push_column(col(&["a"]));
+        state.push_column(col(&["b"]));
+        state.focused_column = 0;
+
+        assert!(state.focus_right());
+        assert_eq!(state.focused_column, 1);
+    }
+
+    #[test]
+    fn focus_right_at_end() {
+        let mut state = MillerState::new();
+        state.push_column(col(&["a"]));
+        // focused_column is 0, only 1 column
+        assert!(!state.focus_right());
+        assert_eq!(state.focused_column, 0);
+    }
+
+    #[test]
+    fn move_up_and_down() {
+        let mut state = MillerState::new();
+        state.push_column(col(&["a", "b", "c"]));
+
+        state.move_down();
+        assert_eq!(state.focused().unwrap().selected_index(), 1);
+        state.move_down();
+        assert_eq!(state.focused().unwrap().selected_index(), 2);
+        // At bottom, should clamp
+        state.move_down();
+        assert_eq!(state.focused().unwrap().selected_index(), 2);
+
+        state.move_up();
+        assert_eq!(state.focused().unwrap().selected_index(), 1);
+        state.move_up();
+        assert_eq!(state.focused().unwrap().selected_index(), 0);
+        // At top, should clamp
+        state.move_up();
+        assert_eq!(state.focused().unwrap().selected_index(), 0);
+    }
+
+    #[test]
+    fn move_to_direct_jump() {
+        let mut state = MillerState::new();
+        state.push_column(col(&["a", "b", "c", "d"]));
+
+        state.move_to(3);
+        assert_eq!(state.focused().unwrap().selected_index(), 3);
+
+        state.move_to(1);
+        assert_eq!(state.focused().unwrap().selected_index(), 1);
+    }
+
+    #[test]
+    fn move_to_clamps_out_of_bounds() {
+        let mut state = MillerState::new();
+        state.push_column(col(&["a", "b"]));
+
+        // Out of bounds — should be ignored (no change from 0)
+        state.move_to(10);
+        assert_eq!(state.focused().unwrap().selected_index(), 0);
+    }
+
+    #[test]
+    fn replace_child_column_existing() {
+        let mut state = MillerState::new();
+        state.push_column(col(&["a"]));
+        state.push_column(col(&["b"]));
+        state.push_column(col(&["c"]));
+
+        // Focus col 0, replace col 1
+        state.focused_column = 0;
+        state.replace_child_column(col(&["replacement"]));
+        assert_eq!(state.column_count(), 2); // col 2 truncated
+        assert_eq!(state.focused_column, 0); // focus unchanged
+        assert_eq!(state.columns[1].items[0], "replacement");
+    }
+
+    #[test]
+    fn replace_child_column_at_end_appends() {
+        let mut state = MillerState::new();
+        state.push_column(col(&["a"]));
+        // focused is at last column (0), replace_child appends
+        state.focused_column = 0;
+        state.replace_child_column(col(&["new"]));
+        assert_eq!(state.column_count(), 2);
+        assert_eq!(state.focused_column, 0); // focus unchanged
+        assert_eq!(state.columns[1].items[0], "new");
+    }
+
+    #[test]
+    fn column_count_and_is_at_root() {
+        let mut state = MillerState::new();
+        assert_eq!(state.column_count(), 0);
+        assert!(state.is_at_root()); // focused_column 0 == 0
+
+        state.push_column(col(&["a"]));
+        assert_eq!(state.column_count(), 1);
+        assert!(state.is_at_root());
+
+        state.push_column(col(&["b"]));
+        assert_eq!(state.column_count(), 2);
+        assert!(!state.is_at_root());
+    }
+
+    #[test]
+    fn move_on_empty_state_is_safe() {
+        let mut state: MillerState<TestColumn> = MillerState::new();
+        // These should all be no-ops, not panic
+        state.move_up();
+        state.move_down();
+        state.move_to(5);
+        state.focus_left();
+        assert!(!state.focus_right());
+    }
+}

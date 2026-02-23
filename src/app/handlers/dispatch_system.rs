@@ -2,7 +2,7 @@
 //! RefreshCategory, CycleTheme, LoadArtwork, LoadWaveform.
 
 use crate::app::{Action, AppState, Event};
-use crate::api::PlexClient;
+use crate::plex::PlexClient;
 use crate::config::Config;
 
 use anyhow::Result;
@@ -72,7 +72,7 @@ pub async fn dispatch(
             // Skip if nothing has changed since last save (cache_dirty is false).
             if state.cache_mgmt.dirty {
             if let Some(lib_key) = &state.active_library {
-                use crate::cache::CacheData;
+                use crate::plex::CacheData;
 
                 let mut cache_data = CacheData::new(lib_key);
                 // Write per-category timestamps

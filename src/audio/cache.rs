@@ -3,8 +3,8 @@
 //! Downloads upcoming tracks in the background so playback starts instantly.
 //! Uses an in-memory LRU cache bounded by entry count and total bytes.
 
-use crate::api::PlexClient;
-use crate::api::models::Track;
+use crate::plex::PlexClient;
+use crate::plex::models::Track;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};

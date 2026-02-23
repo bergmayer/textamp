@@ -2,7 +2,7 @@
 //! NavigateUpFolder, RefreshSubfolder, PlayFolderTracks.
 
 use crate::app::{Action, AppState, Event};
-use crate::api::PlexClient;
+use crate::plex::PlexClient;
 use crate::audio::AudioPlayer;
 use crate::plex::CachedFolder;
 use crate::services::{FolderService, FolderColumn, FolderNavigationState};

@@ -2,7 +2,7 @@
 
 use crate::app::Event;
 use crate::app::event_loop::PreloadType;
-use crate::api::PlexClient;
+use crate::plex::PlexClient;
 use tokio::sync::mpsc;
 
 /// Preload data in background for faster access.
@@ -17,7 +17,7 @@ pub fn preload_data(event_tx: &mpsc::Sender<Event>, preload_type: PreloadType, l
     let event_tx = event_tx.clone();
 
     tokio::spawn(async move {
-        let client = crate::api::PlexClient::new_with_url(&server_url, token.as_deref(), &client_id);
+        let client = crate::plex::PlexClient::new_with_url(&server_url, token.as_deref(), &client_id);
         let lib_key_ref = lib_key.as_str();
 
         match preload_type {
@@ -140,7 +140,7 @@ pub fn preload_data(event_tx: &mpsc::Sender<Event>, preload_type: PreloadType, l
             }
             PreloadType::AllTracks => {
                 // Use a much longer timeout for AllTracks — can be hundreds of MB for large libraries
-                let long_client = crate::api::PlexClient::new_with_url_and_timeout(
+                let long_client = crate::plex::PlexClient::new_with_url_and_timeout(
                     &server_url, token.as_deref(), &client_id, 600,
                 );
                 tracing::debug!("Preloading all tracks for library: {}", lib_key);
@@ -305,7 +305,7 @@ pub fn maybe_start_subfolder_preload(
         }
 
         let semaphore = Arc::new(Semaphore::new(4));
-        let client = Arc::new(crate::api::PlexClient::new_with_url(&server_url, token.as_deref(), &client_id));
+        let client = Arc::new(crate::plex::PlexClient::new_with_url(&server_url, token.as_deref(), &client_id));
         let cancel = Arc::new(cancel);
 
         // Track all keys we've ever queued for fetching (cycle prevention)

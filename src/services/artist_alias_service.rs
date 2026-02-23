@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::api::models::{Album, Artist, Track};
+use crate::plex::models::{Album, Artist, Track};
 
 /// Normalize artist name for matching: lowercase + strip leading "The ".
 pub fn normalize_artist_name(name: &str) -> String {

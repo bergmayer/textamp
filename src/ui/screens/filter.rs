@@ -4,7 +4,7 @@
 
 use crate::app::state::{SearchFocus, SearchTab};
 use crate::app::AppState;
-use crate::api::models::SearchResults;
+use crate::plex::models::SearchResults;
 use crate::services::NavigationService;
 use crate::ui::layout::centered_rect;
 use crate::ui::theme::theme;

@@ -2,9 +2,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::api::models::{Album, Artist, Track};
+use crate::plex::models::{Album, Artist, Track};
 use crate::app::{AppState, Event};
-use crate::api::PlexClient;
+use crate::plex::PlexClient;
 use tokio::sync::mpsc;
 
 /// Check preconditions and run compilation detection if needed.

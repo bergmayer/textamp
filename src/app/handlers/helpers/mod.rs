@@ -53,8 +53,8 @@ pub const PAGE_SIZE: u32 = 100;
 /// ─────────────── (sep:remix)
 /// Remix: Gemini, Twofer, Stretch, Shuffle
 /// ```
-pub fn append_station_action_items(stations: &mut Vec<crate::api::models::Station>, shuffle_active: bool) {
-    use crate::api::models::Station;
+pub fn append_station_action_items(stations: &mut Vec<crate::plex::models::Station>, shuffle_active: bool) {
+    use crate::plex::models::Station;
     use crate::app::state::DjMode;
 
     // Strip any previously appended synthetic items so we always rebuild fresh.
@@ -373,13 +373,13 @@ pub fn get_artist_for_bio(state: &crate::app::state::AppState) -> Option<(String
 /// clone client + event_tx → spawn → match client.method().await → send event.
 pub fn spawn_api_call<T, F, Fut>(
     event_tx: &tokio::sync::mpsc::Sender<crate::app::Event>,
-    client: &crate::api::PlexClient,
+    client: &crate::plex::PlexClient,
     call: F,
     on_success: fn(T) -> crate::app::Event,
     error_msg: &str,
 ) where
-    F: FnOnce(crate::api::PlexClient) -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = Result<T, crate::api::ApiError>> + Send,
+    F: FnOnce(crate::plex::PlexClient) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<T, crate::plex::ApiError>> + Send,
     T: Send + 'static,
 {
     let tx = event_tx.clone();

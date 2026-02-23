@@ -4,9 +4,9 @@
 
 use crate::app::{Action, AppState, Event};
 use crate::app::state::{ConnectionState, PlayStatus, PlaybackMode, QueueSortMode, SettingsSection, View};
-use crate::api::{PlexAuth, PlexClient};
+use crate::plex::{PlexAuth, PlexClient};
 use crate::audio::AudioPlayer;
-use crate::cache::LibraryCache;
+use crate::plex::LibraryCache;
 use crate::config::Config;
 use anyhow::Result;
 use tokio::sync::mpsc;
@@ -752,7 +752,7 @@ pub async fn dispatch(
                             }).await;
 
                             // Now load libraries from this server
-                            let new_client = crate::api::PlexClient::new_with_url(&url, Some(&token), &client_id);
+                            let new_client = crate::plex::PlexClient::new_with_url(&url, Some(&token), &client_id);
                             match new_client.get_libraries().await {
                                 Ok(libs) => {
                                     let _ = event_tx.send(Event::LibrariesLoaded(libs)).await;

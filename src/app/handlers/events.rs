@@ -7,7 +7,7 @@ use crate::app::state::{
     BrowseCategory, BrowseItem, ConnectionState, PlayStatus, PlaybackMode,
     View,
 };
-use crate::api::{PlexAuth, PlexClient};
+use crate::plex::{PlexAuth, PlexClient};
 use super::helpers;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -122,7 +122,7 @@ pub fn handle_app_event(
                     tokio::spawn(async move {
                         // Find a working connection to this server
                         if let Some(url) = helpers::find_working_connection(&server_clone, &token, &cid).await {
-                            let other_client = crate::api::PlexClient::new_with_url(&url, Some(&token), &cid);
+                            let other_client = crate::plex::PlexClient::new_with_url(&url, Some(&token), &cid);
                             match other_client.get_libraries().await {
                                 Ok(libs) => {
                                     let music_libs: Vec<_> = libs.into_iter().filter(|l| l.is_music()).collect();
@@ -1489,7 +1489,7 @@ pub fn handle_app_event(
             state.cache_mgmt.background_refresh.remove(&category);
             state.cache_mgmt.dirty = true;
             // Data was refreshed from the server — update the per-category timestamp
-            let now = crate::cache::CacheData::now();
+            let now = crate::plex::CacheData::now();
             state.cache_mgmt.category_timestamps.insert(category, now);
 
             // Clear the "Refreshing X..." status message if it matches this category

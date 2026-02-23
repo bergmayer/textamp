@@ -3,7 +3,7 @@
 //! Run with: cargo run --example test_stations -- <server_url> <token> <library_key>
 //! Example: cargo run --example test_stations -- http://192.168.1.100:32400 abc123token 5
 
-use textamp::api::PlexClient;
+use textamp::plex::PlexClient;
 
 #[tokio::main]
 async fn main() {

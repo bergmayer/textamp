@@ -1,7 +1,7 @@
 //! Cache saving and background data refresh.
 
 use crate::app::{AppState, Event};
-use crate::cache::LibraryCache;
+use crate::plex::LibraryCache;
 use tokio::sync::mpsc;
 
 /// Check if we should save the cache and spawn async save if conditions are met.
@@ -29,7 +29,7 @@ pub fn maybe_save_cache_async(event_tx: &mpsc::Sender<Event>, state: &mut AppSta
     state.cache_mgmt.dirty = false;
     state.cache_mgmt.last_save = std::time::Instant::now();
 
-    use crate::cache::CacheData;
+    use crate::plex::CacheData;
     let mut cache_data = CacheData::new(&lib_key);
     // Write per-category timestamps
     cache_data.category_timestamps = state.cache_mgmt.category_timestamps.iter()

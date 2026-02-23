@@ -6,7 +6,7 @@
 /// Always injects localhost candidates (127.0.0.1, localhost) to discover
 /// same-machine connections even when Plex doesn't advertise them.
 pub async fn find_working_connection(
-    server: &crate::api::models::PlexServer,
+    server: &crate::plex::models::PlexServer,
     token: &str,
     client_identifier: &str,
 ) -> Option<String> {
@@ -97,7 +97,7 @@ pub async fn find_working_connection(
 
 /// Find the first working connection across multiple servers.
 pub async fn find_working_connection_from_servers(
-    servers: &[crate::api::models::PlexServer],
+    servers: &[crate::plex::models::PlexServer],
     token: &str,
     client_identifier: &str,
 ) -> Option<String> {

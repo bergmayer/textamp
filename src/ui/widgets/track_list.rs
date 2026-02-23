@@ -1,6 +1,6 @@
 //! Track list widget.
 
-use crate::api::models::Track;
+use crate::plex::models::Track;
 use crate::ui::theme::theme;
 
 use ratatui::prelude::*;

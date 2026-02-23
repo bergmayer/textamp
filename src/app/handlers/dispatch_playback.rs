@@ -3,7 +3,7 @@
 
 use crate::app::{Action, AppState, Event};
 use crate::app::state::{PlayStatus, PlaybackMode};
-use crate::api::PlexClient;
+use crate::plex::PlexClient;
 use crate::audio::AudioPlayer;
 
 use anyhow::Result;

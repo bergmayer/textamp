@@ -2,8 +2,8 @@
 
 use crate::app::{AppState, Event};
 use crate::app::state::{PlayStatus, PlaybackMode, View};
-use crate::api::PlexClient;
-use crate::api::models::{Artist, Track};
+use crate::plex::PlexClient;
+use crate::plex::models::{Artist, Track};
 use crate::audio::{AudioEvent, AudioPlayer};
 use crate::audio::cache;
 use tokio::sync::mpsc;
@@ -179,7 +179,7 @@ pub async fn play_current_track(
                     let client_id = client.client_identifier().to_string();
 
                     tokio::spawn(async move {
-                        let client = crate::api::PlexClient::new_with_url(&server_url, token.as_deref(), &client_id);
+                        let client = crate::plex::PlexClient::new_with_url(&server_url, token.as_deref(), &client_id);
                         match tokio::time::timeout(
                             std::time::Duration::from_secs(5),
                             client.fetch_artwork(&thumb_path_owned, 600)
@@ -222,7 +222,7 @@ pub async fn play_current_track(
                     let client_id = client.client_identifier().to_string();
 
                     tokio::spawn(async move {
-                        let client = crate::api::PlexClient::new_with_url(&server_url, token.as_deref(), &client_id);
+                        let client = crate::plex::PlexClient::new_with_url(&server_url, token.as_deref(), &client_id);
                         match tokio::time::timeout(
                             std::time::Duration::from_secs(5),
                             client.fetch_artwork(&thumb_path_owned, 600)
@@ -335,7 +335,7 @@ pub fn report_playback_to_plex(_event_tx: &mpsc::Sender<Event>, track: &Track, s
         let client_id = client.client_identifier().to_string();
 
         tokio::spawn(async move {
-            let client = crate::api::PlexClient::new_with_url(&server_url, token.as_deref(), &client_id);
+            let client = crate::plex::PlexClient::new_with_url(&server_url, token.as_deref(), &client_id);
 
             if let Err(e) = client.report_playback_start(&track_clone, 0, session_id.as_deref()).await {
                 tracing::debug!("Failed to report playback start: {}", e);
@@ -365,7 +365,7 @@ pub fn report_playback_stop_to_plex(
         let client_id = client.client_identifier().to_string();
 
         tokio::spawn(async move {
-            let client = crate::api::PlexClient::new_with_url(&server_url, token.as_deref(), &client_id);
+            let client = crate::plex::PlexClient::new_with_url(&server_url, token.as_deref(), &client_id);
 
             if let Err(e) = client.report_playback_stop(&track_clone, position_ms, continuing, session_id.as_deref()).await {
                 tracing::debug!("Failed to report playback stop: {}", e);
@@ -390,7 +390,7 @@ pub fn report_playback_progress_to_plex(
         let client_id = client.client_identifier().to_string();
 
         tokio::spawn(async move {
-            let client = crate::api::PlexClient::new_with_url(&server_url, token.as_deref(), &client_id);
+            let client = crate::plex::PlexClient::new_with_url(&server_url, token.as_deref(), &client_id);
 
             if let Err(e) = client.report_playback_progress(&track_clone, position_ms, session_id.as_deref()).await {
                 tracing::debug!("Failed to report playback progress: {}", e);
@@ -514,7 +514,7 @@ async fn play_current_track_remote(
                     let client_id = client.client_identifier().to_string();
 
                     tokio::spawn(async move {
-                        let client = crate::api::PlexClient::new_with_url(&server_url, token.as_deref(), &client_id);
+                        let client = crate::plex::PlexClient::new_with_url(&server_url, token.as_deref(), &client_id);
                         match tokio::time::timeout(
                             std::time::Duration::from_secs(5),
                             client.fetch_artwork(&thumb_path_owned, 600)
@@ -545,7 +545,7 @@ async fn play_current_track_remote(
                     let client_id = client.client_identifier().to_string();
 
                     tokio::spawn(async move {
-                        let client = crate::api::PlexClient::new_with_url(&server_url, token.as_deref(), &client_id);
+                        let client = crate::plex::PlexClient::new_with_url(&server_url, token.as_deref(), &client_id);
                         match tokio::time::timeout(
                             std::time::Duration::from_secs(5),
                             client.fetch_artwork(&thumb_path_owned, 600)

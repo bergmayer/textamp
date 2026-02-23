@@ -55,7 +55,7 @@ pub fn clear_artwork_cache() {
 
 /// Format "Artist — Album (Year)" for queue display.
 /// Uses helper methods that handle empty/None fields with fallbacks.
-fn format_artist_album(track: &crate::api::models::Track) -> String {
+fn format_artist_album(track: &crate::plex::models::Track) -> String {
     let artist = track.track_artist();
     let album = track.album_name();
     let year = track.year.or(track.parent_year);

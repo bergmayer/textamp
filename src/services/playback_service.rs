@@ -15,7 +15,7 @@
 
 use std::collections::VecDeque;
 
-use crate::api::models::Track;
+use crate::plex::models::Track;
 
 /// Maximum number of tracks in play history.
 pub const MAX_HISTORY_SIZE: usize = 50;

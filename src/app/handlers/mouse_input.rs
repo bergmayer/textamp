@@ -374,7 +374,7 @@ fn handle_library_picker_mouse(event: crossterm::event::MouseEvent, state: &mut 
                         if already_highlighted {
                             // Second click on highlighted item: select it
                             let multi_server = state.has_multiple_servers();
-                            let all_libs: Vec<(&str, &str, &crate::api::models::Library)> = if multi_server {
+                            let all_libs: Vec<(&str, &str, &crate::plex::models::Library)> = if multi_server {
                                 state.all_libraries_with_servers()
                             } else {
                                 let server_id = state.active_server_id.as_deref().unwrap_or("");

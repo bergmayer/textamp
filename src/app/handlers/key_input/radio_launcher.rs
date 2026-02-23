@@ -106,7 +106,7 @@ pub(super) fn handle_radio_launcher_keys(key: event::KeyEvent, state: &mut AppSt
 }
 
 /// Count total selectable items for the given tab in radio launcher results.
-fn result_count_for_tab(results: &crate::api::models::SearchResults, tab: RadioLauncherTab) -> usize {
+fn result_count_for_tab(results: &crate::plex::models::SearchResults, tab: RadioLauncherTab) -> usize {
     match tab {
         RadioLauncherTab::All => results.artists.len(),
         RadioLauncherTab::Artists => results.artists.len(),

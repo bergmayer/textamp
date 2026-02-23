@@ -2,8 +2,8 @@
 
 use crate::app::{Action, AppState, Event};
 use crate::app::state::{BrowseCategory, BrowseColumn, BrowseItem};
-use crate::api::PlexClient;
-use crate::api::models::Track;
+use crate::plex::PlexClient;
+use crate::plex::models::Track;
 use crate::audio::AudioPlayer;
 
 use anyhow::Result;

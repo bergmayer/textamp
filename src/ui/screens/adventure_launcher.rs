@@ -185,7 +185,7 @@ fn render_artist_albums_level(
     frame: &mut Frame,
     launcher: &AdventureLauncherState,
     artist_name: &str,
-    albums: &[crate::api::models::Album],
+    albums: &[crate::plex::models::Album],
     area: Rect,
 ) {
     let t = theme();
@@ -256,7 +256,7 @@ fn render_album_tracks_level(
     launcher: &AdventureLauncherState,
     artist_name: &str,
     album_title: &str,
-    tracks: &[crate::api::models::Track],
+    tracks: &[crate::plex::models::Track],
     area: Rect,
 ) {
     let t = theme();

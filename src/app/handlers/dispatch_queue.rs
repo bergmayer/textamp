@@ -4,8 +4,8 @@
 
 use crate::app::{Action, AppState, Event};
 use crate::app::state::{BrowseCategory, BrowseItem, PlayStatus, PlaybackMode, QueueSortMode, SimilarMode, View};
-use crate::api::PlexClient;
-use crate::api::models::Track;
+use crate::plex::PlexClient;
+use crate::plex::models::Track;
 use crate::audio::AudioPlayer;
 
 use anyhow::Result;
@@ -1499,4 +1499,284 @@ fn enqueue_search_result_next(state: &AppState) -> Vec<Action> {
     }
 
     vec![]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::AppState;
+
+    fn make_track(key: &str, title: &str) -> Track {
+        Track {
+            rating_key: key.to_string(),
+            title: title.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn make_track_with_artist(key: &str, title: &str, artist_key: &str, album_key: &str) -> Track {
+        Track {
+            rating_key: key.to_string(),
+            title: title.to_string(),
+            grandparent_rating_key: Some(artist_key.to_string()),
+            parent_rating_key: Some(album_key.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn sample_queue() -> Vec<Track> {
+        vec![
+            make_track("t1", "Track 1"),
+            make_track("t2", "Track 2"),
+            make_track("t3", "Track 3"),
+            make_track("t4", "Track 4"),
+        ]
+    }
+
+    // --- RemoveFromQueue state logic tests ---
+
+    #[test]
+    fn remove_before_current_adjusts_index() {
+        let mut state = AppState::new();
+        state.queue = sample_queue();
+        state.queue_index = Some(2); // playing Track 3
+
+        // Simulate RemoveFromQueue(0) state mutation
+        let idx = 0;
+        state.queue.remove(idx);
+        if let Some(current) = state.queue_index {
+            if idx < current {
+                state.queue_index = Some(current - 1);
+            }
+        }
+
+        assert_eq!(state.queue_index, Some(1));
+        assert_eq!(state.queue.len(), 3);
+        assert_eq!(state.queue[1].rating_key, "t3"); // Track 3 is still current
+    }
+
+    #[test]
+    fn remove_after_current_no_change() {
+        let mut state = AppState::new();
+        state.queue = sample_queue();
+        state.queue_index = Some(1); // playing Track 2
+
+        let idx = 3;
+        state.queue.remove(idx);
+        if let Some(current) = state.queue_index {
+            if idx < current {
+                state.queue_index = Some(current - 1);
+            }
+        }
+
+        assert_eq!(state.queue_index, Some(1));
+        assert_eq!(state.queue.len(), 3);
+    }
+
+    #[test]
+    fn remove_current_at_end_wraps_back() {
+        let mut state = AppState::new();
+        state.queue = sample_queue();
+        state.queue_index = Some(3); // playing last track
+
+        let idx = 3;
+        state.queue.remove(idx);
+        if let Some(current) = state.queue_index {
+            if idx == current && current >= state.queue.len() {
+                state.queue_index = if state.queue.is_empty() {
+                    None
+                } else {
+                    Some(state.queue.len() - 1)
+                };
+            }
+        }
+
+        assert_eq!(state.queue_index, Some(2)); // wraps to new last
+    }
+
+    #[test]
+    fn remove_last_element_gives_none() {
+        let mut state = AppState::new();
+        state.queue = vec![make_track("t1", "Track 1")];
+        state.queue_index = Some(0);
+
+        let idx = 0;
+        state.queue.remove(idx);
+        if let Some(current) = state.queue_index {
+            if idx == current && current >= state.queue.len() {
+                state.queue_index = if state.queue.is_empty() {
+                    None
+                } else {
+                    Some(state.queue.len() - 1)
+                };
+            }
+        }
+
+        assert_eq!(state.queue_index, None);
+        assert!(state.queue.is_empty());
+    }
+
+    // --- MoveQueueTrack state logic tests ---
+
+    #[test]
+    fn move_track_up_swaps_and_adjusts() {
+        let mut state = AppState::new();
+        state.queue = sample_queue();
+        state.queue_index = Some(2);
+        state.list_state.queue_index = 2;
+
+        // Simulate MoveQueueTrackUp
+        let idx = state.list_state.queue_index;
+        state.queue.swap(idx, idx - 1);
+        state.list_state.queue_index -= 1;
+        if let Some(qi) = state.queue_index {
+            if qi == idx {
+                state.queue_index = Some(idx - 1);
+            } else if qi == idx - 1 {
+                state.queue_index = Some(idx);
+            }
+        }
+
+        assert_eq!(state.list_state.queue_index, 1);
+        assert_eq!(state.queue_index, Some(1)); // current track moved up
+        assert_eq!(state.queue[1].rating_key, "t3"); // t3 moved from 2 to 1
+        assert_eq!(state.queue[2].rating_key, "t2"); // t2 moved from 1 to 2
+    }
+
+    #[test]
+    fn move_track_up_at_zero_is_noop() {
+        let mut state = AppState::new();
+        state.queue = sample_queue();
+        state.list_state.queue_index = 0;
+
+        // MoveQueueTrackUp should be no-op at idx 0
+        let idx = state.list_state.queue_index;
+        if idx > 0 {
+            state.queue.swap(idx, idx - 1);
+        }
+
+        assert_eq!(state.queue[0].rating_key, "t1"); // unchanged
+    }
+
+    #[test]
+    fn move_track_down_swaps() {
+        let mut state = AppState::new();
+        state.queue = sample_queue();
+        state.queue_index = Some(1);
+        state.list_state.queue_index = 1;
+
+        // Simulate MoveQueueTrackDown
+        let idx = state.list_state.queue_index;
+        state.queue.swap(idx, idx + 1);
+        state.list_state.queue_index += 1;
+        if let Some(qi) = state.queue_index {
+            if qi == idx {
+                state.queue_index = Some(idx + 1);
+            } else if qi == idx + 1 {
+                state.queue_index = Some(idx);
+            }
+        }
+
+        assert_eq!(state.list_state.queue_index, 2);
+        assert_eq!(state.queue_index, Some(2)); // current track moved down
+        assert_eq!(state.queue[1].rating_key, "t3");
+        assert_eq!(state.queue[2].rating_key, "t2");
+    }
+
+    #[test]
+    fn move_track_down_at_end_is_noop() {
+        let mut state = AppState::new();
+        state.queue = sample_queue();
+        state.list_state.queue_index = 3; // last index
+
+        let idx = state.list_state.queue_index;
+        if idx + 1 < state.queue.len() {
+            state.queue.swap(idx, idx + 1);
+        }
+
+        assert_eq!(state.queue[3].rating_key, "t4"); // unchanged
+    }
+
+    // --- pick_diverse_remix tests ---
+
+    #[test]
+    fn pick_diverse_avoids_artists_and_albums() {
+        let used_artists: std::collections::HashSet<String> = ["artist1"].iter().map(|s| s.to_string()).collect();
+        let used_albums: std::collections::HashSet<String> = ["album1"].iter().map(|s| s.to_string()).collect();
+
+        let candidates = vec![
+            make_track_with_artist("c1", "By artist1", "artist1", "album2"),
+            make_track_with_artist("c2", "By artist2 album1", "artist2", "album1"),
+            make_track_with_artist("c3", "By artist3", "artist3", "album3"), // this one passes
+        ];
+
+        let result = pick_diverse_remix(candidates, 1, &[], &used_artists, &used_albums);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].rating_key, "c3");
+    }
+
+    #[test]
+    fn pick_diverse_relaxes_when_no_diverse_match() {
+        let used_artists: std::collections::HashSet<String> = ["artist1", "artist2"].iter().map(|s| s.to_string()).collect();
+        let used_albums = std::collections::HashSet::new();
+
+        let candidates = vec![
+            make_track_with_artist("c1", "By artist1", "artist1", "a1"),
+            make_track_with_artist("c2", "By artist2", "artist2", "a2"),
+            make_track_with_artist("c3", "By artist1 again", "artist1", "a3"),
+        ];
+
+        // Phase 1 finds nothing diverse, Phase 2 takes any non-history track
+        let result = pick_diverse_remix(candidates, 1, &[], &used_artists, &used_albums);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].rating_key, "c1"); // first candidate in relaxed phase
+    }
+
+    #[test]
+    fn pick_diverse_respects_history() {
+        let used_artists = std::collections::HashSet::new();
+        let used_albums = std::collections::HashSet::new();
+        let history = vec!["c1".to_string()];
+
+        let candidates = vec![
+            make_track_with_artist("c1", "Already used", "a1", "al1"),
+            make_track_with_artist("c2", "Fresh", "a2", "al2"),
+        ];
+
+        let result = pick_diverse_remix(candidates, 1, &history, &used_artists, &used_albums);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].rating_key, "c2");
+    }
+
+    #[test]
+    fn pick_diverse_empty_candidates() {
+        let result = pick_diverse_remix(
+            vec![],
+            3,
+            &[],
+            &std::collections::HashSet::new(),
+            &std::collections::HashSet::new(),
+        );
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn pick_diverse_multiple() {
+        let candidates = vec![
+            make_track_with_artist("c1", "T1", "a1", "al1"),
+            make_track_with_artist("c2", "T2", "a2", "al2"),
+            make_track_with_artist("c3", "T3", "a3", "al3"),
+        ];
+
+        let result = pick_diverse_remix(
+            candidates,
+            2,
+            &[],
+            &std::collections::HashSet::new(),
+            &std::collections::HashSet::new(),
+        );
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].rating_key, "c1");
+        assert_eq!(result[1].rating_key, "c2");
+    }
 }

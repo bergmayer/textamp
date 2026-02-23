@@ -33,7 +33,7 @@ use crate::app::state::{
     RightPanelMode, View,
 };
 use crate::app::AppState;
-use crate::api::models::Track;
+use crate::plex::models::Track;
 use super::helpers;
 
 /// Handle keyboard input (CUA-style with Ctrl shortcuts).
@@ -494,7 +494,7 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
 fn handle_library_picker_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
     // Build flat list matching what render_library_picker shows
     let multi_server = state.has_multiple_servers();
-    let all_libs: Vec<(&str, &str, &crate::api::models::Library)> = if multi_server {
+    let all_libs: Vec<(&str, &str, &crate::plex::models::Library)> = if multi_server {
         state.all_libraries_with_servers()
     } else {
         let server_id = state.active_server_id.as_deref().unwrap_or("");

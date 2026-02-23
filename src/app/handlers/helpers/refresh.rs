@@ -2,7 +2,7 @@
 
 use crate::app::{Action, AppState, Event};
 use crate::app::state::{BrowseCategory, View};
-use crate::api::PlexClient;
+use crate::plex::PlexClient;
 use tokio::sync::mpsc;
 
 /// Refresh the current view's category and return actions.
