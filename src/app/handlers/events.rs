@@ -522,6 +522,13 @@ pub fn handle_app_event(
             state.list_state.similar_index = 0;
             vec![]
         }
+        Event::SimilarArtistsLoaded(artists) => {
+            state.similar.artists = artists;
+            state.similar.mode = crate::app::state::SimilarMode::Artists;
+            state.similar.loading = false;
+            state.list_state.similar_index = 0;
+            vec![]
+        }
         Event::RelatedDataLoaded { groups } => {
             state.related.groups = groups;
             state.related.loading = false;
@@ -676,6 +683,7 @@ pub fn handle_app_event(
             // After 8 consecutive failures, show error to user
             state.consecutive_playback_errors = 0;
             if msg.contains("404") || msg.to_lowercase().contains("not found") {
+                state.popups.close_all();
                 state.popups.confirm_dialog = Some(crate::app::state::ConfirmDialog {
                     title: "Track Not Found".to_string(),
                     message: "This track may have been removed. Refresh cache?".to_string(),

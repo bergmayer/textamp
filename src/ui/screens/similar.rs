@@ -24,6 +24,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     let mode_label = match state.similar.mode {
         SimilarMode::Albums => "albums",
         SimilarMode::Tracks => "tracks",
+        SimilarMode::Artists => "artists",
     };
     let title = format!(" similar {} to: {} ", mode_label, state.similar.source_title);
     let block = Block::default()
@@ -50,6 +51,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         let msg = match state.similar.mode {
             SimilarMode::Albums => "Loading similar albums...",
             SimilarMode::Tracks => "Loading similar tracks...",
+            SimilarMode::Artists => "Loading similar artists...",
         };
         let loading = Paragraph::new(msg)
             .style(Style::default().fg(t.colors.fg_muted))
@@ -66,6 +68,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     match state.similar.mode {
         SimilarMode::Albums => render_albums(frame, state, content_area, popup_area),
         SimilarMode::Tracks => render_tracks(frame, state, content_area, popup_area),
+        SimilarMode::Artists => render_artists(frame, state, content_area, popup_area),
     }
 
     // Footer with dynamic Tab hint
@@ -104,6 +107,9 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
                     Style::default().fg(t.colors.fg_muted),
                 ));
             }
+        }
+        SimilarMode::Artists => {
+            // No Tab cycling for artists mode
         }
     }
 
@@ -288,6 +294,92 @@ fn render_tracks(frame: &mut Frame, state: &AppState, inner: Rect, popup_area: R
                 line1_fg,
             ));
             let line2 = Line::from(Span::styled(format!("     {}", subtitle_display), line2_fg));
+
+            ListItem::new(Text::from(vec![line1, line2])).style(item_bg)
+        })
+        .collect();
+
+    let list = List::new(items);
+    frame.render_widget(list, inner);
+
+    // Scrollbar + position indicator
+    if total > visible_item_count {
+        crate::ui::widgets::render_scrollbar(frame, popup_area, total, visible_item_count, scroll_offset);
+
+        let footer = format!("{}/{}", selected_idx + 1, total);
+        let footer_area = Rect::new(
+            popup_area.x + popup_area.width.saturating_sub(footer.len() as u16 + 2),
+            popup_area.y + popup_area.height - 1,
+            footer.len() as u16 + 1,
+            1,
+        );
+        frame.render_widget(
+            Paragraph::new(footer).style(Style::default().fg(t.colors.fg_muted)),
+            footer_area,
+        );
+    }
+}
+
+fn render_artists(frame: &mut Frame, state: &AppState, inner: Rect, popup_area: Rect) {
+    let t = theme();
+
+    if state.similar.artists.is_empty() {
+        let empty = Paragraph::new("No similar artists found")
+            .style(Style::default().fg(t.colors.fg_muted))
+            .alignment(Alignment::Center);
+        frame.render_widget(empty, inner);
+        return;
+    }
+
+    let selected_idx = state.list_state.similar_index;
+    let rows_per_item = 2usize;
+    let visible_item_count = inner.height as usize / rows_per_item;
+    let total = state.similar.artists.len();
+
+    let scroll_offset = match state.scroll.similar {
+        Some(pinned) => pinned,
+        None => NavigationService::calc_scroll_offset(selected_idx, visible_item_count, total),
+    };
+
+    let max_text_width = inner.width.saturating_sub(4) as usize;
+
+    let items: Vec<ListItem> = state
+        .similar.artists
+        .iter()
+        .enumerate()
+        .skip(scroll_offset)
+        .take(visible_item_count)
+        .map(|(i, artist)| {
+            let is_selected = i == selected_idx;
+
+            // Line 1: artist title
+            let title_display = truncate_middle(&artist.title, max_text_width);
+
+            // Line 2: genre tags
+            let genres: String = if artist.genre.is_empty() {
+                String::new()
+            } else {
+                artist.genre.iter().map(|g| g.tag.as_str()).collect::<Vec<_>>().join(", ")
+            };
+            let subtitle_width = max_text_width.saturating_sub(5);
+            let genre_display = truncate_middle(&genres, subtitle_width);
+
+            let (line1_fg, line2_fg, item_bg) = if is_selected {
+                (
+                    Style::default().fg(t.colors.selection_text),
+                    Style::default().fg(t.colors.selection_text),
+                    Style::default().bg(t.colors.selection_bar_bg),
+                )
+            } else {
+                (
+                    Style::default().fg(t.colors.fg_primary),
+                    Style::default().fg(t.colors.fg_muted),
+                    Style::default(),
+                )
+            };
+
+            let line1 = Line::from(Span::styled(format!(" {}", title_display), line1_fg));
+            let line2 = Line::from(Span::styled(format!("     {}", genre_display), line2_fg));
 
             ListItem::new(Text::from(vec![line1, line2])).style(item_bg)
         })

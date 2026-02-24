@@ -335,6 +335,22 @@ pub async fn dispatch(
                 Event::SimilarTracksLoaded, "Failed to load similar tracks",
             );
         }
+        Action::LoadSimilarArtists { artist_key, title } => {
+            state.similar.source_title = title;
+            state.similar.loading = true;
+            state.similar.artists.clear();
+            state.list_state.similar_index = 0;
+            state.similar.mode = crate::app::state::SimilarMode::Artists;
+            if state.view != View::Similar {
+                state.previous_view = Some(state.view);
+                state.set_view(View::Similar);
+            }
+
+            helpers::spawn_api_call(event_tx, client,
+                move |c| async move { c.get_similar_artists(&artist_key, 50).await },
+                Event::SimilarArtistsLoaded, "Failed to load similar artists",
+            );
+        }
         Action::LoadRelated { artist_key, title } => {
             state.related.source_title = title;
             state.related.source_key = artist_key.clone();
@@ -399,12 +415,33 @@ pub async fn dispatch(
                 }
             }
 
+            // Build artist lookup map for fuzzy-matching Similar tags.
+            // Keys: lowercase title, and "the "-stripped variant.
+            let mut artists_by_title: std::collections::HashMap<String, crate::plex::models::Artist> = std::collections::HashMap::new();
+            for artist in &state.artists {
+                let lower = artist.title.to_lowercase();
+                // Also index without leading "The "
+                if let Some(stripped) = lower.strip_prefix("the ") {
+                    artists_by_title.entry(stripped.to_string()).or_insert_with(|| artist.clone());
+                }
+                artists_by_title.entry(lower).or_insert_with(|| artist.clone());
+            }
+
+            // Pre-build cached albums by parent artist key for fallback
+            // when the API returns 0 albums (e.g. compilation-subtype albums).
+            let mut cached_albums_by_artist: std::collections::HashMap<String, Vec<crate::plex::models::Album>> = std::collections::HashMap::new();
+            for album in &state.albums {
+                if let Some(parent_key) = &album.parent_rating_key {
+                    cached_albums_by_artist.entry(parent_key.clone()).or_default().push(album.clone());
+                }
+            }
+
             let tx = event_tx.clone();
             let c = client.clone();
             tokio::spawn(async move {
                 let mut groups = Vec::new();
 
-                // 1. Fetch Plex related artists
+                // 1. Fetch Plex related artists (hub endpoint)
                 let plex_artists = match c.get_related_artists(&artist_key).await {
                     Ok(artists) => artists,
                     Err(e) => {
@@ -414,23 +451,63 @@ pub async fn dispatch(
                 };
 
                 // Filter out: the source artist itself and "Various Artists"
+                let plex_artist_names: Vec<String> = plex_artists.iter().map(|a| a.title.clone()).collect();
+                tracing::debug!("Plex /related hub returned {} artists: {:?}", plex_artists.len(), plex_artist_names);
                 let filtered_artists: Vec<_> = plex_artists.into_iter()
                     .filter(|a| a.rating_key != artist_key
                         && !a.title.eq_ignore_ascii_case("Various Artists"))
                     .collect();
 
-                // Collect Plex keys to dedup real aliases
-                let plex_keys: std::collections::HashSet<String> = filtered_artists.iter()
-                    .map(|a| a.rating_key.clone())
-                    .collect();
-
-                // 2. Fetch albums for each Plex related artist (parallel)
-                let mut handles = Vec::new();
+                // 2. Cross-reference hub artists against library and fetch albums.
+                //    The hub may return external references whose rating_key doesn't
+                //    match the local library entry (e.g. "Urinals" vs "The Urinals"),
+                //    so we fuzzy-match by title and prefer the library artist's key.
+                let mut seen_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+                seen_keys.insert(artist_key.clone());
+                let mut resolved_artists: Vec<crate::plex::models::Artist> = Vec::new();
                 for artist in &filtered_artists {
+                    let lower = artist.title.to_lowercase();
+                    let library_match = artists_by_title.get(&lower)
+                        .or_else(|| lower.strip_prefix("the ").and_then(|s| artists_by_title.get(s)))
+                        .or_else(|| artists_by_title.get(&format!("the {}", lower)));
+                    let resolved = if let Some(lib_artist) = library_match {
+                        tracing::debug!("Related: hub '{}' (key={}) → library '{}' (key={})",
+                            artist.title, artist.rating_key, lib_artist.title, lib_artist.rating_key);
+                        lib_artist.clone()
+                    } else {
+                        tracing::debug!("Related: hub '{}' (key={}) has no library match",
+                            artist.title, artist.rating_key);
+                        artist.clone()
+                    };
+                    // Dedup: skip if we've already resolved to this key
+                    if seen_keys.insert(resolved.rating_key.clone()) {
+                        resolved_artists.push(resolved);
+                    }
+                }
+
+                let mut handles = Vec::new();
+                for artist in &resolved_artists {
                     let c2 = c.clone();
                     let key = artist.rating_key.clone();
+                    let title = artist.title.clone();
+                    let cached = cached_albums_by_artist.get(&key).cloned().unwrap_or_default();
                     handles.push(tokio::spawn(async move {
-                        c2.get_artist_albums(&key).await.unwrap_or_default()
+                        let mut albums = c2.get_artist_albums(&key).await.unwrap_or_default();
+                        // Merge cached albums the API missed (same pattern as Miller columns)
+                        if !cached.is_empty() {
+                            let api_keys: std::collections::HashSet<String> = albums.iter()
+                                .map(|a| a.rating_key.clone())
+                                .collect();
+                            let missing: Vec<_> = cached.into_iter()
+                                .filter(|a| !api_keys.contains(&a.rating_key))
+                                .collect();
+                            if !missing.is_empty() {
+                                tracing::debug!("Related: merging {} cached albums for '{}' (key={}, API returned {})",
+                                    missing.len(), title, key, albums.len());
+                                albums.extend(missing);
+                            }
+                        }
+                        albums
                     }));
                 }
 
@@ -439,42 +516,155 @@ pub async fn dispatch(
                     plex_results.push(handle.await.unwrap_or_default());
                 }
 
-                for (artist, albums) in filtered_artists.into_iter().zip(plex_results) {
-                    if !albums.is_empty() {
-                        groups.push(RelatedArtistGroup {
-                            artist,
-                            albums,
-                            source: RelatedSource::Plex,
-                        });
+                for (artist, albums) in resolved_artists.into_iter().zip(plex_results) {
+                    groups.push(RelatedArtistGroup {
+                        artist,
+                        albums,
+                        source: RelatedSource::Plex,
+                    });
+                }
+
+                // 3. Fetch artist detail for "Similar" metadata tags
+                //    Use raw fetch to inspect actual response structure.
+                let similar_tags: Vec<String> = {
+                    let path = format!("/library/metadata/{}", artist_key);
+                    match c.get_raw(&path).await {
+                        Ok(raw) => {
+                            // Parse as generic JSON to inspect structure
+                            let parsed: Result<serde_json::Value, _> = serde_json::from_str(&raw);
+                            match parsed {
+                                Ok(json) => {
+                                    // The artist metadata might be in "Metadata" or "Directory" array
+                                    let mc = json.get("MediaContainer");
+                                    let artist_val = mc
+                                        .and_then(|mc| mc.get("Metadata").or_else(|| mc.get("Directory")))
+                                        .and_then(|arr| arr.as_array())
+                                        .and_then(|arr| arr.first());
+
+                                    if let Some(artist_obj) = artist_val {
+                                        // Extract "Similar" array
+                                        if let Some(similar_arr) = artist_obj.get("Similar").and_then(|s| s.as_array()) {
+                                            let tags: Vec<String> = similar_arr.iter()
+                                                .filter_map(|t| t.get("tag").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                                                .collect();
+                                            tracing::debug!("Similar tags for artist {}: {:?}", artist_key, tags);
+                                            tags
+                                        } else {
+                                            // Log available top-level keys for diagnosis
+                                            let keys: Vec<&str> = artist_obj.as_object()
+                                                .map(|m| m.keys().map(|k| k.as_str()).collect())
+                                                .unwrap_or_default();
+                                            tracing::debug!("No 'Similar' field on artist {}. Available keys: {:?}", artist_key, keys);
+                                            vec![]
+                                        }
+                                    } else {
+                                        let mc_keys: Vec<&str> = mc
+                                            .and_then(|v| v.as_object())
+                                            .map(|m| m.keys().map(|k| k.as_str()).collect())
+                                            .unwrap_or_default();
+                                        tracing::warn!("No artist metadata found in response. MediaContainer keys: {:?}", mc_keys);
+                                        vec![]
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!("Failed to parse artist detail JSON: {}", e);
+                                    vec![]
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to fetch artist detail for Similar tags: {}", e);
+                            vec![]
+                        }
+                    }
+                };
+
+                // Fuzzy-match Similar tags against library artists
+                let mut tag_matched_artists: Vec<crate::plex::models::Artist> = Vec::new();
+                for tag_name in &similar_tags {
+                    if tag_name.eq_ignore_ascii_case("Various Artists") {
+                        continue;
+                    }
+                    let lower = tag_name.to_lowercase();
+                    // Try: exact, strip "The ", prepend "The "
+                    let matched = artists_by_title.get(&lower)
+                        .or_else(|| lower.strip_prefix("the ").and_then(|s| artists_by_title.get(s)))
+                        .or_else(|| artists_by_title.get(&format!("the {}", lower)));
+                    if let Some(artist) = matched {
+                        if !seen_keys.contains(&artist.rating_key) {
+                            seen_keys.insert(artist.rating_key.clone());
+                            tag_matched_artists.push(artist.clone());
+                            tracing::debug!("Similar tag '{}' matched library artist '{}'", tag_name, artist.title);
+                        } else {
+                            tracing::debug!("Similar tag '{}' matched '{}' but already in results", tag_name, artist.title);
+                        }
+                    } else {
+                        tracing::debug!("Similar tag '{}' had no match in library ({} artists indexed)", tag_name, artists_by_title.len());
                     }
                 }
 
-                // 3. Add real alias artists that have Plex entries (dedup against Plex results)
+                // Fetch albums for tag-matched artists (parallel, with cache merge)
+                let mut tag_handles = Vec::new();
+                for artist in &tag_matched_artists {
+                    let c2 = c.clone();
+                    let key = artist.rating_key.clone();
+                    let cached = cached_albums_by_artist.get(&key).cloned().unwrap_or_default();
+                    tag_handles.push(tokio::spawn(async move {
+                        let mut albums = c2.get_artist_albums(&key).await.unwrap_or_default();
+                        if !cached.is_empty() {
+                            let api_keys: std::collections::HashSet<String> = albums.iter()
+                                .map(|a| a.rating_key.clone()).collect();
+                            let missing: Vec<_> = cached.into_iter()
+                                .filter(|a| !api_keys.contains(&a.rating_key)).collect();
+                            if !missing.is_empty() { albums.extend(missing); }
+                        }
+                        albums
+                    }));
+                }
+
+                for (artist, handle) in tag_matched_artists.into_iter().zip(tag_handles) {
+                    let albums = handle.await.unwrap_or_default();
+                    groups.push(RelatedArtistGroup {
+                        artist,
+                        albums,
+                        source: RelatedSource::SimilarTag,
+                    });
+                }
+
+                // 4. Add real alias artists that have Plex entries (dedup against Plex + tag results)
                 let mut alias_handles = Vec::new();
                 let mut alias_artist_vec = Vec::new();
                 for artist in &real_alias_artists {
-                    if !plex_keys.contains(&artist.rating_key) {
+                    if !seen_keys.contains(&artist.rating_key) {
+                        seen_keys.insert(artist.rating_key.clone());
                         let c2 = c.clone();
                         let key = artist.rating_key.clone();
+                        let cached = cached_albums_by_artist.get(&key).cloned().unwrap_or_default();
                         alias_artist_vec.push(artist.clone());
                         alias_handles.push(tokio::spawn(async move {
-                            c2.get_artist_albums(&key).await.unwrap_or_default()
+                            let mut albums = c2.get_artist_albums(&key).await.unwrap_or_default();
+                            if !cached.is_empty() {
+                                let api_keys: std::collections::HashSet<String> = albums.iter()
+                                    .map(|a| a.rating_key.clone()).collect();
+                                let missing: Vec<_> = cached.into_iter()
+                                    .filter(|a| !api_keys.contains(&a.rating_key)).collect();
+                                if !missing.is_empty() { albums.extend(missing); }
+                            }
+                            albums
                         }));
                     }
                 }
 
                 for (artist, handle) in alias_artist_vec.into_iter().zip(alias_handles) {
                     let albums = handle.await.unwrap_or_default();
-                    if !albums.is_empty() {
-                        groups.push(RelatedArtistGroup {
-                            artist,
-                            albums,
-                            source: RelatedSource::Alias,
-                        });
-                    }
+                    groups.push(RelatedArtistGroup {
+                        artist,
+                        albums,
+                        source: RelatedSource::Alias,
+                    });
                 }
 
-                // 4. Add synthetic alias groups (aliases without Plex artist entries,
+                // 5. Add synthetic alias groups (aliases without Plex artist entries,
                 //    albums derived from source artist's library)
                 groups.extend(synthetic_alias_groups);
 

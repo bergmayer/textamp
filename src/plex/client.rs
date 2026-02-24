@@ -1774,6 +1774,28 @@ impl PlexClient {
         Ok(tracks)
     }
 
+    /// Get sonically similar artists via the /nearest endpoint.
+    pub async fn get_similar_artists(
+        &self,
+        rating_key: &str,
+        limit: u32,
+    ) -> Result<Vec<Artist>, ApiError> {
+        let path = format!(
+            "{}/{}/nearest?limit={}&maxDistance=0.25",
+            EP_LIBRARY_METADATA, rating_key, limit
+        );
+
+        let response: ArtistsResponse = self.get(&path).await?;
+        let artists = response.media_container.metadata;
+
+        tracing::info!(
+            "get_similar_artists for {} found {} artists",
+            rating_key, artists.len()
+        );
+
+        Ok(artists)
+    }
+
     /// Get sonically similar albums via the /nearest endpoint.
     pub async fn get_similar_albums(
         &self,

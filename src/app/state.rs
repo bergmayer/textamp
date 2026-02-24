@@ -1202,6 +1202,22 @@ pub struct Popups {
     pub search_active: bool,
 }
 
+impl Popups {
+    /// Close all modal popups. Call before opening a new popup so only one
+    /// is ever visible at a time.
+    pub fn close_all(&mut self) {
+        self.sort = None;
+        self.radio_launcher = None;
+        self.adventure_launcher = None;
+        self.artist_radio_picker = None;
+        self.artist_bio = None;
+        self.input_dialog = None;
+        self.confirm_dialog = None;
+        self.library_picker_active = false;
+        self.search_active = false;
+    }
+}
+
 /// Artwork state.
 #[derive(Debug)]
 pub struct ArtworkState {
@@ -1256,6 +1272,7 @@ pub struct DjState {
 pub struct SimilarViewState {
     pub albums: Vec<Album>,
     pub tracks: Vec<Track>,
+    pub artists: Vec<Artist>,
     pub mode: SimilarMode,
     pub loading: bool,
     pub source_title: String,
@@ -1274,6 +1291,8 @@ pub struct SimilarViewState {
 pub enum RelatedSource {
     /// From Plex /related API.
     Plex,
+    /// From Plex "Similar" metadata tags on the artist.
+    SimilarTag,
     /// From textamp artist_aliases.
     Alias,
 }
@@ -2821,6 +2840,7 @@ pub enum SimilarMode {
     #[default]
     Albums,
     Tracks,
+    Artists,
 }
 
 /// Playback state.

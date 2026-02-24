@@ -88,7 +88,11 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         // Artist header
         if flat_idx >= scroll_offset && items.len() < visible_item_count {
             let is_selected = flat_idx == selected_idx;
-            let alias_suffix = if group.source == RelatedSource::Alias { " (alias)" } else { "" };
+            let alias_suffix = match group.source {
+                RelatedSource::Alias => " (alias)",
+                RelatedSource::SimilarTag => " (similar)",
+                RelatedSource::Plex => "",
+            };
             let header_text = format!("  {}{}", group.artist.title, alias_suffix);
             let header_display = truncate_middle(&header_text, max_text_width);
 

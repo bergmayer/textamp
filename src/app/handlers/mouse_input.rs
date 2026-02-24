@@ -604,6 +604,7 @@ fn handle_tab_bar_click(click_col: u16, state: &mut AppState) -> Vec<Action> {
     if let Some(quit_rect) = &regions.quit_button {
         if click_col >= quit_rect.x && click_col < quit_rect.right() {
             use crate::app::state::{ConfirmDialog, ConfirmAction};
+            state.popups.close_all();
             state.popups.confirm_dialog = Some(ConfirmDialog {
                 title: "Quit".to_string(),
                 message: "Are you sure you want to quit?".to_string(),
@@ -708,6 +709,7 @@ fn alt_bar_item_action(cmd: &crate::app::handlers::key_input::AltCommand, state:
         }
         (CommandModifier::Ctrl, 'q') => {
             use crate::app::state::{ConfirmDialog, ConfirmAction};
+            state.popups.close_all();
             state.popups.confirm_dialog = Some(ConfirmDialog {
                 title: "Quit".to_string(),
                 message: "Are you sure you want to quit?".to_string(),
@@ -2181,6 +2183,7 @@ fn handle_similar_click(click_row: u16, click_col: u16, state: &mut AppState) ->
     let total = match state.similar.mode {
         SimilarMode::Albums => state.similar.albums.len(),
         SimilarMode::Tracks => state.similar.tracks.len(),
+        SimilarMode::Artists => state.similar.artists.len(),
     };
 
     if total == 0 {
@@ -2334,6 +2337,7 @@ fn handle_scroll(up: bool, click_row: u16, click_col: u16, state: &mut AppState)
             let total = match state.similar.mode {
                 crate::app::state::SimilarMode::Albums => state.similar.albums.len(),
                 crate::app::state::SimilarMode::Tracks => state.similar.tracks.len(),
+                crate::app::state::SimilarMode::Artists => state.similar.artists.len(),
             };
             let max = total.saturating_sub(1);
             let new_idx = (state.list_state.similar_index as i32 + delta).clamp(0, max as i32) as usize;
@@ -3105,6 +3109,7 @@ fn try_similar_scrollbar_click(
     let total_items = match state.similar.mode {
         SimilarMode::Albums => state.similar.albums.len(),
         SimilarMode::Tracks => state.similar.tracks.len(),
+        SimilarMode::Artists => state.similar.artists.len(),
     };
     if total_items == 0 {
         return None;

@@ -65,7 +65,7 @@ pub fn available_alt_commands(state: &AppState) -> Vec<AltCommand> {
         enabled: enqueue_enabled });
 
     // Ctrl+M similar
-    let similar_enabled = has_track || has_album || has_playing;
+    let similar_enabled = has_artist_context(state) || has_track || has_album || has_playing;
     cmds.push(AltCommand { modifier: CommandModifier::Ctrl, key: 'm', label: "similar", display_key: None,
         enabled: similar_enabled });
 

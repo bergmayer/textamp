@@ -26,6 +26,9 @@ pub struct Artist {
     /// Artist biography/summary from Plex.
     #[serde(default)]
     pub summary: Option<String>,
+    /// "Similar" metadata tags from Plex (artist detail only).
+    #[serde(default, rename = "Similar")]
+    pub similar: Vec<GenreTag>,
 }
 
 /// Album metadata.

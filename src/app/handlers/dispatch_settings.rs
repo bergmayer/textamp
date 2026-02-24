@@ -300,6 +300,7 @@ pub async fn dispatch(
                         } else {
                             match idx - lib_count {
                                 0 => {
+                                    state.popups.close_all();
                                     state.popups.confirm_dialog = Some(ConfirmDialog {
                                         title: "Clear Library Cache".to_string(),
                                         message: "Clear all cached library data and reload from server?".to_string(),
@@ -308,6 +309,7 @@ pub async fn dispatch(
                                     });
                                 }
                                 1 => {
+                                    state.popups.close_all();
                                     state.popups.confirm_dialog = Some(ConfirmDialog {
                                         title: "Clear Artwork Cache".to_string(),
                                         message: "Delete all cached album artwork from disk?".to_string(),
@@ -316,6 +318,7 @@ pub async fn dispatch(
                                     });
                                 }
                                 2 => {
+                                    state.popups.close_all();
                                     state.popups.confirm_dialog = Some(ConfirmDialog {
                                         title: "Clear Subfolder Cache".to_string(),
                                         message: "Clear all cached subfolder contents?".to_string(),

@@ -221,6 +221,7 @@ pub async fn dispatch(
                 state.list_filter.loading = false;
                 state.list_filter.selected = 0;
             }
+            state.popups.close_all();
             state.popups.search_active = true;
             state.search_focus = SearchFocus::Input;
             state.search_query.clear();
@@ -232,6 +233,7 @@ pub async fn dispatch(
 
         // Library picker popup actions
         Action::OpenLibraryPicker => {
+            state.popups.close_all();
             state.popups.library_picker_active = true;
             if state.has_multiple_servers() {
                 let all_libs = state.all_libraries_with_servers();
@@ -289,6 +291,7 @@ pub async fn dispatch(
                         col.artwork_visible,
                         is_playlist,
                     );
+                    state.popups.close_all();
                     state.popups.sort = Some(popup);
                 }
             }
@@ -376,6 +379,7 @@ pub async fn dispatch(
 
         // Adventure launcher popup actions
         Action::OpenAdventureLauncher => {
+            state.popups.close_all();
             state.popups.adventure_launcher = Some(crate::app::state::AdventureLauncherState {
                 step: crate::app::state::AdventureStep::FindStartTrack,
                 query: String::new(),
@@ -456,6 +460,7 @@ pub async fn dispatch(
 
         // Multi-artist radio picker actions
         Action::OpenArtistRadioPicker => {
+            state.popups.close_all();
             state.popups.artist_radio_picker = Some(crate::app::state::ArtistRadioPickerState {
                 step: crate::app::state::ArtistRadioPickerStep::EnterCount,
                 max_artists: 0,
@@ -539,6 +544,7 @@ pub async fn dispatch(
         // Artist bio popup (F4)
         Action::ShowArtistBio { artist_key, artist_name } => {
             // Initialize popup in loading state
+            state.popups.close_all();
             state.popups.artist_bio = Some(crate::app::state::ArtistBioPopup {
                 artist_name: artist_name.clone(),
                 bio: String::new(),

@@ -352,6 +352,11 @@ pub fn get_artist_for_bio(state: &crate::app::state::AppState) -> Option<(String
                         }
                     }
                 }
+                crate::app::state::SimilarMode::Artists => {
+                    if let Some(artist) = state.similar.artists.get(state.list_state.similar_index) {
+                        return Some((artist.rating_key.clone(), artist.title.clone()));
+                    }
+                }
             }
         }
         _ => {}

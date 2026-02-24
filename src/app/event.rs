@@ -54,6 +54,7 @@ pub enum Event {
     AllAlbumsForMillerLoaded(Vec<Album>),
     SimilarAlbumsLoaded(Vec<Album>),
     SimilarTracksLoaded(Vec<Track>),
+    SimilarArtistsLoaded(Vec<Artist>),
     RelatedDataLoaded { groups: Vec<crate::app::state::RelatedArtistGroup> },
     SearchCompleted(SearchResults),
     TrackSearchCompleted { version: u64, tracks: Vec<Track> },

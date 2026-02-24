@@ -575,6 +575,7 @@ pub async fn dispatch(
                 } else {
                     "Save Station as Playlist"
                 };
+                state.popups.close_all();
                 state.popups.input_dialog = Some(crate::app::state::InputDialog {
                     title: title.to_string(),
                     input: String::new(),

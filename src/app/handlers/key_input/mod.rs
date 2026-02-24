@@ -187,6 +187,7 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
         // Quit: Ctrl+Q (with confirmation)
         (KeyModifiers::CONTROL, KeyCode::Char('q')) => {
             use crate::app::state::{ConfirmDialog, ConfirmAction};
+            state.popups.close_all();
             state.popups.confirm_dialog = Some(ConfirmDialog {
                 title: "Quit".to_string(),
                 message: "Are you sure you want to quit?".to_string(),
@@ -711,10 +712,30 @@ fn handle_auth_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
 
 /// Get the similar albums/tracks action based on current context.
 ///
-/// Priority: highlighted track → highlighted album → now-playing track.
+/// Priority: highlighted artist → highlighted track → highlighted album → now-playing track.
 pub(crate) fn get_similar_action(state: &mut AppState) -> Vec<Action> {
     // Store current view so we can return to it
     state.previous_view = Some(state.view);
+
+    // 0. Highlighted artist → LoadSimilarArtists
+    if state.view == View::Browse {
+        if let Some(nav) = state.browse_nav() {
+            if let Some(item) = nav.selected_item() {
+                if let BrowseItem::Artist { key, title, .. } = item {
+                    let key = key.clone();
+                    let title = title.clone();
+                    state.similar.tab_album_key = None;
+                    state.similar.tab_album_title = None;
+                    state.similar.tab_track_key = None;
+                    state.similar.tab_track_title = None;
+                    return vec![Action::LoadSimilarArtists {
+                        artist_key: key,
+                        title,
+                    }];
+                }
+            }
+        }
+    }
 
     // 1. Highlighted track → LoadSimilarTracks
     if let Some(track) = get_selected_track(state) {

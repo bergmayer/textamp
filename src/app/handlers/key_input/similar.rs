@@ -65,6 +65,9 @@ pub(in crate::app::handlers) fn handle_similar_keys(key: event::KeyEvent, state:
                         state.set_status("No track playing.".to_string());
                     }
                 }
+                SimilarMode::Artists => {
+                    state.set_status("No album/track context.".to_string());
+                }
             }
             vec![]
         }
@@ -91,6 +94,15 @@ pub(in crate::app::handlers) fn handle_similar_keys(key: event::KeyEvent, state:
                         state.list_state.similar_index = idx;
                     }
                 }
+                SimilarMode::Artists => {
+                    if let Some(idx) = state.similar.artists.iter().position(|a| {
+                        a.title.chars().next()
+                            .map(|ch| ch.to_ascii_lowercase() == letter_lower)
+                            .unwrap_or(false)
+                    }) {
+                        state.list_state.similar_index = idx;
+                    }
+                }
             }
             vec![]
         }
@@ -101,6 +113,7 @@ pub(in crate::app::handlers) fn handle_similar_keys(key: event::KeyEvent, state:
 
 /// Activate the currently highlighted similar item (Enter or second click).
 /// Albums: navigate to album in library (Miller columns). Tracks: play the track.
+/// Artists: navigate to artist in Library (Miller columns).
 pub(in crate::app::handlers) fn activate_similar_item(state: &mut AppState) -> Vec<Action> {
     use crate::app::state::SimilarMode;
 
@@ -140,6 +153,26 @@ pub(in crate::app::handlers) fn activate_similar_item(state: &mut AppState) -> V
         SimilarMode::Tracks => {
             if let Some(track) = state.similar.tracks.get(idx).cloned() {
                 vec![Action::PlayTrack(track)]
+            } else {
+                vec![]
+            }
+        }
+        SimilarMode::Artists => {
+            if let Some(artist) = state.similar.artists.get(idx).cloned() {
+                let artist_key = artist.rating_key.clone();
+                state.set_view(View::Browse);
+                state.browse_category = crate::app::state::BrowseCategory::Library;
+                // Select artist in Miller column 0
+                if let Some(pos) = state.artist_nav.columns.first()
+                    .and_then(|col| col.items.iter().position(|i| i.key() == artist_key.as_str()))
+                {
+                    if let Some(col) = state.artist_nav.columns.first_mut() {
+                        col.selected_index = pos;
+                    }
+                }
+                state.artist_nav.focused_column = 0;
+                state.artist_nav.truncate_right();
+                vec![Action::LoadArtistAlbumsForMiller { artist_key }]
             } else {
                 vec![]
             }
