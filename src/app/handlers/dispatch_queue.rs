@@ -285,6 +285,10 @@ pub async fn dispatch(
             audio.stop();
             audio.track_cache.flush();
             state.playback.status = PlayStatus::Stopped;
+            // Clear artwork so stale cover art doesn't linger
+            state.artwork.current_thumb = None;
+            state.artwork.current_data = None;
+            state.artwork.loading = false;
         }
         Action::ToggleQueueShuffle => {
             use crate::audio::cache;

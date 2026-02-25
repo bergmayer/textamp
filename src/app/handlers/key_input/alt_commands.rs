@@ -162,6 +162,14 @@ fn has_track_context(state: &AppState) -> bool {
             {
                 return true;
             }
+            // Folder view: any track item in the focused column
+            if state.browse_category == BrowseCategory::Folders {
+                if let Some(ref fs) = state.folder_state {
+                    if let Some(col) = fs.focused() {
+                        return col.items.iter().any(|item| item.rating_key.is_some());
+                    }
+                }
+            }
             // Legacy right panel tracks
             matches!(
                 state.right_panel_mode,
