@@ -740,10 +740,20 @@ pub fn handle_app_event(
                 tracing::debug!("Ignoring stale folders preload for library {}", library_key);
                 return vec![];
             }
-            // Only set if folders weren't already loaded (user might have navigated there)
             if state.folder_state.is_none() {
+                // First load: set up folder state
                 state.folder_state = Some(folder_state);
                 tracing::debug!("Folders preloaded and ready");
+            } else if let Some(ref mut existing) = state.folder_state {
+                // Refresh: update root column items while preserving navigation
+                if let Some(new_root) = folder_state.inner.columns.into_iter().next() {
+                    if let Some(old_root) = existing.columns.first_mut() {
+                        let old_selected = old_root.selected_index;
+                        old_root.items = new_root.items;
+                        old_root.selected_index = old_selected.min(old_root.items.len().saturating_sub(1));
+                    }
+                }
+                tracing::debug!("Folders root refreshed");
             }
             state.cache_mgmt.preloads_in_progress.remove("Folders");
             if state.cache_mgmt.preloads_in_progress.is_empty() { state.cache_mgmt.preloads_total = 0; }
@@ -785,6 +795,92 @@ pub fn handle_app_event(
                     }
                 }
             }
+            vec![]
+        }
+        Event::FolderRootLoaded { library_key, lib_title, items } => {
+            // Ignore if library changed while loading
+            if state.active_library.as_ref() != Some(&library_key) {
+                return vec![];
+            }
+            if state.folder_state.is_none() {
+                use crate::services::{FolderColumn, FolderNavigationState};
+                let root_column = FolderColumn::new(None, lib_title, items);
+                state.folder_state = Some(FolderNavigationState::with_root(library_key, root_column));
+            } else if let Some(ref mut folder_state) = state.folder_state {
+                // Refresh: update root column items while preserving navigation
+                if let Some(root_col) = folder_state.columns.first_mut() {
+                    let old_selected = root_col.selected_index;
+                    root_col.items = items;
+                    root_col.selected_index = old_selected.min(root_col.items.len().saturating_sub(1));
+                }
+            }
+            vec![]
+        }
+        Event::FolderContentsLoaded { folder_key, items, folder_path, item_path } => {
+            use crate::plex::CachedFolder;
+            use crate::services::FolderColumn;
+            use super::dispatch_folders::{derive_path_from_children, backfill_parent_path, spawn_path_discovery};
+
+            state.pending_folder_load = None;
+
+            let resolved_path = item_path
+                .or(folder_path)
+                .or_else(|| derive_path_from_children(&items, &state.folder_contents_cache));
+            let folder_title = resolved_path.clone().unwrap_or_default();
+
+            // Store in cache
+            state.folder_contents_cache.insert(folder_key.clone(), CachedFolder::with_path(items.clone(), resolved_path));
+            state.cache_mgmt.dirty = true;
+            tracing::debug!("Cached folder: {} ({} items)", folder_key, items.len());
+
+            // If we couldn't determine the path, probe a child folder in background
+            if folder_title.is_empty() {
+                spawn_path_discovery(&folder_key, &items, event_tx, client);
+            }
+
+            // Only push column if no column with this folder_key already exists
+            // (prevents duplicates from race with cache-hit navigation)
+            if let Some(ref mut folder_state) = state.folder_state {
+                let already_exists = folder_state.columns.iter()
+                    .any(|col| col.key.as_ref() == Some(&folder_key));
+                if !already_exists {
+                    let new_column = FolderColumn::new(Some(folder_key), folder_title, items);
+                    folder_state.push_column(new_column);
+                    backfill_parent_path(folder_state);
+                }
+            }
+            state.clear_status();
+            vec![]
+        }
+        Event::FolderLoadFailed(msg) => {
+            state.pending_folder_load = None;
+            state.set_error(msg);
+            vec![]
+        }
+        Event::FolderRefreshLoaded { folder_key, items, folder_path } => {
+            use crate::plex::CachedFolder;
+            let folder_title = folder_path.clone().unwrap_or_default();
+
+            // Update the cache with fresh data and new timestamp
+            state.folder_contents_cache.insert(folder_key.clone(), CachedFolder::with_path(items.clone(), folder_path));
+            state.cache_mgmt.dirty = true;
+            tracing::info!("Refreshed subfolder cache: {} ({} items)", folder_key, items.len());
+
+            // Update the currently displayed column if it matches
+            if let Some(ref mut folder_state) = state.folder_state {
+                for col in folder_state.columns.iter_mut() {
+                    if col.key.as_ref() == Some(&folder_key) {
+                        let old_selected = col.selected_index;
+                        col.items = items.clone();
+                        col.selected_index = old_selected.min(col.items.len().saturating_sub(1));
+                        if !folder_title.is_empty() {
+                            col.title = folder_title.clone();
+                        }
+                        break;
+                    }
+                }
+            }
+            state.set_status("Folder refreshed".to_string());
             vec![]
         }
         Event::FolderPathDiscovered { folder_key, path } => {
@@ -1401,8 +1497,9 @@ pub fn handle_app_event(
 
             // Folders
             if !cached.root_folders.is_empty() {
-                use crate::services::{FolderColumn, FolderNavigationState};
-                let root_column = FolderColumn::new(None, lib_name, cached.root_folders);
+                use crate::services::{FolderColumn, FolderNavigationState, FolderService};
+                let folders = FolderService::filter_invalid(cached.root_folders);
+                let root_column = FolderColumn::new(None, lib_name, folders);
                 state.folder_state = Some(FolderNavigationState::with_root(library_key.clone(), root_column));
             }
             if !cached.folder_contents.is_empty() {

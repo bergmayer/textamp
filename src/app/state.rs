@@ -1491,6 +1491,8 @@ pub struct AppState {
     /// At 32+ days, entries are served as warm cache and re-fetched in background on access.
     /// Subfolders are only cached when navigated to (lazy caching).
     pub folder_contents_cache: HashMap<String, CachedFolder>,
+    /// Folder key currently being loaded asynchronously (prevents duplicate spawns).
+    pub pending_folder_load: Option<String>,
     /// Whether a subfolder preload crawl is currently active.
     pub subfolder_preload_active: bool,
     /// Cancel flag for the subfolder preload task (set on library switch).
@@ -2013,6 +2015,7 @@ impl AppState {
             settings_state: SettingsState::default(),
             folder_state: None,
             folder_contents_cache: HashMap::new(),
+            pending_folder_load: None,
             subfolder_preload_active: false,
             subfolder_preload_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             keep_subfolder_cache: false,

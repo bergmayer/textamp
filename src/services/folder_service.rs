@@ -17,7 +17,16 @@ impl FolderService {
 
         // Add directories as folders (with filesystem path if available)
         for dir in &response.media_container.directories {
-            items.push(FolderItem::folder_with_path(dir.key.clone(), dir.title.clone(), dir.path.clone()));
+            // Use path as title when the API returns an empty or useless title (e.g. "?" for drive roots)
+            let title = if dir.title.is_empty() || dir.title == "?" {
+                match dir.path.as_deref().filter(|p| !p.is_empty()) {
+                    Some(path) => path.to_string(),
+                    None => continue, // Skip entries with no usable title or path
+                }
+            } else {
+                dir.title.clone()
+            };
+            items.push(FolderItem::folder_with_path(dir.key.clone(), title, dir.path.clone()));
         }
 
         // Add metadata items as tracks (only if they have a rating_key)
@@ -95,6 +104,13 @@ impl FolderService {
                 _ => a.title.cmp(&b.title), // Same type: sort ASCIIbetically
             }
         });
+    }
+
+    /// Filter out folder items with useless titles (empty or "?" from Plex drive roots).
+    pub fn filter_invalid(items: Vec<FolderItem>) -> Vec<FolderItem> {
+        items.into_iter().filter(|item| {
+            !item.is_folder() || (!item.title.is_empty() && item.title != "?")
+        }).collect()
     }
 
     /// Get only the tracks from a list of items, sorted ASCIIbetically.

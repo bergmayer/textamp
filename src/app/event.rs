@@ -99,6 +99,28 @@ pub enum Event {
         folder_key: String,
         cached_folder: crate::plex::CachedFolder,
     },
+    /// Folder root loaded in background (LoadFolderRoot).
+    FolderRootLoaded {
+        library_key: String,
+        lib_title: String,
+        items: Vec<crate::plex::models::FolderItem>,
+    },
+    /// Subfolder contents loaded in background (NavigateIntoFolder cache miss).
+    FolderContentsLoaded {
+        folder_key: String,
+        items: Vec<crate::plex::models::FolderItem>,
+        folder_path: Option<String>,
+        /// Filesystem path from the selected item before navigation (preserved for title).
+        item_path: Option<String>,
+    },
+    /// Folder load failed (background).
+    FolderLoadFailed(String),
+    /// Subfolder refresh completed in background (RefreshSubfolder / F5).
+    FolderRefreshLoaded {
+        folder_key: String,
+        items: Vec<crate::plex::models::FolderItem>,
+        folder_path: Option<String>,
+    },
     /// Async path discovery completed for a folder column.
     FolderPathDiscovered {
         folder_key: String,

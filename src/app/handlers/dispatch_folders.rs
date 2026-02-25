@@ -14,7 +14,7 @@ use super::helpers;
 
 /// Derive a folder's filesystem path from its child folders' cached paths.
 /// If a child folder has a cached path like `D:\music\10cm\4.0`, the parent is `D:\music\10cm`.
-fn derive_path_from_children(
+pub(crate) fn derive_path_from_children(
     items: &[crate::plex::models::FolderItem],
     folder_cache: &std::collections::HashMap<String, CachedFolder>,
 ) -> Option<String> {
@@ -50,7 +50,7 @@ fn derive_path_from_children(
 /// When a folder contains only subdirectories (no tracks), the Plex API doesn't return
 /// filesystem paths. This probes the first child folder to find tracks and derive the
 /// parent path from their file paths.
-fn spawn_path_discovery(
+pub(crate) fn spawn_path_discovery(
     folder_key: &str,
     items: &[crate::plex::models::FolderItem],
     event_tx: &mpsc::Sender<Event>,
@@ -91,7 +91,7 @@ fn spawn_path_discovery(
 }
 
 /// After pushing a column with a known path, backfill any parent column that's missing a path.
-fn backfill_parent_path(folder_state: &mut FolderNavigationState) {
+pub(crate) fn backfill_parent_path(folder_state: &mut FolderNavigationState) {
     let num_cols = folder_state.columns.len();
     if num_cols < 2 { return; }
     let child_title = folder_state.columns[num_cols - 1].title.clone();
@@ -120,21 +120,32 @@ pub async fn dispatch(
     match action {
         Action::LoadFolderRoot => {
             if let Some(lib_key) = &state.active_library {
-                match client.get_library_folders(lib_key).await {
-                    Ok(response) => {
-                        let items = FolderService::from_response(&response);
-                        let lib_title = state.libraries.iter()
-                            .find(|l| &l.key == lib_key)
-                            .map(|l| l.title.clone())
-                            .unwrap_or_else(|| "Root".to_string());
+                let lib_title = state.libraries.iter()
+                    .find(|l| &l.key == lib_key)
+                    .map(|l| l.title.clone())
+                    .unwrap_or_else(|| "Root".to_string());
 
-                        let root_column = FolderColumn::new(None, lib_title, items);
-                        state.folder_state = Some(FolderNavigationState::with_root(lib_key.clone(), root_column));
+                let event_tx = event_tx.clone();
+                let client = client.clone();
+                let lk = lib_key.clone();
+                let lt = lib_title;
+                tokio::spawn(async move {
+                    match client.get_library_folders(&lk).await {
+                        Ok(response) => {
+                            let items = FolderService::from_response(&response);
+                            let _ = event_tx.send(Event::FolderRootLoaded {
+                                library_key: lk,
+                                lib_title: lt,
+                                items,
+                            }).await;
+                        }
+                        Err(e) => {
+                            let _ = event_tx.send(Event::FolderLoadFailed(
+                                format!("Failed to load folders: {}", e)
+                            )).await;
+                        }
                     }
-                    Err(e) => {
-                        state.set_error(format!("Failed to load folders: {}", e));
-                    }
-                }
+                });
             }
         }
         Action::NavigateIntoFolder(folder_key) => {
@@ -146,6 +157,7 @@ pub async fn dispatch(
 
             // Check cache first for instant navigation
             if let Some(cached_folder) = state.folder_contents_cache.get(&folder_key) {
+                state.pending_folder_load = None; // cancel any in-flight load
                 tracing::debug!("Folder cache hit: {} ({} items)", folder_key, cached_folder.items.len());
                 let folder_title = item_path.clone()
                     .or_else(|| cached_folder.path.clone())
@@ -192,76 +204,60 @@ pub async fn dispatch(
                         }
                     });
                 }
-            } else {
-                // Not in cache - fetch from API
-                match client.get_folder_contents(&folder_key).await {
-                    Ok(response) => {
-                        let items = FolderService::from_response(&response);
-                        let folder_path = item_path
-                            .or_else(|| FolderService::folder_path(&response))
-                            .or_else(|| derive_path_from_children(&items, &state.folder_contents_cache));
-                        let folder_title = folder_path.clone().unwrap_or_default();
-
-                        // Store in cache with timestamp for future use
-                        state.folder_contents_cache.insert(folder_key.clone(), CachedFolder::with_path(items.clone(), folder_path));
-                        state.cache_mgmt.dirty = true;
-                        tracing::debug!("Cached folder: {} ({} items)", folder_key, items.len());
-
-                        // If we couldn't determine the path, probe a child folder in background
-                        if folder_title.is_empty() {
-                            spawn_path_discovery(&folder_key, &items, event_tx, client);
+            } else if state.pending_folder_load.as_ref() != Some(&folder_key) {
+                // Not in cache and not already loading - fetch from API in background
+                state.pending_folder_load = Some(folder_key.clone());
+                state.set_status("Loading folder\u{2026}".to_string());
+                let event_tx = event_tx.clone();
+                let client = client.clone();
+                let fk = folder_key;
+                let ip = item_path;
+                tokio::spawn(async move {
+                    match client.get_folder_contents(&fk).await {
+                        Ok(response) => {
+                            let items = FolderService::from_response(&response);
+                            let folder_path = FolderService::folder_path(&response);
+                            let _ = event_tx.send(Event::FolderContentsLoaded {
+                                folder_key: fk,
+                                items,
+                                folder_path,
+                                item_path: ip,
+                            }).await;
                         }
-
-                        if let Some(ref mut folder_state) = state.folder_state {
-                            let new_column = FolderColumn::new(Some(folder_key), folder_title, items);
-                            folder_state.push_column(new_column);
-                            backfill_parent_path(folder_state);
+                        Err(e) => {
+                            let _ = event_tx.send(Event::FolderLoadFailed(
+                                format!("Failed to load folder: {}", e)
+                            )).await;
                         }
                     }
-                    Err(e) => {
-                        state.set_error(format!("Failed to load folder: {}", e));
-                    }
-                }
+                });
             }
         }
         Action::RefreshSubfolder(folder_key) => {
             // Manual refresh of a specific subfolder (F5 when focused on subfolder)
             // This is the ONLY way subfolder caches get manually refreshed.
-
-            match client.get_folder_contents(&folder_key).await {
-                Ok(response) => {
-                    let items = FolderService::from_response(&response);
-                    let folder_path = FolderService::folder_path(&response);
-                    let folder_title = folder_path.clone().unwrap_or_default();
-
-                    // Update the cache with fresh data and new timestamp
-                    state.folder_contents_cache.insert(folder_key.clone(), CachedFolder::with_path(items.clone(), folder_path));
-                    state.cache_mgmt.dirty = true;
-                    tracing::info!("Refreshed subfolder cache: {} ({} items)", folder_key, items.len());
-
-                    // Update the currently displayed column if it matches
-                    if let Some(ref mut folder_state) = state.folder_state {
-                        // Find the column that corresponds to this folder key and update it
-                        for col in folder_state.columns.iter_mut() {
-                            if col.key.as_ref() == Some(&folder_key) {
-                                let old_selected = col.selected_index;
-                                col.items = items.clone();
-                                // Preserve selection position if possible
-                                col.selected_index = old_selected.min(col.items.len().saturating_sub(1));
-                                if !folder_title.is_empty() {
-                                    col.title = folder_title.clone();
-                                }
-                                break;
-                            }
-                        }
+            state.set_status("Refreshing folder\u{2026}".to_string());
+            let event_tx = event_tx.clone();
+            let client = client.clone();
+            let fk = folder_key;
+            tokio::spawn(async move {
+                match client.get_folder_contents(&fk).await {
+                    Ok(response) => {
+                        let items = FolderService::from_response(&response);
+                        let folder_path = FolderService::folder_path(&response);
+                        let _ = event_tx.send(Event::FolderRefreshLoaded {
+                            folder_key: fk,
+                            items,
+                            folder_path,
+                        }).await;
                     }
-
-                    state.set_status("Folder refreshed".to_string());
+                    Err(e) => {
+                        let _ = event_tx.send(Event::FolderLoadFailed(
+                            format!("Failed to refresh folder: {}", e)
+                        )).await;
+                    }
                 }
-                Err(e) => {
-                    state.set_error(format!("Failed to refresh folder: {}", e));
-                }
-            }
+            });
         }
         Action::PlayFolderTracks => {
             // Play tracks in the focused column's folder, starting from selected item
