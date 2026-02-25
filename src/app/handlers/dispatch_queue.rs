@@ -13,6 +13,51 @@ use tokio::sync::mpsc;
 
 use super::helpers;
 
+/// Fetch tracks from a folder and return them ordered to match the column's display order,
+/// starting from `start_index` (the selected item in the column).
+/// Returns empty vec on error or if no tracks are found.
+async fn fetch_folder_tracks_from_index(
+    state: &AppState,
+    client: &PlexClient,
+    start_index: usize,
+) -> Vec<Track> {
+    let folder_state = match state.folder_state.as_ref() {
+        Some(fs) => fs,
+        None => return vec![],
+    };
+    let col = match folder_state.focused() {
+        Some(c) => c,
+        None => return vec![],
+    };
+
+    // Collect rating_keys from the column in display order, starting at start_index
+    let column_keys: Vec<&str> = col.items[start_index..].iter()
+        .filter_map(|item| item.rating_key.as_deref())
+        .collect();
+    if column_keys.is_empty() {
+        return vec![];
+    }
+
+    // Fetch full Track objects from API
+    let tracks = if let Some(ref folder_key) = col.key {
+        client.get_folder_tracks(folder_key).await.unwrap_or_default()
+    } else if let Some(lib_key) = &state.active_library {
+        client.get_library_root_tracks(lib_key).await.unwrap_or_default()
+    } else {
+        return vec![];
+    };
+
+    // Build lookup by rating_key
+    let mut track_map: std::collections::HashMap<String, Track> = tracks.into_iter()
+        .map(|t| (t.rating_key.clone(), t))
+        .collect();
+
+    // Return tracks in column display order
+    column_keys.into_iter()
+        .filter_map(|key| track_map.remove(key))
+        .collect()
+}
+
 /// Dispatch queue actions. Returns follow-up actions.
 pub async fn dispatch(
     event_tx: &mpsc::Sender<Event>,
@@ -378,6 +423,32 @@ pub async fn dispatch(
                 return Ok(vec![Action::EnqueueAlbum { rating_key, title }]);
             }
 
+            // Folder tracks: fetch from API, ordered by column display order
+            if state.view == View::Browse && state.browse_category == BrowseCategory::Folders {
+                let start = state.folder_state.as_ref()
+                    .and_then(|fs| fs.focused())
+                    .map(|col| col.selected_index)
+                    .unwrap_or(0);
+                let tracks_to_add = fetch_folder_tracks_from_index(state, client, start).await;
+                if !tracks_to_add.is_empty() {
+                    // If radio is playing, convert to queue mode
+                    if state.playback_mode == PlaybackMode::Radio {
+                        state.queue = state.radio.tracks.clone();
+                        state.queue_index = state.radio.track_index;
+                        state.playback_mode = PlaybackMode::Queue;
+                        state.radio.clear();
+                        if let Some(idx) = state.queue_index {
+                            state.list_state.queue_index = idx;
+                        }
+                    }
+                    state.queue_original.clear();
+                    state.queue_sort_mode = QueueSortMode::QueueOrder;
+                    let added = tracks_to_add.len();
+                    state.queue.extend(tracks_to_add);
+                    state.set_status(format!("Added {} to queue ({} total)", added, state.queue.len()));
+                }
+            }
+
             // Get tracks from selected index to end
             let tracks_to_add: Vec<Track> = match state.view {
                 View::Browse => {
@@ -499,6 +570,18 @@ pub async fn dispatch(
 
             if let Some((rating_key, title)) = album_to_enqueue {
                 return Ok(vec![Action::EnqueueAlbumNext { rating_key, title }]);
+            }
+
+            // Folder tracks: fetch from API, ordered by column display order
+            if state.view == View::Browse && state.browse_category == BrowseCategory::Folders {
+                let start = state.folder_state.as_ref()
+                    .and_then(|fs| fs.focused())
+                    .map(|col| col.selected_index)
+                    .unwrap_or(0);
+                let tracks = fetch_folder_tracks_from_index(state, client, start).await;
+                if !tracks.is_empty() {
+                    return Ok(vec![Action::EnqueueTracksNext(tracks)]);
+                }
             }
 
             // Get tracks from selected index to end

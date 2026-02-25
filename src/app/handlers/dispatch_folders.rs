@@ -265,24 +265,20 @@ pub async fn dispatch(
                 // Get the folder key and selected item from the focused column
                 let selected_key = folder_state.selected_item().map(|item| item.key.clone());
                 let selected_index = folder_state.focused().map(|col| col.selected_index).unwrap_or(0);
-                let is_shuffled = folder_state.focused().map(|col| col.is_shuffled()).unwrap_or(false);
-                // Capture track key order from column items for shuffle reordering
-                let column_track_keys: Vec<String> = if is_shuffled {
-                    folder_state.focused().map(|col| {
-                        col.items.iter()
-                            .filter_map(|item| item.rating_key.clone())
-                            .collect()
-                    }).unwrap_or_default()
-                } else {
-                    vec![]
-                };
+                // Capture track key order from column items to reorder API results
+                // to match column display order (filename order, or shuffled order)
+                let column_track_keys: Vec<String> = folder_state.focused().map(|col| {
+                    col.items.iter()
+                        .filter_map(|item| item.rating_key.clone())
+                        .collect()
+                }).unwrap_or_default();
 
                 if let Some(col) = folder_state.focused() {
                     if let Some(ref folder_key) = col.key {
                         match client.get_folder_tracks(folder_key).await {
                             Ok(mut tracks) => {
-                                // Reorder tracks to match shuffled column order
-                                if is_shuffled && !column_track_keys.is_empty() {
+                                // Reorder tracks to match column display order
+                                if !column_track_keys.is_empty() {
                                     use std::collections::HashMap;
                                     let pos_map: HashMap<&str, usize> = column_track_keys.iter()
                                         .enumerate()
@@ -323,8 +319,8 @@ pub async fn dispatch(
                             match client.get_library_root_tracks(lib_key).await {
                                 Ok(mut tracks) => {
                                     if !tracks.is_empty() {
-                                        // Reorder tracks to match shuffled column order
-                                        if is_shuffled && !column_track_keys.is_empty() {
+                                        // Reorder tracks to match column display order
+                                        if !column_track_keys.is_empty() {
                                             use std::collections::HashMap;
                                             let pos_map: HashMap<&str, usize> = column_track_keys.iter()
                                                 .enumerate()
