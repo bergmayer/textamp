@@ -12,6 +12,28 @@ use tokio::sync::mpsc;
 
 use super::helpers;
 
+/// Resolve folder column track items to full Track objects using the all_tracks cache.
+/// Returns tracks in column display order (only track items, skipping folders).
+/// Returns empty vec if all_tracks cache is not loaded.
+fn resolve_folder_column_tracks(state: &AppState) -> Vec<crate::plex::models::Track> {
+    if state.all_tracks.is_empty() {
+        return vec![];
+    }
+    let col = match state.folder_state.as_ref().and_then(|fs| fs.focused()) {
+        Some(c) => c,
+        None => return vec![],
+    };
+
+    let track_map: std::collections::HashMap<&str, &crate::plex::models::Track> = state.all_tracks.iter()
+        .map(|t| (t.rating_key.as_str(), t))
+        .collect();
+
+    col.items.iter()
+        .filter_map(|item| item.rating_key.as_deref())
+        .filter_map(|key| track_map.get(key).map(|t| (*t).clone()))
+        .collect()
+}
+
 /// Derive a folder's filesystem path from its child folders' cached paths.
 /// If a child folder has a cached path like `D:\music\10cm\4.0`, the parent is `D:\music\10cm`.
 pub(crate) fn derive_path_from_children(
@@ -262,22 +284,46 @@ pub async fn dispatch(
         Action::PlayFolderTracks => {
             // Play tracks in the focused column's folder, starting from selected item
             if let Some(ref folder_state) = state.folder_state {
-                // Get the folder key and selected item from the focused column
-                let selected_key = folder_state.selected_item().map(|item| item.key.clone());
                 let selected_index = folder_state.focused().map(|col| col.selected_index).unwrap_or(0);
-                // Capture track key order from column items to reorder API results
-                // to match column display order (filename order, or shuffled order)
-                let column_track_keys: Vec<String> = folder_state.focused().map(|col| {
-                    col.items.iter()
-                        .filter_map(|item| item.rating_key.clone())
-                        .collect()
-                }).unwrap_or_default();
 
-                if let Some(col) = folder_state.focused() {
-                    if let Some(ref folder_key) = col.key {
-                        match client.get_folder_tracks(folder_key).await {
-                            Ok(mut tracks) => {
-                                // Reorder tracks to match column display order
+                // Resolve tracks in column display order using all_tracks cache
+                let tracks = resolve_folder_column_tracks(state);
+
+                if !tracks.is_empty() {
+                    // Find start position (selected item)
+                    let start_idx = selected_index.min(tracks.len().saturating_sub(1));
+
+                    if let Some(current) = state.current_track().cloned() {
+                        helpers::report_playback_stop_to_plex(
+                            &current, state.playback.position_ms, true,
+                            state.plex_session_id.clone(), client,
+                        );
+                    }
+                    state.plex_session_id = Some(helpers::generate_plex_session_id());
+                    state.queue_original.clear();
+                    state.queue_sort_mode = crate::app::state::QueueSortMode::QueueOrder;
+                    helpers::queue_and_play(event_tx, state, client, audio, tracks, start_idx).await;
+                } else {
+                    // Fallback: fetch from API if all_tracks cache is empty
+                    let selected_key = folder_state.selected_item().map(|item| item.key.clone());
+                    let column_track_keys: Vec<String> = folder_state.focused().map(|col| {
+                        col.items.iter()
+                            .filter_map(|item| item.rating_key.clone())
+                            .collect()
+                    }).unwrap_or_default();
+
+                    if let Some(col) = folder_state.focused() {
+                        let api_result = if let Some(ref folder_key) = col.key {
+                            client.get_folder_tracks(folder_key).await
+                        } else if let Some(lib_key) = &state.active_library {
+                            client.get_library_root_tracks(lib_key).await
+                        } else {
+                            Ok(vec![])
+                        };
+
+                        match api_result {
+                            Ok(mut tracks) if !tracks.is_empty() => {
+                                // Reorder to match column display order
                                 if !column_track_keys.is_empty() {
                                     use std::collections::HashMap;
                                     let pos_map: HashMap<&str, usize> = column_track_keys.iter()
@@ -289,7 +335,6 @@ pub async fn dispatch(
                                     });
                                 }
 
-                                // Find the index of the selected track
                                 let start_idx = if let Some(ref sel_key) = selected_key {
                                     tracks.iter().position(|t| {
                                         t.rating_key == *sel_key || t.key == *sel_key
@@ -309,52 +354,9 @@ pub async fn dispatch(
                                 state.queue_sort_mode = crate::app::state::QueueSortMode::QueueOrder;
                                 helpers::queue_and_play(event_tx, state, client, audio, tracks, start_idx).await;
                             }
+                            Ok(_) => {} // empty
                             Err(e) => {
                                 state.set_error(format!("Failed to load folder tracks: {}", e));
-                            }
-                        }
-                    } else {
-                        // Root folder - get all tracks from library root
-                        if let Some(lib_key) = &state.active_library {
-                            match client.get_library_root_tracks(lib_key).await {
-                                Ok(mut tracks) => {
-                                    if !tracks.is_empty() {
-                                        // Reorder tracks to match column display order
-                                        if !column_track_keys.is_empty() {
-                                            use std::collections::HashMap;
-                                            let pos_map: HashMap<&str, usize> = column_track_keys.iter()
-                                                .enumerate()
-                                                .map(|(i, k)| (k.as_str(), i))
-                                                .collect();
-                                            tracks.sort_by_key(|t| {
-                                                pos_map.get(t.rating_key.as_str()).copied().unwrap_or(usize::MAX)
-                                            });
-                                        }
-
-                                        // Find the index of the selected track
-                                        let start_idx = if let Some(ref sel_key) = selected_key {
-                                            tracks.iter().position(|t| {
-                                                t.rating_key == *sel_key || t.key == *sel_key
-                                            }).unwrap_or(selected_index.min(tracks.len().saturating_sub(1)))
-                                        } else {
-                                            0
-                                        };
-
-                                        if let Some(current) = state.current_track().cloned() {
-                                            helpers::report_playback_stop_to_plex(
-                                                &current, state.playback.position_ms, true,
-                                                state.plex_session_id.clone(), client,
-                                            );
-                                        }
-                                        state.plex_session_id = Some(helpers::generate_plex_session_id());
-                                        state.queue_original.clear();
-                                        state.queue_sort_mode = crate::app::state::QueueSortMode::QueueOrder;
-                                        helpers::queue_and_play(event_tx, state, client, audio, tracks, start_idx).await;
-                                    }
-                                }
-                                Err(e) => {
-                                    state.set_error(format!("Failed to load tracks: {}", e));
-                                }
                             }
                         }
                     }
@@ -368,11 +370,22 @@ pub async fn dispatch(
                     .and_then(|col| col.items.get(track_index))
                     .and_then(|item| item.rating_key.clone());
 
+                // Fast path: look up from all_tracks cache
+                if let Some(ref sel_key) = selected_key {
+                    if let Some(track) = state.all_tracks.iter().find(|t| t.rating_key == *sel_key) {
+                        state.plex_session_id = Some(helpers::generate_plex_session_id());
+                        state.queue_original.clear();
+                        state.queue_sort_mode = crate::app::state::QueueSortMode::QueueOrder;
+                        helpers::queue_and_play(event_tx, state, client, audio, vec![track.clone()], 0).await;
+                        return Ok(vec![]);
+                    }
+                }
+
+                // Slow path: fetch from API
                 if let Some(col) = folder_state.focused() {
                     if let Some(ref folder_key) = col.key {
                         match client.get_folder_tracks(folder_key).await {
                             Ok(tracks) => {
-                                // Find the track matching the selected key
                                 let track = if let Some(ref sel_key) = selected_key {
                                     tracks.into_iter().find(|t| t.rating_key == *sel_key || t.key == *sel_key)
                                 } else {

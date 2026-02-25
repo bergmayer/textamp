@@ -13,10 +13,11 @@ use tokio::sync::mpsc;
 
 use super::helpers;
 
-/// Fetch tracks from a folder and return them ordered to match the column's display order,
-/// starting from `start_index` (the selected item in the column).
-/// Returns empty vec on error or if no tracks are found.
-async fn fetch_folder_tracks_from_index(
+/// Get tracks from a folder column in display order, starting from `start_index`.
+///
+/// Uses the preloaded `all_tracks` cache for instant lookup (no API call).
+/// Falls back to API fetch if `all_tracks` is empty.
+async fn get_folder_tracks_from_index(
     state: &AppState,
     client: &PlexClient,
     start_index: usize,
@@ -38,7 +39,20 @@ async fn fetch_folder_tracks_from_index(
         return vec![];
     }
 
-    // Fetch full Track objects from API
+    // Fast path: look up from preloaded all_tracks cache (no network call)
+    if !state.all_tracks.is_empty() {
+        let track_map: std::collections::HashMap<&str, &Track> = state.all_tracks.iter()
+            .map(|t| (t.rating_key.as_str(), t))
+            .collect();
+        let result: Vec<Track> = column_keys.iter()
+            .filter_map(|key| track_map.get(key).map(|t| (*t).clone()))
+            .collect();
+        if !result.is_empty() {
+            return result;
+        }
+    }
+
+    // Slow path: fetch from API if all_tracks not available
     let tracks = if let Some(ref folder_key) = col.key {
         client.get_folder_tracks(folder_key).await.unwrap_or_default()
     } else if let Some(lib_key) = &state.active_library {
@@ -47,12 +61,10 @@ async fn fetch_folder_tracks_from_index(
         return vec![];
     };
 
-    // Build lookup by rating_key
     let mut track_map: std::collections::HashMap<String, Track> = tracks.into_iter()
         .map(|t| (t.rating_key.clone(), t))
         .collect();
 
-    // Return tracks in column display order
     column_keys.into_iter()
         .filter_map(|key| track_map.remove(key))
         .collect()
@@ -429,7 +441,7 @@ pub async fn dispatch(
                     .and_then(|fs| fs.focused())
                     .map(|col| col.selected_index)
                     .unwrap_or(0);
-                let tracks_to_add = fetch_folder_tracks_from_index(state, client, start).await;
+                let tracks_to_add = get_folder_tracks_from_index(state, client, start).await;
                 if !tracks_to_add.is_empty() {
                     // If radio is playing, convert to queue mode
                     if state.playback_mode == PlaybackMode::Radio {
@@ -578,7 +590,7 @@ pub async fn dispatch(
                     .and_then(|fs| fs.focused())
                     .map(|col| col.selected_index)
                     .unwrap_or(0);
-                let tracks = fetch_folder_tracks_from_index(state, client, start).await;
+                let tracks = get_folder_tracks_from_index(state, client, start).await;
                 if !tracks.is_empty() {
                     return Ok(vec![Action::EnqueueTracksNext(tracks)]);
                 }
