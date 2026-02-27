@@ -53,11 +53,6 @@ pub fn apply_selected_option(state: &mut AppState) -> Vec<Action> {
     }
 }
 
-/// Apply a sort mode to a specific column (public for title bar click cycling).
-pub fn apply_sort_for_column(state: &mut AppState, col_idx: usize, mode: ColumnSortMode) -> Vec<Action> {
-    apply_sort_mode(state, col_idx, mode)
-}
-
 /// Apply a sort mode to the column and update the popup.
 fn apply_sort_mode(state: &mut AppState, col_idx: usize, mode: ColumnSortMode) -> Vec<Action> {
     let nav = match state.browse_nav_mut() {
@@ -94,15 +89,11 @@ fn apply_sort_mode(state: &mut AppState, col_idx: usize, mode: ColumnSortMode) -
         if let Some(col) = nav.columns.get_mut(col_idx) {
             col.clear_originals();
         }
-        // Rebuild popup with Default as the active mode
-        if let Some(popup) = &mut state.popups.sort {
-            popup.rebuild_options(ColumnSortMode::Default);
-        }
-    } else {
-        // Rebuild popup options (Direction availability may have changed)
-        if let Some(popup) = &mut state.popups.sort {
-            popup.rebuild_options(mode);
-        }
+    }
+
+    // Rebuild popup options with the actual active mode
+    if let Some(popup) = &mut state.popups.sort {
+        popup.rebuild_options(mode);
     }
 
     // Auto-drill to repopulate child column after sort change

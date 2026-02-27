@@ -725,11 +725,10 @@ impl BrowseColumn {
     }
 
     /// Clear stored originals so current order becomes the new baseline.
-    /// Resets sort mode to Default without restoring previous order.
+    /// Preserves sort_mode so the header suffix and cycle position remain correct.
     pub fn clear_originals(&mut self) {
         self.original_items = None;
         self.original_tracks = None;
-        self.sort_mode = ColumnSortMode::Default;
     }
 
     /// Restore original order (clears sort mode to Default).

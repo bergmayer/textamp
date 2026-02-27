@@ -151,7 +151,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
 
     // Scrollbar + position indicator
     if total > visible_item_count {
-        crate::ui::widgets::render_scrollbar(frame, popup_area, total, visible_item_count, scroll_offset);
+        crate::ui::widgets::render_scrollbar(frame, popup_area, total, visible_item_count, scroll_offset, None);
 
         let footer_pos = format!("{}/{}", selected_idx + 1, total);
         let footer_pos_area = Rect::new(

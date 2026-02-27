@@ -953,11 +953,11 @@ fn miller_title_hit_test(
 
 /// Cycle the sort mode for a specific column (used by title bar click).
 /// Cycles through modes only (always ascending): Default → ByTitle → ... → Shuffled → Default.
-/// Use the sort popup (Ctrl+S) for ascending/descending control.
+/// Sorts in-place with no side effects: no truncation, no auto-drill, no focus/selection change.
 fn cycle_column_sort(state: &mut AppState, col_idx: usize) -> Vec<Action> {
     use crate::app::state::{BrowseItem, ColumnSortMode, SortColumnType};
 
-    let (current_mode, column_type) = {
+    let (current_mode, column_type, saved_selected) = {
         let nav = match state.browse_nav() {
             Some(n) => n,
             None => return vec![],
@@ -986,7 +986,7 @@ fn cycle_column_sort(state: &mut AppState, col_idx: usize) -> Vec<Action> {
             return vec![];
         };
 
-        (col.sort_mode, ct)
+        (col.sort_mode, ct, col.selected_index)
     };
 
     let modes = match column_type {
@@ -1000,7 +1000,24 @@ fn cycle_column_sort(state: &mut AppState, col_idx: usize) -> Vec<Action> {
     let current_pos = modes.iter().position(|m| *m == current_mode).unwrap_or(0);
     let next_mode = modes[(current_pos + 1) % modes.len()];
 
-    super::key_input::sort_popup::apply_sort_for_column(state, col_idx, next_mode)
+    // Sort in-place — no truncation, no auto-drill, no focus change
+    let nav = match state.browse_nav_mut() {
+        Some(n) => n,
+        None => return vec![],
+    };
+    if let Some(col) = nav.columns.get_mut(col_idx) {
+        if col.has_originals() && next_mode != ColumnSortMode::Shuffled {
+            col.unshuffle();
+        }
+        col.apply_sort(next_mode);
+        if next_mode != ColumnSortMode::Shuffled && next_mode != ColumnSortMode::Default {
+            col.clear_originals();
+        }
+        // Restore selection — header click only changes sort order
+        col.selected_index = saved_selected.min(col.items.len().saturating_sub(1));
+    }
+
+    vec![]
 }
 
 /// Hit-test a click against Miller column layout for BrowseNavigationState.

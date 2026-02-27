@@ -8,13 +8,16 @@ use crate::ui::theme::theme;
 
 /// Render a scrollbar on the right border of a bordered area.
 ///
-/// Uses `█` for the thumb and `▕` for the track, overlaid on the right border.
+/// Uses `█` for the thumb and `│` for the track, overlaid on the right border.
+/// When `border_override` is `Some(color)`, the track uses that color instead of the
+/// theme's default border color.
 pub fn render_scrollbar(
     frame: &mut Frame,
     col_area: Rect,
     total_items: usize,
     visible_items: usize,
     scroll_offset: usize,
+    border_override: Option<Color>,
 ) {
     let t = theme();
 
@@ -30,7 +33,8 @@ pub fn render_scrollbar(
     let bar_y_start = col_area.y + 1; // Skip top border
 
     let thumb_style = Style::default().fg(t.colors.fg_secondary);
-    let track_style = Style::default().fg(t.colors.border);
+    let border_color = border_override.unwrap_or(t.colors.border);
+    let track_style = Style::default().fg(border_color);
 
     for row in 0..track_height {
         let y = bar_y_start + row as u16;
@@ -41,7 +45,7 @@ pub fn render_scrollbar(
             );
         } else {
             frame.render_widget(
-                Paragraph::new("▕").style(track_style),
+                Paragraph::new("│").style(track_style),
                 Rect::new(bar_x, y, 1, 1),
             );
         }
@@ -82,7 +86,7 @@ pub fn render_scrollbar_borderless(
             );
         } else {
             frame.render_widget(
-                Paragraph::new("▕").style(track_style),
+                Paragraph::new("│").style(track_style),
                 Rect::new(bar_x, y, 1, 1),
             );
         }

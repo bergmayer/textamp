@@ -364,7 +364,7 @@ fn render_account_content(frame: &mut Frame, state: &AppState, outer: Rect, area
 
     // Scrollbar when content overflows
     if total > visible {
-        crate::ui::widgets::render_scrollbar(frame, outer, total as usize, visible as usize, scroll as usize);
+        crate::ui::widgets::render_scrollbar(frame, outer, total as usize, visible as usize, scroll as usize, None);
     }
 }
 
@@ -633,7 +633,7 @@ fn render_textamp_content(frame: &mut Frame, state: &AppState, outer: Rect, area
 
     // Scrollbar when content overflows
     if total > visible {
-        crate::ui::widgets::render_scrollbar(frame, outer, total as usize, visible as usize, scroll as usize);
+        crate::ui::widgets::render_scrollbar(frame, outer, total as usize, visible as usize, scroll as usize, None);
     }
 }
 
@@ -721,7 +721,7 @@ fn render_about_content(frame: &mut Frame, state: &AppState, outer: Rect, area: 
 
     // Scrollbar when content overflows
     if total > visible {
-        crate::ui::widgets::render_scrollbar(frame, outer, total as usize, visible as usize, scroll as usize);
+        crate::ui::widgets::render_scrollbar(frame, outer, total as usize, visible as usize, scroll as usize, None);
     }
 }
 

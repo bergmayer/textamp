@@ -440,7 +440,7 @@ fn render_folder_view(
 
             use crate::util::truncate_middle;
 
-            let border_color = if is_focused { t.colors.border_focused } else { t.colors.border };
+            let border_color = if is_focused { t.colors.title_focused } else { t.colors.border };
             let is_root = col_idx == 0;
 
             // Show title for all columns; folder paths truncate from the left
@@ -465,9 +465,10 @@ fn render_folder_view(
                 .style(Style::default().bg(t.colors.bg_primary));
 
             if !title.is_empty() {
+                let title_color = if is_focused { t.colors.title_focused } else { t.colors.fg_accent };
                 block = block
                     .title(title)
-                    .title_style(Style::default().fg(t.colors.fg_accent));
+                    .title_style(Style::default().fg(title_color));
             }
 
             let inner = block.inner(col_area);
@@ -561,7 +562,7 @@ fn render_folder_view(
 
                 // Scrollbar + position indicator for long lists
                 if total_items > visible_height {
-                    render_scrollbar(frame, col_area, total_items, visible_height, scroll_offset);
+                    render_scrollbar(frame, col_area, total_items, visible_height, scroll_offset, Some(border_color));
 
                     let footer = format!("{}/{}", selected_idx + 1, total_items);
                     let footer_area = Rect::new(
@@ -771,7 +772,7 @@ fn render_browse_miller_columns(
             height: area.height,
         };
 
-        let border_color = if is_focused { t.colors.border_focused } else { t.colors.border };
+        let border_color = if is_focused { t.colors.title_focused } else { t.colors.border };
 
         // Show title for all columns with sort suffix
         let sort_suffix = {
@@ -795,14 +796,12 @@ fn render_browse_miller_columns(
             .borders(Borders::ALL)
             .border_style(Style::default().fg(border_color))
             .style(Style::default().bg(t.colors.bg_primary));
-        if is_focused {
-            block = block.border_set(ratatui::symbols::border::THICK);
-        }
 
         if !title.is_empty() {
+            let title_color = if is_focused { t.colors.title_focused } else { t.colors.fg_accent };
             block = block
                 .title(title)
-                .title_style(Style::default().fg(t.colors.fg_accent));
+                .title_style(Style::default().fg(title_color));
         }
 
         let inner = block.inner(col_area);
@@ -1086,6 +1085,7 @@ fn render_browse_miller_columns(
                         total_display_items,
                         visible_item_count,
                         scroll_offset,
+                        Some(border_color),
                     );
 
                     let footer = format!("{}/{}", display_selected_idx + 1, total_display_items);
@@ -1135,7 +1135,7 @@ fn render_album_art_grid(
     frame: &mut Frame,
     state: &AppState,
     col: &crate::app::state::BrowseColumn,
-    _is_focused: bool,
+    is_focused: bool,
     inner: Rect,
     col_area: Rect,
     col_idx: usize,
@@ -1383,7 +1383,8 @@ fn render_album_art_grid(
 
     // Scrollbar + position indicator
     if total_items > visible_count {
-        render_scrollbar(frame, col_area, total_items, visible_count, scroll_offset);
+        let sb_border = if is_focused { Some(t.colors.title_focused) } else { None };
+        render_scrollbar(frame, col_area, total_items, visible_count, scroll_offset, sb_border);
 
         let footer = format!("{}/{}", display_selected + 1, total_items);
         let footer_area = Rect::new(
@@ -1856,7 +1857,7 @@ fn render_artist_bio_popup(frame: &mut Frame, state: &AppState) {
 
     // Scrollbar
     if total_lines > visible {
-        render_scrollbar(frame, area, total_lines as usize, visible as usize, scroll as usize);
+        render_scrollbar(frame, area, total_lines as usize, visible as usize, scroll as usize, None);
     }
 }
 

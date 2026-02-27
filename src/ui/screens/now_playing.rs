@@ -314,7 +314,7 @@ fn render_station_panel(frame: &mut Frame, state: &AppState, area: Rect) {
 
     // Scrollbar + position indicator for long lists
     if total_items > station_visible_height {
-        crate::ui::widgets::render_scrollbar(frame, area, total_items, station_visible_height, scroll_offset);
+        crate::ui::widgets::render_scrollbar(frame, area, total_items, station_visible_height, scroll_offset, None);
 
         let footer = format!("{}/{}", selected_idx + 1, total_items);
         let footer_area = Rect::new(
@@ -515,7 +515,7 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
 
     // Scrollbar for long lists
     if total_display > visible_item_count {
-        crate::ui::widgets::render_scrollbar(frame, area, total_display, visible_item_count, scroll_offset);
+        crate::ui::widgets::render_scrollbar(frame, area, total_display, visible_item_count, scroll_offset, None);
     }
 
     // Footer: position and mode info

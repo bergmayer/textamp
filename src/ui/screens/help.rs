@@ -102,6 +102,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
             line_count as usize,
             visible_lines as usize,
             scroll as usize,
+            None,
         );
     }
 }

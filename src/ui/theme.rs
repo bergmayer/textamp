@@ -92,6 +92,7 @@ pub struct ThemeColors {
     // Borders
     pub border: Color,
     pub border_focused: Color,
+    pub title_focused: Color,
 
     // Semantic colors
     pub error: Color,
@@ -124,6 +125,7 @@ impl ThemeColors {
 
             border: Color::Rgb(60, 60, 60),
             border_focused: Color::Rgb(229, 160, 60),
+            title_focused: Color::Rgb(255, 200, 100),
 
             error: Color::Rgb(220, 80, 80),
             success: Color::Rgb(80, 200, 120),
@@ -153,7 +155,7 @@ impl ThemeColors {
 
         // Solarized accent colors
         let yellow = Color::Rgb(181, 137, 0);    // #b58900
-        let _orange = Color::Rgb(203, 75, 22);   // #cb4b16
+        let orange = Color::Rgb(203, 75, 22);    // #cb4b16
         let red = Color::Rgb(220, 50, 47);       // #dc322f
         let _magenta = Color::Rgb(211, 54, 130); // #d33682
         let _violet = Color::Rgb(108, 113, 196); // #6c71c4
@@ -175,6 +177,7 @@ impl ThemeColors {
 
             border: base01,
             border_focused: blue,
+            title_focused: orange,
 
             error: red,
             success: green,
@@ -225,6 +228,7 @@ impl ThemeColors {
 
             border: base2,
             border_focused: magenta,
+            title_focused: orange,
 
             error: red,
             success: green,
@@ -266,6 +270,7 @@ impl ThemeColors {
 
             border: cyan,
             border_focused: yellow,
+            title_focused: white,
 
             error: red,
             success: green,

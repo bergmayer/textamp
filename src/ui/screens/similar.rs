@@ -211,7 +211,7 @@ fn render_albums(frame: &mut Frame, state: &AppState, inner: Rect, popup_area: R
 
     // Scrollbar + position indicator
     if total > visible_item_count {
-        crate::ui::widgets::render_scrollbar(frame, popup_area, total, visible_item_count, scroll_offset);
+        crate::ui::widgets::render_scrollbar(frame, popup_area, total, visible_item_count, scroll_offset, None);
 
         let footer = format!("{}/{}", selected_idx + 1, total);
         let footer_area = Rect::new(
@@ -304,7 +304,7 @@ fn render_tracks(frame: &mut Frame, state: &AppState, inner: Rect, popup_area: R
 
     // Scrollbar + position indicator
     if total > visible_item_count {
-        crate::ui::widgets::render_scrollbar(frame, popup_area, total, visible_item_count, scroll_offset);
+        crate::ui::widgets::render_scrollbar(frame, popup_area, total, visible_item_count, scroll_offset, None);
 
         let footer = format!("{}/{}", selected_idx + 1, total);
         let footer_area = Rect::new(
@@ -390,7 +390,7 @@ fn render_artists(frame: &mut Frame, state: &AppState, inner: Rect, popup_area: 
 
     // Scrollbar + position indicator
     if total > visible_item_count {
-        crate::ui::widgets::render_scrollbar(frame, popup_area, total, visible_item_count, scroll_offset);
+        crate::ui::widgets::render_scrollbar(frame, popup_area, total, visible_item_count, scroll_offset, None);
 
         let footer = format!("{}/{}", selected_idx + 1, total);
         let footer_area = Rect::new(
