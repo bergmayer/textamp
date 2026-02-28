@@ -46,23 +46,25 @@ pub async fn dispatch(
             }
         }
         Action::NextView => {
-            // Tab: cycle through main views only
-            // Order: Library → Playlists → Queue → Now Playing → Library
-            // Genre/Folder categories are accessed via Ctrl+G / Ctrl+O, not Tab.
+            // Tab: cycle through views in displayed tab bar order
+            // Order: Library → Playlists → Genres → Folders → Queue → Now Playing → Library
             if state.view == View::NowPlaying {
-                // From Now Playing, go to Library
                 state.set_view(View::Browse);
                 follow_ups.push(Action::SetCategory(BrowseCategory::Library));
             } else if state.view == View::Queue {
-                // From Queue, go to Now Playing
                 state.set_view(View::NowPlaying);
             } else if state.view == View::Browse {
                 match state.browse_category {
                     BrowseCategory::Library => {
                         follow_ups.push(Action::SetCategory(BrowseCategory::Playlists));
                     }
-                    _ => {
-                        // From Playlists, Genres, or Folders → Queue
+                    BrowseCategory::Playlists => {
+                        follow_ups.push(Action::SetCategory(BrowseCategory::Genres));
+                    }
+                    BrowseCategory::Genres => {
+                        follow_ups.push(Action::SetCategory(BrowseCategory::Folders));
+                    }
+                    BrowseCategory::Folders => {
                         state.set_view(View::Queue);
                     }
                 }
@@ -72,23 +74,26 @@ pub async fn dispatch(
             }
         }
         Action::PrevView => {
-            // Shift+Tab: cycle backwards through main views
-            // Order: Library ← Playlists ← Queue ← Now Playing ← Library
+            // Shift+Tab: cycle backwards through views in displayed tab bar order
+            // Order: Library ← Playlists ← Genres ← Folders ← Queue ← Now Playing ← Library
             if state.view == View::NowPlaying {
-                // From Now Playing, go to Queue
                 state.set_view(View::Queue);
             } else if state.view == View::Queue {
-                // From Queue, go to Playlists
                 state.set_view(View::Browse);
-                follow_ups.push(Action::SetCategory(BrowseCategory::Playlists));
+                follow_ups.push(Action::SetCategory(BrowseCategory::Folders));
             } else if state.view == View::Browse {
                 match state.browse_category {
                     BrowseCategory::Library => {
                         state.set_view(View::NowPlaying);
                     }
-                    _ => {
-                        // From Playlists, Genres, or Folders → Library
+                    BrowseCategory::Playlists => {
                         follow_ups.push(Action::SetCategory(BrowseCategory::Library));
+                    }
+                    BrowseCategory::Genres => {
+                        follow_ups.push(Action::SetCategory(BrowseCategory::Playlists));
+                    }
+                    BrowseCategory::Folders => {
+                        follow_ups.push(Action::SetCategory(BrowseCategory::Genres));
                     }
                 }
             } else {
@@ -258,13 +263,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn next_view_playlists_to_queue() {
+    async fn next_view_playlists_to_genres() {
         let (tx, _rx, mut state, mut client) = setup();
         state.view = View::Browse;
         state.browse_category = BrowseCategory::Playlists;
 
-        dispatch(&tx, Action::NextView, &mut state, &mut client).await.unwrap();
-        assert_eq!(state.view, View::Queue);
+        let follow_ups = dispatch(&tx, Action::NextView, &mut state, &mut client).await.unwrap();
+        assert!(follow_ups.iter().any(|a| matches!(a, Action::SetCategory(BrowseCategory::Genres))));
     }
 
     #[tokio::test]

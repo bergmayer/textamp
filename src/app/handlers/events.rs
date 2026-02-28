@@ -742,7 +742,9 @@ pub fn handle_app_event(
             }
             if state.folder_state.is_none() {
                 // First load: set up folder state
-                state.folder_state = Some(folder_state);
+                let mut fs = folder_state;
+                fs.ensure_placeholder();
+                state.folder_state = Some(fs);
                 tracing::debug!("Folders preloaded and ready");
             } else if let Some(ref mut existing) = state.folder_state {
                 // Refresh: update root column items while preserving navigation
@@ -805,7 +807,9 @@ pub fn handle_app_event(
             if state.folder_state.is_none() {
                 use crate::services::{FolderColumn, FolderNavigationState};
                 let root_column = FolderColumn::new(None, lib_title, items);
-                state.folder_state = Some(FolderNavigationState::with_root(library_key, root_column));
+                let mut fs = FolderNavigationState::with_root(library_key, root_column);
+                fs.ensure_placeholder();
+                state.folder_state = Some(fs);
             } else if let Some(ref mut folder_state) = state.folder_state {
                 // Refresh: update root column items while preserving navigation
                 if let Some(root_col) = folder_state.columns.first_mut() {
@@ -1500,7 +1504,9 @@ pub fn handle_app_event(
                 use crate::services::{FolderColumn, FolderNavigationState, FolderService};
                 let folders = FolderService::filter_invalid(cached.root_folders);
                 let root_column = FolderColumn::new(None, lib_name, folders);
-                state.folder_state = Some(FolderNavigationState::with_root(library_key.clone(), root_column));
+                let mut fs = FolderNavigationState::with_root(library_key.clone(), root_column);
+                fs.ensure_placeholder();
+                state.folder_state = Some(fs);
             }
             if !cached.folder_contents.is_empty() {
                 state.folder_contents_cache = cached.folder_contents;

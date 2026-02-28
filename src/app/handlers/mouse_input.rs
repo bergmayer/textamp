@@ -1329,12 +1329,11 @@ fn handle_browse_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
                     _ => unreachable!(),
                 };
 
-                // If clicking a different column, change focus
+                // If clicking a different column, change focus (preserve child columns)
                 if col_idx != nav.focused_column {
                     state.scroll.browse = Some((col_idx, scroll_offset));
                     state.scroll.browse_click_time = Some(std::time::Instant::now());
                     nav.focused_column = col_idx;
-                    nav.truncate_right();
                     if let Some(col) = nav.columns.get_mut(col_idx) {
                         col.selected_index = item_idx;
                     }
@@ -1386,48 +1385,20 @@ fn handle_browse_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
                         return browse_drill_down_action(item, col_idx, item_idx, state);
                     }
                 } else if !filter_on_click_col {
-                    // Auto-drill: update child column so right panel
-                    // reflects the highlighted item.
-                    // Exception: Track items only play on second click
-                    // (first click highlights, matching keyboard behavior).
-                    let nav = match state.browse_category {
-                        BrowseCategory::Library => &state.artist_nav,
-                        BrowseCategory::Genres => &state.genre_nav,
-                        BrowseCategory::Playlists => &state.playlist_nav,
-                        _ => return vec![],
-                    };
-                    if let Some(item) = nav.columns.get(col_idx).and_then(|c| c.items.get(item_idx)).cloned() {
-                        let is_track = matches!(item, BrowseItem::Track { .. });
-                        if is_track {
-                            // Track: only play if already highlighted (second click)
-                            if col_sel == item_idx {
-                                return browse_drill_down_action(item, col_idx, item_idx, state);
-                            }
-                            // First click on track: just highlight (already done above),
-                            // truncate child columns
-                            let nav = match state.browse_category {
-                                BrowseCategory::Library => &mut state.artist_nav,
-                                BrowseCategory::Genres => &mut state.genre_nav,
-                                BrowseCategory::Playlists => &mut state.playlist_nav,
-                                _ => return vec![],
-                            };
-                            nav.truncate_right();
-                        } else {
-                            let drill_actions = browse_drill_down_action(item, col_idx, item_idx, state);
-                            if !drill_actions.is_empty() {
-                                state.auto_drill_pending = true;
-                                return drill_actions;
-                            }
-                        }
-                    } else {
-                        // Non-drillable item: truncate child columns
+                    // Click just highlights — no auto-drill, no truncation.
+                    // Exception: second click on an already-selected track plays it.
+                    if col_sel == item_idx {
                         let nav = match state.browse_category {
-                            BrowseCategory::Library => &mut state.artist_nav,
-                            BrowseCategory::Genres => &mut state.genre_nav,
-                            BrowseCategory::Playlists => &mut state.playlist_nav,
+                            BrowseCategory::Library => &state.artist_nav,
+                            BrowseCategory::Genres => &state.genre_nav,
+                            BrowseCategory::Playlists => &state.playlist_nav,
                             _ => return vec![],
                         };
-                        nav.truncate_right();
+                        if let Some(item) = nav.columns.get(col_idx).and_then(|c| c.items.get(item_idx)).cloned() {
+                            if matches!(item, BrowseItem::Track { .. }) {
+                                return browse_drill_down_action(item, col_idx, item_idx, state);
+                            }
+                        }
                     }
                 }
             }
@@ -1541,12 +1512,11 @@ fn handle_folder_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
             return vec![];
         };
 
-        // If clicking a different column, change focus (clears filter)
+        // If clicking a different column, change focus (preserve child columns)
         if col_idx != folder_state.focused_column {
             state.scroll.browse = Some((col_idx, scroll_offset));
             state.scroll.browse_click_time = Some(std::time::Instant::now());
             folder_state.focused_column = col_idx;
-            folder_state.truncate_right_columns();
             if let Some(col) = folder_state.columns.get_mut(col_idx) {
                 col.selected_index = item_idx;
             }
@@ -1572,11 +1542,11 @@ fn handle_folder_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
             if col_sel == item_idx {
                 true
             } else {
+                // Click just highlights — no truncation, preserves child columns
                 if let Some(ref mut fs) = state.folder_state {
                     if let Some(col) = fs.columns.get_mut(col_idx) {
                         col.selected_index = item_idx;
                     }
-                    fs.truncate_right_columns();
                 }
                 false
             }
@@ -2422,6 +2392,7 @@ fn handle_browse_scroll(up: bool, click_row: u16, click_col: u16, state: &mut Ap
                         if col_idx != folder_state.focused_column {
                             folder_state.focused_column = col_idx;
                             folder_state.truncate_right_columns();
+                            folder_state.ensure_placeholder();
                         }
                     }
                 }

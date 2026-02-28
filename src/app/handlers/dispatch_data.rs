@@ -754,7 +754,9 @@ fn load_from_cache(state: &mut AppState, cached: CacheData, lib_key: &str, lib_t
     if !cached.root_folders.is_empty() {
         let folders = FolderService::filter_invalid(cached.root_folders);
         let root_column = FolderColumn::new(None, lib_title.to_string(), folders);
-        state.folder_state = Some(FolderNavigationState::with_root(lib_key.to_string(), root_column));
+        let mut fs = FolderNavigationState::with_root(lib_key.to_string(), root_column);
+        fs.ensure_placeholder();
+        state.folder_state = Some(fs);
     }
     if !cached.folder_contents.is_empty() {
         state.folder_contents_cache = cached.folder_contents;

@@ -229,6 +229,7 @@ pub(super) fn handle_folder_browse_keys(key: event::KeyEvent, state: &mut AppSta
                 folder_state.move_up();
                 // Clear columns to the right since selection changed
                 folder_state.truncate_right_columns();
+                folder_state.ensure_placeholder();
             }
             vec![]
         }
@@ -237,6 +238,7 @@ pub(super) fn handle_folder_browse_keys(key: event::KeyEvent, state: &mut AppSta
                 folder_state.move_down();
                 // Clear columns to the right since selection changed
                 folder_state.truncate_right_columns();
+                folder_state.ensure_placeholder();
             }
             vec![]
         }
@@ -247,6 +249,7 @@ pub(super) fn handle_folder_browse_keys(key: event::KeyEvent, state: &mut AppSta
                 }
                 // Clear columns to the right since selection changed
                 folder_state.truncate_right_columns();
+                folder_state.ensure_placeholder();
             }
             vec![]
         }
@@ -258,6 +261,7 @@ pub(super) fn handle_folder_browse_keys(key: event::KeyEvent, state: &mut AppSta
                 }
                 // Clear columns to the right since selection changed
                 folder_state.truncate_right_columns();
+                folder_state.ensure_placeholder();
             }
             vec![]
         }
@@ -268,6 +272,7 @@ pub(super) fn handle_folder_browse_keys(key: event::KeyEvent, state: &mut AppSta
                 }
                 // Clear columns to the right since selection changed
                 folder_state.truncate_right_columns();
+                folder_state.ensure_placeholder();
             }
             vec![]
         }
@@ -278,6 +283,7 @@ pub(super) fn handle_folder_browse_keys(key: event::KeyEvent, state: &mut AppSta
                 }
                 // Clear columns to the right since selection changed
                 folder_state.truncate_right_columns();
+                folder_state.ensure_placeholder();
             }
             vec![]
         }
@@ -326,9 +332,10 @@ pub(super) fn handle_folder_browse_keys(key: event::KeyEvent, state: &mut AppSta
                     folder_state.focus_left();
                     return vec![];
                 }
-                // At root column: truncate child columns
+                // At root column: truncate child columns, keep placeholder
                 if folder_state.columns.len() > 1 {
                     folder_state.columns.truncate(1);
+                    folder_state.ensure_placeholder();
                     return vec![];
                 }
             }
@@ -375,6 +382,7 @@ pub(super) fn handle_folder_browse_keys(key: event::KeyEvent, state: &mut AppSta
                 }
                 // Clear columns to the right since selection changed
                 folder_state.truncate_right_columns();
+                folder_state.ensure_placeholder();
             }
             vec![]
         }

@@ -123,7 +123,7 @@ pub async fn queue_and_play(
         state.radio.clear();
     }
     audio.track_cache.flush();
-    state.queue.splice(0..0, tracks);
+    state.queue = tracks;
     state.queue_index = Some(play_idx);
     state.queue_selected.clear();
     state.queue_original.clear();

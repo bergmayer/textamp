@@ -400,4 +400,13 @@ impl FolderNavigationState {
     pub fn visible_columns(&self) -> usize {
         self.columns.len()
     }
+
+    /// Ensure at least 2 columns exist by adding an empty placeholder if needed.
+    /// Called after truncation leaves only the root column so the folder view
+    /// always renders two side-by-side columns (matching Library/Genre/Playlist).
+    pub fn ensure_placeholder(&mut self) {
+        if self.columns.len() == 1 {
+            self.inner.columns.push(FolderColumn::new(None, String::new(), vec![]));
+        }
+    }
 }

@@ -376,10 +376,10 @@ fn render_folder_view(
             .rev()
             .find(|&i| !folder_state.columns[i].items.is_empty() || i <= folder_state.focused_column)
             .unwrap_or(0);
-        let effective_columns = last_meaningful + 1;
+        let effective_columns = (last_meaningful + 1).max(num_columns.min(2));
 
-        // Calculate column width - show up to 3 columns
-        let max_visible = 3.min(effective_columns);
+        // Calculate column width - show up to 3 columns, minimum 2
+        let max_visible = 3.min(effective_columns).max(2);
         let col_width = area.width / max_visible as u16;
 
         // Determine which columns to show (always include focused column)
