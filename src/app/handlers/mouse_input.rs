@@ -1361,15 +1361,19 @@ fn handle_browse_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
                     }
                     drill
                 } else {
-                    // No filter: click highlights, Enter key activates
+                    // No filter: first click highlights, second click on same item drills down
                     state.scroll.browse = Some((col_idx, scroll_offset));
                     state.scroll.browse_click_time = Some(std::time::Instant::now());
-                    // Update selection
-                    if let Some(col) = nav.columns.get_mut(col_idx) {
-                        col.selected_index = item_idx;
+                    if col_sel == item_idx {
+                        // Already selected — drill down (same as Enter)
+                        true
+                    } else {
+                        // Update selection
+                        if let Some(col) = nav.columns.get_mut(col_idx) {
+                            col.selected_index = item_idx;
+                        }
+                        false
                     }
-                    // Click just highlights, never drills down
-                    false
                 };
 
                 if should_drill {
@@ -1383,22 +1387,6 @@ fn handle_browse_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
                         nav.columns.get(col_idx).and_then(|c| c.items.get(item_idx)).cloned()
                     } {
                         return browse_drill_down_action(item, col_idx, item_idx, state);
-                    }
-                } else if !filter_on_click_col {
-                    // Click just highlights — no auto-drill, no truncation.
-                    // Exception: second click on an already-selected track plays it.
-                    if col_sel == item_idx {
-                        let nav = match state.browse_category {
-                            BrowseCategory::Library => &state.artist_nav,
-                            BrowseCategory::Genres => &state.genre_nav,
-                            BrowseCategory::Playlists => &state.playlist_nav,
-                            _ => return vec![],
-                        };
-                        if let Some(item) = nav.columns.get(col_idx).and_then(|c| c.items.get(item_idx)).cloned() {
-                            if matches!(item, BrowseItem::Track { .. }) {
-                                return browse_drill_down_action(item, col_idx, item_idx, state);
-                            }
-                        }
                     }
                 }
             }
