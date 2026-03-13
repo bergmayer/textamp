@@ -57,6 +57,9 @@ pub enum Action {
     EnqueueSelectionNext,  // Ctrl+E: Add current selection to TOP of queue and play
     EnqueueAlbum { rating_key: String, title: String },  // Load album tracks and add to queue (end)
     EnqueueArtistTracks { artist_key: String, artist_name: String },  // Add all tracks by artist to queue (end)
+    // Double-click play: replace queue and start playback
+    PlayAlbumNow { rating_key: String, title: String },
+    PlayPlaylistNow { playlist_key: String, title: String },
     EnqueueTrack(Track),  // Add a single track to queue (end)
     EnqueueSearchResult,  // Add selected search result to queue (end)
     EnqueueSearchResultNext,  // Shift+Enter: add search result to TOP and play

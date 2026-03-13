@@ -49,6 +49,7 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
         state.scroll.browse = None;
     }
     state.scroll.browse_click_time = None;
+    state.scroll.browse_last_click = None;
 
     // Track modifier bar display.
     // Alt+/ or Ctrl+/ toggles the contextual shortcut bar on/off.

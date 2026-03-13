@@ -209,6 +209,36 @@ pub async fn dispatch(
             state.queue.push(track);
             state.set_status(format!("Added \"{}\" to queue", title));
         }
+        Action::PlayAlbumNow { rating_key, title } => {
+            // Double-click play: load album tracks, replace queue, start playback
+            match client.get_album_tracks(&rating_key).await {
+                Ok(tracks) => {
+                    if !tracks.is_empty() {
+                        let count = tracks.len();
+                        helpers::queue_and_play(event_tx, state, client, audio, tracks, 0).await;
+                        state.set_status(format!("Playing {} tracks from \"{}\"", count, title));
+                    }
+                }
+                Err(e) => {
+                    state.set_error(format!("Failed to load album: {}", e));
+                }
+            }
+        }
+        Action::PlayPlaylistNow { playlist_key, title } => {
+            // Double-click play: load playlist tracks, replace queue, start playback
+            match client.get_playlist_tracks(&playlist_key).await {
+                Ok(tracks) => {
+                    if !tracks.is_empty() {
+                        let count = tracks.len();
+                        helpers::queue_and_play(event_tx, state, client, audio, tracks, 0).await;
+                        state.set_status(format!("Playing {} tracks from \"{}\"", count, title));
+                    }
+                }
+                Err(e) => {
+                    state.set_error(format!("Failed to load playlist: {}", e));
+                }
+            }
+        }
         Action::EnqueueSearchResult => {
             // Enqueue the selected search result (at end of queue)
             let follow_up = enqueue_search_result(state);

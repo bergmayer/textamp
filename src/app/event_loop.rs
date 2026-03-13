@@ -507,6 +507,7 @@ impl EventLoop {
             PlayTrack(_) | PlayTrackFromCategory(_) | PlayAlbum { .. }
             | PlayArtistTracks { .. } | PlaySearchResult
             | EnqueueAlbum { .. } | EnqueueArtistTracks { .. } | EnqueueTrack(_)
+            | PlayAlbumNow { .. } | PlayPlaylistNow { .. }
             | EnqueueSearchResult | ClearQueue | RemoveFromQueue(_)
             | JumpToQueueIndex(_)
             | EnqueueSelection | EnqueueSelectionNext | PromptSavePlaylist | SaveQueueAsPlaylist(_)

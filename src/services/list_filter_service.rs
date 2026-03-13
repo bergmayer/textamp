@@ -8,10 +8,43 @@ use crate::app::state::ListFilterResults;
 /// Maximum number of results to return by default.
 pub const DEFAULT_MAX_RESULTS: usize = 100;
 
-/// Strip punctuation for fuzzy comparison (keeps alphanumeric + whitespace).
+/// Fold accented/diacritical characters to ASCII equivalents.
+fn fold_to_ascii(c: char) -> Option<char> {
+    match c {
+        'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' | 'ă' | 'ą' => Some('a'),
+        'è' | 'é' | 'ê' | 'ë' | 'ē' | 'ĕ' | 'ė' | 'ę' | 'ě' => Some('e'),
+        'ì' | 'í' | 'î' | 'ï' | 'ī' | 'ĭ' | 'į' => Some('i'),
+        'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ō' | 'ŏ' | 'ő' | 'ø' => Some('o'),
+        'ù' | 'ú' | 'û' | 'ü' | 'ū' | 'ŭ' | 'ů' | 'ű' | 'ų' => Some('u'),
+        'ñ' | 'ń' | 'ņ' | 'ň' => Some('n'),
+        'ç' | 'ć' | 'ĉ' | 'č' => Some('c'),
+        'ð' | 'ď' => Some('d'),
+        'ý' | 'ÿ' => Some('y'),
+        'ś' | 'ŝ' | 'ş' | 'š' => Some('s'),
+        'ź' | 'ż' | 'ž' => Some('z'),
+        'ł' => Some('l'),
+        'ř' => Some('r'),
+        'ť' => Some('t'),
+        'þ' => Some('t'),
+        'æ' => Some('a'), // ae ligature → a (close enough for search)
+        'ß' => Some('s'), // eszett → s
+        _ => None,
+    }
+}
+
+/// Normalize a string for fuzzy comparison: fold accents to ASCII, strip punctuation.
 fn normalize_for_search(s: &str) -> String {
     s.chars()
-        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .filter_map(|c| {
+            if c.is_ascii_alphanumeric() || c.is_whitespace() {
+                Some(c)
+            } else if c.is_alphanumeric() {
+                // Non-ASCII alphanumeric: try accent folding, keep original if no mapping
+                Some(fold_to_ascii(c).unwrap_or(c))
+            } else {
+                None // strip punctuation
+            }
+        })
         .collect()
 }
 
@@ -44,28 +77,23 @@ where
     let query_normalized = normalize_for_search(&query_lower);
     let short_query = query.len() < 2;
 
-    let mut priority1: Vec<usize> = Vec::new(); // Starts with
+    let mut priority1: Vec<usize> = Vec::new(); // Starts with (exact or accent-folded)
     let mut priority2: Vec<usize> = Vec::new(); // Word starts with
     let mut priority3: Vec<usize> = Vec::new(); // Contains
-    let mut priority4: Vec<usize> = Vec::new(); // Normalized match (punctuation-insensitive)
 
     for (idx, item) in items.iter().enumerate() {
         let title = get_title(item).to_lowercase();
+        let title_norm = normalize_for_search(&title);
 
-        if title.starts_with(&query_lower) {
+        if title.starts_with(&query_lower) || title_norm.starts_with(&query_normalized) {
             priority1.push(idx);
         } else if !short_query {
-            // For longer queries, check word boundaries and contains
-            if title.split_whitespace().any(|w| w.starts_with(&query_lower)) {
+            if title.split_whitespace().any(|w| w.starts_with(&query_lower))
+                || title_norm.split_whitespace().any(|w| w.starts_with(&query_normalized))
+            {
                 priority2.push(idx);
-            } else if title.contains(&query_lower) {
+            } else if title.contains(&query_lower) || title_norm.contains(&query_normalized) {
                 priority3.push(idx);
-            } else {
-                // Fuzzy: try punctuation-insensitive match
-                let title_normalized = normalize_for_search(&title);
-                if title_normalized.contains(&query_normalized) {
-                    priority4.push(idx);
-                }
             }
         }
     }
@@ -74,7 +102,6 @@ where
     let mut matched_indices = priority1;
     matched_indices.extend(priority2);
     matched_indices.extend(priority3);
-    matched_indices.extend(priority4);
 
     let total_matches = matched_indices.len();
     let has_more = matched_indices.len() > max_results;
@@ -108,11 +135,10 @@ pub fn filter_browse_items(
     let query_normalized = normalize_for_search(&query_lower);
     let short_query = query.len() < 2;
 
-    let mut priority1: Vec<usize> = Vec::new(); // Starts with
+    let mut priority1: Vec<usize> = Vec::new(); // Starts with (exact or accent-folded)
     let mut priority2: Vec<usize> = Vec::new(); // Word starts with
     let mut priority3: Vec<usize> = Vec::new(); // Contains
-    let mut priority4: Vec<usize> = Vec::new(); // Normalized match (punctuation-insensitive)
-    let mut priority5: Vec<usize> = Vec::new(); // Year match / alias match
+    let mut priority4: Vec<usize> = Vec::new(); // Year match / alias match
 
     // Track whether any compilation-only artist matched (to inject Compilations entry)
     let mut compilation_artist_matched = false;
@@ -123,9 +149,11 @@ pub fn filter_browse_items(
             if !compilation_artist_keys.is_empty() && compilation_artist_keys.contains(key) {
                 // Check if it matches the query — if so, flag for Compilations injection
                 let title = item.title().to_lowercase();
-                if title.starts_with(&query_lower)
+                let title_norm = normalize_for_search(&title);
+                if title.starts_with(&query_lower) || title_norm.starts_with(&query_normalized)
                     || (!short_query && (title.split_whitespace().any(|w| w.starts_with(&query_lower))
-                        || title.contains(&query_lower)))
+                        || title_norm.split_whitespace().any(|w| w.starts_with(&query_normalized))
+                        || title.contains(&query_lower) || title_norm.contains(&query_normalized)))
                 {
                     compilation_artist_matched = true;
                 }
@@ -134,33 +162,30 @@ pub fn filter_browse_items(
         }
 
         let title = item.title().to_lowercase();
+        let title_norm = normalize_for_search(&title);
 
-        if title.starts_with(&query_lower) {
+        if title.starts_with(&query_lower) || title_norm.starts_with(&query_normalized) {
             priority1.push(idx);
         } else if !short_query {
-            if title.split_whitespace().any(|w| w.starts_with(&query_lower)) {
+            if title.split_whitespace().any(|w| w.starts_with(&query_lower))
+                || title_norm.split_whitespace().any(|w| w.starts_with(&query_normalized))
+            {
                 priority2.push(idx);
-            } else if title.contains(&query_lower) {
+            } else if title.contains(&query_lower) || title_norm.contains(&query_normalized) {
                 priority3.push(idx);
-            } else {
-                // Fuzzy: try punctuation-insensitive match
-                let title_normalized = normalize_for_search(&title);
-                if title_normalized.contains(&query_normalized) {
+            } else if let BrowseItem::Album { year: Some(year), .. } = item {
+                if year.to_string().contains(&query_lower) {
                     priority4.push(idx);
-                } else if let BrowseItem::Album { year: Some(year), .. } = item {
-                    if year.to_string().contains(&query_lower) {
-                        priority5.push(idx);
-                    }
-                } else if let BrowseItem::Artist { key, .. } = item {
-                    // Check artist aliases (with normalization)
-                    if let Some(aliases) = artist_aliases.get(key) {
-                        let query_norm = crate::services::artist_alias_service::normalize_artist_name(&query_lower);
-                        if aliases.iter().any(|alias| {
-                            let a = crate::services::artist_alias_service::normalize_artist_name(alias);
-                            a.starts_with(&query_norm) || a.contains(&query_norm)
-                        }) {
-                            priority5.push(idx);
-                        }
+                }
+            } else if let BrowseItem::Artist { key, .. } = item {
+                // Check artist aliases (with normalization)
+                if let Some(aliases) = artist_aliases.get(key) {
+                    let query_norm = crate::services::artist_alias_service::normalize_artist_name(&query_lower);
+                    if aliases.iter().any(|alias| {
+                        let a = crate::services::artist_alias_service::normalize_artist_name(alias);
+                        a.starts_with(&query_norm) || a.contains(&query_norm)
+                    }) {
+                        priority4.push(idx);
                     }
                 }
             }
@@ -168,7 +193,7 @@ pub fn filter_browse_items(
             // Short query: check year match for single-char digits too
             if let BrowseItem::Album { year: Some(year), .. } = item {
                 if year.to_string().contains(&query_lower) {
-                    priority5.push(idx);
+                    priority4.push(idx);
                 }
             }
         }
@@ -178,12 +203,11 @@ pub fn filter_browse_items(
     // (find it in the items list)
     if compilation_artist_matched {
         if let Some(comp_idx) = items.iter().position(|item| matches!(item, BrowseItem::Compilations)) {
-            // Add at the end of priority5 if not already in results
+            // Add at the end of priority4 if not already in results
             if !priority1.contains(&comp_idx) && !priority2.contains(&comp_idx)
                 && !priority3.contains(&comp_idx) && !priority4.contains(&comp_idx)
-                && !priority5.contains(&comp_idx)
             {
-                priority5.push(comp_idx);
+                priority4.push(comp_idx);
             }
         }
     }
@@ -192,7 +216,6 @@ pub fn filter_browse_items(
     matched_indices.extend(priority2);
     matched_indices.extend(priority3);
     matched_indices.extend(priority4);
-    matched_indices.extend(priority5);
 
     let total_matches = matched_indices.len();
     let has_more = matched_indices.len() > max_results;
@@ -253,35 +276,32 @@ where
     let mut bucket3: Vec<usize> = Vec::new(); // Title starts with
     let mut bucket4: Vec<usize> = Vec::new(); // Any word starts with
     let mut bucket5: Vec<usize> = Vec::new(); // Contains
-    let mut bucket6: Vec<usize> = Vec::new(); // Normalized contains
 
     for (idx, item) in items.iter().enumerate() {
         let title = get_title(item).to_lowercase();
+        let title_norm = normalize_for_search(&title);
 
-        if title == query_lower {
+        if title == query_lower || title_norm == query_normalized {
             bucket1.push(idx);
-        } else if title.starts_with(&query_lower) {
+        } else if title.starts_with(&query_lower) || title_norm.starts_with(&query_normalized) {
             bucket3.push(idx);
         } else {
-            // Check last word starts with query (last-name heuristic)
             let last_word = title.split_whitespace().last().unwrap_or("");
-            if last_word.starts_with(&query_lower) {
+            let last_word_norm = title_norm.split_whitespace().last().unwrap_or("");
+            if last_word.starts_with(&query_lower) || last_word_norm.starts_with(&query_normalized) {
                 bucket2.push(idx);
-            } else if title.split_whitespace().any(|w| w.starts_with(&query_lower)) {
+            } else if title.split_whitespace().any(|w| w.starts_with(&query_lower))
+                || title_norm.split_whitespace().any(|w| w.starts_with(&query_normalized))
+            {
                 bucket4.push(idx);
-            } else if title.contains(&query_lower) {
+            } else if title.contains(&query_lower) || title_norm.contains(&query_normalized) {
                 bucket5.push(idx);
-            } else {
-                let title_normalized = normalize_for_search(&title);
-                if title_normalized.contains(&query_normalized) {
-                    bucket6.push(idx);
-                }
             }
         }
     }
 
     let mut result = Vec::new();
-    for bucket in [bucket1, bucket2, bucket3, bucket4, bucket5, bucket6] {
+    for bucket in [bucket1, bucket2, bucket3, bucket4, bucket5] {
         for idx in bucket {
             if result.len() >= max_results {
                 return result;
@@ -313,37 +333,35 @@ pub fn search_albums_with_ranking(
     let mut bucket3: Vec<usize> = Vec::new(); // Title starts with
     let mut bucket4: Vec<usize> = Vec::new(); // Any word starts with
     let mut bucket5: Vec<usize> = Vec::new(); // Contains
-    let mut bucket6: Vec<usize> = Vec::new(); // Normalized contains
-    let mut bucket7: Vec<usize> = Vec::new(); // Year match
+    let mut bucket6: Vec<usize> = Vec::new(); // Year match
 
     for (idx, album) in albums.iter().enumerate() {
         let title = album.title.to_lowercase();
+        let title_norm = normalize_for_search(&title);
 
-        if title == query_lower {
+        if title == query_lower || title_norm == query_normalized {
             bucket1.push(idx);
-        } else if title.starts_with(&query_lower) {
+        } else if title.starts_with(&query_lower) || title_norm.starts_with(&query_normalized) {
             bucket3.push(idx);
         } else {
             let last_word = title.split_whitespace().last().unwrap_or("");
-            if last_word.starts_with(&query_lower) {
+            let last_word_norm = title_norm.split_whitespace().last().unwrap_or("");
+            if last_word.starts_with(&query_lower) || last_word_norm.starts_with(&query_normalized) {
                 bucket2.push(idx);
-            } else if title.split_whitespace().any(|w| w.starts_with(&query_lower)) {
+            } else if title.split_whitespace().any(|w| w.starts_with(&query_lower))
+                || title_norm.split_whitespace().any(|w| w.starts_with(&query_normalized))
+            {
                 bucket4.push(idx);
-            } else if title.contains(&query_lower) {
+            } else if title.contains(&query_lower) || title_norm.contains(&query_normalized) {
                 bucket5.push(idx);
-            } else {
-                let title_normalized = normalize_for_search(&title);
-                if title_normalized.contains(&query_normalized) {
-                    bucket6.push(idx);
-                } else if album.year.map(|y| y.to_string().contains(&query_lower)).unwrap_or(false) {
-                    bucket7.push(idx);
-                }
+            } else if album.year.map(|y| y.to_string().contains(&query_lower)).unwrap_or(false) {
+                bucket6.push(idx);
             }
         }
     }
 
     let mut result = Vec::new();
-    for bucket in [bucket1, bucket2, bucket3, bucket4, bucket5, bucket6, bucket7] {
+    for bucket in [bucket1, bucket2, bucket3, bucket4, bucket5, bucket6] {
         for idx in bucket {
             if result.len() >= max_results {
                 return result;
@@ -384,37 +402,36 @@ pub fn search_tracks_with_ranking(
     let mut bucket5: Vec<usize> = Vec::new(); // Any word in artist starts with
     let mut bucket6: Vec<usize> = Vec::new(); // Title contains
     let mut bucket7: Vec<usize> = Vec::new(); // Artist contains
-    let mut bucket8: Vec<usize> = Vec::new(); // Normalized contains (either)
 
     for (idx, track) in tracks.iter().enumerate() {
         let title = track.title.to_lowercase();
         let artist = track.grandparent_title.as_deref().unwrap_or("").to_lowercase();
+        let title_norm = normalize_for_search(&title);
+        let artist_norm = normalize_for_search(&artist);
 
-        if title == query_lower {
+        if title == query_lower || title_norm == query_normalized {
             bucket1.push(idx);
-        } else if title.starts_with(&query_lower) {
+        } else if title.starts_with(&query_lower) || title_norm.starts_with(&query_normalized) {
             bucket2.push(idx);
-        } else if artist.starts_with(&query_lower) {
+        } else if artist.starts_with(&query_lower) || artist_norm.starts_with(&query_normalized) {
             bucket3.push(idx);
-        } else if title.split_whitespace().any(|w| w.starts_with(&query_lower)) {
+        } else if title.split_whitespace().any(|w| w.starts_with(&query_lower))
+            || title_norm.split_whitespace().any(|w| w.starts_with(&query_normalized))
+        {
             bucket4.push(idx);
-        } else if artist.split_whitespace().any(|w| w.starts_with(&query_lower)) {
+        } else if artist.split_whitespace().any(|w| w.starts_with(&query_lower))
+            || artist_norm.split_whitespace().any(|w| w.starts_with(&query_normalized))
+        {
             bucket5.push(idx);
-        } else if title.contains(&query_lower) {
+        } else if title.contains(&query_lower) || title_norm.contains(&query_normalized) {
             bucket6.push(idx);
-        } else if artist.contains(&query_lower) {
+        } else if artist.contains(&query_lower) || artist_norm.contains(&query_normalized) {
             bucket7.push(idx);
-        } else {
-            let title_norm = normalize_for_search(&title);
-            let artist_norm = normalize_for_search(&artist);
-            if title_norm.contains(&query_normalized) || artist_norm.contains(&query_normalized) {
-                bucket8.push(idx);
-            }
         }
     }
 
     let mut result = Vec::new();
-    for bucket in [bucket1, bucket2, bucket3, bucket4, bucket5, bucket6, bucket7, bucket8] {
+    for bucket in [bucket1, bucket2, bucket3, bucket4, bucket5, bucket6, bucket7] {
         for idx in bucket {
             if result.len() >= max_results {
                 return result;

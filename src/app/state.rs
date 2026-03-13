@@ -1171,6 +1171,8 @@ pub struct Notifications {
 pub struct ScrollPins {
     pub browse: Option<(usize, usize)>,
     pub browse_click_time: Option<std::time::Instant>,
+    /// Last clicked item in browse Miller columns: (col_idx, item_idx) for double-click detection.
+    pub browse_last_click: Option<(usize, usize)>,
     pub search: Option<usize>,
     pub station: Option<usize>,
     pub queue: Option<usize>,

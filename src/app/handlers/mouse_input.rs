@@ -230,19 +230,8 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
                     state.list_filter.deactivate();
                     return vec![];
                 }
-                // Browse view with non-empty query: check if click lands on the filtered column
-                let on_filtered_column = {
-                    let hr = state.hit_regions.borrow();
-                    hr.miller_columns.as_ref().and_then(|mc| {
-                        mc.columns.iter().find(|c| c.col_idx == state.list_filter.column)
-                            .map(|c| click_col >= c.area.x && click_col < c.area.right()
-                                      && click_row >= c.area.y && click_row < c.area.bottom())
-                    }).unwrap_or(false)
-                };
-                if !on_filtered_column {
-                    state.list_filter.deactivate();
-                    return vec![];
-                }
+                // Browse view with non-empty query: let content-area clicks pass through
+                // to normal handlers. Filter stays active until Esc or view change.
             }
 
             // Check tab bar (top row)
@@ -1316,6 +1305,36 @@ fn handle_browse_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
             }
 
             if let Some((col_idx, item_idx, scroll_offset)) = miller_hit_test(click_col, click_row, nav, state) {
+                // Double-click detection: same (col_idx, item_idx) clicked twice within 400ms.
+                // Checked BEFORE column-focus changes, since a drill from the first click
+                // may shift focused_column before the second click arrives.
+                let is_double_click = state.scroll.browse_last_click == Some((col_idx, item_idx))
+                    && state.scroll.browse_click_time
+                        .map(|t| t.elapsed().as_millis() < 400)
+                        .unwrap_or(false);
+
+                if is_double_click {
+                    // Look up the item and try a double-click play action
+                    let item = {
+                        let nav = match state.browse_category {
+                            BrowseCategory::Library => &state.artist_nav,
+                            BrowseCategory::Genres => &state.genre_nav,
+                            BrowseCategory::Playlists => &state.playlist_nav,
+                            _ => return vec![],
+                        };
+                        nav.columns.get(col_idx).and_then(|c| c.items.get(item_idx)).cloned()
+                    };
+                    if let Some(ref item) = item {
+                        if let Some(actions) = browse_double_click_action(item, state) {
+                            state.scroll.browse_last_click = None; // consume the double-click
+                            return actions;
+                        }
+                    }
+                }
+
+                // Record this click for future double-click detection
+                state.scroll.browse_last_click = Some((col_idx, item_idx));
+
                 // Check if this click is on a column with an active filter
                 let filter_on_click_col = state.list_filter.active
                     && state.list_filter.category == state.browse_category
@@ -1486,11 +1505,72 @@ fn browse_drill_down_action(item: BrowseItem, col_idx: usize, item_idx: usize, s
     }
 }
 
+/// Handle double-click on a browse item: play immediately instead of drilling.
+/// Returns Some(actions) if the item type supports double-click play, None otherwise (fall through to drill).
+fn browse_double_click_action(item: &BrowseItem, _state: &mut AppState) -> Option<Vec<Action>> {
+    match item {
+        BrowseItem::Artist { key, title, .. } => {
+            // Double-click artist → start Artist Radio
+            Some(vec![Action::StartPlexRadio {
+                key: key.clone(),
+                title: format!("{} Radio", title),
+            }])
+        }
+        BrowseItem::Album { key, title, .. } => {
+            // Double-click album → play album now
+            Some(vec![Action::PlayAlbumNow {
+                rating_key: key.clone(),
+                title: title.clone(),
+            }])
+        }
+        BrowseItem::Playlist { key, title, .. } => {
+            // Double-click playlist → play playlist now
+            Some(vec![Action::PlayPlaylistNow {
+                playlist_key: key.clone(),
+                title: title.clone(),
+            }])
+        }
+        BrowseItem::ArtistRadio { artist_key, artist_name, .. } => {
+            // Double-click ArtistRadio entry → start radio
+            Some(vec![Action::StartPlexRadio {
+                key: artist_key.clone(),
+                title: artist_name.clone(),
+            }])
+        }
+        BrowseItem::Genre { .. } => {
+            // Fall through to drill — playing all genre tracks is complex
+            None
+        }
+        _ => None,
+    }
+}
+
 /// Handle click in Folder browse mode.
 fn handle_folder_click(click_row: u16, click_col: u16, state: &mut AppState) -> Vec<Action> {
     use crate::services::FolderItemType;
 
     if let Some((col_idx, item_idx, scroll_offset)) = folder_hit_test(click_col, click_row, state) {
+        // Double-click detection (before column-focus changes)
+        let is_double_click = state.scroll.browse_last_click == Some((col_idx, item_idx))
+            && state.scroll.browse_click_time
+                .map(|t| t.elapsed().as_millis() < 400)
+                .unwrap_or(false);
+
+        if is_double_click {
+            if let Some(item) = state.folder_state.as_ref()
+                .and_then(|fs| fs.columns.get(col_idx))
+                .and_then(|c| c.items.get(item_idx)).cloned()
+            {
+                if matches!(item.item_type, FolderItemType::Folder) {
+                    // Double-click folder → play all tracks in it
+                    state.scroll.browse_last_click = None;
+                    return vec![Action::PlayFolderTracks];
+                }
+            }
+        }
+
+        state.scroll.browse_last_click = Some((col_idx, item_idx));
+
         let filter_on_click_col = state.list_filter.active
             && state.list_filter.category == BrowseCategory::Folders
             && state.list_filter.column == col_idx
@@ -2814,9 +2894,22 @@ fn handle_scrollbar_drag(mouse_y: u16, state: &mut AppState) -> Vec<Action> {
             state.scroll.browse = Some((drag.col_idx, new_offset));
             state.scroll.browse_click_time = Some(std::time::Instant::now());
 
-            // Adjust selected index to stay within the visible range
+            // Adjust selected index to stay within the visible range.
+            // When filter is active, offsets are positions in the filtered list,
+            // so we must map through matched_indices.
             let first_visible = new_offset;
             let last_visible = new_offset + drag.visible_items.saturating_sub(1);
+
+            let filter_indices = if state.list_filter.active
+                && state.list_filter.column == drag.col_idx
+                && ((drag.view == ScrollbarView::Browse && state.list_filter.category == state.browse_category)
+                    || (drag.view == ScrollbarView::Folder && state.list_filter.category == BrowseCategory::Folders))
+            {
+                state.list_filter.results.as_ref().map(|r| r.matched_indices.clone())
+            } else {
+                None
+            };
+
             match drag.view {
                 ScrollbarView::Browse => {
                     let nav = match state.browse_category {
@@ -2826,20 +2919,37 @@ fn handle_scrollbar_drag(mouse_y: u16, state: &mut AppState) -> Vec<Action> {
                         _ => return vec![],
                     };
                     if let Some(col) = nav.columns.get_mut(drag.col_idx) {
-                        if col.selected_index < first_visible {
-                            col.selected_index = first_visible;
-                        } else if col.selected_index > last_visible {
-                            col.selected_index = last_visible;
+                        if let Some(ref indices) = filter_indices {
+                            // Map display position to actual item index
+                            let display_pos = indices.iter()
+                                .position(|&idx| idx == col.selected_index)
+                                .unwrap_or(0);
+                            let clamped = display_pos.max(first_visible).min(last_visible.min(indices.len().saturating_sub(1)));
+                            col.selected_index = indices[clamped];
+                        } else {
+                            if col.selected_index < first_visible {
+                                col.selected_index = first_visible;
+                            } else if col.selected_index > last_visible {
+                                col.selected_index = last_visible;
+                            }
                         }
                     }
                 }
                 ScrollbarView::Folder => {
                     if let Some(folder_state) = &mut state.folder_state {
                         if let Some(col) = folder_state.columns.get_mut(drag.col_idx) {
-                            if col.selected_index < first_visible {
-                                col.selected_index = first_visible;
-                            } else if col.selected_index > last_visible {
-                                col.selected_index = last_visible;
+                            if let Some(ref indices) = filter_indices {
+                                let display_pos = indices.iter()
+                                    .position(|&idx| idx == col.selected_index)
+                                    .unwrap_or(0);
+                                let clamped = display_pos.max(first_visible).min(last_visible.min(indices.len().saturating_sub(1)));
+                                col.selected_index = indices[clamped];
+                            } else {
+                                if col.selected_index < first_visible {
+                                    col.selected_index = first_visible;
+                                } else if col.selected_index > last_visible {
+                                    col.selected_index = last_visible;
+                                }
                             }
                         }
                     }
@@ -2887,6 +2997,16 @@ fn try_browse_scrollbar_click(
         _ => return None,
     };
 
+    // Check if filter is active on a column in this category
+    let filter_on_col = if state.list_filter.active
+        && state.list_filter.category == state.browse_category
+        && state.list_filter.results.is_some()
+    {
+        Some(state.list_filter.column)
+    } else {
+        None
+    };
+
     for col_reg in &mr.columns {
         let col_idx = col_reg.col_idx;
         if col_idx >= nav.columns.len() {
@@ -2894,23 +3014,37 @@ fn try_browse_scrollbar_click(
         }
 
         let col = &nav.columns[col_idx];
-        let total_items = col.items.len();
+        let inner_height = col_reg.inner.height as usize;
+
+        // When filter is active on this column, use filtered item count
+        let (total_items, display_selected) = if filter_on_col == Some(col_idx) {
+            if let Some(ref results) = state.list_filter.results {
+                if results.matched_indices.is_empty() { continue; }
+                let ds = results.matched_indices.iter()
+                    .position(|&idx| idx == col.selected_index)
+                    .unwrap_or(0);
+                (results.matched_indices.len(), ds)
+            } else {
+                continue;
+            }
+        } else {
+            (col.items.len(), col.selected_index)
+        };
+
         if total_items == 0 {
             continue;
         }
 
-        let inner_height = col_reg.inner.height as usize;
-
-        let visible_items = if col_reg.is_art_mode {
+        let visible_items = if col_reg.is_art_mode && filter_on_col != Some(col_idx) {
             let art_count = col.items.iter().filter(|item| !is_one_row_item(item)).count().max(1);
             let target_visible = 3u16.max((art_count as u16).min(5));
             let art_row_height = (inner_height as u16 / target_visible).max(3) as usize;
             let mut y = 0usize;
             let mut count = 0;
             let offset = state.scroll.browse.and_then(|(pc, po)| if pc == col_idx { Some(po) } else { None }).unwrap_or(0);
-            for i in offset..total_items {
+            for i in offset..col.items.len() {
                 let h = if is_one_row_item(&col.items[i]) { 1 } else { art_row_height };
-                let spacer = if i + 1 < total_items && is_one_row_item(&col.items[i]) && !is_one_row_item(&col.items[i + 1]) { 1 } else { 0 };
+                let spacer = if i + 1 < col.items.len() && is_one_row_item(&col.items[i]) && !is_one_row_item(&col.items[i + 1]) { 1 } else { 0 };
                 if y + h + spacer > inner_height { break; }
                 y += h + spacer;
                 count += 1;
@@ -2922,7 +3056,7 @@ fn try_browse_scrollbar_click(
         };
 
         let pinned = state.scroll.browse.and_then(|(pc, po)| if pc == col_idx { Some(po) } else { None });
-        let scroll_offset = pinned.unwrap_or_else(|| helpers::calc_scroll_offset(col.selected_index, visible_items, total_items));
+        let scroll_offset = pinned.unwrap_or_else(|| helpers::calc_scroll_offset(display_selected, visible_items, total_items));
 
         if let Some((track_y_start, track_height, thumb_pos, thumb_size, _)) =
             scrollbar_hit_test_bordered(click_col, click_row, col_reg.area.x, col_reg.area.width, col_reg.area.y, col_reg.area.height, total_items, visible_items, scroll_offset)
@@ -2954,6 +3088,16 @@ fn try_folder_scrollbar_click(
     };
     let mr = miller?;
 
+    // Check if filter is active on a folder column
+    let filter_on_col = if state.list_filter.active
+        && state.list_filter.category == BrowseCategory::Folders
+        && state.list_filter.results.is_some()
+    {
+        Some(state.list_filter.column)
+    } else {
+        None
+    };
+
     for col_reg in &mr.columns {
         let col_idx = col_reg.col_idx;
         if col_idx >= folder_state.columns.len() {
@@ -2961,15 +3105,30 @@ fn try_folder_scrollbar_click(
         }
 
         let col = &folder_state.columns[col_idx];
-        let total_items = col.items.len();
+        let inner_height = col_reg.inner.height as usize;
+
+        // When filter is active on this column, use filtered item count
+        let (total_items, display_selected) = if filter_on_col == Some(col_idx) {
+            if let Some(ref results) = state.list_filter.results {
+                if results.matched_indices.is_empty() { continue; }
+                let ds = results.matched_indices.iter()
+                    .position(|&idx| idx == col.selected_index)
+                    .unwrap_or(0);
+                (results.matched_indices.len(), ds)
+            } else {
+                continue;
+            }
+        } else {
+            (col.items.len(), col.selected_index)
+        };
+
         if total_items == 0 {
             continue;
         }
 
-        let inner_height = col_reg.inner.height as usize;
         let visible_items = inner_height;
         let pinned = state.scroll.browse.and_then(|(pc, po)| if pc == col_idx { Some(po) } else { None });
-        let scroll_offset = pinned.unwrap_or_else(|| helpers::calc_scroll_offset(col.selected_index, visible_items, total_items));
+        let scroll_offset = pinned.unwrap_or_else(|| helpers::calc_scroll_offset(display_selected, visible_items, total_items));
 
         if let Some((track_y_start, track_height, thumb_pos, thumb_size, _)) =
             scrollbar_hit_test_bordered(click_col, click_row, col_reg.area.x, col_reg.area.width, col_reg.area.y, col_reg.area.height, total_items, visible_items, scroll_offset)
