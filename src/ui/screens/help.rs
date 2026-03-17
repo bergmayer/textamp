@@ -24,13 +24,12 @@ COMMANDS
   / or Alt+F        Inline filter (type to narrow list, stays on column)
 
   Enter             Navigate to item (drill down)
-                    On tracks: enqueue track + following, and play
+                    On tracks: play track + all following (replaces queue)
   Double-click      Play immediately (replaces queue):
-                    Artist → Artist Radio, Album → play album,
-                    Playlist → play playlist, Folder → play folder
-  Ctrl+E            Enqueue at top of queue and play (any context)
-  Ctrl+Shift+E      Enqueue at end of queue
-                    On tracks: enqueues track and following tracks
+                    Album → play album, Playlist → play playlist,
+                    Folder → play folder
+  Ctrl+E            Add to end of queue (track + following, or album)
+  Ctrl+Shift+E      Insert next in queue (after current track)
 
   Space             Play / Pause
   Shift+Left/Right  Seek ±10 seconds

@@ -170,6 +170,47 @@ impl PlexClient {
         Ok(headers)
     }
 
+    /// Get a reference to the internal HTTP client.
+    ///
+    /// Use this for audio downloads so they share the same connection pool,
+    /// TLS settings, and HTTP version negotiation as API calls that work.
+    pub fn http_client(&self) -> &reqwest::Client {
+        &self.http
+    }
+
+    /// Build headers for audio streaming requests.
+    ///
+    /// Same Plex identification headers as API requests, but without
+    /// `Accept: application/json` since the response is binary audio.
+    pub fn stream_headers(&self) -> reqwest::header::HeaderMap {
+        use reqwest::header::HeaderValue;
+
+        let mut headers = reqwest::header::HeaderMap::new();
+
+        if let Ok(v) = HeaderValue::from_str(&self.client_info.product) {
+            headers.insert(HEADER_PLEX_PRODUCT, v);
+        }
+        if let Ok(v) = HeaderValue::from_str(&self.client_info.version) {
+            headers.insert(HEADER_PLEX_VERSION, v);
+        }
+        if let Ok(v) = HeaderValue::from_str(&self.client_info.client_identifier) {
+            headers.insert(HEADER_PLEX_CLIENT_ID, v);
+        }
+        if let Ok(v) = HeaderValue::from_str(&self.client_info.device_name) {
+            headers.insert(HEADER_PLEX_DEVICE_NAME, v);
+        }
+        if let Ok(v) = HeaderValue::from_str(&self.client_info.platform) {
+            headers.insert(HEADER_PLEX_PLATFORM, v);
+        }
+        if let Some(ref token) = self.auth_token {
+            if let Ok(v) = HeaderValue::from_str(token) {
+                headers.insert(HEADER_PLEX_TOKEN, v);
+            }
+        }
+
+        headers
+    }
+
     /// Build URL from server base and path.
     fn build_url(&self, path: &str) -> Result<String, ApiError> {
         Ok(format!("{}{}", self.require_server()?, path))
@@ -1831,26 +1872,93 @@ impl PlexClient {
         Ok(format!("{}{}?{}={}", server, part.key, HEADER_PLEX_TOKEN, token))
     }
 
-    /// Get a transcoded stream URL (Plex converts to MP3).
-    pub fn get_transcoded_stream_url(&self, track: &Track) -> Result<String, ApiError> {
+    /// Get a transcoded stream URL (Plex converts to MP3 at the given bitrate).
+    ///
+    /// Two-step process verified by testing against PMS:
+    /// 1. Call `/video/:/transcode/universal/decision` to establish the transcode session
+    /// 2. Return the `/music/:/transcode/universal/start` URL for the actual MP3 stream
+    ///
+    /// Critical details discovered through testing:
+    /// - `X-Plex-Platform` MUST be "iOS" — PMS rejects transcoding for "macos"/"linux"
+    ///   platforms, assuming they can direct-play everything.
+    /// - The decision step MUST be called first or start returns 400.
+    /// - All Plex auth params go in the query string, NOT as HTTP headers.
+    /// - Uses `protocol=http` with mp3 profile for a single direct MP3 stream.
+    pub async fn get_transcoded_stream_url(&self, track: &Track, bitrate_kbps: u32) -> Result<String, ApiError> {
         let token = self.require_token()?;
         let server = self.require_server()?;
         let session_id = uuid::Uuid::new_v4().to_string();
 
-        tracing::debug!("Generating transcode URL with client_identifier: {}", self.client_info.client_identifier);
+        let path = if !track.key.is_empty() {
+            track.key.clone()
+        } else {
+            format!("{}/{}", EP_LIBRARY_METADATA, track.rating_key)
+        };
 
-        Ok(format!(
-            "{}{}?path={}&mediaIndex=0&partIndex=0&protocol=http&directPlay=0&directStream=0\
-             &fastSeek=1&location=lan&session={}&{}={}&{}={}&{}={}&{}={}",
-            server,
-            EP_MUSIC_TRANSCODE,
-            urlencoding::encode(&format!("{}/{}", EP_LIBRARY_METADATA, track.rating_key)),
-            session_id,
-            HEADER_PLEX_CLIENT_ID, urlencoding::encode(&self.client_info.client_identifier),
-            HEADER_PLEX_PRODUCT, urlencoding::encode(&self.client_info.product),
-            HEADER_PLEX_PLATFORM, urlencoding::encode(&self.client_info.platform),
-            HEADER_PLEX_TOKEN, token
-        ))
+        // Transcode endpoints fail over HTTPS .plex.direct (400 Bad Request) but work
+        // over plain HTTP to the LAN IP. Convert the server URL to HTTP.
+        let transcode_server = if server.contains(".plex.direct") {
+            if let Some(ip_part) = server.split("//").nth(1).and_then(|s| s.split('.').next()) {
+                let raw_ip = ip_part.replace('-', ".");
+                let port = server.rsplit(':').next().unwrap_or("32400");
+                format!("http://{}:{}", raw_ip, port)
+            } else {
+                server.to_string()
+            }
+        } else {
+            server.to_string()
+        };
+
+        let profile_extra = "add-transcode-target(type=musicProfile&context=streaming&protocol=http&container=mp3&audioCodec=mp3)";
+
+        let common_params = format!(
+            "path={}\
+             &directPlay=0&directStream=1\
+             &protocol=http\
+             &musicBitrate={}\
+             &session={}\
+             &X-Plex-Session-Identifier={}\
+             &X-Plex-Token={}\
+             &X-Plex-Client-Identifier={}\
+             &X-Plex-Product={}\
+             &X-Plex-Version={}\
+             &X-Plex-Platform={}\
+             &X-Plex-Client-Profile-Extra={}",
+            urlencoding::encode(&path),
+            bitrate_kbps,
+            &session_id,
+            &session_id,
+            token,
+            urlencoding::encode(&self.client_info.client_identifier),
+            urlencoding::encode(&self.client_info.product),
+            urlencoding::encode(&self.client_info.version),
+            urlencoding::encode("iOS"),
+            urlencoding::encode(profile_extra),
+        );
+
+        // Step 1: Decision — establishes the transcode session
+        let decision_url = format!("{}/video/:/transcode/universal/decision?{}", transcode_server, common_params);
+        tracing::info!("Transcode decision ({}kbps): {}", bitrate_kbps,
+            decision_url.split("X-Plex-Token=").next().unwrap_or(&decision_url));
+
+        let resp = self.http.get(&decision_url).send().await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            tracing::error!("Transcode decision failed: HTTP {} - {}", status, &body[..body.len().min(500)]);
+            return Err(ApiError::ServerError {
+                status: status.as_u16(),
+                message: format!("Transcode decision failed: HTTP {}", status),
+            });
+        }
+        let _decision_body = resp.text().await.unwrap_or_default();
+
+        // Step 2: Return the start URL — the actual MP3 audio stream
+        let start_url = format!("{}/music/:/transcode/universal/start?{}", transcode_server, common_params);
+        tracing::info!("Transcode stream ({}kbps): {}", bitrate_kbps,
+            start_url.split("X-Plex-Token=").next().unwrap_or(&start_url));
+
+        Ok(start_url)
     }
 
     /// Get client identifier.

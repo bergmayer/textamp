@@ -1455,7 +1455,8 @@ fn browse_drill_down_action(item: BrowseItem, col_idx: usize, item_idx: usize, s
                     vec![Action::LoadCompilationAlbumsForMiller { artist_key, artist_name }]
                 }
                 BrowseItem::Track { .. } => {
-                    vec![Action::PlayTrackFromMiller { column_index: col_idx, track_index: item_idx, single_track: true }]
+                    // Click already-selected track: play track + all following (replaces queue)
+                    vec![Action::PlayTrackFromMiller { column_index: col_idx, track_index: item_idx, single_track: false }]
                 }
                 _ => vec![],
             }
@@ -1472,7 +1473,8 @@ fn browse_drill_down_action(item: BrowseItem, col_idx: usize, item_idx: usize, s
                     vec![Action::LoadGenreTracksForMiller { album_key: key }]
                 }
                 BrowseItem::Track { .. } => {
-                    vec![Action::PlayGenreTrackFromMiller { column_index: col_idx, track_index: item_idx, single_track: true }]
+                    // Click already-selected track: play track + all following (replaces queue)
+                    vec![Action::PlayGenreTrackFromMiller { column_index: col_idx, track_index: item_idx, single_track: false }]
                 }
                 _ => vec![],
             }
@@ -1496,7 +1498,8 @@ fn browse_drill_down_action(item: BrowseItem, col_idx: usize, item_idx: usize, s
                     vec![Action::LoadAlbumTracksForMiller { album_key: key }]
                 }
                 BrowseItem::Track { .. } => {
-                    vec![Action::PlayPlaylistTrackFromMiller { column_index: col_idx, track_index: item_idx, single_track: true }]
+                    // Click already-selected track: play track + all following (replaces queue)
+                    vec![Action::PlayPlaylistTrackFromMiller { column_index: col_idx, track_index: item_idx, single_track: false }]
                 }
                 _ => vec![],
             }
@@ -1509,12 +1512,9 @@ fn browse_drill_down_action(item: BrowseItem, col_idx: usize, item_idx: usize, s
 /// Returns Some(actions) if the item type supports double-click play, None otherwise (fall through to drill).
 fn browse_double_click_action(item: &BrowseItem, _state: &mut AppState) -> Option<Vec<Action>> {
     match item {
-        BrowseItem::Artist { key, title, .. } => {
-            // Double-click artist → start Artist Radio
-            Some(vec![Action::StartPlexRadio {
-                key: key.clone(),
-                title: format!("{} Radio", title),
-            }])
+        BrowseItem::Artist { .. } => {
+            // Double-click artist → no special action, fall through to drill
+            None
         }
         BrowseItem::Album { key, title, .. } => {
             // Double-click album → play album now
@@ -1561,10 +1561,16 @@ fn handle_folder_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
                 .and_then(|fs| fs.columns.get(col_idx))
                 .and_then(|c| c.items.get(item_idx)).cloned()
             {
-                if matches!(item.item_type, FolderItemType::Folder) {
-                    // Double-click folder → play all tracks in it
-                    state.scroll.browse_last_click = None;
-                    return vec![Action::PlayFolderTracks];
+                state.scroll.browse_last_click = None;
+                match item.item_type {
+                    FolderItemType::Folder => {
+                        // Double-click folder → play all tracks in it
+                        return vec![Action::PlayFolderTracks];
+                    }
+                    FolderItemType::Track => {
+                        // Double-click track → play track + following (matches library behavior)
+                        return vec![Action::PlayFolderTracks];
+                    }
                 }
             }
         }
@@ -1610,11 +1616,14 @@ fn handle_folder_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
             if col_sel == item_idx {
                 true
             } else {
-                // Click just highlights — no truncation, preserves child columns
+                // Click highlights and truncates stale child columns
+                // (matches Up/Down keyboard behavior)
                 if let Some(ref mut fs) = state.folder_state {
                     if let Some(col) = fs.columns.get_mut(col_idx) {
                         col.selected_index = item_idx;
                     }
+                    fs.truncate_right_columns();
+                    fs.ensure_placeholder();
                 }
                 false
             }

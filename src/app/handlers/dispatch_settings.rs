@@ -419,9 +419,30 @@ pub async fn dispatch(
                                 player_uri: uri,
                             }));
                         }
-                    } else {
-                        // Refresh players (last item)
+                    } else if idx == output_offset + 1 + state.remote.players.len() {
+                        // Refresh players
                         follow_ups.push(Action::DiscoverPlayers);
+                    } else {
+                        // Transcode: cycle through 0 → 128 → 192 → 256 → 320 → 0
+                        let options = [0u32, 128, 192, 256, 320];
+                        let current_pos = options.iter().position(|&v| v == state.transcode_kbps).unwrap_or(0);
+                        let next = options[(current_pos + 1) % options.len()];
+                        state.transcode_kbps = next;
+
+                        // Flush pre-fetch cache since encoding changed
+                        audio.track_cache.flush();
+
+                        // Save to config
+                        config.playback.transcode_kbps = next;
+                        if let Err(e) = crate::config::save_config(config) {
+                            tracing::warn!("Failed to save transcode setting: {}", e);
+                        }
+
+                        if next == 0 {
+                            state.set_status("Streaming: original (direct play)".to_string());
+                        } else {
+                            state.set_status(format!("Streaming: transcode to {}kbps MP3", next));
+                        }
                     }
                 }
                 SettingsSection::About => {

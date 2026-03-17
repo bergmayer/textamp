@@ -61,8 +61,8 @@ pub const EP_SCROBBLE: &str = "/:/scrobble";
 /// Photo transcoding endpoint.
 pub const EP_PHOTO_TRANSCODE: &str = "/photo/:/transcode";
 
-/// Music transcoding endpoint.
-pub const EP_MUSIC_TRANSCODE: &str = "/music/:/transcode/universal/start.mp3";
+/// Audio transcoding endpoint (must use /audio/ not /music/ for track streaming).
+pub const EP_AUDIO_TRANSCODE: &str = "/audio/:/transcode/universal/start";
 
 // ============================================================================
 // Plex Media Types

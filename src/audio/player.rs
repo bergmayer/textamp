@@ -86,8 +86,8 @@ impl AudioPlayer {
     /// Spawns the HTTP request and buffer setup in a background task.
     /// Returns immediately — the event loop stays responsive.
     /// Sends `AudioEvent::BufferingReady` when playback is ready to start.
-    pub async fn play_url(&mut self, url: &str, event_tx: mpsc::Sender<AudioEvent>) -> Result<()> {
-        self.play_url_with_headers(url, HeaderMap::new(), None, event_tx).await
+    pub async fn play_url(&mut self, url: &str, event_tx: mpsc::Sender<AudioEvent>, http_client: reqwest::Client) -> Result<()> {
+        self.play_url_with_headers(url, HeaderMap::new(), None, event_tx, http_client).await
     }
 
     /// Play audio from a URL with optional fallback (non-blocking).
@@ -101,12 +101,15 @@ impl AudioPlayer {
     ///
     /// If `fallback_url` is provided and the primary URL fails,
     /// the background task automatically tries the fallback.
+    ///
+    /// `http_client`: use the PlexClient's HTTP client to share connection pool and settings.
     pub async fn play_url_with_headers(
         &mut self,
         url: &str,
         headers: HeaderMap,
         fallback_url: Option<String>,
         event_tx: mpsc::Sender<AudioEvent>,
+        http_client: reqwest::Client,
     ) -> Result<()> {
         // Stop any existing playback synchronously
         self.stop();
@@ -119,7 +122,7 @@ impl AudioPlayer {
 
         tokio::spawn(async move {
             // Try primary URL
-            match fetch_and_buffer(&url, &headers, &pending, &event_tx, &generation, expected_gen).await {
+            match fetch_and_buffer(&url, &headers, &http_client, &pending, &event_tx, &generation, expected_gen).await {
                 Ok(()) => {},
                 Err(primary_err) => {
                     tracing::warn!("Primary stream failed: {}", primary_err);
@@ -127,7 +130,7 @@ impl AudioPlayer {
                     if let Some(ref fb_url) = fallback_url {
                         let redacted = fb_url.split("X-Plex-Token=").next().unwrap_or(fb_url);
                         tracing::info!("Trying fallback (transcode): {}...", redacted);
-                        match fetch_and_buffer(fb_url, &headers, &pending, &event_tx, &generation, expected_gen).await {
+                        match fetch_and_buffer(fb_url, &headers, &http_client, &pending, &event_tx, &generation, expected_gen).await {
                             Ok(()) => {},
                             Err(fb_err) => {
                                 tracing::error!("Fallback stream also failed: {}", fb_err);
@@ -257,18 +260,14 @@ fn looks_like_html(data: &[u8]) -> bool {
 
 async fn fetch_and_buffer(
     url: &str,
-    _headers: &HeaderMap,
+    headers: &HeaderMap,
+    client: &reqwest::Client,
     pending: &PendingPlayback,
     event_tx: &mpsc::Sender<AudioEvent>,
     generation: &Arc<AtomicU64>,
     expected_gen: u64,
 ) -> Result<(), String> {
     tracing::debug!("Fetching audio from: {}", url);
-
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| format!("HTTP client error: {}", e))?;
 
     // Retry loop with exponential backoff for transient errors (including HTML responses)
     let backoff_secs = [1u64, 2, 4];
@@ -277,7 +276,7 @@ async fn fetch_and_buffer(
 
     let response = 'retry: {
         for attempt in 0..max_retries {
-            match client.get(url).send().await {
+            match client.get(url).headers(headers.clone()).send().await {
                 Ok(resp) => {
                     let status = resp.status();
                     if status.is_success() {
@@ -320,9 +319,9 @@ async fn fetch_and_buffer(
                 }
                 Err(e) => {
                     last_error = format!("Failed to fetch audio: {}", e);
+                    tracing::warn!("Audio fetch send error (attempt {}): {:?}", attempt + 1, e);
                     if attempt + 1 < max_retries {
                         let delay = backoff_secs[attempt as usize];
-                        tracing::debug!("Audio fetch error (attempt {}), retrying in {}s: {}", attempt + 1, delay, e);
                         tokio::time::sleep(Duration::from_secs(delay)).await;
                         continue;
                     }
@@ -332,6 +331,18 @@ async fn fetch_and_buffer(
         }
         return Err(last_error);
     };
+
+    // Log response headers for diagnostics
+    {
+        let h = response.headers();
+        tracing::info!("Audio response: status={}, content-type={:?}, content-encoding={:?}, content-length={:?}, transfer-encoding={:?}",
+            response.status(),
+            h.get("content-type").map(|v| v.to_str().unwrap_or("?")),
+            h.get("content-encoding").map(|v| v.to_str().unwrap_or("?")),
+            h.get("content-length").map(|v| v.to_str().unwrap_or("?")),
+            h.get("transfer-encoding").map(|v| v.to_str().unwrap_or("?")),
+        );
+    }
 
     // Get content length for progress tracking
     let content_length = response
@@ -344,7 +355,7 @@ async fn fetch_and_buffer(
     // Small files (< 1MB): download fully, check for HTML, wrap in complete buffer
     if total_size > 0 && total_size < 1024 * 1024 {
         let bytes = response.bytes().await
-            .map_err(|e| format!("Download failed: {}", e))?;
+            .map_err(|e| { tracing::warn!("Small file bytes() error: {:?}", e); format!("Download failed: {}", e) })?;
         let data = bytes.to_vec();
 
         // Detect HTML that slipped through without a text/html content-type
@@ -383,6 +394,7 @@ async fn fetch_and_buffer(
             match chunk_result {
                 Ok(chunk) => dl_buffer.append(&chunk),
                 Err(e) => {
+                    tracing::warn!("Streaming chunk error: {:?}", e);
                     dl_buffer.set_error(format!("Download error: {}", e));
                     return;
                 }

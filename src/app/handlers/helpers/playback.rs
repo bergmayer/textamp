@@ -134,6 +134,30 @@ pub async fn queue_and_play(
     play_current_track(event_tx, state, client, audio).await;
 }
 
+/// Insert tracks into the queue immediately after the currently playing track.
+/// If no track is playing, inserts at the beginning of the queue.
+/// Does NOT start playback — just modifies the queue.
+pub fn insert_tracks_next(state: &mut AppState, tracks: Vec<Track>) -> usize {
+    // Convert radio to queue if needed
+    if state.playback_mode == PlaybackMode::Radio {
+        state.queue = state.radio.tracks.clone();
+        state.queue_index = state.radio.track_index;
+        state.playback_mode = PlaybackMode::Queue;
+        state.radio.clear();
+        if let Some(idx) = state.queue_index {
+            state.list_state.queue_index = idx;
+        }
+    }
+
+    state.queue_original.clear();
+    state.queue_sort_mode = crate::app::state::QueueSortMode::QueueOrder;
+
+    let insert_pos = state.queue_index.map(|idx| idx + 1).unwrap_or(0);
+    let added = tracks.len();
+    state.queue.splice(insert_pos..insert_pos, tracks);
+    added
+}
+
 /// Play the current track from the queue.
 pub async fn play_current_track(
     event_tx: &mpsc::Sender<Event>,
@@ -273,7 +297,7 @@ pub async fn play_current_track(
                     state.last_progress_report = Some(std::time::Instant::now());
                     // Trigger pre-fetch for next tracks
                     let upcoming = get_upcoming_tracks(state);
-                    cache::trigger_prefetch(&audio.track_cache, &upcoming, client);
+                    cache::trigger_prefetch(&audio.track_cache, &upcoming, client, state.transcode_kbps);
                     return;
                 }
                 Err(e) => {
@@ -284,41 +308,41 @@ pub async fn play_current_track(
             }
         }
 
-        // Build stream URLs: primary (direct) + fallback (transcode)
-        let primary_url = client.get_stream_url(&track).ok();
-        let fallback_url = client.get_transcoded_stream_url(&track).ok();
+        // Build stream URL: transcode if configured, otherwise direct play. No fallback.
+        let stream_url = if state.transcode_kbps > 0 {
+            client.get_transcoded_stream_url(&track, state.transcode_kbps).await.ok()
+        } else {
+            client.get_stream_url(&track).ok()
+        };
 
         // Create adapter to bridge AudioEvent → app Event
         let audio_tx = audio_event_adapter(event_tx);
 
-        if let Some(url) = primary_url {
-            tracing::debug!("Direct stream URL: {}", url);
-            // play_url_with_headers spawns HTTP fetch in background — returns immediately
-            if let Err(e) = audio.play_url_with_headers(&url, reqwest::header::HeaderMap::new(), fallback_url, audio_tx).await {
-                state.set_error(format!("Playback failed: {}", e));
-                state.playback.status = PlayStatus::Stopped;
-                return;
-            }
-            report_playback_to_plex(event_tx, &track, state.plex_session_id.clone(), client);
-            state.last_progress_report = Some(std::time::Instant::now());
-            // Trigger pre-fetch for next tracks
-            let upcoming = get_upcoming_tracks(state);
-            cache::trigger_prefetch(&audio.track_cache, &upcoming, client);
-        } else if let Some(url) = fallback_url {
-            let redacted = url.split("X-Plex-Token=").next().unwrap_or(&url);
-            tracing::info!("Using transcoded stream for: {} - URL: {}...", track.title, redacted);
-            if let Err(e) = audio.play_url_with_headers(&url, reqwest::header::HeaderMap::new(), None, audio_event_adapter(event_tx)).await {
-                state.set_error(format!("Playback failed: {}", e));
-                state.playback.status = PlayStatus::Stopped;
-                return;
-            }
-            report_playback_to_plex(event_tx, &track, state.plex_session_id.clone(), client);
-            state.last_progress_report = Some(std::time::Instant::now());
-            // Trigger pre-fetch for next tracks
-            let upcoming = get_upcoming_tracks(state);
-            cache::trigger_prefetch(&audio.track_cache, &upcoming, client);
+        // Use the PlexClient's HTTP client — shares connection pool and settings with working API calls.
+        // Transcode URLs have all auth params in the query string already — adding them
+        // as headers too causes 400. Direct play URLs need stream_headers for auth.
+        let stream_headers = if state.transcode_kbps > 0 {
+            reqwest::header::HeaderMap::new()
         } else {
-            tracing::error!("Cannot get any stream URL (track has {} media items)", track.media.len());
+            client.stream_headers()
+        };
+        let http_client = client.http_client().clone();
+
+        if let Some(url) = stream_url {
+            let mode = if state.transcode_kbps > 0 { format!("transcode {}kbps", state.transcode_kbps) } else { "direct".to_string() };
+            tracing::debug!("{} stream URL: {}", mode, url);
+            if let Err(e) = audio.play_url_with_headers(&url, stream_headers, None, audio_tx, http_client).await {
+                state.set_error(format!("Playback failed: {}", e));
+                state.playback.status = PlayStatus::Stopped;
+                return;
+            }
+            report_playback_to_plex(event_tx, &track, state.plex_session_id.clone(), client);
+            state.last_progress_report = Some(std::time::Instant::now());
+            // Trigger pre-fetch for next tracks
+            let upcoming = get_upcoming_tracks(state);
+            cache::trigger_prefetch(&audio.track_cache, &upcoming, client, state.transcode_kbps);
+        } else {
+            tracing::error!("Cannot get stream URL (track has {} media items, transcode_kbps={})", track.media.len(), state.transcode_kbps);
             state.set_error("Failed to get stream URL".to_string());
             state.playback.status = PlayStatus::Stopped;
         }

@@ -819,6 +819,9 @@ async fn run_app(
     state.playback.volume = config.playback.default_volume;
     audio.set_volume(config.playback.default_volume);
 
+    // Set transcoding preference from config
+    state.transcode_kbps = config.playback.transcode_kbps;
+
     // Run event loop
     let mut event_loop = EventLoop::new(config);
     let result = event_loop.run(terminal, &mut state, &mut client, &mut audio).await;

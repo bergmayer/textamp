@@ -291,8 +291,13 @@ pub(super) fn handle_folder_browse_keys(key: event::KeyEvent, state: &mut AppSta
         // Right/Enter - go into selected folder; only Enter plays tracks
         KeyCode::Enter | KeyCode::Right => {
             if let Some(ref mut folder_state) = state.folder_state {
-                // First check if there's already a column to the right we can move to
-                if folder_state.focus_right() {
+                // Check if there's a non-empty column to the right we can move to.
+                // Skip empty placeholder columns — they exist only for visual layout
+                // and shouldn't intercept navigation.
+                let next_col_has_items = folder_state.columns
+                    .get(folder_state.focused_column + 1)
+                    .map_or(false, |col| !col.items.is_empty());
+                if next_col_has_items && folder_state.focus_right() {
                     return vec![];
                 }
 
@@ -303,10 +308,8 @@ pub(super) fn handle_folder_browse_keys(key: event::KeyEvent, state: &mut AppSta
                             return vec![Action::NavigateIntoFolder(item.key)];
                         }
                         FolderItemType::Track if key.code == KeyCode::Enter => {
-                            // Enter: play single track
-                            if let Some(col) = folder_state.focused() {
-                                return vec![Action::PlayFolderTrack { track_index: col.selected_index }];
-                            }
+                            // Enter: play this track + all following tracks (replaces queue)
+                            return vec![Action::PlayFolderTracks];
                         }
                         _ => {}
                     }
@@ -465,10 +468,10 @@ pub(super) fn handle_artist_browse_keys(key: event::KeyEvent, state: &mut AppSta
                     vec![Action::LoadCompilationAlbumsForMiller { artist_key, artist_name }]
                 }
                 BrowseItem::Track { .. } if key.code == KeyCode::Enter => {
-                    // Enter: play single track
+                    // Enter: play this track + all following tracks (replaces queue)
                     if let Some(col) = state.artist_nav.focused() {
                         let idx = col.selected_index;
-                        vec![Action::PlayTrackFromMiller { column_index: state.artist_nav.focused_column, track_index: idx, single_track: true }]
+                        vec![Action::PlayTrackFromMiller { column_index: state.artist_nav.focused_column, track_index: idx, single_track: false }]
                     } else {
                         vec![]
                     }
@@ -532,10 +535,10 @@ pub(super) fn handle_genre_browse_keys(key: event::KeyEvent, state: &mut AppStat
                     vec![Action::LoadGenreTracksForMiller { album_key: key }]
                 }
                 BrowseItem::Track { .. } if key.code == KeyCode::Enter => {
-                    // Enter: play single track
+                    // Enter: play this track + all following tracks (replaces queue)
                     if let Some(col) = state.genre_nav.focused() {
                         let idx = col.selected_index;
-                        vec![Action::PlayGenreTrackFromMiller { column_index: state.genre_nav.focused_column, track_index: idx, single_track: true }]
+                        vec![Action::PlayGenreTrackFromMiller { column_index: state.genre_nav.focused_column, track_index: idx, single_track: false }]
                     } else {
                         vec![]
                     }
@@ -605,10 +608,10 @@ pub(super) fn handle_playlist_browse_keys(key: event::KeyEvent, state: &mut AppS
                     vec![Action::LoadAlbumTracksForMiller { album_key: key }]
                 }
                 BrowseItem::Track { .. } if key.code == KeyCode::Enter => {
-                    // Enter: play single track
+                    // Enter: play this track + all following tracks (replaces queue)
                     if let Some(col) = state.playlist_nav.focused() {
                         let idx = col.selected_index;
-                        vec![Action::PlayPlaylistTrackFromMiller { column_index: state.playlist_nav.focused_column, track_index: idx, single_track: true }]
+                        vec![Action::PlayPlaylistTrackFromMiller { column_index: state.playlist_nav.focused_column, track_index: idx, single_track: false }]
                     } else {
                         vec![]
                     }

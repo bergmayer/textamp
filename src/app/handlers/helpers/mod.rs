@@ -26,7 +26,7 @@ pub use navigation::{
 };
 pub use playback::{
     fetch_more_radio_tracks, generate_plex_session_id,
-    get_upcoming_tracks, play_current_track, play_track, queue_and_play,
+    get_upcoming_tracks, insert_tracks_next, play_current_track, play_track, queue_and_play,
     report_playback_progress_to_plex, report_playback_stop_to_plex,
 };
 pub use preload::{maybe_start_subfolder_preload, preload_all_library_data, preload_data, SubfolderPreloadResult};

@@ -16,11 +16,11 @@ pub(super) fn handle_search_keys(key: event::KeyEvent, state: &mut AppState) -> 
         match key.code {
             KeyCode::Char('e') => {
                 if key.modifiers.contains(KeyModifiers::SHIFT) {
-                    // Ctrl+Shift+E: add to END of queue
-                    return vec![Action::EnqueueSearchResult];
-                } else {
-                    // Ctrl+E: add to TOP of queue and play
+                    // Ctrl+Shift+E: insert NEXT in queue after current track
                     return vec![Action::EnqueueSearchResultNext];
+                } else {
+                    // Ctrl+E: add to END of queue
+                    return vec![Action::EnqueueSearchResult];
                 }
             }
             _ => {}

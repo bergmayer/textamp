@@ -154,15 +154,15 @@ impl std::fmt::Debug for TrackAudioCache {
 ///
 /// Retries on 5xx, 429, timeouts, and connection errors.
 /// Does NOT retry on 4xx client errors (except 429).
-pub async fn download_track_audio(url: &str, fallback_url: Option<&str>) -> Result<Vec<u8>, String> {
+pub async fn download_track_audio(url: &str, fallback_url: Option<&str>, headers: reqwest::header::HeaderMap, http_client: reqwest::Client) -> Result<Vec<u8>, String> {
     // Try primary URL
-    match download_with_retry(url).await {
+    match download_with_retry(url, &headers, &http_client).await {
         Ok(data) => return Ok(data),
         Err(primary_err) => {
             tracing::warn!("Pre-fetch primary download failed: {}", primary_err);
             // Try fallback if available
             if let Some(fb_url) = fallback_url {
-                match download_with_retry(fb_url).await {
+                match download_with_retry(fb_url, &headers, &http_client).await {
                     Ok(data) => return Ok(data),
                     Err(fb_err) => {
                         return Err(format!("Both URLs failed: primary={}, fallback={}", primary_err, fb_err));
@@ -175,16 +175,11 @@ pub async fn download_track_audio(url: &str, fallback_url: Option<&str>) -> Resu
 }
 
 /// Download from a single URL with exponential backoff retry.
-async fn download_with_retry(url: &str) -> Result<Vec<u8>, String> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| format!("HTTP client error: {}", e))?;
-
+async fn download_with_retry(url: &str, headers: &reqwest::header::HeaderMap, client: &reqwest::Client) -> Result<Vec<u8>, String> {
     let backoff_secs = [1, 2, 4];
 
     for attempt in 0..MAX_RETRIES {
-        match client.get(url).send().await {
+        match client.get(url).headers(headers.clone()).send().await {
             Ok(response) => {
                 let status = response.status();
                 if status.is_success() {
@@ -272,6 +267,7 @@ pub fn trigger_prefetch(
     cache: &Arc<TrackAudioCache>,
     upcoming_tracks: &[Track],
     client: &PlexClient,
+    transcode_kbps: u32,
 ) {
     for track in upcoming_tracks {
         // Skip if already cached or being downloaded
@@ -279,20 +275,32 @@ pub fn trigger_prefetch(
             continue;
         }
 
-        // Build URLs
-        let primary_url = match client.get_stream_url(track) {
-            Ok(url) => url,
-            Err(_) => {
-                cache.finish_fetch(&track.rating_key);
-                continue;
+        // For direct play, build URL synchronously. For transcode, defer to async task.
+        let direct_url = if transcode_kbps == 0 {
+            match client.get_stream_url(track) {
+                Ok(url) => Some(url),
+                Err(_) => {
+                    cache.finish_fetch(&track.rating_key);
+                    continue;
+                }
             }
+        } else {
+            None
         };
-        let fallback_url = client.get_transcoded_stream_url(track).ok();
 
         let cache = Arc::clone(cache);
         let rating_key = track.rating_key.clone();
         let title = track.title.clone();
+        let track_clone = track.clone();
         let semaphore = Arc::clone(&cache.semaphore);
+        // Transcode URLs have all auth in the query string — headers would duplicate and cause 400
+        let stream_headers = if transcode_kbps > 0 {
+            reqwest::header::HeaderMap::new()
+        } else {
+            client.stream_headers()
+        };
+        let http_client = client.http_client().clone();
+        let plex_client = client.clone();
 
         tokio::spawn(async move {
             // Acquire semaphore permit (limits concurrent downloads)
@@ -304,8 +312,22 @@ pub fn trigger_prefetch(
                 }
             };
 
+            // Resolve URL (transcode requires async HLS playlist fetch)
+            let primary_url = if let Some(url) = direct_url {
+                url
+            } else {
+                match plex_client.get_transcoded_stream_url(&track_clone, transcode_kbps).await {
+                    Ok(url) => url,
+                    Err(e) => {
+                        cache.finish_fetch(&rating_key);
+                        tracing::warn!("Pre-fetch transcode URL failed for {}: {}", title, e);
+                        return;
+                    }
+                }
+            };
+
             tracing::debug!("Pre-fetching: {}", title);
-            match download_track_audio(&primary_url, fallback_url.as_deref()).await {
+            match download_track_audio(&primary_url, None, stream_headers, http_client).await {
                 Ok(data) => {
                     let size = data.len();
                     cache.insert(rating_key.clone(), data);

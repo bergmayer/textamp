@@ -84,6 +84,12 @@ pub async fn dispatch(
         Action::PlayTrack(track) => {
             helpers::play_track(event_tx, track, state, client, audio).await;
         }
+        Action::PlayTracksNow(tracks) => {
+            // Play tracks immediately, replacing queue
+            if !tracks.is_empty() {
+                helpers::queue_and_play(event_tx, state, client, audio, tracks, 0).await;
+            }
+        }
         Action::PlayTrackFromCategory(idx) => {
             if idx < state.selected_album_tracks.len() {
                 // Report stop for currently playing track before switching
@@ -248,7 +254,7 @@ pub async fn dispatch(
             state.set_view(View::Queue);
         }
         Action::EnqueueSearchResultNext => {
-            // Ctrl+E: enqueue search result at TOP of queue and start playing
+            // Ctrl+Shift+E: insert search result NEXT in queue (after current track)
             let follow_up = enqueue_search_result_next(state);
             follow_ups.extend(follow_up);
             // Close search popup and navigate to queue
@@ -256,13 +262,12 @@ pub async fn dispatch(
             state.set_view(View::Queue);
         }
         Action::EnqueueAlbumNext { rating_key, title } => {
-            // Shift+Enter: Insert album tracks at TOP of queue and start playing
+            // Ctrl+Shift+E: Insert album tracks NEXT in queue (after current track)
             match client.get_album_tracks(&rating_key).await {
                 Ok(tracks) => {
                     if !tracks.is_empty() {
-                        let added = tracks.len();
-                        helpers::queue_and_play(event_tx, state, client, audio, tracks, 0).await;
-                        state.set_status(format!("Playing {} tracks from \"{}\"", added, title));
+                        let added = helpers::insert_tracks_next(state, tracks);
+                        state.set_status(format!("Inserted {} tracks from \"{}\" next ({} total)", added, title, state.queue.len()));
                     }
                 }
                 Err(e) => {
@@ -271,13 +276,12 @@ pub async fn dispatch(
             }
         }
         Action::EnqueueArtistTracksNext { artist_key, artist_name } => {
-            // Shift+Enter: Insert artist tracks at TOP of queue and start playing
+            // Ctrl+Shift+E: Insert artist tracks NEXT in queue (after current track)
             match client.get_artist_all_tracks(&artist_key).await {
                 Ok(tracks) => {
                     if !tracks.is_empty() {
-                        let added = tracks.len();
-                        helpers::queue_and_play(event_tx, state, client, audio, tracks, 0).await;
-                        state.set_status(format!("Playing {} tracks by \"{}\"", added, artist_name));
+                        let added = helpers::insert_tracks_next(state, tracks);
+                        state.set_status(format!("Inserted {} tracks by \"{}\" next ({} total)", added, artist_name, state.queue.len()));
                     }
                 }
                 Err(e) => {
@@ -286,15 +290,14 @@ pub async fn dispatch(
             }
         }
         Action::EnqueueTracksNext(tracks) => {
-            // Shift+Enter: Insert tracks at TOP of queue and start playing
+            // Ctrl+Shift+E: Insert tracks NEXT in queue (after current track)
             if !tracks.is_empty() {
-                let added = tracks.len();
                 let title = tracks.first().map(|t| t.title.clone()).unwrap_or_default();
-                helpers::queue_and_play(event_tx, state, client, audio, tracks, 0).await;
+                let added = helpers::insert_tracks_next(state, tracks);
                 if added == 1 {
-                    state.set_status(format!("Playing \"{}\"", title));
+                    state.set_status(format!("Inserted \"{}\" next ({} total)", title, state.queue.len()));
                 } else {
-                    state.set_status(format!("Playing {} tracks starting with \"{}\"", added, title));
+                    state.set_status(format!("Inserted {} tracks next, starting with \"{}\" ({} total)", added, title, state.queue.len()));
                 }
             }
         }
@@ -374,7 +377,7 @@ pub async fn dispatch(
             // Flush and re-prefetch based on new order
             audio.track_cache.flush();
             let upcoming = helpers::get_upcoming_tracks(state);
-            cache::trigger_prefetch(&audio.track_cache, &upcoming, client);
+            cache::trigger_prefetch(&audio.track_cache, &upcoming, client, state.transcode_kbps);
         }
         Action::RemoveFromQueue(idx) => {
             if idx < state.queue.len() {
@@ -422,7 +425,7 @@ pub async fn dispatch(
             }
         }
         Action::EnqueueSelection => {
-            // Ctrl+Shift+E: Add selected item + all following items to END of queue
+            // Ctrl+E: Add selected item + all following items to END of queue
             // For tracks: enqueue selected track + all following tracks in the view
             // For albums: enqueue the album
 
@@ -571,9 +574,9 @@ pub async fn dispatch(
             }
         }
         Action::EnqueueSelectionNext => {
-            // Ctrl+E: Add selected item + all following items to TOP of queue and start playing
-            // For tracks: enqueue selected track + all following tracks in the view
-            // For albums: enqueue the album
+            // Ctrl+Shift+E: Insert selected item + all following items NEXT in queue (after current track)
+            // For tracks: insert selected track + all following tracks
+            // For albums: insert the album's tracks
 
             // Check for album selection first
             let album_to_enqueue: Option<(String, String)> = match state.view {
@@ -1032,7 +1035,7 @@ pub async fn dispatch(
 
             // Pre-cache upcoming tracks
             let upcoming = helpers::get_upcoming_tracks(state);
-            crate::audio::cache::trigger_prefetch(&audio.track_cache, &upcoming, client);
+            crate::audio::cache::trigger_prefetch(&audio.track_cache, &upcoming, client, state.transcode_kbps);
         }
         Action::RemixDoppelgangerReady(replacements) => {
             if replacements.is_empty() {
@@ -1058,7 +1061,7 @@ pub async fn dispatch(
 
             // Pre-cache upcoming tracks
             let upcoming = helpers::get_upcoming_tracks(state);
-            crate::audio::cache::trigger_prefetch(&audio.track_cache, &upcoming, client);
+            crate::audio::cache::trigger_prefetch(&audio.track_cache, &upcoming, client, state.transcode_kbps);
         }
         _ => unreachable!("dispatch_queue called with non-queue action: {:?}", action),
     }
@@ -1586,7 +1589,7 @@ fn play_search_result(state: &AppState) -> Vec<Action> {
     vec![]
 }
 
-/// Ctrl+E in search: add search result + following to TOP of queue and start playing.
+/// Ctrl+Shift+E in search: insert search result + following NEXT in queue (after current track).
 fn enqueue_search_result_next(state: &AppState) -> Vec<Action> {
     use crate::app::state::SearchTab;
 

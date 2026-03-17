@@ -1515,6 +1515,9 @@ pub struct AppState {
     // Radio mode state (legacy)
     pub radio_state: RadioState,
 
+    /// Transcode bitrate in kbps. 0 = disabled (direct play), e.g. 256 = transcode to 256kbps MP3.
+    pub transcode_kbps: u32,
+
     // NEW: Playback mode (Queue vs Radio)
     pub playback_mode: PlaybackMode,
 
@@ -2026,6 +2029,7 @@ impl AppState {
             playlist_tracks_cache: HashMap::new(),
             artwork: ArtworkState::default(),
             radio_state: RadioState::default(),
+            transcode_kbps: 0,
             playback_mode: PlaybackMode::None,
             radio: RadioPlaybackState::default(),
             station_nav: StationNavigationState::default(),

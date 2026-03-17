@@ -110,6 +110,11 @@ pub struct PlaybackConfig {
 
     #[serde(default = "default_buffer_size")]
     pub buffer_size_kb: u32,
+
+    /// Transcode bitrate in kbps. 0 = disabled (direct play), e.g. 256 = transcode to 256kbps MP3.
+    /// Useful for remote connections where bandwidth is limited.
+    #[serde(default)]
+    pub transcode_kbps: u32,
 }
 
 impl Default for PlaybackConfig {
@@ -118,6 +123,7 @@ impl Default for PlaybackConfig {
             default_volume: default_volume(),
             gapless: true,
             buffer_size_kb: default_buffer_size(),
+            transcode_kbps: 0,
         }
     }
 }

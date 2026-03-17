@@ -5,19 +5,22 @@
 //! time-to-first-audio.
 
 use std::io::{self, Read, Seek, SeekFrom};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 /// Minimum buffer size before playback can start (512KB).
 /// Larger buffer reduces blocking waits during decoder format detection.
 const MIN_BUFFER_SIZE: usize = 512 * 1024;
 
-/// Streaming buffer that grows as data arrives.
-///
-/// Implements `Read + Seek` for compatibility with rodio's Decoder.
-/// Seeking beyond buffered data will block until data arrives.
-#[derive(Clone)]
-pub struct StreamingBuffer {
-    inner: Arc<Mutex<BufferState>>,
+/// Maximum time BlockingReader will wait for new data before retrying (10ms).
+/// Short enough for responsive audio, long enough to avoid spinning.
+const READER_WAIT_TIMEOUT: Duration = Duration::from_millis(10);
+
+/// Shared state between StreamingBuffer and its readers.
+struct SharedBuffer {
+    state: Mutex<BufferState>,
+    /// Signaled when new data is appended, download completes, or an error occurs.
+    data_available: Condvar,
 }
 
 struct BufferState {
@@ -31,76 +34,103 @@ struct BufferState {
     error: Option<String>,
 }
 
+/// Lock a mutex on SharedBuffer, recovering from poisoning.
+fn lock_state(shared: &SharedBuffer) -> std::sync::MutexGuard<'_, BufferState> {
+    shared.state.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Streaming buffer that grows as data arrives.
+///
+/// Implements `Read + Seek` for compatibility with rodio's Decoder.
+/// Seeking beyond buffered data will block until data arrives.
+#[derive(Clone)]
+pub struct StreamingBuffer {
+    inner: Arc<SharedBuffer>,
+}
+
 impl StreamingBuffer {
     /// Create a new empty streaming buffer.
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(Mutex::new(BufferState {
-                data: Vec::new(),
-                total_size: None,
-                complete: false,
-                error: None,
-            })),
+            inner: Arc::new(SharedBuffer {
+                state: Mutex::new(BufferState {
+                    data: Vec::new(),
+                    total_size: None,
+                    complete: false,
+                    error: None,
+                }),
+                data_available: Condvar::new(),
+            }),
         }
     }
 
     /// Create a new streaming buffer with known total size.
     pub fn with_size_hint(total_size: usize) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(BufferState {
-                data: Vec::with_capacity(total_size),
-                total_size: Some(total_size),
-                complete: false,
-                error: None,
-            })),
+            inner: Arc::new(SharedBuffer {
+                state: Mutex::new(BufferState {
+                    data: Vec::with_capacity(total_size),
+                    total_size: Some(total_size),
+                    complete: false,
+                    error: None,
+                }),
+                data_available: Condvar::new(),
+            }),
         }
     }
 
     /// Append data to the buffer.
     ///
     /// Called by the download task as chunks arrive.
+    /// Wakes any waiting readers.
     pub fn append(&self, chunk: &[u8]) {
-        let mut state = super::lock_or_recover(&self.inner);
+        let mut state = lock_state(&self.inner);
         state.data.extend_from_slice(chunk);
+        drop(state);
+        self.inner.data_available.notify_all();
     }
 
     /// Mark the download as complete.
     pub fn set_complete(&self) {
-        let mut state = super::lock_or_recover(&self.inner);
+        let mut state = lock_state(&self.inner);
         state.complete = true;
+        drop(state);
+        self.inner.data_available.notify_all();
     }
 
     /// Mark an error occurred during download.
     pub fn set_error(&self, error: String) {
-        let mut state = super::lock_or_recover(&self.inner);
+        let mut state = lock_state(&self.inner);
         state.error = Some(error);
         state.complete = true;
+        drop(state);
+        self.inner.data_available.notify_all();
     }
 
     /// Check if minimum buffer for playback is available.
     pub fn has_min_buffer(&self) -> bool {
-        let state = super::lock_or_recover(&self.inner);
+        let state = lock_state(&self.inner);
         state.data.len() >= MIN_BUFFER_SIZE || state.complete
     }
 
     /// Get current buffered size.
     pub fn buffered_size(&self) -> usize {
-        super::lock_or_recover(&self.inner).data.len()
+        lock_state(&self.inner).data.len()
     }
 
     /// Check if download is complete.
     pub fn is_complete(&self) -> bool {
-        super::lock_or_recover(&self.inner).complete
+        lock_state(&self.inner).complete
     }
 
     /// Get download error if any.
     pub fn error(&self) -> Option<String> {
-        super::lock_or_recover(&self.inner).error.clone()
+        lock_state(&self.inner).error.clone()
     }
 
     /// Get download progress as a fraction (0.0 to 1.0).
     pub fn progress(&self) -> f64 {
-        let state = super::lock_or_recover(&self.inner);
+        let state = lock_state(&self.inner);
         match state.total_size {
             Some(total) if total > 0 => state.data.len() as f64 / total as f64,
             _ if state.complete => 1.0,
@@ -113,14 +143,14 @@ impl StreamingBuffer {
     /// The reader shares the same underlying buffer.
     pub fn reader(&self) -> BufferReader {
         BufferReader {
-            buffer: self.inner.clone(),
+            shared: self.inner.clone(),
             position: 0,
         }
     }
 
     /// Get total data as bytes (for compatibility with existing code).
     pub fn into_bytes(self) -> Vec<u8> {
-        let state = super::lock_or_recover(&self.inner);
+        let state = lock_state(&self.inner);
         state.data.clone()
     }
 }
@@ -136,13 +166,13 @@ impl Default for StreamingBuffer {
 /// Multiple readers can exist for the same buffer, each with
 /// their own read position.
 pub struct BufferReader {
-    buffer: Arc<Mutex<BufferState>>,
+    shared: Arc<SharedBuffer>,
     position: usize,
 }
 
 impl Read for BufferReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let state = super::lock_or_recover(&self.buffer);
+        let state = lock_state(&self.shared);
 
         // Check for download error
         if let Some(ref err) = state.error {
@@ -176,7 +206,7 @@ impl Read for BufferReader {
 
 impl Seek for BufferReader {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
-        let state = super::lock_or_recover(&self.buffer);
+        let state = lock_state(&self.shared);
 
         let new_pos = match pos {
             SeekFrom::Start(offset) => offset as i64,
@@ -211,16 +241,18 @@ impl Seek for BufferReader {
 
 /// Blocking reader that waits for data instead of returning WouldBlock.
 ///
-/// Use this when you need blocking behavior (e.g., for rodio).
+/// Uses a condvar to sleep efficiently until data arrives, instead of
+/// busy-spinning with yield_now(). This prevents CPU starvation of the
+/// download task and eliminates audio stuttering on large files.
 pub struct BlockingReader {
-    buffer: Arc<Mutex<BufferState>>,
+    shared: Arc<SharedBuffer>,
     position: usize,
 }
 
 impl BlockingReader {
     pub fn new(buffer: &StreamingBuffer) -> Self {
         Self {
-            buffer: buffer.inner.clone(),
+            shared: buffer.inner.clone(),
             position: 0,
         }
     }
@@ -228,75 +260,79 @@ impl BlockingReader {
 
 impl Read for BlockingReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let mut state = lock_state(&self.shared);
+
         loop {
-            {
-                let state = super::lock_or_recover(&self.buffer);
-
-                if let Some(ref err) = state.error {
-                    return Err(io::Error::new(io::ErrorKind::Other, err.clone()));
-                }
-
-                if self.position < state.data.len() {
-                    let available = &state.data[self.position..];
-                    let to_read = buf.len().min(available.len());
-                    buf[..to_read].copy_from_slice(&available[..to_read]);
-                    self.position += to_read;
-                    return Ok(to_read);
-                }
-
-                if state.complete {
-                    return Ok(0); // EOF
-                }
+            if let Some(ref err) = state.error {
+                return Err(io::Error::new(io::ErrorKind::Other, err.clone()));
             }
 
-            // Yield CPU to allow download task to progress
-            // Using yield_now instead of sleep to avoid blocking the event loop
-            std::thread::yield_now();
+            if self.position < state.data.len() {
+                let available = &state.data[self.position..];
+                let to_read = buf.len().min(available.len());
+                buf[..to_read].copy_from_slice(&available[..to_read]);
+                self.position += to_read;
+                return Ok(to_read);
+            }
+
+            if state.complete {
+                return Ok(0); // EOF
+            }
+
+            // Wait for the download task to signal new data (with timeout to
+            // handle edge cases like the download task dying without signaling).
+            let result = self.shared.data_available
+                .wait_timeout(state, READER_WAIT_TIMEOUT)
+                .unwrap_or_else(|e| e.into_inner());
+            state = result.0;
         }
     }
 }
 
 impl Seek for BlockingReader {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        let mut state = lock_state(&self.shared);
+
         loop {
-            {
-                let state = super::lock_or_recover(&self.buffer);
-
-                let target_pos = match pos {
-                    SeekFrom::Start(offset) => offset as i64,
-                    SeekFrom::Current(offset) => self.position as i64 + offset,
-                    SeekFrom::End(offset) => {
-                        if let Some(total) = state.total_size {
-                            total as i64 + offset
-                        } else if state.complete {
-                            state.data.len() as i64 + offset
-                        } else {
-                            // Wait for completion to know size
-                            drop(state);
-                            std::thread::yield_now();
-                            continue;
-                        }
+            let target_pos = match pos {
+                SeekFrom::Start(offset) => offset as i64,
+                SeekFrom::Current(offset) => self.position as i64 + offset,
+                SeekFrom::End(offset) => {
+                    if let Some(total) = state.total_size {
+                        total as i64 + offset
+                    } else if state.complete {
+                        state.data.len() as i64 + offset
+                    } else {
+                        // Wait for completion to know size
+                        let result = self.shared.data_available
+                            .wait_timeout(state, READER_WAIT_TIMEOUT)
+                            .unwrap_or_else(|e| e.into_inner());
+                        state = result.0;
+                        continue;
                     }
-                };
-
-                if target_pos < 0 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "Seek to negative position",
-                    ));
                 }
+            };
 
-                let target = target_pos as usize;
-
-                // If seeking within buffered data, do it immediately
-                if target <= state.data.len() || state.complete {
-                    self.position = target;
-                    return Ok(self.position as u64);
-                }
-
-                // Wait for more data
+            if target_pos < 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Seek to negative position",
+                ));
             }
-            std::thread::yield_now();
+
+            let target = target_pos as usize;
+
+            // If seeking within buffered data, do it immediately
+            if target <= state.data.len() || state.complete {
+                self.position = target;
+                return Ok(self.position as u64);
+            }
+
+            // Wait for more data
+            let result = self.shared.data_available
+                .wait_timeout(state, READER_WAIT_TIMEOUT)
+                .unwrap_or_else(|e| e.into_inner());
+            state = result.0;
         }
     }
 }

@@ -52,21 +52,22 @@ pub enum Action {
     PlayTrackFromCategory(usize),
     PlayAlbum { rating_key: String },  // Load album tracks and play them
     PlayArtistTracks { artist_key: String },  // Load all artist tracks and play them
+    PlayTracksNow(Vec<Track>),  // Play tracks (replaces queue, starts playback)
     PlaySearchResult,  // Play the selected search result
-    EnqueueSelection,  // Ctrl+Shift+E: Add current selection to END of queue
-    EnqueueSelectionNext,  // Ctrl+E: Add current selection to TOP of queue and play
+    EnqueueSelection,  // Ctrl+E: Add current selection to END of queue
+    EnqueueSelectionNext,  // Ctrl+Shift+E: Insert current selection NEXT in queue (after current track)
     EnqueueAlbum { rating_key: String, title: String },  // Load album tracks and add to queue (end)
     EnqueueArtistTracks { artist_key: String, artist_name: String },  // Add all tracks by artist to queue (end)
     // Double-click play: replace queue and start playback
     PlayAlbumNow { rating_key: String, title: String },
     PlayPlaylistNow { playlist_key: String, title: String },
     EnqueueTrack(Track),  // Add a single track to queue (end)
-    EnqueueSearchResult,  // Add selected search result to queue (end)
-    EnqueueSearchResultNext,  // Shift+Enter: add search result to TOP and play
-    // Shift+Enter actions: add to TOP of queue and start playing
-    EnqueueAlbumNext { rating_key: String, title: String },  // Add album tracks to TOP and play
-    EnqueueArtistTracksNext { artist_key: String, artist_name: String },  // Add artist tracks to TOP and play
-    EnqueueTracksNext(Vec<Track>),  // Add tracks to TOP and play
+    EnqueueSearchResult,  // Ctrl+E: Add selected search result to END of queue
+    EnqueueSearchResultNext,  // Ctrl+Shift+E: Insert search result NEXT in queue (after current track)
+    // Ctrl+Shift+E actions: insert NEXT in queue (after current track)
+    EnqueueAlbumNext { rating_key: String, title: String },  // Insert album tracks NEXT in queue
+    EnqueueArtistTracksNext { artist_key: String, artist_name: String },  // Insert artist tracks NEXT in queue
+    EnqueueTracksNext(Vec<Track>),  // Insert tracks NEXT in queue
     ClearQueue,
     RemoveFromQueue(usize),
     ToggleQueueShuffle,

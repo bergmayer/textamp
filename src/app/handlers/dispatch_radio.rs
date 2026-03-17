@@ -385,7 +385,7 @@ pub async fn dispatch(
 
             // Pre-cache the newly inserted DJ tracks (and other upcoming tracks)
             let upcoming = helpers::get_upcoming_tracks(state);
-            crate::audio::cache::trigger_prefetch(&audio.track_cache, &upcoming, client);
+            crate::audio::cache::trigger_prefetch(&audio.track_cache, &upcoming, client, state.transcode_kbps);
         }
         Action::DjModeBatchReady(inserts) => {
             // Inserter mode batch results: interleave into queue
@@ -431,7 +431,7 @@ pub async fn dispatch(
 
             // Pre-cache upcoming tracks (including newly interleaved DJ tracks)
             let upcoming = helpers::get_upcoming_tracks(state);
-            crate::audio::cache::trigger_prefetch(&audio.track_cache, &upcoming, client);
+            crate::audio::cache::trigger_prefetch(&audio.track_cache, &upcoming, client, state.transcode_kbps);
         }
         _ => unreachable!("dispatch_radio called with non-radio action: {:?}", action),
     }

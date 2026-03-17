@@ -52,6 +52,29 @@ pub async fn find_working_connection(
         }
     }
 
+    // Inject plain HTTP candidates for LAN IPs extracted from .plex.direct hostnames.
+    // The HTTPS .plex.direct connections can have TLS issues with large audio streams
+    // (IncompleteBody errors), while plain HTTP to the same IP works reliably.
+    for conn in &server.connections {
+        if conn.local && conn.uri.contains(".plex.direct") {
+            // Extract IP from hostname like "192-168-4-47.xxx.plex.direct"
+            if let Some(host_part) = conn.uri.split("//").nth(1) {
+                if let Some(ip_dashed) = host_part.split('.').next() {
+                    let raw_ip = ip_dashed.replace('-', ".");
+                    // Validate it looks like an IP
+                    if raw_ip.split('.').count() == 4 && raw_ip.split('.').all(|s| s.parse::<u8>().is_ok()) {
+                        for port in &ports {
+                            let uri = format!("http://{}:{}", raw_ip, port);
+                            if seen_uris.insert(uri.clone()) {
+                                prioritized.push((0, uri));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     if prioritized.is_empty() {
         tracing::warn!("No connections available for server {}", server.name);
         return None;

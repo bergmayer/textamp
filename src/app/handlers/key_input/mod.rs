@@ -363,13 +363,13 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
         (KeyModifiers::SHIFT, KeyCode::Left) => return vec![Action::SeekRelative(-10000)],
         (KeyModifiers::SHIFT, KeyCode::Right) => return vec![Action::SeekRelative(10000)],
         // Action commands (Ctrl+key) — gated by availability check
-        // Ctrl+E: Add to TOP of queue and play (skip if in search popup - handled there)
+        // Ctrl+E: Add to END of queue (skip if in search popup - handled there)
         (KeyModifiers::CONTROL, KeyCode::Char('e')) if !state.popups.search_active && alt_commands::is_action_command_available(state, 'e') => {
-            return vec![Action::EnqueueSelectionNext];
-        }
-        // Ctrl+Shift+E: Add to END of queue (skip if in search popup - handled there)
-        (mods, KeyCode::Char('e')) | (mods, KeyCode::Char('E')) if !state.popups.search_active && mods == KeyModifiers::CONTROL | KeyModifiers::SHIFT && alt_commands::is_action_command_available(state, 'e') => {
             return vec![Action::EnqueueSelection];
+        }
+        // Ctrl+Shift+E: Insert NEXT in queue after current track (skip if in search popup - handled there)
+        (mods, KeyCode::Char('e')) | (mods, KeyCode::Char('E')) if !state.popups.search_active && mods == KeyModifiers::CONTROL | KeyModifiers::SHIFT && alt_commands::is_action_command_available(state, 'e') => {
+            return vec![Action::EnqueueSelectionNext];
         }
         (KeyModifiers::CONTROL, KeyCode::Char('m')) if alt_commands::is_action_command_available(state, 'm') => {
             return get_similar_action(state);

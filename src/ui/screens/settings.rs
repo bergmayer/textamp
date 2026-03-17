@@ -610,10 +610,32 @@ fn render_textamp_content(frame: &mut Frame, state: &AppState, outer: Rect, area
         )));
     }
 
+    // Transcode setting
+    let transcode_offset = refresh_idx + 1;
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "streaming quality:",
+        Style::default().fg(t.colors.fg_accent),
+    )));
+
+    let transcode_label = if state.transcode_kbps == 0 {
+        "original (direct play)".to_string()
+    } else {
+        format!("transcode to {}kbps MP3", state.transcode_kbps)
+    };
+    let is_selected = is_focused && transcode_offset == state.settings_state.item_index;
+    if is_selected { selected_line = Some(lines.len()); }
+    let style = if is_selected { Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg) } else { Style::default().fg(t.colors.fg_primary) };
+    lines.push(Line::from(Span::styled(
+        format!("  {}", transcode_label),
+        style,
+    )));
+
     // Help text
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "enter: select output | per-session only (not saved)",
+        "enter: select | streaming quality saved to config",
         Style::default().fg(t.colors.fg_muted),
     )));
 

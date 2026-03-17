@@ -344,20 +344,10 @@ impl EventLoop {
                             }
                         };
 
-                        // Step 2: Test if stored URL is still valid
-                        if let Some(ref url) = stored_bg.server_url {
-                            match crate::plex::test_connection(url, token, client_id).await {
-                                Ok(()) => {
-                                    tracing::info!("Background: stored URL valid");
-                                    return; // All good
-                                }
-                                Err(e) => {
-                                    tracing::warn!("Background: stored URL failed ({}), searching for alternative", e);
-                                }
-                            }
-                        }
-
-                        // Step 3: Stored URL is stale - find a working connection
+                        // Step 2: Always try to find the best connection (prefer local over relay).
+                        // Even if the stored URL passes a small API test, relay connections
+                        // can't handle large audio streams (IncompleteBody errors).
+                        // find_working_connection prioritizes: local > remote > relay.
                         let working_url = if let Some(ref stored_id) = stored_bg.server_identifier {
                             if let Some(server) = servers.iter().find(|s| &s.client_identifier == stored_id) {
                                 tracing::info!("Testing connections for stored server: {}", server.name);
@@ -504,7 +494,7 @@ impl EventLoop {
             }
 
             // Queue operations
-            PlayTrack(_) | PlayTrackFromCategory(_) | PlayAlbum { .. }
+            PlayTrack(_) | PlayTracksNow(_) | PlayTrackFromCategory(_) | PlayAlbum { .. }
             | PlayArtistTracks { .. } | PlaySearchResult
             | EnqueueAlbum { .. } | EnqueueArtistTracks { .. } | EnqueueTrack(_)
             | PlayAlbumNow { .. } | PlayPlaylistNow { .. }
