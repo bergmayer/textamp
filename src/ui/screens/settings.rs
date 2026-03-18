@@ -304,40 +304,21 @@ fn render_account_content(frame: &mut Frame, state: &AppState, outer: Rect, area
             lines.push(Line::from(Span::styled(folder_text, Style::default().fg(t.colors.fg_muted))));
         }
 
-        // Artwork cache
-        if let Some((art_count, art_bytes)) = state.artwork.cache_stats {
-            lines.push(Line::from(Span::styled(
-                format!("  artwork: {} images, {}", art_count, format_size(art_bytes)),
-                Style::default().fg(t.colors.fg_muted),
-            )));
+        // Total cache size (artwork + library + waveforms)
+        let mut total_bytes = 0u64;
+        if let Some((_, art_bytes)) = state.artwork.cache_stats {
+            total_bytes += art_bytes;
         }
-
-        // Library cache (per-library size with breakdown)
-        if let Some((lib_bytes, ref breakdown)) = state.library_cache_stats {
-            lines.push(Line::from(Span::styled(
-                format!("  library: {}", format_size(lib_bytes)),
-                Style::default().fg(t.colors.fg_muted),
-            )));
-            // Show top 3 breakdown items on a sub-line
-            if !breakdown.is_empty() {
-                let top: Vec<String> = breakdown.iter()
-                    .take(3)
-                    .filter(|(_, bytes)| *bytes > 0)
-                    .map(|(name, bytes)| format!("{} {}", name, format_size(*bytes)))
-                    .collect();
-                if !top.is_empty() {
-                    lines.push(Line::from(Span::styled(
-                        format!("    {}", top.join(" | ")),
-                        Style::default().fg(t.colors.fg_muted),
-                    )));
-                }
-            }
+        if let Some((lib_bytes, _)) = state.library_cache_stats {
+            total_bytes += lib_bytes;
         }
-
-        // Waveform cache
-        if let Some((wf_count, wf_bytes)) = state.waveform_cache_stats {
+        if let Some((_, wf_bytes)) = state.waveform_cache_stats {
+            total_bytes += wf_bytes;
+        }
+        if total_bytes > 0 {
+            let mb = total_bytes as f64 / (1024.0 * 1024.0);
             lines.push(Line::from(Span::styled(
-                format!("  waveforms: {} files, {}", wf_count, format_size(wf_bytes)),
+                format!("  cache: {:.1} MB", mb),
                 Style::default().fg(t.colors.fg_muted),
             )));
         }
@@ -659,16 +640,6 @@ fn render_textamp_content(frame: &mut Frame, state: &AppState, outer: Rect, area
     }
 }
 
-/// Format a byte count as a human-readable size string.
-fn format_size(bytes: u64) -> String {
-    if bytes >= 1024 * 1024 {
-        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
-    } else if bytes >= 1024 {
-        format!("{} KB", bytes / 1024)
-    } else {
-        format!("{} B", bytes)
-    }
-}
 
 /// Format a count with comma separators (e.g. 12345 → "12,345").
 fn format_count(n: usize) -> String {

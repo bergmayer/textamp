@@ -375,6 +375,7 @@ pub fn maybe_start_subfolder_preload(
                             library_key: lib_key.clone(),
                             entries: std::mem::take(&mut batch),
                             done: false,
+                            valid_keys: None,
                         }).await;
                     }
                 }
@@ -386,6 +387,7 @@ pub fn maybe_start_subfolder_preload(
                     library_key: lib_key.clone(),
                     entries: std::mem::take(&mut batch),
                     done: false,
+                    valid_keys: None,
                 }).await;
             }
 
@@ -397,12 +399,17 @@ pub fn maybe_start_subfolder_preload(
             depth += 1;
         }
 
-        // Send final event to signal done
-        tracing::info!("Subfolder preload complete: {} total fetched across {} depth levels", total_fetched, depth + 1);
+        // Send final event with the complete set of valid folder keys for pruning.
+        // `all_fetched_keys` contains every folder key we encountered during the crawl
+        // (both fetched and discovered as children). Any cache entry NOT in this set
+        // was deleted/moved on the server and should be pruned.
+        tracing::info!("Subfolder preload complete: {} total fetched across {} depth levels, {} valid keys",
+            total_fetched, depth + 1, all_fetched_keys.len());
         let _ = event_tx.send(Event::SubfoldersPreloaded {
             library_key: lib_key,
             entries: batch,
             done: true,
+            valid_keys: Some(all_fetched_keys),
         }).await;
     });
 

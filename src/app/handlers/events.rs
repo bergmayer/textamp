@@ -761,7 +761,7 @@ pub fn handle_app_event(
             if state.cache_mgmt.preloads_in_progress.is_empty() { state.cache_mgmt.preloads_total = 0; }
             vec![]
         }
-        Event::SubfoldersPreloaded { library_key, entries, done } => {
+        Event::SubfoldersPreloaded { library_key, entries, done, valid_keys } => {
             // Ignore if this is for a different library (race condition from library switch)
             if state.active_library.as_ref() != Some(&library_key) {
                 tracing::debug!("Ignoring stale subfolder preload for library {}", library_key);
@@ -776,6 +776,19 @@ pub fn handle_app_event(
             }
             if done {
                 state.subfolder_preload_active = false;
+
+                // Prune cache entries for folders that no longer exist on the server.
+                // valid_keys contains every folder key seen during the crawl.
+                if let Some(valid) = valid_keys {
+                    let before = state.folder_contents_cache.len();
+                    state.folder_contents_cache.retain(|key, _| valid.contains(key));
+                    let pruned = before - state.folder_contents_cache.len();
+                    if pruned > 0 {
+                        tracing::info!("Pruned {} stale subfolder cache entries", pruned);
+                        state.cache_mgmt.dirty = true;
+                    }
+                }
+
                 tracing::info!("Subfolder preload finished, {} total cached subfolders", state.folder_contents_cache.len());
             }
             vec![]

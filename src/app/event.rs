@@ -93,6 +93,8 @@ pub enum Event {
         library_key: String,
         entries: Vec<(String, crate::plex::CachedFolder)>,
         done: bool,
+        /// All valid folder keys seen during crawl (only set when done=true, for pruning).
+        valid_keys: Option<std::collections::HashSet<String>>,
     },
     /// Background subfolder warm-cache re-fetch completed.
     SubfolderRefreshed {
