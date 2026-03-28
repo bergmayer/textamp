@@ -1,39 +1,101 @@
 //! Application actions.
 //!
 //! Actions are commands that modify state or trigger side effects.
+//! Organized into sub-enums matching dispatch handler modules.
 
 use crate::plex::models::Track;
 use super::state::{BrowseCategory, View};
 
-/// Application actions/commands.
+/// Top-level action routing — each variant maps to a dispatch handler module.
 #[derive(Debug, Clone)]
 pub enum Action {
-    // Navigation (musikcube-style)
-    SetView(View),
-    SetCategory(BrowseCategory),
-    NextView,   // Tab: cycle Library→Playlists→Queue→NowPlaying
-    PrevView,   // Shift+Tab: cycle backwards
-    ToggleFocus,
+    System(SystemAction),
+    Navigation(NavigationAction),
+    Data(DataAction),
+    Miller(MillerAction),
+    Playback(PlaybackAction),
+    Queue(QueueAction),
+    Search(SearchAction),
+    Browse(BrowseAction),
+    Folders(FolderAction),
+    Radio(RadioAction),
+    Settings(SettingsAction),
+}
 
-    // Data loading
+// ============================================================================
+// Sub-enums
+// ============================================================================
+
+#[derive(Debug, Clone)]
+pub enum SystemAction {
+    Quit,
+    ShowError(String),
+    ClearError,
+    SetStatus(String),
+    ClearStatus,
+    RefreshCategory(crate::app::state::RefreshCategory),
+    CheckStaleness(crate::app::state::RefreshCategory),
+    LoadArtwork,
+    LoadWaveform,
+    LoadSpectrogram,
+    /// Load album art for a batch of albums: Vec<(rating_key, thumb_path)>
+    LoadAlbumArt(Vec<(String, String)>),
+}
+
+#[derive(Debug, Clone)]
+pub enum NavigationAction {
+    SetView(View),
+    NextView,
+    PrevView,
+    SetCategory(BrowseCategory),
+    ToggleFocus,
+}
+
+#[derive(Debug, Clone)]
+pub enum DataAction {
     LoadInitialData,
-    SelectLibrary(String),
-    /// Switch to a library on a different server: (library_key, server_identifier)
-    SelectLibraryOnServer(String, String),
     LoadArtists,
     LoadPlaylists,
-    LoadArtistAlbums,      // Load albums for selected artist (right panel)
-    LoadArtistAllTracks,   // Load all tracks by the selected artist
-    LoadSelectedAlbumTracks, // Load tracks for selected album (drill down)
-    LoadAlbumTracks { rating_key: String }, // Load tracks for a specific album by key
-    LoadCategoryTracks,    // Load tracks directly (for Albums/Playlists categories)
-    GoBackInRightPanel,    // Go from tracks back to albums view
+    LoadArtistAlbums,
+    LoadArtistAllTracks,
+    LoadSelectedAlbumTracks,
+    LoadAlbumTracks { rating_key: String },
+    LoadCategoryTracks,
+    GoBackInRightPanel,
     LoadSimilarAlbums { rating_key: String, title: String },
     LoadSimilarTracks { rating_key: String, title: String },
     LoadSimilarArtists { artist_key: String, title: String },
     LoadRelated { artist_key: String, title: String },
+    ListUp,
+    ListDown,
+    ListPageUp,
+    ListPageDown,
+    ListTop,
+    ListBottom,
+}
 
-    // Playback control
+#[derive(Debug, Clone)]
+pub enum MillerAction {
+    LoadArtistAlbumsForMiller { artist_key: String },
+    LoadAlbumTracksForMiller { album_key: String },
+    LoadArtistAllTracksForMiller { artist_key: String },
+    LoadAllAlbumsForMiller,
+    PlayTrackFromMiller { column_index: usize, track_index: usize, single_track: bool },
+    LoadGenreAlbumsForMiller { genre_key: String },
+    LoadGenreTracksForMiller { album_key: String },
+    PlayGenreTrackFromMiller { column_index: usize, track_index: usize, single_track: bool },
+    LoadPlaylistTracksForMiller { playlist_key: String },
+    PlayPlaylistTrackFromMiller { column_index: usize, track_index: usize, single_track: bool },
+    RefreshAlbumTracks { album_key: String },
+    LoadCompilationsForMiller,
+    LoadCompilationAlbumsForMiller { artist_key: String, artist_name: String },
+    LoadCompilationAllTracksForMiller { artist_key: String, artist_name: String },
+    LoadAllCompilationTracksForMiller,
+    LoadAllLibraryTracksForMiller,
+}
+
+#[derive(Debug, Clone)]
+pub enum PlaybackAction {
     TogglePlayPause,
     Stop,
     Next,
@@ -45,197 +107,35 @@ pub enum Action {
     VolumeDown,
     ToggleMute,
     StartPendingPlayback,
-    RetryCurrentTrack,    // Replay current track without resetting error counter
+    RetryCurrentTrack,
+}
 
-    // Queue management
+#[derive(Debug, Clone)]
+pub enum QueueAction {
     PlayTrack(Track),
     PlayTrackFromCategory(usize),
-    PlayAlbum { rating_key: String },  // Load album tracks and play them
-    PlayArtistTracks { artist_key: String },  // Load all artist tracks and play them
-    PlayTracksNow(Vec<Track>),  // Play tracks (replaces queue, starts playback)
-    PlaySearchResult,  // Play the selected search result
-    EnqueueSelection,  // Ctrl+E: Add current selection to END of queue
-    EnqueueSelectionNext,  // Ctrl+Shift+E: Insert current selection NEXT in queue (after current track)
-    EnqueueAlbum { rating_key: String, title: String },  // Load album tracks and add to queue (end)
-    EnqueueArtistTracks { artist_key: String, artist_name: String },  // Add all tracks by artist to queue (end)
-    // Double-click play: replace queue and start playback
+    PlayAlbum { rating_key: String },
+    PlayArtistTracks { artist_key: String },
+    PlayTracksNow(Vec<Track>),
+    PlaySearchResult,
+    EnqueueSelection,
+    EnqueueSelectionNext,
+    EnqueueAlbum { rating_key: String, title: String },
+    EnqueueArtistTracks { artist_key: String, artist_name: String },
     PlayAlbumNow { rating_key: String, title: String },
     PlayPlaylistNow { playlist_key: String, title: String },
-    EnqueueTrack(Track),  // Add a single track to queue (end)
-    EnqueueSearchResult,  // Ctrl+E: Add selected search result to END of queue
-    EnqueueSearchResultNext,  // Ctrl+Shift+E: Insert search result NEXT in queue (after current track)
-    // Ctrl+Shift+E actions: insert NEXT in queue (after current track)
-    EnqueueAlbumNext { rating_key: String, title: String },  // Insert album tracks NEXT in queue
-    EnqueueArtistTracksNext { artist_key: String, artist_name: String },  // Insert artist tracks NEXT in queue
-    EnqueueTracksNext(Vec<Track>),  // Insert tracks NEXT in queue
+    EnqueueTrack(Track),
+    EnqueueSearchResult,
+    EnqueueSearchResultNext,
+    EnqueueAlbumNext { rating_key: String, title: String },
+    EnqueueArtistTracksNext { artist_key: String, artist_name: String },
+    EnqueueTracksNext(Vec<Track>),
     ClearQueue,
     RemoveFromQueue(usize),
     ToggleQueueShuffle,
-    JumpToQueueIndex(usize),      // Jump to and play a specific queue index
-    PromptSavePlaylist,           // Ctrl+W: Prompt user for playlist name
-    SaveQueueAsPlaylist(String),  // Save queue with given name
-
-    // Genres, Artist Genres, Album Genres, Moods, and Styles
-    LoadGenres,
-    LoadArtistGenres,     // Load Plex genres at artist level
-    LoadAlbumGenres,      // Load Plex genres at album level
-    LoadMoods,
-    LoadStyles,           // Load Plex styles
-    LoadGenreAlbums,           // Load albums in selected genre (file tags)
-    RefreshGenreView,          // Refresh genre view after mode change (shared logic)
-
-    // Genre tab cycling
-    CycleGenreTab,       // Ctrl+G when already in Genres: cycle All/Library/Artist/Album/Mood/Style
-    SetGenreTab(crate::app::state::GenreTab), // Direct tab selection (mouse clicks)
-    // Genre category drill-down (Miller column)
-    DrillGenreCategory { category_key: String }, // Drill into a genre category from column 0
-
-    // Search
-    ExecuteLocalSearch,
-    SelectSearchResult,
-
-    // Artist bio popup (F4)
-    ShowArtistBio { artist_key: String, artist_name: String },
-
-    // UI
-    ListUp,
-    ListDown,
-    ListPageUp,
-    ListPageDown,
-    ListTop,
-    ListBottom,
-
-    // Settings
-    OpenSettings,
-    SettingsSelect,
-    SelectServer(String),
-    SaveSettings,
-    SaveCredentials, // Save username/password from settings
-    ClearLibraryCache,      // Clear main library cache only (artists, albums, etc.)
-    ClearArtworkCache,      // Clear artwork disk cache
-    ClearSubfolderCache,    // Clear subfolder cache entries
-    StartSubfolderCrawl,    // Manual subfolder crawl for current library
-    StopSubfolderCrawl,     // Cancel active subfolder crawl
-    ToggleKeepSubfolderCache,  // Toggle per-library keep_subfolder_cache setting
-
-    // Folder navigation
-    LoadFolderRoot,
-    NavigateIntoFolder(String),
-    PlayFolderTracks,
-    PlayFolderTrack { track_index: usize },
-    /// Refresh a specific subfolder (F5 when focused on a subfolder column).
-    /// This is the only way subfolder caches get manually refreshed.
-    RefreshSubfolder(String),
-
-    // Miller column navigation for Artists view
-    LoadArtistAlbumsForMiller { artist_key: String },
-    LoadAlbumTracksForMiller { album_key: String },
-    LoadArtistAllTracksForMiller { artist_key: String },  // Load all tracks by artist (from "All Tracks" entry)
-    LoadAllAlbumsForMiller,  // Load all albums as a Miller column (from "All Artists" entry)
-    PlayTrackFromMiller { column_index: usize, track_index: usize, single_track: bool },
-    LoadCompilationsForMiller,  // Load compilation albums into a new Miller column
-    LoadCompilationAlbumsForMiller { artist_key: String, artist_name: String },  // Load compilation albums for an artist
-    LoadCompilationAllTracksForMiller { artist_key: String, artist_name: String },  // Load all compilation tracks for an artist
-    LoadAllCompilationTracksForMiller,  // Load all compilation tracks across all artists
-    LoadAllLibraryTracksForMiller,  // Load all library tracks into a Miller column (from "All Tracks" in All Artists)
-
-    // Miller column navigation for Genres view
-    LoadGenreAlbumsForMiller { genre_key: String },
-    LoadGenreTracksForMiller { album_key: String },
-    PlayGenreTrackFromMiller { column_index: usize, track_index: usize, single_track: bool },
-
-    // Miller column navigation for Playlists view
-    LoadPlaylistTracksForMiller { playlist_key: String },
-    PlayPlaylistTrackFromMiller { column_index: usize, track_index: usize, single_track: bool },
-
-    // Radio mode
-    JumpToRadioTrack(usize),  // Jump to track in radio queue without clearing
-    PlayCurrentRadioTrack,    // Play current track in radio mode (stays in Radio playback mode)
-
-    // Stations (Plexamp-style radio stations)
-    LoadStations,
-    PlayStation(String), // station key
-    DrillIntoStation(String, String), // station key, station title
-    NavigateStationsBack,
-
-    // Authentication
-    SettingsSignIn, // Sign in with username/password from settings
-    AuthSignIn,     // Submit login form (from Auth screen)
-    AuthSelectServer, // Select server and connect (from Auth screen)
-    Logout,
-
-    // Artwork
-    LoadArtwork,
-    /// Load album art for a batch of albums: Vec<(rating_key, thumb_path)>
-    LoadAlbumArt(Vec<(String, String)>),
-
-    // Waveform and spectrogram (for visualizers)
-    LoadWaveform,
-    LoadSpectrogram,
-
-    // System
-    Quit,
-    ShowError(String),
-    ClearError,
-    SetStatus(String),
-    ClearStatus,
-    RefreshCategory(crate::app::state::RefreshCategory),
-    /// Refresh album tracks in the current Miller column (F5 when viewing album tracks).
-    RefreshAlbumTracks { album_key: String },
-    /// Check cache staleness on view navigation (tier-1: 72h for this category, tier-2: 32d for all others).
-    CheckStaleness(crate::app::state::RefreshCategory),
-
-    // Sonic Adventure
-    SetAdventureLength(usize),           // Set length and start generation
-    CancelAdventure,                     // Cancel adventure mode
-    AdventureComplete(Vec<Track>),       // Adventure ready
-    AdventureError(String),              // Generation failed
-
-    // Inline list filter
-    ActivateListFilter,
-    DeactivateListFilter,
-    SelectFilteredItem,       // Select the currently highlighted filtered item (drill down/play)
-    FilteredListUp,           // Navigate up within filtered results
-    FilteredListDown,         // Navigate down within filtered results
-    AppendListFilterChar(char),
-    DeleteListFilterChar,
-
-    // Search popup (Ctrl+F)
-    OpenSearchPopup,
-    CloseSearchPopup,
-
-    // Radio launcher popup
-    CloseRadioLauncher,
-    RadioLauncherSearch,
-    RadioLauncherSelectResult,
-    /// Start radio using Plex playQueue API (full heuristics: similarity, popularity, taste, freshness)
-    StartPlexRadio { key: String, title: String },
-
-    // Adventure launcher popup (Sonic Adventure from Radio section)
-    OpenAdventureLauncher,
-    CloseAdventureLauncher,
-    AdventureLauncherSearch,
-    AdventureLauncherDrillArtist { key: String, name: String },
-    AdventureLauncherDrillAlbum { key: String, title: String, artist_name: String },
-    AdventureLauncherSelectTrack,
-    AdventureLauncherBack,
-
-    // Library picker popup (F3)
-    OpenLibraryPicker,
-    CloseLibraryPicker,
-
-    // Sort popup (Ctrl+S)
-    OpenSortPopup,
-    CloseSortPopup,
-
-    // DJ modes
-    ToggleDjMode(crate::app::state::DjMode),
-    DjModeProcess,
-    DjModeTracksReady(Vec<Track>, bool, Option<String>), // (tracks, insert_next, error)
-    /// Batch result from inserter DJ modes: Vec<(original_queue_index, tracks_to_insert_after)>
-    DjModeBatchReady(Vec<(usize, Vec<Track>)>),
-
-    // Queue remix
+    JumpToQueueIndex(usize),
+    PromptSavePlaylist,
+    SaveQueueAsPlaylist(String),
     RemixGemini,
     RemixTwofer,
     RemixStretch,
@@ -248,21 +148,146 @@ pub enum Action {
     MoveSelectedTracksUp,
     MoveSelectedTracksDown,
     RemoveSelectedFromQueue,
-    /// Batch result from remix: Vec<(original_queue_index, tracks_to_insert_after)>
     RemixBatchReady(Vec<(usize, Vec<Track>)>),
-    /// Doppelganger remix result: Vec<(queue_index, replacement_track)>
     RemixDoppelgangerReady(Vec<(usize, Track)>),
+}
 
-    // Multi-artist radio picker
+#[derive(Debug, Clone)]
+pub enum SearchAction {
+    ExecuteLocalSearch,
+    SelectSearchResult,
+    ActivateListFilter,
+    DeactivateListFilter,
+    SelectFilteredItem,
+    FilteredListUp,
+    FilteredListDown,
+    AppendListFilterChar(char),
+    DeleteListFilterChar,
+    OpenSearchPopup,
+    CloseSearchPopup,
+    CloseRadioLauncher,
+    RadioLauncherSearch,
+    RadioLauncherSelectResult,
+    OpenAdventureLauncher,
+    CloseAdventureLauncher,
+    AdventureLauncherSearch,
+    AdventureLauncherDrillArtist { key: String, name: String },
+    AdventureLauncherDrillAlbum { key: String, title: String, artist_name: String },
+    AdventureLauncherSelectTrack,
+    AdventureLauncherBack,
+    OpenLibraryPicker,
+    CloseLibraryPicker,
+    OpenSortPopup,
+    CloseSortPopup,
     OpenArtistRadioPicker,
     CloseArtistRadioPicker,
     ArtistRadioPickerSearch,
     ArtistRadioPickerSetCount,
     ArtistRadioPickerToggleArtist,
     ArtistRadioPickerLaunch,
-    ArtistRadioComplete(Vec<crate::plex::models::Track>),
+    ShowArtistBio { artist_key: String, artist_name: String },
+}
 
-    // Remote player control
+#[derive(Debug, Clone)]
+pub enum BrowseAction {
+    LoadStations,
+    LoadGenres,
+    LoadArtistGenres,
+    LoadAlbumGenres,
+    LoadMoods,
+    LoadStyles,
+    LoadGenreAlbums,
+    RefreshGenreView,
+    CycleGenreTab,
+    SetGenreTab(crate::app::state::GenreTab),
+    DrillGenreCategory { category_key: String },
+}
+
+#[derive(Debug, Clone)]
+pub enum FolderAction {
+    LoadFolderRoot,
+    NavigateIntoFolder(String),
+    PlayFolderTracks,
+    PlayFolderTrack { track_index: usize },
+    RefreshSubfolder(String),
+}
+
+#[derive(Debug, Clone)]
+pub enum RadioAction {
+    JumpToRadioTrack(usize),
+    PlayCurrentRadioTrack,
+    StartPlexRadio { key: String, title: String },
+    PlayStation(String),
+    DrillIntoStation(String, String),
+    NavigateStationsBack,
+    ToggleDjMode(crate::app::state::DjMode),
+    DjModeProcess,
+    DjModeTracksReady(Vec<Track>, bool, Option<String>),
+    DjModeBatchReady(Vec<(usize, Vec<Track>)>),
+}
+
+#[derive(Debug, Clone)]
+pub enum SettingsAction {
+    Logout,
+    AuthSignIn,
+    AuthSelectServer,
+    OpenSettings,
+    SaveCredentials,
+    SettingsSelect,
+    SettingsSignIn,
+    SelectServer(String),
+    SelectLibrary(String),
+    SelectLibraryOnServer(String, String),
+    SaveSettings,
+    ClearLibraryCache,
+    ClearArtworkCache,
+    ClearSubfolderCache,
+    StartSubfolderCrawl,
+    StopSubfolderCrawl,
+    ToggleKeepSubfolderCache,
     DiscoverPlayers,
     SetOutputTarget(crate::app::state::OutputTarget),
+    SetAdventureLength(usize),
+    CancelAdventure,
+    AdventureComplete(Vec<Track>),
+    AdventureError(String),
+    ArtistRadioComplete(Vec<Track>),
+}
+
+// ============================================================================
+// From impls for ergonomic construction
+// ============================================================================
+
+impl From<SystemAction> for Action {
+    fn from(a: SystemAction) -> Self { Action::System(a) }
+}
+impl From<NavigationAction> for Action {
+    fn from(a: NavigationAction) -> Self { Action::Navigation(a) }
+}
+impl From<DataAction> for Action {
+    fn from(a: DataAction) -> Self { Action::Data(a) }
+}
+impl From<MillerAction> for Action {
+    fn from(a: MillerAction) -> Self { Action::Miller(a) }
+}
+impl From<PlaybackAction> for Action {
+    fn from(a: PlaybackAction) -> Self { Action::Playback(a) }
+}
+impl From<QueueAction> for Action {
+    fn from(a: QueueAction) -> Self { Action::Queue(a) }
+}
+impl From<SearchAction> for Action {
+    fn from(a: SearchAction) -> Self { Action::Search(a) }
+}
+impl From<BrowseAction> for Action {
+    fn from(a: BrowseAction) -> Self { Action::Browse(a) }
+}
+impl From<FolderAction> for Action {
+    fn from(a: FolderAction) -> Self { Action::Folders(a) }
+}
+impl From<RadioAction> for Action {
+    fn from(a: RadioAction) -> Self { Action::Radio(a) }
+}
+impl From<SettingsAction> for Action {
+    fn from(a: SettingsAction) -> Self { Action::Settings(a) }
 }

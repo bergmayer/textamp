@@ -2,7 +2,9 @@
 //! SaveCredentials, SettingsSelect, SettingsSignIn, SettingsDiscoverServers, SelectServer,
 //! SelectLibrary, SaveSettings, ClearCache, and Adventure actions.
 
+use crate::app::event::*;
 use crate::app::{Action, AppState, Event};
+use crate::app::action::SettingsAction;
 use crate::app::state::{ConnectionState, PlayStatus, PlaybackMode, QueueSortMode, SettingsSection, View};
 use crate::plex::{PlexAuth, PlexClient};
 use crate::audio::AudioPlayer;
@@ -17,7 +19,7 @@ use super::helpers;
 pub async fn dispatch(
     event_tx: &mpsc::Sender<Event>,
     config: &mut Config,
-    action: Action,
+    action: SettingsAction,
     state: &mut AppState,
     client: &mut PlexClient,
     audio: &mut AudioPlayer,
@@ -25,7 +27,7 @@ pub async fn dispatch(
     let mut follow_ups = vec![];
 
     match action {
-        Action::Logout => {
+        SettingsAction::Logout => {
             // Clear auth token
             if let Err(e) = PlexAuth::delete_token() {
                 tracing::warn!("Failed to delete auth token: {}", e);
@@ -50,38 +52,38 @@ pub async fn dispatch(
             state.waveform_cache_stats = None;
 
             // Clear browse data
-            state.artists.clear();
-            state.albums.clear();
-            state.playlists.clear();
-            state.genres.clear();
-            state.artist_genres.clear();
-            state.album_genres.clear();
-            state.moods.clear();
-            state.styles.clear();
+            state.library.artists.clear();
+            state.library.albums.clear();
+            state.library.playlists.clear();
+            state.library.genres.clear();
+            state.library.artist_genres.clear();
+            state.library.album_genres.clear();
+            state.library.moods.clear();
+            state.library.styles.clear();
             state.stations.clear();
-            state.all_tracks.clear();
-            state.track_artists.clear();
-            state.artist_aliases.clear();
-            state.album_display_artist.clear();
-            state.compilations.albums.clear();
-            state.compilations.artist_keys.clear();
-            state.compilations.track_artist_keys.clear();
-            state.compilations.artist_map.clear();
-            state.compilations.single_artist.clear();
-            state.compilations.detected = false;
+            state.library.all_tracks.clear();
+            state.library.track_artists.clear();
+            state.library.artist_aliases.clear();
+            state.library.album_display_artist.clear();
+            state.library.compilations.albums.clear();
+            state.library.compilations.artist_keys.clear();
+            state.library.compilations.track_artist_keys.clear();
+            state.library.compilations.artist_map.clear();
+            state.library.compilations.single_artist.clear();
+            state.library.compilations.detected = false;
 
-            state.selected_artist_albums.clear();
-            state.selected_album_tracks.clear();
-            state.genre_albums.clear();
+            state.library.selected_artist_albums.clear();
+            state.library.selected_album_tracks.clear();
+            state.library.genre_albums.clear();
             state.folder_state = None;
             state.folder_contents_cache.clear();
             state.subfolder_preload_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
             state.subfolder_preload_active = false;
 
             // Clear playback state
-            state.queue.clear();
-            state.queue_index = None;
-            state.queue_original.clear();
+            state.queue.tracks.clear();
+            state.queue.index = None;
+            state.queue.original.clear();
 
             // Clear navigation state
             state.station_nav.columns.clear();
@@ -97,7 +99,7 @@ pub async fn dispatch(
             state.artwork.grid_cache.clear();
             state.artwork.grid_pending.clear();
             state.waveform = Default::default();
-            state.search_results = None;
+            state.search.results = None;
             state.playlist_tracks_cache.clear();
 
             // Stop playback and flush track cache
@@ -116,7 +118,7 @@ pub async fn dispatch(
 
             state.set_status("Signed out.".to_string());
         }
-        Action::AuthSignIn => {
+        SettingsAction::AuthSignIn => {
             use crate::app::state::AuthStep;
             // Authenticate with username/password entered in auth screen login form
             let username = state.auth_state.username_input.clone();
@@ -150,25 +152,25 @@ pub async fn dispatch(
 
                                     // Send servers ready event (will auto-select or show selection)
                                     let has_plex_pass = user.has_plex_pass();
-                                    let _ = event_tx.send(Event::AuthServersReady {
+                                    let _ = event_tx.send(AuthEvent::AuthServersReady {
                                         token,
                                         username: user.username,
                                         servers,
                                         client_identifier: client_id,
                                         has_plex_pass,
-                                    }).await;
+                                    }.into()).await;
                                 }
                                 Err(e) => {
-                                    let _ = event_tx.send(Event::AuthLoginFailed(
+                                    let _ = event_tx.send(AuthEvent::AuthLoginFailed(
                                         format!("Token verification failed: {}", e)
-                                    )).await;
+                                    ).into()).await;
                                 }
                             }
                         }
                         Err(e) => {
-                            let _ = event_tx.send(Event::AuthLoginFailed(
+                            let _ = event_tx.send(AuthEvent::AuthLoginFailed(
                                 format!("Invalid username or password")
-                            )).await;
+                            ).into()).await;
                             tracing::error!("Auth error: {}", e);
                         }
                     }
@@ -178,7 +180,7 @@ pub async fn dispatch(
                 state.auth_state.password_input.clear();
             }
         }
-        Action::AuthSelectServer => {
+        SettingsAction::AuthSelectServer => {
             use crate::app::state::AuthStep;
             // Select server from the server selection list
             if let Some(server) = state.available_servers.get(state.auth_state.server_index) {
@@ -197,18 +199,18 @@ pub async fn dispatch(
                     let has_plex_pass = state.auth_state.has_plex_pass;
                     tokio::spawn(async move {
                         if let Some(url) = helpers::find_working_connection(&server_clone, &token, &client_id).await {
-                            let _ = event_tx.send(Event::AuthSuccess {
+                            let _ = event_tx.send(AuthEvent::AuthSuccess {
                                 token,
                                 username,
                                 server_url: url,
                                 servers,
                                 client_identifier: client_id,
                                 has_plex_pass,
-                            }).await;
+                            }.into()).await;
                         } else {
-                            let _ = event_tx.send(Event::AuthFailed(
+                            let _ = event_tx.send(AuthEvent::AuthFailed(
                                 format!("Could not connect to {} - all connection attempts failed", server_clone.name)
-                            )).await;
+                            ).into()).await;
                         }
                     });
                 } else {
@@ -217,7 +219,7 @@ pub async fn dispatch(
                 }
             }
         }
-        Action::OpenSettings => {
+        SettingsAction::OpenSettings => {
             state.set_view(View::Settings);
             state.settings_state.section = SettingsSection::Account;
             state.settings_state.item_index = 0;
@@ -225,7 +227,7 @@ pub async fn dispatch(
 
             // Auto-discover remote players if connected and list is empty
             if state.remote.players.is_empty() && !state.remote.discovering {
-                follow_ups.push(Action::DiscoverPlayers);
+                follow_ups.push(SettingsAction::DiscoverPlayers.into());
             }
 
             // Get username from connection state first (most reliable), then StoredAuth, then config
@@ -251,17 +253,17 @@ pub async fn dispatch(
                         let auth = PlexAuth::from_stored_auth(&stored);
                         match auth.get_servers(&stored.token).await {
                             Ok(servers) => {
-                                let _ = event_tx.send(Event::ServersDiscovered(servers)).await;
+                                let _ = event_tx.send(AuthEvent::ServersDiscovered(servers).into()).await;
                             }
                             Err(e) => {
-                                let _ = event_tx.send(Event::ServerDiscoveryFailed(e.to_string())).await;
+                                let _ = event_tx.send(AuthEvent::ServerDiscoveryFailed(e.to_string()).into()).await;
                             }
                         }
                     });
                 }
             }
         }
-        Action::SaveCredentials => {
+        SettingsAction::SaveCredentials => {
             // Save username to config file (for display purposes only)
             // Authentication is handled via stored tokens, not passwords
             let mut updated_config = config.clone();
@@ -276,7 +278,7 @@ pub async fn dispatch(
                 state.set_status("Username saved.".to_string());
             }
         }
-        Action::SettingsSelect => {
+        SettingsAction::SettingsSelect => {
             match state.settings_state.section {
                 SettingsSection::Account => {
                     if state.settings_state.signing_in {
@@ -285,7 +287,7 @@ pub async fn dispatch(
                         if let Some(server) = state.available_servers.get(server_index) {
                             let server_id = server.client_identifier.clone();
                             tracing::info!("Selected server: {}", server.name);
-                            follow_ups.push(Action::SelectServer(server_id));
+                            follow_ups.push(SettingsAction::SelectServer(server_id).into());
                         }
                     } else if matches!(state.connection, ConnectionState::Connected { .. }) {
                         use crate::app::state::{ConfirmDialog, ConfirmAction};
@@ -295,7 +297,7 @@ pub async fn dispatch(
                             // Activate selected library
                             if let Some(lib) = state.libraries.get(idx) {
                                 let lib_key = lib.key.clone();
-                                follow_ups.push(Action::SelectLibrary(lib_key));
+                                follow_ups.push(SettingsAction::SelectLibrary(lib_key).into());
                             }
                         } else {
                             match idx - lib_count {
@@ -329,13 +331,13 @@ pub async fn dispatch(
                                 3 => {
                                     // Toggle crawl: start if not running, stop if running
                                     if state.subfolder_preload_active {
-                                        follow_ups.push(Action::StopSubfolderCrawl);
+                                        follow_ups.push(SettingsAction::StopSubfolderCrawl.into());
                                     } else {
-                                        follow_ups.push(Action::StartSubfolderCrawl);
+                                        follow_ups.push(SettingsAction::StartSubfolderCrawl.into());
                                     }
                                 }
-                                4 => follow_ups.push(Action::ToggleKeepSubfolderCache),
-                                5 => follow_ups.push(Action::Logout),
+                                4 => follow_ups.push(SettingsAction::ToggleKeepSubfolderCache.into()),
+                                5 => follow_ups.push(SettingsAction::Logout.into()),
                                 _ => {}
                             }
                         }
@@ -393,14 +395,14 @@ pub async fn dispatch(
 
                             state.set_status(format!("Artwork: {}", mode.name()));
 
-                            config.ui.artwork_mode = mode.config_value().to_string();
+                            config.ui.artwork_mode = mode.name().to_string();
                             if let Err(e) = crate::config::save_config(config) {
                                 tracing::warn!("Failed to save artwork_mode preference: {}", e);
                             }
                         }
                     } else if idx == output_offset {
                         // Local output
-                        follow_ups.push(Action::SetOutputTarget(crate::app::state::OutputTarget::Local));
+                        follow_ups.push(SettingsAction::SetOutputTarget(crate::app::state::OutputTarget::Local).into());
                     } else if idx <= output_offset + state.remote.players.len() {
                         // Remote player
                         let player_idx = idx - output_offset - 1;
@@ -413,15 +415,15 @@ pub async fn dispatch(
                                 "Selecting remote player: {} (id={}, product={}, uri={:?})",
                                 player.name, player.client_identifier, player.product, uri
                             );
-                            follow_ups.push(Action::SetOutputTarget(crate::app::state::OutputTarget::Remote {
+                            follow_ups.push(SettingsAction::SetOutputTarget(crate::app::state::OutputTarget::Remote {
                                 player_id: player.client_identifier.clone(),
                                 player_name: player.name.clone(),
                                 player_uri: uri,
-                            }));
+                            }).into());
                         }
                     } else if idx == output_offset + 1 + state.remote.players.len() {
                         // Refresh players
-                        follow_ups.push(Action::DiscoverPlayers);
+                        follow_ups.push(SettingsAction::DiscoverPlayers.into());
                     } else {
                         // Transcode: cycle through 0 → 128 → 192 → 256 → 320 → 0
                         let options = [0u32, 128, 192, 256, 320];
@@ -450,7 +452,7 @@ pub async fn dispatch(
                 }
             }
         }
-        Action::SettingsSignIn => {
+        SettingsAction::SettingsSignIn => {
             // Authenticate with username/password entered in settings
             let username = state.settings_state.username_input.clone();
             let password = state.settings_state.password_input.clone();
@@ -486,13 +488,13 @@ pub async fn dispatch(
                                     // Multiple servers and no configured URL: show server selection
                                     if server_url.is_empty() && servers.len() > 1 {
                                         let has_plex_pass = user.has_plex_pass();
-                                        let _ = event_tx.send(Event::AuthServersReady {
+                                        let _ = event_tx.send(AuthEvent::AuthServersReady {
                                             token,
                                             username: user.username,
                                             servers,
                                             client_identifier: client_id,
                                             has_plex_pass,
-                                        }).await;
+                                        }.into()).await;
                                         return;
                                     }
 
@@ -505,30 +507,30 @@ pub async fn dispatch(
 
                                     if let Some(url) = final_url {
                                         let has_plex_pass = user.has_plex_pass();
-                                        let _ = event_tx.send(Event::AuthSuccess {
+                                        let _ = event_tx.send(AuthEvent::AuthSuccess {
                                             token,
                                             username: user.username,
                                             server_url: url,
                                             servers,
                                             client_identifier: client_id,
                                             has_plex_pass,
-                                        }).await;
+                                        }.into()).await;
                                     } else {
                                         // No working server connection available
-                                        let _ = event_tx.send(Event::ServersDiscovered(servers)).await;
+                                        let _ = event_tx.send(AuthEvent::ServersDiscovered(servers).into()).await;
                                     }
                                 }
                                 Err(e) => {
-                                    let _ = event_tx.send(Event::AuthFailed(
+                                    let _ = event_tx.send(AuthEvent::AuthFailed(
                                         format!("Token verification failed: {}", e)
-                                    )).await;
+                                    ).into()).await;
                                 }
                             }
                         }
                         Err(e) => {
-                            let _ = event_tx.send(Event::AuthFailed(
+                            let _ = event_tx.send(AuthEvent::AuthFailed(
                                 format!("Authentication failed: {}", e)
-                            )).await;
+                            ).into()).await;
                         }
                     }
                 });
@@ -537,7 +539,7 @@ pub async fn dispatch(
                 state.settings_state.password_input.clear();
             }
         }
-        Action::SelectServer(server_id) => {
+        SettingsAction::SelectServer(server_id) => {
             // Find server and try to connect
             if let Some(server) = state.available_servers.iter().find(|s| s.client_identifier == server_id) {
                 // Get token for connection testing
@@ -551,14 +553,14 @@ pub async fn dispatch(
                     // Find working connection URL (tests connectivity)
                     tokio::spawn(async move {
                         if let Some(url) = helpers::find_working_connection(&server_clone, &token, &client_id).await {
-                            let _ = event_tx.send(Event::ServerConnectionSucceeded {
+                            let _ = event_tx.send(AuthEvent::ServerConnectionSucceeded {
                                 server_name: server_clone.name.clone(),
                                 url,
-                            }).await;
+                            }.into()).await;
                         } else {
-                            let _ = event_tx.send(Event::ServerConnectionFailed {
+                            let _ = event_tx.send(AuthEvent::ServerConnectionFailed {
                                 server_name: server_clone.name.clone(),
-                            }).await;
+                            }.into()).await;
                         }
                     });
 
@@ -568,7 +570,7 @@ pub async fn dispatch(
                 }
             }
         }
-        Action::SelectLibrary(lib_key) => {
+        SettingsAction::SelectLibrary(lib_key) => {
             // Switch to the selected library
             if state.active_library.as_ref() != Some(&lib_key) {
                 state.active_library = Some(lib_key.clone());
@@ -578,26 +580,26 @@ pub async fn dispatch(
                     .unwrap_or(false);
 
                 // Clear all current data and UI state
-                state.artists.clear();
-                state.albums.clear();
-                state.playlists.clear();
-                state.genres.clear();
-                state.artist_genres.clear();
-                state.album_genres.clear();
-                state.moods.clear();
-                state.styles.clear();
+                state.library.artists.clear();
+                state.library.albums.clear();
+                state.library.playlists.clear();
+                state.library.genres.clear();
+                state.library.artist_genres.clear();
+                state.library.album_genres.clear();
+                state.library.moods.clear();
+                state.library.styles.clear();
                 state.stations.clear();
-                state.all_tracks.clear();
-                state.track_artists.clear();
-                state.artist_aliases.clear();
-                state.album_display_artist.clear();
-                state.compilations.albums.clear();
-                state.compilations.artist_keys.clear();
-                state.compilations.track_artist_keys.clear();
-                state.compilations.detected = false;
+                state.library.all_tracks.clear();
+                state.library.track_artists.clear();
+                state.library.artist_aliases.clear();
+                state.library.album_display_artist.clear();
+                state.library.compilations.albums.clear();
+                state.library.compilations.artist_keys.clear();
+                state.library.compilations.track_artist_keys.clear();
+                state.library.compilations.detected = false;
 
-                state.selected_artist_albums.clear();
-                state.selected_album_tracks.clear();
+                state.library.selected_artist_albums.clear();
+                state.library.selected_album_tracks.clear();
                 state.folder_state = None;
                 state.folder_contents_cache.clear();
                 state.subfolder_preload_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -649,9 +651,9 @@ pub async fn dispatch(
                 state.playback.position_ms = 0;
                 state.playback.duration_ms = 0;
                 state.playback.playback_started_at = None;
-                state.queue.clear();
-                state.queue_index = None;
-                state.queue_original.clear();
+                state.queue.tracks.clear();
+                state.queue.index = None;
+                state.queue.original.clear();
                 state.radio.clear();
                 state.playback_mode = PlaybackMode::Queue;
                 state.adventure = crate::app::state::AdventureState::default();
@@ -677,15 +679,15 @@ pub async fn dispatch(
                     let result = LibraryCache::new().and_then(|cache| cache.load(&bg_lib_key));
                     match result {
                         Some(cached) => {
-                            let _ = tx.blocking_send(Event::LibraryCacheLoaded {
+                            let _ = tx.blocking_send(PreloadEvent::LibraryCacheLoaded {
                                 library_key: bg_lib_key,
                                 cached: Box::new(cached),
-                            });
+                            }.into());
                         }
                         None => {
-                            let _ = tx.blocking_send(Event::LibraryCacheLoadFailed {
+                            let _ = tx.blocking_send(PreloadEvent::LibraryCacheLoadFailed {
                                 library_key: bg_lib_key,
-                            });
+                            }.into());
                         }
                     }
                 });
@@ -696,10 +698,10 @@ pub async fn dispatch(
                 state.set_status(format!("Switched to {}", lib_name));
 
                 // Auto-save the default library
-                follow_ups.push(Action::SaveSettings);
+                follow_ups.push(SettingsAction::SaveSettings.into());
             }
         }
-        Action::SelectLibraryOnServer(lib_key, server_id) => {
+        SettingsAction::SelectLibraryOnServer(lib_key, server_id) => {
             // Switch to a library on a different server
             // First, find the server and connect to it
             if let Some(server) = state.available_servers.iter().find(|s| s.client_identifier == server_id).cloned() {
@@ -707,24 +709,24 @@ pub async fn dispatch(
 
                 if let Some(token) = token {
                     // Clear all current data (same as SelectLibrary but more thorough)
-                    state.artists.clear();
-                    state.albums.clear();
-                    state.playlists.clear();
-                    state.genres.clear();
-                    state.artist_genres.clear();
-                    state.album_genres.clear();
-                    state.moods.clear();
-                    state.styles.clear();
+                    state.library.artists.clear();
+                    state.library.albums.clear();
+                    state.library.playlists.clear();
+                    state.library.genres.clear();
+                    state.library.artist_genres.clear();
+                    state.library.album_genres.clear();
+                    state.library.moods.clear();
+                    state.library.styles.clear();
                     state.stations.clear();
-                    state.all_tracks.clear();
-                    state.track_artists.clear();
-                    state.compilations.albums.clear();
-                    state.compilations.artist_keys.clear();
-                    state.compilations.track_artist_keys.clear();
-                    state.compilations.detected = false;
+                    state.library.all_tracks.clear();
+                    state.library.track_artists.clear();
+                    state.library.compilations.albums.clear();
+                    state.library.compilations.artist_keys.clear();
+                    state.library.compilations.track_artist_keys.clear();
+                    state.library.compilations.detected = false;
 
-                    state.selected_artist_albums.clear();
-                    state.selected_album_tracks.clear();
+                    state.library.selected_artist_albums.clear();
+                    state.library.selected_album_tracks.clear();
                     state.folder_state = None;
                     state.folder_contents_cache.clear();
                     state.subfolder_preload_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -752,9 +754,9 @@ pub async fn dispatch(
                     state.playback.status = PlayStatus::Stopped;
                     state.playback.position_ms = 0;
                     state.playback.duration_ms = 0;
-                    state.queue.clear();
-                    state.queue_index = None;
-                    state.queue_original.clear();
+                    state.queue.tracks.clear();
+                    state.queue.index = None;
+                    state.queue.original.clear();
                     state.radio.clear();
                     state.playback_mode = PlaybackMode::Queue;
                     state.adventure = crate::app::state::AdventureState::default();
@@ -770,25 +772,25 @@ pub async fn dispatch(
 
                     tokio::spawn(async move {
                         if let Some(url) = helpers::find_working_connection(&server, &token, &client_id).await {
-                            let _ = event_tx.send(Event::ServerConnectionSucceeded {
+                            let _ = event_tx.send(AuthEvent::ServerConnectionSucceeded {
                                 server_name: spawn_server_name.clone(),
                                 url: url.clone(),
-                            }).await;
+                            }.into()).await;
 
                             // Now load libraries from this server
                             let new_client = crate::plex::PlexClient::new_with_url(&url, Some(&token), &client_id);
                             match new_client.get_libraries().await {
                                 Ok(libs) => {
-                                    let _ = event_tx.send(Event::LibrariesLoaded(libs)).await;
+                                    let _ = event_tx.send(DataEvent::LibrariesLoaded(libs).into()).await;
                                 }
                                 Err(e) => {
                                     tracing::error!("Failed to load libraries from {}: {}", spawn_server_name, e);
                                 }
                             }
                         } else {
-                            let _ = event_tx.send(Event::ServerConnectionFailed {
+                            let _ = event_tx.send(AuthEvent::ServerConnectionFailed {
                                 server_name: spawn_server_name,
-                            }).await;
+                            }.into()).await;
                         }
                     });
 
@@ -814,7 +816,7 @@ pub async fn dispatch(
                 state.set_error("Server not found".to_string());
             }
         }
-        Action::SaveSettings => {
+        SettingsAction::SaveSettings => {
             // Build updated config from current state
             let mut updated_config = config.clone();
             updated_config.libraries.default_library = state.active_library.clone();
@@ -826,7 +828,7 @@ pub async fn dispatch(
                 tracing::debug!("Settings saved");
             }
         }
-        Action::ClearLibraryCache => {
+        SettingsAction::ClearLibraryCache => {
             // Clear main library cache files and in-memory data (but not subfolders or artwork)
             if let Some(cache) = LibraryCache::new() {
                 match cache.clear_all() {
@@ -834,21 +836,21 @@ pub async fn dispatch(
                         tracing::info!("Cleared {} library cache files", count);
 
                         // Clear in-memory library data
-                        state.artists.clear();
-                        state.albums.clear();
-                        state.playlists.clear();
-                        state.genres.clear();
-                        state.artist_genres.clear();
-                        state.album_genres.clear();
-                        state.moods.clear();
-                        state.styles.clear();
+                        state.library.artists.clear();
+                        state.library.albums.clear();
+                        state.library.playlists.clear();
+                        state.library.genres.clear();
+                        state.library.artist_genres.clear();
+                        state.library.album_genres.clear();
+                        state.library.moods.clear();
+                        state.library.styles.clear();
                         state.stations.clear();
-                        state.all_tracks.clear();
-                        state.track_artists.clear();
-                        state.compilations.albums.clear();
-                        state.compilations.artist_keys.clear();
-                        state.compilations.track_artist_keys.clear();
-                        state.compilations.detected = false;
+                        state.library.all_tracks.clear();
+                        state.library.track_artists.clear();
+                        state.library.compilations.albums.clear();
+                        state.library.compilations.artist_keys.clear();
+                        state.library.compilations.track_artist_keys.clear();
+                        state.library.compilations.detected = false;
 
                         state.playlist_tracks_cache.clear();
                         state.cache_mgmt.category_timestamps.clear();
@@ -876,7 +878,7 @@ pub async fn dispatch(
                 state.set_error("Cache not available".to_string());
             }
         }
-        Action::ClearArtworkCache => {
+        SettingsAction::ClearArtworkCache => {
             let artwork_cache = crate::plex::ArtworkCache::default();
             let removed = artwork_cache.clear_all();
             tracing::info!("Cleared {} artwork cache files", removed);
@@ -888,7 +890,7 @@ pub async fn dispatch(
 
             state.set_status(format!("Cleared {} artwork cache files", removed));
         }
-        Action::ClearSubfolderCache => {
+        SettingsAction::ClearSubfolderCache => {
             let count = state.folder_contents_cache.len();
             state.folder_contents_cache.clear();
             state.subfolder_preload_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -898,7 +900,7 @@ pub async fn dispatch(
             tracing::info!("Cleared {} subfolder cache entries", count);
             state.set_status(format!("Cleared {} subfolder cache entries", count));
         }
-        Action::StartSubfolderCrawl => {
+        SettingsAction::StartSubfolderCrawl => {
             use crate::app::handlers::helpers::SubfolderPreloadResult;
             match helpers::maybe_start_subfolder_preload(event_tx, state, client) {
                 SubfolderPreloadResult::Started => {
@@ -921,12 +923,12 @@ pub async fn dispatch(
                 }
             }
         }
-        Action::StopSubfolderCrawl => {
+        SettingsAction::StopSubfolderCrawl => {
             state.subfolder_preload_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
             state.subfolder_preload_active = false;
             state.set_status("Subfolder crawl stopped".to_string());
         }
-        Action::ToggleKeepSubfolderCache => {
+        SettingsAction::ToggleKeepSubfolderCache => {
             if let Some(lib_key) = state.active_library.clone() {
                 state.keep_subfolder_cache = !state.keep_subfolder_cache;
                 let entry = config.libraries.per_library.entry(lib_key).or_default();
@@ -942,7 +944,7 @@ pub async fn dispatch(
             }
         }
 
-        Action::DiscoverPlayers => {
+        SettingsAction::DiscoverPlayers => {
             if let Some(stored) = PlexAuth::load_token() {
                 state.remote.discovering = true;
                 let event_tx = event_tx.clone();
@@ -950,10 +952,10 @@ pub async fn dispatch(
                     let auth = PlexAuth::from_stored_auth(&stored);
                     match auth.get_players(&stored.token).await {
                         Ok(players) => {
-                            let _ = event_tx.send(Event::PlayersDiscovered(players)).await;
+                            let _ = event_tx.send(RemoteEvent::PlayersDiscovered(players).into()).await;
                         }
                         Err(e) => {
-                            let _ = event_tx.send(Event::PlayerDiscoveryFailed(e.to_string())).await;
+                            let _ = event_tx.send(RemoteEvent::PlayerDiscoveryFailed(e.to_string()).into()).await;
                         }
                     }
                 });
@@ -961,7 +963,7 @@ pub async fn dispatch(
                 state.set_error("No authentication token available".to_string());
             }
         }
-        Action::SetOutputTarget(target) => {
+        SettingsAction::SetOutputTarget(target) => {
             use crate::app::state::OutputTarget;
             let was_playing = matches!(state.playback.status, PlayStatus::Playing | PlayStatus::Paused);
 
@@ -1016,7 +1018,7 @@ pub async fn dispatch(
             }
         }
 
-        Action::SetAdventureLength(length) => {
+        SettingsAction::SetAdventureLength(length) => {
             state.adventure.requested_length = length.clamp(5, 100);
             state.popups.input_dialog = None;
             state.adventure.generating = true;
@@ -1042,16 +1044,16 @@ pub async fn dispatch(
                             state.radio.clear();
                         }
                         // Replace queue with adventure
-                        state.queue = tracks;
-                        state.queue_index = Some(0);
-                        state.queue_original.clear();
-                        state.queue_sort_mode = QueueSortMode::QueueOrder;
+                        state.queue.tracks = tracks;
+                        state.queue.index = Some(0);
+                        state.queue.original.clear();
+                        state.queue.sort_mode = QueueSortMode::QueueOrder;
                         state.playback_mode = PlaybackMode::Queue;
                         state.set_view(View::Queue);
 
                         // Start playback
                         helpers::play_current_track(event_tx, state, client, audio).await;
-                        state.set_status(format!("Adventure: {} tracks ready!", state.queue.len()));
+                        state.set_status(format!("Adventure: {} tracks ready!", state.queue.tracks.len()));
                     }
                     Err(e) => {
                         // Fully reset adventure state on error
@@ -1065,31 +1067,31 @@ pub async fn dispatch(
                 state.set_error("Adventure: missing start or end track".to_string());
             }
         }
-        Action::CancelAdventure => {
+        SettingsAction::CancelAdventure => {
             state.adventure = crate::app::state::AdventureState::default();
             state.popups.input_dialog = None;
             state.clear_status();
         }
-        Action::AdventureComplete(tracks) => {
+        SettingsAction::AdventureComplete(tracks) => {
             // This is handled inline in SetAdventureLength for simplicity
             state.adventure = crate::app::state::AdventureState::default();
             // Clear radio state if switching from radio mode
             if state.playback_mode == PlaybackMode::Radio {
                 state.radio.clear();
             }
-            state.queue = tracks;
-            state.queue_index = Some(0);
-            state.queue_original.clear();
-            state.queue_sort_mode = QueueSortMode::QueueOrder;
+            state.queue.tracks = tracks;
+            state.queue.index = Some(0);
+            state.queue.original.clear();
+            state.queue.sort_mode = QueueSortMode::QueueOrder;
             state.playback_mode = PlaybackMode::Queue;
             state.set_view(View::Queue);
             helpers::play_current_track(event_tx, state, client, audio).await;
         }
-        Action::AdventureError(msg) => {
+        SettingsAction::AdventureError(msg) => {
             state.adventure.generating = false;
             state.set_error(format!("Adventure failed: {}", msg));
         }
-        Action::ArtistRadioComplete(tracks) => {
+        SettingsAction::ArtistRadioComplete(tracks) => {
             if tracks.is_empty() {
                 state.set_error("Artist radio: no tracks returned".to_string());
                 return Ok(vec![]);
@@ -1099,18 +1101,17 @@ pub async fn dispatch(
                 state.radio.clear();
             }
             let count = tracks.len();
-            state.queue = tracks;
-            state.queue_index = Some(0);
-            state.queue_selected.clear();
-            state.queue_original.clear();
-            state.queue_sort_mode = QueueSortMode::QueueOrder;
+            state.queue.tracks = tracks;
+            state.queue.index = Some(0);
+            state.queue.selected.clear();
+            state.queue.original.clear();
+            state.queue.sort_mode = QueueSortMode::QueueOrder;
             state.playback_mode = PlaybackMode::Queue;
             state.list_state.queue_index = 0;
             state.set_view(View::Queue);
             state.set_status(format!("Artist radio: {} tracks", count));
             helpers::play_current_track(event_tx, state, client, audio).await;
         }
-        _ => unreachable!("dispatch_settings called with non-settings action: {:?}", action),
     }
     Ok(follow_ups)
 }

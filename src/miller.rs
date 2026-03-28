@@ -5,16 +5,6 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Trait for items displayed in Miller columns.
-pub trait MillerItem: Clone + std::fmt::Debug {
-    /// Unique key for this item.
-    fn key(&self) -> &str;
-    /// Display title.
-    fn title(&self) -> &str;
-    /// Whether drilling into this item produces a sub-column.
-    fn is_drillable(&self) -> bool;
-}
-
 /// Trait for a single column in a Miller columns layout.
 ///
 /// Each concrete column type (BrowseColumn, FolderColumn, StationColumn)

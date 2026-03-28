@@ -1,5 +1,6 @@
 //! Related view key handling.
 
+use crate::app::action::*;
 use crossterm::event::{self, KeyCode};
 
 use crate::app::Action;
@@ -12,16 +13,16 @@ pub(in crate::app::handlers) fn handle_related_keys(key: event::KeyEvent, state:
     match key.code {
         KeyCode::Esc => {
             let target = state.previous_view.take().unwrap_or(View::Browse);
-            vec![Action::SetView(target)]
+            vec![NavigationAction::SetView(target).into()]
         }
-        KeyCode::F(1) | KeyCode::Char('?') => vec![Action::SetView(View::Help)],
+        KeyCode::F(1) | KeyCode::Char('?') => vec![NavigationAction::SetView(View::Help).into()],
 
-        KeyCode::Up => { state.scroll.related = None; vec![Action::ListUp] }
-        KeyCode::Down => { state.scroll.related = None; vec![Action::ListDown] }
-        KeyCode::PageUp => { state.scroll.related = None; vec![Action::ListPageUp] }
-        KeyCode::PageDown => { state.scroll.related = None; vec![Action::ListPageDown] }
-        KeyCode::Home => { state.scroll.related = None; vec![Action::ListTop] }
-        KeyCode::End => { state.scroll.related = None; vec![Action::ListBottom] }
+        KeyCode::Up => { state.scroll.related = None; vec![DataAction::ListUp.into()] }
+        KeyCode::Down => { state.scroll.related = None; vec![DataAction::ListDown.into()] }
+        KeyCode::PageUp => { state.scroll.related = None; vec![DataAction::ListPageUp.into()] }
+        KeyCode::PageDown => { state.scroll.related = None; vec![DataAction::ListPageDown.into()] }
+        KeyCode::Home => { state.scroll.related = None; vec![DataAction::ListTop.into()] }
+        KeyCode::End => { state.scroll.related = None; vec![DataAction::ListBottom.into()] }
 
         KeyCode::Enter => activate_related_item(state),
 
@@ -89,12 +90,12 @@ pub(in crate::app::handlers) fn activate_related_item(state: &mut AppState) -> V
     };
 
     state.set_view(View::Browse);
-    state.browse_category = crate::app::state::BrowseCategory::Library;
-    state.selected_artist_name = artist_name;
+    state.set_browse_category(crate::app::state::BrowseCategory::Library);
+    state.library.selected_artist_name = artist_name;
 
     if let Some(album_key_val) = album_key {
-        state.pending_album_key = Some(album_key_val);
-        state.selected_album_title = album_title.unwrap_or_default();
+        state.search.pending_album_key = Some(album_key_val);
+        state.library.selected_album_title = album_title.unwrap_or_default();
     }
 
     if let Some(pos) = state.artist_nav.columns.first()
@@ -106,5 +107,5 @@ pub(in crate::app::handlers) fn activate_related_item(state: &mut AppState) -> V
     }
     state.artist_nav.focused_column = 0;
     state.artist_nav.truncate_right();
-    vec![Action::LoadArtistAlbumsForMiller { artist_key: nav_artist_key }]
+    vec![MillerAction::LoadArtistAlbumsForMiller { artist_key: nav_artist_key }.into()]
 }

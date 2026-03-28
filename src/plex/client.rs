@@ -9,6 +9,14 @@ use super::models::*;
 use reqwest::Client;
 use std::time::Duration;
 
+/// Build an HTTP client with the given timeout.
+fn build_http_client(timeout_secs: u64) -> Client {
+    Client::builder()
+        .timeout(Duration::from_secs(timeout_secs))
+        .build()
+        .expect("Failed to create HTTP client")
+}
+
 /// Plex API client.
 #[derive(Clone)]
 pub struct PlexClient {
@@ -22,13 +30,8 @@ pub struct PlexClient {
 impl PlexClient {
     /// Create a new PlexClient.
     pub fn new(client_info: PlexClientInfo) -> Self {
-        let http = Client::builder()
-            .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
-            .build()
-            .expect("Failed to create HTTP client");
-
         Self {
-            http,
+            http: build_http_client(DEFAULT_TIMEOUT_SECS),
             client_info,
             auth_token: None,
             server_url: None,
@@ -43,16 +46,11 @@ impl PlexClient {
     /// otherwise Plex will reject requests with 400 errors. Always pass the
     /// client_identifier from auth.toml, not a new random one.
     pub fn new_with_url(server_url: &str, token: Option<&str>, client_identifier: &str) -> Self {
-        let http = Client::builder()
-            .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
-            .build()
-            .expect("Failed to create HTTP client");
-
         let mut client_info = PlexClientInfo::default();
         client_info.client_identifier = client_identifier.to_string();
 
         Self {
-            http,
+            http: build_http_client(DEFAULT_TIMEOUT_SECS),
             client_info,
             auth_token: token.map(|s| s.to_string()),
             server_url: Some(server_url.trim_end_matches('/').to_string()),
@@ -62,16 +60,11 @@ impl PlexClient {
 
     /// Create a new PlexClient with a specific timeout (for large responses like AllTracks).
     pub fn new_with_url_and_timeout(server_url: &str, token: Option<&str>, client_identifier: &str, timeout_secs: u64) -> Self {
-        let http = Client::builder()
-            .timeout(Duration::from_secs(timeout_secs))
-            .build()
-            .expect("Failed to create HTTP client");
-
         let mut client_info = PlexClientInfo::default();
         client_info.client_identifier = client_identifier.to_string();
 
         Self {
-            http,
+            http: build_http_client(timeout_secs),
             client_info,
             auth_token: token.map(|s| s.to_string()),
             server_url: Some(server_url.trim_end_matches('/').to_string()),
@@ -124,65 +117,9 @@ impl PlexClient {
         self.auth_token.as_deref().ok_or(ApiError::NotAuthenticated)
     }
 
-    /// Build headers for Plex API requests.
-    ///
-    /// Returns an error if any header value contains invalid characters.
-    fn build_headers(&self) -> Result<reqwest::header::HeaderMap, ApiError> {
-        use reqwest::header::HeaderValue;
-
-        let mut headers = reqwest::header::HeaderMap::new();
-
-        headers.insert(
-            HEADER_PLEX_PRODUCT,
-            HeaderValue::from_str(&self.client_info.product)
-                .map_err(|_| ApiError::InvalidHeader(HEADER_PLEX_PRODUCT.to_string()))?,
-        );
-        headers.insert(
-            HEADER_PLEX_VERSION,
-            HeaderValue::from_str(&self.client_info.version)
-                .map_err(|_| ApiError::InvalidHeader(HEADER_PLEX_VERSION.to_string()))?,
-        );
-        headers.insert(
-            HEADER_PLEX_CLIENT_ID,
-            HeaderValue::from_str(&self.client_info.client_identifier)
-                .map_err(|_| ApiError::InvalidHeader(HEADER_PLEX_CLIENT_ID.to_string()))?,
-        );
-        headers.insert(
-            HEADER_PLEX_DEVICE_NAME,
-            HeaderValue::from_str(&self.client_info.device_name)
-                .map_err(|_| ApiError::InvalidHeader(HEADER_PLEX_DEVICE_NAME.to_string()))?,
-        );
-        headers.insert(
-            HEADER_PLEX_PLATFORM,
-            HeaderValue::from_str(&self.client_info.platform)
-                .map_err(|_| ApiError::InvalidHeader(HEADER_PLEX_PLATFORM.to_string()))?,
-        );
-        headers.insert("Accept", HeaderValue::from_static("application/json"));
-
-        if let Some(ref token) = self.auth_token {
-            headers.insert(
-                HEADER_PLEX_TOKEN,
-                HeaderValue::from_str(token)
-                    .map_err(|_| ApiError::InvalidHeader(HEADER_PLEX_TOKEN.to_string()))?,
-            );
-        }
-
-        Ok(headers)
-    }
-
-    /// Get a reference to the internal HTTP client.
-    ///
-    /// Use this for audio downloads so they share the same connection pool,
-    /// TLS settings, and HTTP version negotiation as API calls that work.
-    pub fn http_client(&self) -> &reqwest::Client {
-        &self.http
-    }
-
-    /// Build headers for audio streaming requests.
-    ///
-    /// Same Plex identification headers as API requests, but without
-    /// `Accept: application/json` since the response is binary audio.
-    pub fn stream_headers(&self) -> reqwest::header::HeaderMap {
+    /// Build Plex identification headers (shared between API and streaming requests).
+    /// Silently skips any header whose value contains invalid characters.
+    fn plex_headers(&self) -> reqwest::header::HeaderMap {
         use reqwest::header::HeaderValue;
 
         let mut headers = reqwest::header::HeaderMap::new();
@@ -209,6 +146,33 @@ impl PlexClient {
         }
 
         headers
+    }
+
+    /// Build headers for Plex API requests (JSON).
+    ///
+    /// Adds `Accept: application/json` on top of the shared Plex headers.
+    fn build_headers(&self) -> Result<reqwest::header::HeaderMap, ApiError> {
+        use reqwest::header::HeaderValue;
+
+        let mut headers = self.plex_headers();
+        headers.insert("Accept", HeaderValue::from_static("application/json"));
+        Ok(headers)
+    }
+
+    /// Get a reference to the internal HTTP client.
+    ///
+    /// Use this for audio downloads so they share the same connection pool,
+    /// TLS settings, and HTTP version negotiation as API calls that work.
+    pub fn http_client(&self) -> &reqwest::Client {
+        &self.http
+    }
+
+    /// Build headers for audio streaming requests.
+    ///
+    /// Same Plex identification headers as API requests, but without
+    /// `Accept: application/json` since the response is binary audio.
+    pub fn stream_headers(&self) -> reqwest::header::HeaderMap {
+        self.plex_headers()
     }
 
     /// Build URL from server base and path.
@@ -797,62 +761,68 @@ impl PlexClient {
         self.get(folder_key).await
     }
 
-    /// Get all tracks in a folder, suitable for playback.
-    pub async fn get_folder_tracks(&self, folder_key: &str) -> Result<Vec<Track>, ApiError> {
-        let response = self.get_folder_contents(folder_key).await?;
-
+    /// Convert folder metadata into sorted tracks for playback.
+    fn folder_response_to_tracks(response: FolderResponse) -> Vec<Track> {
         let mut tracks: Vec<Track> = response
             .media_container
             .metadata
             .into_iter()
-            .filter_map(|meta| {
-                let rating_key = meta.rating_key?;
-                Some(Track {
-                    rating_key,
-                    key: meta.key,
-                    title: meta.title,
-                    duration: meta.duration,
-                    parent_title: meta.parent_title,
-                    grandparent_title: meta.grandparent_title,
-                    index: meta.index,
-                    year: None,
-                    parent_year: None,
-                    parent_rating_key: meta.parent_rating_key,
-                    grandparent_rating_key: meta.grandparent_rating_key,
-                    thumb: None,
-                    parent_thumb: None,
-                    grandparent_thumb: None,
-                    original_title: None,
-                    media: meta
-                        .media
+            .filter_map(Self::folder_meta_to_track)
+            .collect();
+        tracks.sort_by(|a, b| a.title.cmp(&b.title));
+        tracks
+    }
+
+    /// Convert a single folder metadata entry to a Track.
+    fn folder_meta_to_track(meta: FolderMetadata) -> Option<Track> {
+        let rating_key = meta.rating_key?;
+        Some(Track {
+            rating_key,
+            key: meta.key,
+            title: meta.title,
+            duration: meta.duration,
+            parent_title: meta.parent_title,
+            grandparent_title: meta.grandparent_title,
+            index: meta.index,
+            year: None,
+            parent_year: None,
+            parent_rating_key: meta.parent_rating_key,
+            grandparent_rating_key: meta.grandparent_rating_key,
+            thumb: None,
+            parent_thumb: None,
+            grandparent_thumb: None,
+            original_title: None,
+            media: meta
+                .media
+                .into_iter()
+                .map(|m| Media {
+                    id: m.id,
+                    duration: m.duration,
+                    bitrate: m.bitrate,
+                    audio_channels: m.audio_channels.map(|c| c as u8),
+                    audio_codec: m.audio_codec,
+                    container: m.container,
+                    part: m
+                        .parts
                         .into_iter()
-                        .map(|m| Media {
-                            id: m.id,
-                            duration: m.duration,
-                            bitrate: m.bitrate,
-                            audio_channels: m.audio_channels.map(|c| c as u8),
-                            audio_codec: m.audio_codec,
-                            container: m.container,
-                            part: m
-                                .parts
-                                .into_iter()
-                                .map(|p| MediaPart {
-                                    id: p.id,
-                                    key: p.key.unwrap_or_default(),
-                                    duration: p.duration,
-                                    file: p.file,
-                                    size: p.size,
-                                    container: p.container,
-                                })
-                                .collect(),
+                        .map(|p| MediaPart {
+                            id: p.id,
+                            key: p.key.unwrap_or_default(),
+                            duration: p.duration,
+                            file: p.file,
+                            size: p.size,
+                            container: p.container,
                         })
                         .collect(),
                 })
-            })
-            .collect();
+                .collect(),
+        })
+    }
 
-        tracks.sort_by(|a, b| a.title.cmp(&b.title));
-        Ok(tracks)
+    /// Get all tracks in a folder, suitable for playback.
+    pub async fn get_folder_tracks(&self, folder_key: &str) -> Result<Vec<Track>, ApiError> {
+        let response = self.get_folder_contents(folder_key).await?;
+        Ok(Self::folder_response_to_tracks(response))
     }
 
     /// Get all tracks at the library root level, suitable for playback.
@@ -860,59 +830,7 @@ impl PlexClient {
     /// Similar to `get_folder_tracks` but for the library root folder.
     pub async fn get_library_root_tracks(&self, library_key: &str) -> Result<Vec<Track>, ApiError> {
         let response = self.get_library_folders(library_key).await?;
-
-        let mut tracks: Vec<Track> = response
-            .media_container
-            .metadata
-            .into_iter()
-            .filter_map(|meta| {
-                let rating_key = meta.rating_key?;
-                Some(Track {
-                    rating_key,
-                    key: meta.key,
-                    title: meta.title,
-                    duration: meta.duration,
-                    parent_title: meta.parent_title,
-                    grandparent_title: meta.grandparent_title,
-                    index: meta.index,
-                    year: None,
-                    parent_year: None,
-                    parent_rating_key: meta.parent_rating_key,
-                    grandparent_rating_key: meta.grandparent_rating_key,
-                    thumb: None,
-                    parent_thumb: None,
-                    grandparent_thumb: None,
-                    original_title: None,
-                    media: meta
-                        .media
-                        .into_iter()
-                        .map(|m| Media {
-                            id: m.id,
-                            duration: m.duration,
-                            bitrate: m.bitrate,
-                            audio_channels: m.audio_channels.map(|c| c as u8),
-                            audio_codec: m.audio_codec,
-                            container: m.container,
-                            part: m
-                                .parts
-                                .into_iter()
-                                .map(|p| MediaPart {
-                                    id: p.id,
-                                    key: p.key.unwrap_or_default(),
-                                    duration: p.duration,
-                                    file: p.file,
-                                    size: p.size,
-                                    container: p.container,
-                                })
-                                .collect(),
-                        })
-                        .collect(),
-                })
-            })
-            .collect();
-
-        tracks.sort_by(|a, b| a.title.cmp(&b.title));
-        Ok(tracks)
+        Ok(Self::folder_response_to_tracks(response))
     }
 
     // ========================================================================

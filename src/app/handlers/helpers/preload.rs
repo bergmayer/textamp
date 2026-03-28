@@ -1,5 +1,6 @@
 //! Background data preloading for faster access.
 
+use crate::app::event::*;
 use crate::app::Event;
 use crate::app::event_loop::PreloadType;
 use crate::plex::PlexClient;
@@ -26,11 +27,11 @@ pub fn preload_data(event_tx: &mpsc::Sender<Event>, preload_type: PreloadType, l
                 match client.get_artists(lib_key_ref).await {
                     Ok(data) => {
                         tracing::debug!("Artists preloaded: {} items", data.len());
-                        let _ = event_tx.send(Event::ArtistsPreloaded { library_key: lib_key, artists: data }).await;
+                        let _ = event_tx.send(PreloadEvent::ArtistsPreloaded { library_key: lib_key, artists: data }.into()).await;
                     }
                     Err(e) => {
                         tracing::error!("Failed to preload artists: {}", e);
-                        let _ = event_tx.send(Event::PreloadFailed { category: "Artists".to_string() }).await;
+                        let _ = event_tx.send(PreloadEvent::PreloadFailed { category: "Artists".to_string() }.into()).await;
                     }
                 }
             }
@@ -39,11 +40,11 @@ pub fn preload_data(event_tx: &mpsc::Sender<Event>, preload_type: PreloadType, l
                 match client.get_albums(lib_key_ref).await {
                     Ok(data) => {
                         tracing::debug!("Albums preloaded: {} items", data.len());
-                        let _ = event_tx.send(Event::AlbumsPreloaded { library_key: lib_key, albums: data }).await;
+                        let _ = event_tx.send(PreloadEvent::AlbumsPreloaded { library_key: lib_key, albums: data }.into()).await;
                     }
                     Err(e) => {
                         tracing::error!("Failed to preload albums: {}", e);
-                        let _ = event_tx.send(Event::PreloadFailed { category: "Albums".to_string() }).await;
+                        let _ = event_tx.send(PreloadEvent::PreloadFailed { category: "Albums".to_string() }.into()).await;
                     }
                 }
             }
@@ -52,11 +53,11 @@ pub fn preload_data(event_tx: &mpsc::Sender<Event>, preload_type: PreloadType, l
                 match client.get_playlists(Some(&lib_key)).await {
                     Ok(data) => {
                         tracing::debug!("Playlists preloaded: {} items", data.len());
-                        let _ = event_tx.send(Event::PlaylistsPreloaded { library_key: lib_key, playlists: data }).await;
+                        let _ = event_tx.send(PreloadEvent::PlaylistsPreloaded { library_key: lib_key, playlists: data }.into()).await;
                     }
                     Err(e) => {
                         tracing::error!("Failed to preload playlists: {}", e);
-                        let _ = event_tx.send(Event::PreloadFailed { category: "Playlists".to_string() }).await;
+                        let _ = event_tx.send(PreloadEvent::PreloadFailed { category: "Playlists".to_string() }.into()).await;
                     }
                 }
             }
@@ -65,11 +66,11 @@ pub fn preload_data(event_tx: &mpsc::Sender<Event>, preload_type: PreloadType, l
                 match client.get_genres(lib_key_ref).await {
                     Ok(data) => {
                         tracing::debug!("Genres preloaded: {} items", data.len());
-                        let _ = event_tx.send(Event::GenresPreloaded { library_key: lib_key, genres: data }).await;
+                        let _ = event_tx.send(PreloadEvent::GenresPreloaded { library_key: lib_key, genres: data }.into()).await;
                     }
                     Err(e) => {
                         tracing::error!("Failed to preload genres: {}", e);
-                        let _ = event_tx.send(Event::PreloadFailed { category: "Genres".to_string() }).await;
+                        let _ = event_tx.send(PreloadEvent::PreloadFailed { category: "Genres".to_string() }.into()).await;
                     }
                 }
             }
@@ -78,11 +79,11 @@ pub fn preload_data(event_tx: &mpsc::Sender<Event>, preload_type: PreloadType, l
                 match client.get_moods(lib_key_ref).await {
                     Ok(data) => {
                         tracing::debug!("Moods preloaded: {} items", data.len());
-                        let _ = event_tx.send(Event::MoodsPreloaded { library_key: lib_key, moods: data }).await;
+                        let _ = event_tx.send(PreloadEvent::MoodsPreloaded { library_key: lib_key, moods: data }.into()).await;
                     }
                     Err(e) => {
                         tracing::error!("Failed to preload moods: {}", e);
-                        let _ = event_tx.send(Event::PreloadFailed { category: "Moods".to_string() }).await;
+                        let _ = event_tx.send(PreloadEvent::PreloadFailed { category: "Moods".to_string() }.into()).await;
                     }
                 }
             }
@@ -91,11 +92,11 @@ pub fn preload_data(event_tx: &mpsc::Sender<Event>, preload_type: PreloadType, l
                 match client.get_artist_genres(lib_key_ref).await {
                     Ok(data) => {
                         tracing::debug!("Artist genres preloaded: {} items", data.len());
-                        let _ = event_tx.send(Event::ArtistGenresPreloaded { library_key: lib_key, genres: data }).await;
+                        let _ = event_tx.send(PreloadEvent::ArtistGenresPreloaded { library_key: lib_key, genres: data }.into()).await;
                     }
                     Err(e) => {
                         tracing::error!("Failed to preload artist genres: {}", e);
-                        let _ = event_tx.send(Event::PreloadFailed { category: "Artist Genres".to_string() }).await;
+                        let _ = event_tx.send(PreloadEvent::PreloadFailed { category: "Artist Genres".to_string() }.into()).await;
                     }
                 }
             }
@@ -104,11 +105,11 @@ pub fn preload_data(event_tx: &mpsc::Sender<Event>, preload_type: PreloadType, l
                 match client.get_album_genres(lib_key_ref).await {
                     Ok(data) => {
                         tracing::debug!("Album genres preloaded: {} items", data.len());
-                        let _ = event_tx.send(Event::AlbumGenresPreloaded { library_key: lib_key, genres: data }).await;
+                        let _ = event_tx.send(PreloadEvent::AlbumGenresPreloaded { library_key: lib_key, genres: data }.into()).await;
                     }
                     Err(e) => {
                         tracing::error!("Failed to preload album genres: {}", e);
-                        let _ = event_tx.send(Event::PreloadFailed { category: "Album Genres".to_string() }).await;
+                        let _ = event_tx.send(PreloadEvent::PreloadFailed { category: "Album Genres".to_string() }.into()).await;
                     }
                 }
             }
@@ -117,11 +118,11 @@ pub fn preload_data(event_tx: &mpsc::Sender<Event>, preload_type: PreloadType, l
                 match client.get_styles(lib_key_ref).await {
                     Ok(data) => {
                         tracing::debug!("Styles preloaded: {} items", data.len());
-                        let _ = event_tx.send(Event::StylesPreloaded { library_key: lib_key, styles: data }).await;
+                        let _ = event_tx.send(PreloadEvent::StylesPreloaded { library_key: lib_key, styles: data }.into()).await;
                     }
                     Err(e) => {
                         tracing::error!("Failed to preload styles: {}", e);
-                        let _ = event_tx.send(Event::PreloadFailed { category: "Styles".to_string() }).await;
+                        let _ = event_tx.send(PreloadEvent::PreloadFailed { category: "Styles".to_string() }.into()).await;
                     }
                 }
             }
@@ -130,11 +131,11 @@ pub fn preload_data(event_tx: &mpsc::Sender<Event>, preload_type: PreloadType, l
                 match client.get_stations(lib_key_ref).await {
                     Ok(data) => {
                         tracing::debug!("Stations preloaded: {} items", data.len());
-                        let _ = event_tx.send(Event::StationsPreloaded { library_key: lib_key, stations: data }).await;
+                        let _ = event_tx.send(PreloadEvent::StationsPreloaded { library_key: lib_key, stations: data }.into()).await;
                     }
                     Err(e) => {
                         tracing::error!("Failed to preload stations: {}", e);
-                        let _ = event_tx.send(Event::PreloadFailed { category: "Stations".to_string() }).await;
+                        let _ = event_tx.send(PreloadEvent::PreloadFailed { category: "Stations".to_string() }.into()).await;
                     }
                 }
             }
@@ -147,11 +148,11 @@ pub fn preload_data(event_tx: &mpsc::Sender<Event>, preload_type: PreloadType, l
                 match long_client.get_tracks(lib_key_ref).await {
                     Ok(data) => {
                         tracing::debug!("All tracks preloaded: {} items", data.len());
-                        let _ = event_tx.send(Event::AllTracksPreloaded { library_key: lib_key, tracks: data }).await;
+                        let _ = event_tx.send(PreloadEvent::AllTracksPreloaded { library_key: lib_key, tracks: data }.into()).await;
                     }
                     Err(e) => {
                         tracing::error!("Failed to preload all tracks: {}", e);
-                        let _ = event_tx.send(Event::PreloadFailed { category: "Tracks".to_string() }).await;
+                        let _ = event_tx.send(PreloadEvent::PreloadFailed { category: "Tracks".to_string() }.into()).await;
                     }
                 }
             }
@@ -163,11 +164,11 @@ pub fn preload_data(event_tx: &mpsc::Sender<Event>, preload_type: PreloadType, l
                         let root_column = FolderColumn::new(None, lib_title, items);
                         let folder_state = FolderNavigationState::with_root(lib_key.clone(), root_column);
                         tracing::debug!("Folders preloaded successfully");
-                        let _ = event_tx.send(Event::FoldersPreloaded { library_key: lib_key, folder_state }).await;
+                        let _ = event_tx.send(FolderEvent::FoldersPreloaded { library_key: lib_key, folder_state }.into()).await;
                     }
                     Err(e) => {
                         tracing::error!("Failed to preload folders: {}", e);
-                        let _ = event_tx.send(Event::PreloadFailed { category: "Folders".to_string() }).await;
+                        let _ = event_tx.send(PreloadEvent::PreloadFailed { category: "Folders".to_string() }.into()).await;
                     }
                 }
             }
@@ -371,24 +372,24 @@ pub fn maybe_start_subfolder_preload(
                     // Send batch every 10 entries for responsive UI updates
                     if batch.len() >= 10 {
                         tracing::debug!("Subfolder preload batch: {} fetched so far", total_fetched);
-                        let _ = event_tx.send(Event::SubfoldersPreloaded {
+                        let _ = event_tx.send(FolderEvent::SubfoldersPreloaded {
                             library_key: lib_key.clone(),
                             entries: std::mem::take(&mut batch),
                             done: false,
                             valid_keys: None,
-                        }).await;
+                        }.into()).await;
                     }
                 }
             }
 
             // Send remaining batch from this level
             if !batch.is_empty() {
-                let _ = event_tx.send(Event::SubfoldersPreloaded {
+                let _ = event_tx.send(FolderEvent::SubfoldersPreloaded {
                     library_key: lib_key.clone(),
                     entries: std::mem::take(&mut batch),
                     done: false,
                     valid_keys: None,
-                }).await;
+                }.into()).await;
             }
 
             if next_keys.is_empty() {
@@ -405,12 +406,12 @@ pub fn maybe_start_subfolder_preload(
         // was deleted/moved on the server and should be pruned.
         tracing::info!("Subfolder preload complete: {} total fetched across {} depth levels, {} valid keys",
             total_fetched, depth + 1, all_fetched_keys.len());
-        let _ = event_tx.send(Event::SubfoldersPreloaded {
+        let _ = event_tx.send(FolderEvent::SubfoldersPreloaded {
             library_key: lib_key,
             entries: batch,
             done: true,
             valid_keys: Some(all_fetched_keys),
-        }).await;
+        }.into()).await;
     });
 
     SubfolderPreloadResult::Started

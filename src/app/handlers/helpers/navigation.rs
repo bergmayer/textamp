@@ -1,5 +1,6 @@
 //! List navigation, scrolling, pagination, and filter selection.
 
+use crate::app::event::*;
 use crate::app::{AppState, Event};
 use crate::app::state::{
     BrowseCategory, Focus,
@@ -28,7 +29,7 @@ pub fn calc_scroll_offset(selected: usize, viewport_height: usize, total_items: 
 pub fn load_artists(event_tx: &mpsc::Sender<Event>, state: &mut AppState, client: &PlexClient) {
     if let Some(lib_key) = &state.active_library {
         tracing::info!("Loading all artists from library: {}", lib_key);
-        state.artists_loading = true;
+        state.library.artists_loading = true;
 
         let event_tx = event_tx.clone();
         let client = client.clone();
@@ -37,7 +38,7 @@ pub fn load_artists(event_tx: &mpsc::Sender<Event>, state: &mut AppState, client
             match client.get_artists(&lib_key).await {
                 Ok(artists) => {
                     tracing::info!("Loaded {} artists", artists.len());
-                    let _ = event_tx.send(Event::ArtistsLoaded(artists)).await;
+                    let _ = event_tx.send(DataEvent::ArtistsLoaded(artists).into()).await;
                 }
                 Err(e) => {
                     tracing::error!("Failed to load artists: {}", e);
@@ -52,7 +53,7 @@ pub fn load_artists(event_tx: &mpsc::Sender<Event>, state: &mut AppState, client
 /// Load playlists in background, filtered by active library.
 pub fn load_playlists(event_tx: &mpsc::Sender<Event>, state: &mut AppState, client: &PlexClient) {
     tracing::info!("Loading playlists");
-    state.playlists_loading = true;
+    state.library.playlists_loading = true;
 
     let event_tx = event_tx.clone();
     let client = client.clone();
@@ -61,7 +62,7 @@ pub fn load_playlists(event_tx: &mpsc::Sender<Event>, state: &mut AppState, clie
         match client.get_playlists(section_id.as_deref()).await {
             Ok(playlists) => {
                 tracing::info!("Loaded {} playlists", playlists.len());
-                let _ = event_tx.send(Event::PlaylistsLoaded(playlists)).await;
+                let _ = event_tx.send(DataEvent::PlaylistsLoaded(playlists).into()).await;
             }
             Err(e) => {
                 tracing::error!("Failed to load playlists: {}", e);
@@ -79,25 +80,25 @@ pub async fn maybe_load_more(state: &mut AppState, client: &PlexClient) {
     if let Some(lib_key) = &state.active_library.clone() {
         if state.browse_category == BrowseCategory::Library {
             let idx = state.list_state.artists_index;
-            let loaded = state.artists.len();
-            let total = state.artists_total as usize;
+            let loaded = state.library.artists.len();
+            let total = state.library.artists_total as usize;
 
-            if idx + 20 >= loaded && loaded < total && !state.artists_loading {
-                state.artists_loading = true;
+            if idx + 20 >= loaded && loaded < total && !state.library.artists_loading {
+                state.library.artists_loading = true;
                 let offset = loaded as u32;
                 // Remember selected artist before re-sort
-                let selected_key = state.artists.get(idx)
+                let selected_key = state.library.artists.get(idx)
                     .map(|a| a.rating_key.clone());
                 if let Ok((more, _)) = client.get_artists_page(lib_key, offset, PAGE_SIZE).await {
-                    sorted_merge(&mut state.artists, more, |a| sort_key(&a.title));
+                    sorted_merge(&mut state.library.artists, more, |a| sort_key(&a.title));
                     // Restore selection to the same artist after re-sort
                     if let Some(ref key) = selected_key {
-                        if let Some(pos) = state.artists.iter().position(|a| &a.rating_key == key) {
+                        if let Some(pos) = state.library.artists.iter().position(|a| &a.rating_key == key) {
                             state.list_state.artists_index = pos;
                         }
                     }
                 }
-                state.artists_loading = false;
+                state.library.artists_loading = false;
             }
         }
     }
@@ -114,26 +115,26 @@ pub fn adjust_list_index(state: &mut AppState, delta: isize) {
                     state.set_category_index(idx.clamp(0, len as isize - 1) as usize);
                 }
             } else {
-                match state.right_panel_mode {
+                match state.library.right_panel_mode {
                     RightPanelMode::ArtistAlbums => {
-                        let len = state.selected_artist_albums.len() + 1;
+                        let len = state.library.selected_artist_albums.len() + 1;
                         if len > 0 {
                             let idx = state.list_state.right_albums_index as isize + delta;
                             state.list_state.right_albums_index = idx.clamp(0, len as isize - 1) as usize;
                         }
                     }
                     RightPanelMode::AlbumTracks | RightPanelMode::CategoryTracks => {
-                        let len = state.selected_album_tracks.len();
+                        let len = state.library.selected_album_tracks.len();
                         if len > 0 {
                             let idx = state.list_state.tracks_index as isize + delta;
                             state.list_state.tracks_index = idx.clamp(0, len as isize - 1) as usize;
                         }
                     }
                     RightPanelMode::CategoryAlbums => {
-                        let len = state.genre_albums.len();
+                        let len = state.library.genre_albums.len();
                         if len > 0 {
-                            let idx = state.genre_albums_index as isize + delta;
-                            state.genre_albums_index = idx.clamp(0, len as isize - 1) as usize;
+                            let idx = state.library.genre_albums_index as isize + delta;
+                            state.library.genre_albums_index = idx.clamp(0, len as isize - 1) as usize;
                         }
                     }
                     RightPanelMode::Empty => {}
@@ -141,7 +142,7 @@ pub fn adjust_list_index(state: &mut AppState, delta: isize) {
             }
         }
         View::NowPlaying => {
-            let len = state.queue.len();
+            let len = state.queue.tracks.len();
             if len > 0 {
                 let idx = state.list_state.queue_index as isize + delta;
                 state.list_state.queue_index = idx.clamp(0, len as isize - 1) as usize;
@@ -185,9 +186,9 @@ pub fn set_list_index(state: &mut AppState, index: isize) {
                 };
                 state.set_category_index(idx);
             } else {
-                match state.right_panel_mode {
+                match state.library.right_panel_mode {
                     RightPanelMode::ArtistAlbums => {
-                        let len = state.selected_artist_albums.len() + 1;
+                        let len = state.library.selected_artist_albums.len() + 1;
                         state.list_state.right_albums_index = if index == isize::MAX {
                             len.saturating_sub(1)
                         } else {
@@ -195,7 +196,7 @@ pub fn set_list_index(state: &mut AppState, index: isize) {
                         };
                     }
                     RightPanelMode::AlbumTracks | RightPanelMode::CategoryTracks => {
-                        let len = state.selected_album_tracks.len();
+                        let len = state.library.selected_album_tracks.len();
                         state.list_state.tracks_index = if index == isize::MAX {
                             len.saturating_sub(1)
                         } else {
@@ -203,8 +204,8 @@ pub fn set_list_index(state: &mut AppState, index: isize) {
                         };
                     }
                     RightPanelMode::CategoryAlbums => {
-                        let len = state.genre_albums.len();
-                        state.genre_albums_index = if index == isize::MAX {
+                        let len = state.library.genre_albums.len();
+                        state.library.genre_albums_index = if index == isize::MAX {
                             len.saturating_sub(1)
                         } else {
                             (index as usize).min(len.saturating_sub(1))
@@ -215,7 +216,7 @@ pub fn set_list_index(state: &mut AppState, index: isize) {
             }
         }
         View::NowPlaying => {
-            let len = state.queue.len();
+            let len = state.queue.tracks.len();
             state.list_state.queue_index = if index == isize::MAX {
                 len.saturating_sub(1)
             } else {
@@ -356,7 +357,7 @@ mod tests {
     fn adjust_queue_index_down() {
         let mut state = AppState::new();
         state.view = View::NowPlaying;
-        state.queue = vec![make_track("1", "A"), make_track("2", "B"), make_track("3", "C")];
+        state.queue.tracks = vec![make_track("1", "A"), make_track("2", "B"), make_track("3", "C")];
         state.list_state.queue_index = 0;
 
         adjust_list_index(&mut state, 1);
@@ -370,7 +371,7 @@ mod tests {
     fn adjust_queue_index_up() {
         let mut state = AppState::new();
         state.view = View::NowPlaying;
-        state.queue = vec![make_track("1", "A"), make_track("2", "B"), make_track("3", "C")];
+        state.queue.tracks = vec![make_track("1", "A"), make_track("2", "B"), make_track("3", "C")];
         state.list_state.queue_index = 2;
 
         adjust_list_index(&mut state, -1);
@@ -381,7 +382,7 @@ mod tests {
     fn adjust_queue_clamps_at_boundaries() {
         let mut state = AppState::new();
         state.view = View::NowPlaying;
-        state.queue = vec![make_track("1", "A"), make_track("2", "B")];
+        state.queue.tracks = vec![make_track("1", "A"), make_track("2", "B")];
         state.list_state.queue_index = 0;
 
         // Clamp at top
@@ -436,8 +437,8 @@ mod tests {
         let mut state = AppState::new();
         state.view = View::Browse;
         state.focus = Focus::Left;
-        state.browse_category = BrowseCategory::Library;
-        state.artists = vec![make_artist("1", "A"), make_artist("2", "B"), make_artist("3", "C")];
+        state.set_browse_category(BrowseCategory::Library);
+        state.library.artists = vec![make_artist("1", "A"), make_artist("2", "B"), make_artist("3", "C")];
         state.list_state.artists_index = 0;
 
         adjust_list_index(&mut state, 1);
@@ -450,7 +451,7 @@ mod tests {
     fn set_queue_index_absolute() {
         let mut state = AppState::new();
         state.view = View::NowPlaying;
-        state.queue = vec![make_track("1", "A"), make_track("2", "B"), make_track("3", "C")];
+        state.queue.tracks = vec![make_track("1", "A"), make_track("2", "B"), make_track("3", "C")];
         state.list_state.queue_index = 0;
 
         set_list_index(&mut state, 2);
@@ -461,7 +462,7 @@ mod tests {
     fn set_queue_index_max_jumps_to_end() {
         let mut state = AppState::new();
         state.view = View::NowPlaying;
-        state.queue = vec![make_track("1", "A"), make_track("2", "B"), make_track("3", "C")];
+        state.queue.tracks = vec![make_track("1", "A"), make_track("2", "B"), make_track("3", "C")];
         state.list_state.queue_index = 0;
 
         set_list_index(&mut state, isize::MAX);
@@ -472,7 +473,7 @@ mod tests {
     fn set_queue_index_zero_jumps_to_start() {
         let mut state = AppState::new();
         state.view = View::NowPlaying;
-        state.queue = vec![make_track("1", "A"), make_track("2", "B"), make_track("3", "C")];
+        state.queue.tracks = vec![make_track("1", "A"), make_track("2", "B"), make_track("3", "C")];
         state.list_state.queue_index = 2;
 
         set_list_index(&mut state, 0);

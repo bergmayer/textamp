@@ -45,7 +45,10 @@ pub struct HitRegions {
 
     // ── Content (view-dependent, mutually exclusive) ────────────────────────
 
-    /// Miller columns (Browse view).
+    /// Category selector column (Browse view, column 0).
+    pub category_column: Option<CategoryColumnRegion>,
+
+    /// Miller columns (Browse view, content columns).
     pub miller_columns: Option<MillerRegions>,
 
     /// Queue view content areas.
@@ -166,6 +169,17 @@ pub struct CommandBarRegions {
     pub top_row: Vec<(Rect, String)>,
     /// Bottom row items: (rect, action_key).
     pub bottom_row: Vec<(Rect, String)>,
+}
+
+/// Category selector column region (Browse view, column 0).
+#[derive(Debug, Clone)]
+pub struct CategoryColumnRegion {
+    /// Outer area (including border).
+    pub area: Rect,
+    /// Inner area (border excluded).
+    pub inner: Rect,
+    /// Number of category items.
+    pub item_count: usize,
 }
 
 /// A single Miller column's registered geometry.

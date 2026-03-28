@@ -1,7 +1,9 @@
 //! System dispatch handlers: Quit, ShowError, ClearError, SetStatus, ClearStatus,
 //! RefreshCategory, CycleTheme, LoadArtwork, LoadWaveform.
 
+use crate::app::event::*;
 use crate::app::{Action, AppState, Event};
+use crate::app::action::SystemAction;
 use crate::plex::PlexClient;
 use crate::config::Config;
 
@@ -31,12 +33,12 @@ use super::helpers;
 pub async fn dispatch(
     event_tx: &mpsc::Sender<Event>,
     _config: &mut Config,
-    action: Action,
+    action: SystemAction,
     state: &mut AppState,
     client: &mut PlexClient,
 ) -> Result<Vec<Action>> {
     match action {
-        Action::Quit => {
+        SystemAction::Quit => {
             // Report playback stop to Plex before quitting
             if state.playback.status != crate::app::state::PlayStatus::Stopped {
                 if let Some(track) = state.current_track().cloned() {
@@ -88,9 +90,9 @@ pub async fn dispatch(
                 }
 
                 // Core library data
-                cache_data.artists = state.artists.clone();
-                cache_data.albums = state.albums.clone();
-                cache_data.playlists = state.playlists.clone();
+                cache_data.artists = state.library.artists.clone();
+                cache_data.albums = state.library.albums.clone();
+                cache_data.playlists = state.library.playlists.clone();
 
                 // Folder data - extract root folder items only if they belong to this library
                 if let Some(ref folder_state) = state.folder_state {
@@ -114,11 +116,11 @@ pub async fn dispatch(
                 };
 
                 // Genre/mood/style data
-                cache_data.genres = state.genres.clone();
-                cache_data.artist_genres = state.artist_genres.clone();
-                cache_data.album_genres = state.album_genres.clone();
-                cache_data.moods = state.moods.clone();
-                cache_data.styles = state.styles.clone();
+                cache_data.genres = state.library.genres.clone();
+                cache_data.artist_genres = state.library.artist_genres.clone();
+                cache_data.album_genres = state.library.album_genres.clone();
+                cache_data.moods = state.library.moods.clone();
+                cache_data.styles = state.library.styles.clone();
 
                 // Stations — save root column (not state.stations which may be drilled children)
                 cache_data.stations = state.station_nav.columns.first()
@@ -128,23 +130,23 @@ pub async fn dispatch(
 
                 // All tracks + track-level artists + aliases
                 // Only save if non-empty to avoid overwriting cached data when preload is in-flight
-                if !state.all_tracks.is_empty() {
-                    cache_data.all_tracks = state.all_tracks.clone();
-                    cache_data.track_artists = state.track_artists.clone();
+                if !state.library.all_tracks.is_empty() {
+                    cache_data.all_tracks = state.library.all_tracks.clone();
+                    cache_data.track_artists = state.library.track_artists.clone();
                 }
-                cache_data.artist_aliases = state.artist_aliases.clone();
-                cache_data.album_display_artist = state.album_display_artist.clone();
+                cache_data.artist_aliases = state.library.artist_aliases.clone();
+                cache_data.album_display_artist = state.library.album_display_artist.clone();
 
                 // Compilation detection results
-                cache_data.compilation_albums = state.compilations.albums.clone();
-                cache_data.compilation_artist_keys = state.compilations.artist_keys.clone();
-                cache_data.compilation_track_artist_keys = state.compilations.track_artist_keys.clone();
-                cache_data.artist_compilation_map = state.compilations.artist_map.clone();
-                cache_data.single_artist_compilations = state.compilations.single_artist.clone();
+                cache_data.compilation_albums = state.library.compilations.albums.clone();
+                cache_data.compilation_artist_keys = state.library.compilations.artist_keys.clone();
+                cache_data.compilation_track_artist_keys = state.library.compilations.track_artist_keys.clone();
+                cache_data.artist_compilation_map = state.library.compilations.artist_map.clone();
+                cache_data.single_artist_compilations = state.library.compilations.single_artist.clone();
 
                 // Save non-smart playlist tracks to disk cache
                 for (key, cached) in &state.playlist_tracks_cache {
-                    let is_smart = state.playlists.iter().any(|p| p.rating_key == *key && p.smart);
+                    let is_smart = state.library.playlists.iter().any(|p| p.rating_key == *key && p.smart);
                     if !is_smart {
                         cache_data.playlist_tracks.insert(key.clone(), cached.clone());
                     }
@@ -156,28 +158,28 @@ pub async fn dispatch(
 
             state.should_quit = true;
         }
-        Action::ShowError(msg) => {
+        SystemAction::ShowError(msg) => {
             state.set_error(msg);
         }
-        Action::ClearError => {
+        SystemAction::ClearError => {
             state.clear_error();
         }
-        Action::SetStatus(msg) => {
+        SystemAction::SetStatus(msg) => {
             state.set_status(msg);
         }
-        Action::ClearStatus => {
+        SystemAction::ClearStatus => {
             state.clear_status();
         }
-        Action::RefreshCategory(category) => {
+        SystemAction::RefreshCategory(category) => {
             if let Some(lib_key) = &state.active_library {
                 let lib_key = lib_key.clone();
                 helpers::spawn_category_refresh(event_tx, category, &lib_key, state, client);
             }
         }
-        Action::CheckStaleness(tier1_category) => {
+        SystemAction::CheckStaleness(tier1_category) => {
             helpers::check_staleness_on_view_load(event_tx, state, client, tier1_category);
         }
-        Action::LoadArtwork => {
+        SystemAction::LoadArtwork => {
             // Get thumb path from current track (clone to avoid borrow)
             let thumb_path = state.current_track()
                 .and_then(|t| t.best_thumb().map(|s| s.to_string()));
@@ -205,7 +207,7 @@ pub async fn dispatch(
                 state.artwork.current_data = None;
             }
         }
-        Action::LoadWaveform => {
+        SystemAction::LoadWaveform => {
             // Only generate waveform if we have a track and don't already have data
             if let Some(track) = state.current_track().cloned() {
                 let needs_generation = state.waveform.data.is_none()
@@ -244,27 +246,27 @@ pub async fn dispatch(
                             // Try waveform cache
                             let waveform_cached = waveform_cache.load(&track_key);
                             if let Some(data) = waveform_cached {
-                                let _ = event_tx.send(Event::WaveformCacheHit {
+                                let _ = event_tx.send(VisualizerEvent::WaveformCacheHit {
                                     track_key: track_key.clone(),
                                     data,
-                                }).await;
+                                }.into()).await;
 
                                 // Check spectrogram cache; if miss, leave it for LoadSpectrogram
                                 // (triggered by tick safety net) rather than downloading here.
                                 if also_generate_spectrogram {
                                     if let Some(sg_data) = spectrogram_cache.load(&track_key) {
-                                        let _ = event_tx.send(Event::SpectrogramCacheHit {
+                                        let _ = event_tx.send(VisualizerEvent::SpectrogramCacheHit {
                                             track_key,
                                             data: sg_data,
-                                        }).await;
+                                        }.into()).await;
                                     } else {
                                         // Signal that spectrogram still needs work —
                                         // SpectrogramFailed clears generating so the tick
                                         // safety net triggers LoadSpectrogram independently.
-                                        let _ = event_tx.send(Event::SpectrogramFailed {
+                                        let _ = event_tx.send(VisualizerEvent::SpectrogramFailed {
                                             track_key,
                                             error: String::new(),
-                                        }).await;
+                                        }.into()).await;
                                     }
                                 }
                                 return;
@@ -277,10 +279,10 @@ pub async fn dispatch(
                                 None
                             };
                             if let Some(sg_data) = &spectrogram_cached {
-                                let _ = event_tx.send(Event::SpectrogramCacheHit {
+                                let _ = event_tx.send(VisualizerEvent::SpectrogramCacheHit {
                                     track_key: track_key.clone(),
                                     data: sg_data.clone(),
-                                }).await;
+                                }.into()).await;
                             }
 
                             // Download audio with timeout and generate waveform (+ spectrogram if not cached)
@@ -293,16 +295,16 @@ pub async fn dispatch(
                                     ) {
                                         Ok(data) => {
                                             waveform_cache.save(&data);
-                                            let _ = event_tx.send(Event::WaveformGenerated {
+                                            let _ = event_tx.send(VisualizerEvent::WaveformGenerated {
                                                 track_key: track_key.clone(),
                                                 data,
-                                            }).await;
+                                            }.into()).await;
                                         }
                                         Err(e) => {
-                                            let _ = event_tx.send(Event::WaveformFailed {
+                                            let _ = event_tx.send(VisualizerEvent::WaveformFailed {
                                                 track_key: track_key.clone(),
                                                 error: e.to_string(),
-                                            }).await;
+                                            }.into()).await;
                                         }
                                     }
 
@@ -313,27 +315,27 @@ pub async fn dispatch(
                                         ) {
                                             Ok(sg_data) => {
                                                 spectrogram_cache.save(&sg_data);
-                                                let _ = event_tx.send(Event::SpectrogramGenerated {
+                                                let _ = event_tx.send(VisualizerEvent::SpectrogramGenerated {
                                                     track_key, data: sg_data,
-                                                }).await;
+                                                }.into()).await;
                                             }
                                             Err(e) => {
-                                                let _ = event_tx.send(Event::SpectrogramFailed {
+                                                let _ = event_tx.send(VisualizerEvent::SpectrogramFailed {
                                                     track_key, error: e.to_string(),
-                                                }).await;
+                                                }.into()).await;
                                             }
                                         }
                                     }
                                 }
                                 Err(e) => {
-                                    let _ = event_tx.send(Event::WaveformFailed {
+                                    let _ = event_tx.send(VisualizerEvent::WaveformFailed {
                                         track_key: track_key.clone(),
                                         error: e.clone(),
-                                    }).await;
+                                    }.into()).await;
                                     if also_generate_spectrogram && spectrogram_cached.is_none() {
-                                        let _ = event_tx.send(Event::SpectrogramFailed {
+                                        let _ = event_tx.send(VisualizerEvent::SpectrogramFailed {
                                             track_key, error: e,
-                                        }).await;
+                                        }.into()).await;
                                     }
                                 }
                             }
@@ -342,7 +344,7 @@ pub async fn dispatch(
                 }
             }
         }
-        Action::LoadSpectrogram => {
+        SystemAction::LoadSpectrogram => {
             // Load spectrogram data — check cache first, then generate if needed.
             // Generation is normally co-computed with waveform, but if waveform is
             // already loaded (e.g., re-entering NowPlaying), we download independently.
@@ -365,7 +367,7 @@ pub async fn dispatch(
                         state.spectrogram.error = None;
                     } else if state.waveform.data.is_none() && !state.waveform.generating {
                         // Neither waveform nor spectrogram — trigger LoadWaveform to co-compute
-                        return Ok(vec![Action::LoadWaveform]);
+                        return Ok(vec![SystemAction::LoadWaveform.into()]);
                     } else if state.waveform.generating {
                         // Waveform is being generated right now — it will co-compute spectrogram
                         state.spectrogram.generating = true;
@@ -393,21 +395,21 @@ pub async fn dispatch(
                                                     .join("spectrograms");
                                                 let sg_cache = crate::services::SpectrogramCache::new(sg_cache_dir);
                                                 sg_cache.save(&data);
-                                                let _ = event_tx.send(Event::SpectrogramGenerated {
+                                                let _ = event_tx.send(VisualizerEvent::SpectrogramGenerated {
                                                     track_key, data,
-                                                }).await;
+                                                }.into()).await;
                                             }
                                             Err(e) => {
-                                                let _ = event_tx.send(Event::SpectrogramFailed {
+                                                let _ = event_tx.send(VisualizerEvent::SpectrogramFailed {
                                                     track_key, error: e.to_string(),
-                                                }).await;
+                                                }.into()).await;
                                             }
                                         }
                                     }
                                     Err(e) => {
-                                        let _ = event_tx.send(Event::SpectrogramFailed {
+                                        let _ = event_tx.send(VisualizerEvent::SpectrogramFailed {
                                             track_key, error: e,
-                                        }).await;
+                                        }.into()).await;
                                     }
                                 }
                             });
@@ -416,7 +418,7 @@ pub async fn dispatch(
                 }
             }
         }
-        Action::LoadAlbumArt(batch) => {
+        SystemAction::LoadAlbumArt(batch) => {
             let artwork_cache = crate::plex::ArtworkCache::default();
             let warm_threshold = crate::plex::constants::CACHE_VERY_STALE_THRESHOLD_SECS;
 
@@ -441,10 +443,10 @@ pub async fn dispatch(
                                     let cache = crate::plex::ArtworkCache::default();
                                     cache.save(&bg_key, &data);
                                     // Send updated art to UI
-                                    let _ = event_tx.send(Event::AlbumArtLoaded {
+                                    let _ = event_tx.send(ArtworkEvent::AlbumArtLoaded {
                                         key: bg_key,
                                         data,
-                                    }).await;
+                                    }.into()).await;
                                 }
                                 Err(e) => {
                                     tracing::debug!("Warm artwork re-fetch failed for {}: {}", bg_key, e);
@@ -467,20 +469,19 @@ pub async fn dispatch(
                             let cache = crate::plex::ArtworkCache::default();
                             cache.save(&key, &data);
 
-                            let _ = event_tx.send(Event::AlbumArtLoaded {
+                            let _ = event_tx.send(ArtworkEvent::AlbumArtLoaded {
                                 key,
                                 data,
-                            }).await;
+                            }.into()).await;
                         }
                         Err(e) => {
                             tracing::warn!("Failed to load album art for {}: {}", key, e);
-                            let _ = event_tx.send(Event::AlbumArtFailed { key }).await;
+                            let _ = event_tx.send(ArtworkEvent::AlbumArtFailed { key }.into()).await;
                         }
                     }
                 });
             }
         }
-        _ => unreachable!("dispatch_system called with non-system action: {:?}", action),
     }
     Ok(vec![])
 }

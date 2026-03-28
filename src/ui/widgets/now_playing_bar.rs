@@ -75,8 +75,10 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
             .alignment(Alignment::Center);
         frame.render_widget(time_text, chunks[3]);
 
-        // Volume
-        let vol_text = if state.playback.muted {
+        // Volume (or no-audio indicator)
+        let vol_text = if !state.audio_available {
+            "🔇 no audio".to_string()
+        } else if state.playback.muted {
             "🔇".to_string()
         } else {
             format!("🔊 {}%", (state.playback.volume * 100.0) as u8)

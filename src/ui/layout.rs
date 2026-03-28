@@ -41,8 +41,6 @@ pub fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 /// │ ^E enqueue | ^S sort | ^W save playlist | ...   │  ← command bar row 2
 /// └─────────────────────────────────────────────────┘
 pub struct AppLayout {
-    /// Tab bar at the top (navigation tabs + library name)
-    pub tab_bar: Rect,
     /// Left panel for category list (artists, albums, etc.)
     pub left_panel: Rect,
     /// Right panel for track list
@@ -55,11 +53,11 @@ pub struct AppLayout {
 
 impl AppLayout {
     pub fn new(area: Rect) -> Self {
-        // Split vertically: tab bar | main content | transport | command bar
+        // Split vertically: main content | transport | command bar
+        // (tab bar removed — tabs are now in the command bar top row)
         let main_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),  // Tab bar
                 Constraint::Min(5),     // Main content
                 Constraint::Length(2),  // Transport bar
                 Constraint::Length(3),  // Command bar (3 rows: top + spacer + bottom)
@@ -73,22 +71,19 @@ impl AppLayout {
                 Constraint::Length(30), // Left panel (category list)
                 Constraint::Min(40),    // Right panel (track list)
             ])
-            .split(main_chunks[1]);
+            .split(main_chunks[0]);
 
         Self {
-            tab_bar: main_chunks[0],
             left_panel: content_chunks[0],
             right_panel: content_chunks[1],
-            transport: main_chunks[2],
-            commands: main_chunks[3],
+            transport: main_chunks[1],
+            commands: main_chunks[2],
         }
     }
 }
 
 /// Layout for full-screen views (now playing queue, help, search).
 pub struct FullScreenLayout {
-    /// Tab bar at the top
-    pub tab_bar: Rect,
     /// Main content area
     pub content: Rect,
     /// Transport bar
@@ -99,10 +94,10 @@ pub struct FullScreenLayout {
 
 impl FullScreenLayout {
     pub fn new(area: Rect) -> Self {
+        // Tab bar removed — tabs are now in the command bar top row
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),  // Tab bar
                 Constraint::Min(5),     // Content
                 Constraint::Length(2),  // Transport
                 Constraint::Length(3),  // Command bar (3 rows)
@@ -110,10 +105,9 @@ impl FullScreenLayout {
             .split(area);
 
         Self {
-            tab_bar: chunks[0],
-            content: chunks[1],
-            transport: chunks[2],
-            commands: chunks[3],
+            content: chunks[0],
+            transport: chunks[1],
+            commands: chunks[2],
         }
     }
 }

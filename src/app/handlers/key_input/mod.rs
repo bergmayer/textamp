@@ -19,12 +19,13 @@ mod settings;
 
 // Re-export public items used by other handler modules.
 pub use browse::{update_filter_column_selection, get_filter_drilldown_actions, truncate_filter_right_columns};
-pub(crate) use browse::{auto_drill_artist_action, auto_drill_genre_action, auto_drill_playlist_action};
+pub(crate) use browse::{auto_drill_artist_action, auto_drill_genre_action, auto_drill_playlist_action, auto_drill_folder};
 pub use self::alt_commands::{AltCommand, CommandModifier, available_alt_commands};
 
 mod alt_commands;
 pub(crate) mod sort_popup;
 
+use crate::app::action::*;
 use crossterm::event::{self, KeyCode, KeyModifiers};
 
 use crate::app::Action;
@@ -85,7 +86,7 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
             && key.modifiers == KeyModifiers::CONTROL
             && key.code == KeyCode::Char('q')
         {
-            return vec![Action::Quit];
+            return vec![SystemAction::Quit.into()];
         }
         match key.code {
             KeyCode::Enter => {
@@ -93,10 +94,10 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
                     use crate::app::state::ConfirmAction;
                     return match dialog.on_confirm {
                         ConfirmAction::RefreshCache => helpers::refresh_current_view(state),
-                        ConfirmAction::ClearLibraryCache => vec![Action::ClearLibraryCache],
-                        ConfirmAction::ClearArtworkCache => vec![Action::ClearArtworkCache],
-                        ConfirmAction::ClearSubfolderCache => vec![Action::ClearSubfolderCache],
-                        ConfirmAction::Quit => vec![Action::Quit],
+                        ConfirmAction::ClearLibraryCache => vec![SettingsAction::ClearLibraryCache.into()],
+                        ConfirmAction::ClearArtworkCache => vec![SettingsAction::ClearArtworkCache.into()],
+                        ConfirmAction::ClearSubfolderCache => vec![SettingsAction::ClearSubfolderCache.into()],
+                        ConfirmAction::Quit => vec![SystemAction::Quit.into()],
                     };
                 } else {
                     // No selected — dismiss
@@ -107,10 +108,10 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
                 use crate::app::state::ConfirmAction;
                 return match dialog.on_confirm {
                     ConfirmAction::RefreshCache => helpers::refresh_current_view(state),
-                    ConfirmAction::ClearLibraryCache => vec![Action::ClearLibraryCache],
-                    ConfirmAction::ClearArtworkCache => vec![Action::ClearArtworkCache],
-                    ConfirmAction::ClearSubfolderCache => vec![Action::ClearSubfolderCache],
-                    ConfirmAction::Quit => vec![Action::Quit],
+                    ConfirmAction::ClearLibraryCache => vec![SettingsAction::ClearLibraryCache.into()],
+                    ConfirmAction::ClearArtworkCache => vec![SettingsAction::ClearArtworkCache.into()],
+                    ConfirmAction::ClearSubfolderCache => vec![SettingsAction::ClearSubfolderCache.into()],
+                    ConfirmAction::Quit => vec![SystemAction::Quit.into()],
                 };
             }
             KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
@@ -136,7 +137,7 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
                 let was_adventure = matches!(dialog.action_type, crate::app::state::InputDialogAction::AdventureLength);
                 state.popups.input_dialog = None;
                 if was_adventure {
-                    return vec![Action::CancelAdventure];
+                    return vec![SettingsAction::CancelAdventure.into()];
                 }
             }
             KeyCode::Enter => {
@@ -146,12 +147,12 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
                 state.popups.input_dialog = None;
                 match action_type {
                     crate::app::state::InputDialogAction::SavePlaylist => {
-                        return vec![Action::SaveQueueAsPlaylist(input)];
+                        return vec![QueueAction::SaveQueueAsPlaylist(input).into()];
                     }
                     crate::app::state::InputDialogAction::AdventureLength => {
                         // Parse the length (default to 20)
                         let length = input.parse::<usize>().unwrap_or(20).clamp(5, 100);
-                        return vec![Action::SetAdventureLength(length)];
+                        return vec![SettingsAction::SetAdventureLength(length).into()];
                     }
                 }
             }
@@ -179,7 +180,7 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
     // Handle adventure mode Esc separately
     if state.adventure.active {
         if key.code == KeyCode::Esc {
-            return vec![Action::CancelAdventure];
+            return vec![SettingsAction::CancelAdventure.into()];
         }
     }
 
@@ -192,7 +193,7 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
             state.popups.confirm_dialog = Some(ConfirmDialog {
                 title: "Quit".to_string(),
                 message: "Are you sure you want to quit?".to_string(),
-                on_confirm: ConfirmAction::Quit,
+                on_confirm: ConfirmAction::Quit.into(),
                 selected_yes: false,
             });
             return vec![];
@@ -202,9 +203,9 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
         (KeyModifiers::CONTROL, KeyCode::Char('f')) => {
             // Ctrl+F = Search/Filter popup (floating dialog)
             if state.popups.search_active {
-                return vec![Action::CloseSearchPopup];
+                return vec![SearchAction::CloseSearchPopup.into()];
             } else {
-                return vec![Action::OpenSearchPopup];
+                return vec![SearchAction::OpenSearchPopup.into()];
             }
         }
         (KeyModifiers::CONTROL, KeyCode::Char('g')) => {
@@ -213,18 +214,18 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
                 return vec![];
             }
             // Not in genres view - switch to it and reset right panel
-            state.browse_category = BrowseCategory::Genres;
+            state.set_browse_category(BrowseCategory::Genres);
             reset_right_panel(state);
             // RefreshGenreView uses cached data when available, only fetches if empty
-            return vec![Action::RefreshGenreView, Action::SetView(View::Browse), Action::CheckStaleness(crate::app::state::RefreshCategory::Genres)];
+            return vec![BrowseAction::RefreshGenreView.into(), NavigationAction::SetView(View::Browse).into(), SystemAction::CheckStaleness(crate::app::state::RefreshCategory::Genres).into()];
         }
         (KeyModifiers::CONTROL, KeyCode::Char('n')) => {
             // Ctrl+N = Now Playing (visualizer view)
-            return vec![Action::SetView(View::NowPlaying), Action::LoadWaveform];
+            return vec![NavigationAction::SetView(View::NowPlaying).into(), SystemAction::LoadWaveform.into()];
         }
         (KeyModifiers::CONTROL, KeyCode::Char('u')) => {
             // Ctrl+U = Queue view
-            return vec![Action::SetView(View::Queue)];
+            return vec![NavigationAction::SetView(View::Queue).into()];
         }
         (KeyModifiers::CONTROL, KeyCode::Char('l')) => {
             // Ctrl+L = Library category (no cycling — Plex doesn't distinguish album artists)
@@ -232,14 +233,14 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
                 return vec![];
             }
             // Not in library view - switch to it and reset right panel
-            state.browse_category = BrowseCategory::Library;
+            state.set_browse_category(BrowseCategory::Library);
             reset_right_panel(state);
             let tier1 = crate::app::state::RefreshCategory::Artists;
-            if state.artists.is_empty() {
-                return vec![Action::LoadArtists, Action::SetView(View::Browse), Action::CheckStaleness(tier1)];
+            if state.library.artists.is_empty() {
+                return vec![DataAction::LoadArtists.into(), NavigationAction::SetView(View::Browse).into(), SystemAction::CheckStaleness(tier1).into()];
             }
             // Auto-drill if only root column exists
-            let mut actions = vec![Action::SetView(View::Browse), Action::CheckStaleness(tier1)];
+            let mut actions = vec![NavigationAction::SetView(View::Browse).into(), SystemAction::CheckStaleness(tier1).into()];
             if state.artist_nav.columns.len() == 1 && !state.artist_nav.is_empty() {
                 if let Some(drill) = browse::auto_drill_artist_action(state) {
                     state.auto_drill_pending = true;
@@ -253,13 +254,13 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
             if state.view == View::Browse && state.browse_category == BrowseCategory::Playlists {
                 return vec![];
             }
-            state.browse_category = BrowseCategory::Playlists;
+            state.set_browse_category(BrowseCategory::Playlists);
             reset_right_panel(state);
-            let mut actions = vec![Action::SetView(View::Browse)];
-            if state.playlists.is_empty() {
-                actions.insert(0, Action::LoadPlaylists);
+            let mut actions = vec![NavigationAction::SetView(View::Browse).into()];
+            if state.library.playlists.is_empty() {
+                actions.insert(0, DataAction::LoadPlaylists.into());
             } else {
-                let items = crate::app::state::BrowseItem::from_playlists(&state.playlists);
+                let items = crate::app::state::BrowseItem::from_playlists(&state.library.playlists);
                 state.playlist_nav.reset("playlists", items);
                 // Auto-drill if only root column exists
                 if state.playlist_nav.columns.len() == 1 && !state.playlist_nav.is_empty() {
@@ -269,42 +270,42 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
                     }
                 }
             }
-            actions.push(Action::CheckStaleness(crate::app::state::RefreshCategory::Playlists));
+            actions.push(SystemAction::CheckStaleness(crate::app::state::RefreshCategory::Playlists).into());
             return actions;
         }
         (KeyModifiers::CONTROL, KeyCode::Char('o')) => {
             // Ctrl+O = Folders category
-            state.browse_category = BrowseCategory::Folders;
+            state.set_browse_category(BrowseCategory::Folders);
             reset_right_panel(state);
-            let staleness = Action::CheckStaleness(crate::app::state::RefreshCategory::Folders);
+            let staleness = SystemAction::CheckStaleness(crate::app::state::RefreshCategory::Folders).into();
             if state.folder_state.is_none() {
-                return vec![Action::LoadFolderRoot, Action::SetView(View::Browse), staleness];
+                return vec![FolderAction::LoadFolderRoot.into(), NavigationAction::SetView(View::Browse).into(), staleness];
             }
-            return vec![Action::SetView(View::Browse), staleness];
+            return vec![NavigationAction::SetView(View::Browse).into(), staleness];
         }
 
         // Global function keys - work from any screen
         (_, KeyCode::F(1)) => {
             if state.view != View::Help {
-                return vec![Action::SetView(View::Help)];
+                return vec![NavigationAction::SetView(View::Help).into()];
             }
         }
         (_, KeyCode::F(2)) => {
             if state.view != View::Settings {
-                return vec![Action::OpenSettings];
+                return vec![SettingsAction::OpenSettings.into()];
             }
         }
         (_, KeyCode::F(3)) => {
             // F3 = Quick library switcher
             if !state.libraries.is_empty() {
-                return vec![Action::OpenLibraryPicker];
+                return vec![SearchAction::OpenLibraryPicker.into()];
             }
         }
         (_, KeyCode::F(4)) => {
             // F4 = Artist bio popup
             // Priority: selected track → selected album → selected artist → now-playing track
             if let Some((artist_key, artist_name)) = helpers::get_artist_for_bio(state) {
-                return vec![Action::ShowArtistBio { artist_key, artist_name }];
+                return vec![SearchAction::ShowArtistBio { artist_key, artist_name }.into()];
             }
         }
         (_, KeyCode::F(5)) => {
@@ -313,24 +314,24 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
         }
         // Playback controls
         (_, KeyCode::Char(' ')) if state.view != View::Search && !state.list_filter.active && !state.popups.search_active && state.popups.radio_launcher.is_none() && state.popups.adventure_launcher.is_none() && state.popups.artist_radio_picker.is_none() => {
-            return vec![Action::TogglePlayPause];
+            return vec![PlaybackAction::TogglePlayPause.into()];
         }
         // < and > for prev/next track (crossterm reports these with NONE modifiers, not SHIFT)
         (_, KeyCode::Char('<')) if state.view != View::Search && !state.list_filter.active && !state.popups.search_active && state.popups.radio_launcher.is_none() && state.popups.adventure_launcher.is_none() => {
-            return vec![Action::Previous];
+            return vec![PlaybackAction::Previous.into()];
         }
         (_, KeyCode::Char('>')) if state.view != View::Search && !state.list_filter.active && !state.popups.search_active && state.popups.radio_launcher.is_none() && state.popups.adventure_launcher.is_none() => {
-            return vec![Action::Next];
+            return vec![PlaybackAction::Next.into()];
         }
         // Ctrl+Shift+Up/Down: multi-select in Queue view, volume elsewhere
         (mods, KeyCode::Up) if mods == KeyModifiers::CONTROL | KeyModifiers::SHIFT && state.view == View::Queue => {
             // Toggle current item into queue_selected, then move cursor up
             let queue_idx = state.list_state.queue_index;
-            if queue_idx < state.queue.len() {
-                if state.queue_selected.contains(&queue_idx) {
-                    state.queue_selected.remove(&queue_idx);
+            if queue_idx < state.queue.tracks.len() {
+                if state.queue.selected.contains(&queue_idx) {
+                    state.queue.selected.remove(&queue_idx);
                 } else {
-                    state.queue_selected.insert(queue_idx);
+                    state.queue.selected.insert(queue_idx);
                 }
             }
             if state.list_state.queue_index > 0 {
@@ -340,36 +341,36 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
         }
         (mods, KeyCode::Down) if mods == KeyModifiers::CONTROL | KeyModifiers::SHIFT && state.view == View::Queue => {
             let queue_idx = state.list_state.queue_index;
-            if queue_idx < state.queue.len() {
-                if state.queue_selected.contains(&queue_idx) {
-                    state.queue_selected.remove(&queue_idx);
+            if queue_idx < state.queue.tracks.len() {
+                if state.queue.selected.contains(&queue_idx) {
+                    state.queue.selected.remove(&queue_idx);
                 } else {
-                    state.queue_selected.insert(queue_idx);
+                    state.queue.selected.insert(queue_idx);
                 }
             }
-            let max = state.queue.len().saturating_sub(1);
+            let max = state.queue.tracks.len().saturating_sub(1);
             state.list_state.queue_index = (state.list_state.queue_index + 1).min(max);
             return vec![];
         }
         (mods, KeyCode::Up) if mods == KeyModifiers::CONTROL | KeyModifiers::SHIFT => {
             state.volume_slider_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
-            return vec![Action::VolumeUp];
+            return vec![PlaybackAction::VolumeUp.into()];
         }
         (mods, KeyCode::Down) if mods == KeyModifiers::CONTROL | KeyModifiers::SHIFT => {
             state.volume_slider_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
-            return vec![Action::VolumeDown];
+            return vec![PlaybackAction::VolumeDown.into()];
         }
         // Shift+Left/Right for seeking (10 second skip)
-        (KeyModifiers::SHIFT, KeyCode::Left) => return vec![Action::SeekRelative(-10000)],
-        (KeyModifiers::SHIFT, KeyCode::Right) => return vec![Action::SeekRelative(10000)],
+        (KeyModifiers::SHIFT, KeyCode::Left) => return vec![PlaybackAction::SeekRelative(-10000).into()],
+        (KeyModifiers::SHIFT, KeyCode::Right) => return vec![PlaybackAction::SeekRelative(10000).into()],
         // Action commands (Ctrl+key) — gated by availability check
         // Ctrl+E: Add to END of queue (skip if in search popup - handled there)
         (KeyModifiers::CONTROL, KeyCode::Char('e')) if !state.popups.search_active && alt_commands::is_action_command_available(state, 'e') => {
-            return vec![Action::EnqueueSelection];
+            return vec![QueueAction::EnqueueSelection.into()];
         }
         // Ctrl+Shift+E: Insert NEXT in queue after current track (skip if in search popup - handled there)
         (mods, KeyCode::Char('e')) | (mods, KeyCode::Char('E')) if !state.popups.search_active && mods == KeyModifiers::CONTROL | KeyModifiers::SHIFT && alt_commands::is_action_command_available(state, 'e') => {
-            return vec![Action::EnqueueSelectionNext];
+            return vec![QueueAction::EnqueueSelectionNext.into()];
         }
         (KeyModifiers::CONTROL, KeyCode::Char('m')) if alt_commands::is_action_command_available(state, 'm') => {
             return get_similar_action(state);
@@ -381,10 +382,10 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
             return navigate_to_album(state);
         }
         (KeyModifiers::CONTROL, KeyCode::Char('w')) if alt_commands::is_action_command_available(state, 'w') => {
-            return vec![Action::PromptSavePlaylist];
+            return vec![QueueAction::PromptSavePlaylist.into()];
         }
         (KeyModifiers::CONTROL, KeyCode::Char('x')) if alt_commands::is_action_command_available(state, 'x') => {
-            return vec![Action::ClearQueue];
+            return vec![QueueAction::ClearQueue.into()];
         }
         // Alt shortcuts (station/global commands)
         (KeyModifiers::ALT, KeyCode::Char('f')) => {
@@ -394,7 +395,7 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
                 && state.popups.radio_launcher.is_none() && state.popups.adventure_launcher.is_none()
                 && state.popups.artist_radio_picker.is_none()
             {
-                return vec![Action::ActivateListFilter];
+                return vec![SearchAction::ActivateListFilter.into()];
             }
             return vec![];
         }
@@ -402,13 +403,13 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
             // Alt+R = Play Random Album Radio station
             if let Some(lib_key) = &state.active_library {
                 let key = format!("/library/sections/{}/stations/randomAlbum", lib_key);
-                return vec![Action::PlayStation(key)];
+                return vec![RadioAction::PlayStation(key).into()];
             }
             return vec![];
         }
         (KeyModifiers::CONTROL, KeyCode::Char('s')) if alt_commands::is_action_command_available(state, 's') => {
             // Ctrl+S = Sort popup for current column
-            return vec![Action::OpenSortPopup];
+            return vec![SearchAction::OpenSortPopup.into()];
         }
 
         // External service search: Ctrl+Alt+A/S/Y
@@ -514,7 +515,7 @@ fn handle_library_picker_keys(key: event::KeyEvent, state: &mut AppState) -> Vec
 
     match key.code {
         KeyCode::Esc => {
-            return vec![Action::CloseLibraryPicker];
+            return vec![SearchAction::CloseLibraryPicker.into()];
         }
         KeyCode::Up => {
             if state.popups.library_picker_index > 0 {
@@ -539,11 +540,11 @@ fn handle_library_picker_keys(key: event::KeyEvent, state: &mut AppState) -> Vec
 
                 if is_different_server && multi_server {
                     return vec![
-                        Action::SelectLibraryOnServer(lib_key, server_id.to_string()),
-                        Action::CloseLibraryPicker,
+                        SettingsAction::SelectLibraryOnServer(lib_key, server_id.to_string()).into(),
+                        SearchAction::CloseLibraryPicker.into(),
                     ];
                 } else {
-                    return vec![Action::SelectLibrary(lib_key), Action::CloseLibraryPicker];
+                    return vec![SettingsAction::SelectLibrary(lib_key).into(), SearchAction::CloseLibraryPicker.into()];
                 }
             }
         }
@@ -625,7 +626,7 @@ fn handle_auth_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
                         }
                         // If we're now on the sign in button, submit
                         if state.auth_state.field_index == 2 {
-                            return vec![Action::AuthSignIn];
+                            return vec![SettingsAction::AuthSignIn.into()];
                         }
                         vec![]
                     }
@@ -665,7 +666,7 @@ fn handle_auth_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
                     KeyCode::Enter => {
                         if state.auth_state.field_index == 2 {
                             // Sign In button
-                            vec![Action::AuthSignIn]
+                            vec![SettingsAction::AuthSignIn.into()]
                         } else {
                             // Start editing the field
                             state.auth_state.editing = true;
@@ -703,7 +704,7 @@ fn handle_auth_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
                     vec![]
                 }
                 KeyCode::Enter => {
-                    vec![Action::AuthSelectServer]
+                    vec![SettingsAction::AuthSelectServer.into()]
                 }
                 _ => vec![],
             }
@@ -729,10 +730,10 @@ pub(crate) fn get_similar_action(state: &mut AppState) -> Vec<Action> {
                     state.similar.tab_album_title = None;
                     state.similar.tab_track_key = None;
                     state.similar.tab_track_title = None;
-                    return vec![Action::LoadSimilarArtists {
+                    return vec![DataAction::LoadSimilarArtists {
                         artist_key: key,
                         title,
-                    }];
+                    }.into()];
                 }
             }
         }
@@ -745,10 +746,10 @@ pub(crate) fn get_similar_action(state: &mut AppState) -> Vec<Action> {
         state.similar.tab_album_title = Some(track.album_name().to_string());
         state.similar.tab_track_key = Some(track.rating_key.clone());
         state.similar.tab_track_title = Some(title.clone());
-        return vec![Action::LoadSimilarTracks {
+        return vec![DataAction::LoadSimilarTracks {
             rating_key: track.rating_key.clone(),
             title,
-        }];
+        }.into()];
     }
 
     // 2. Highlighted album → LoadSimilarAlbums
@@ -757,10 +758,10 @@ pub(crate) fn get_similar_action(state: &mut AppState) -> Vec<Action> {
         state.similar.tab_album_title = None;
         state.similar.tab_track_key = None;
         state.similar.tab_track_title = None;
-        return vec![Action::LoadSimilarAlbums {
+        return vec![DataAction::LoadSimilarAlbums {
             rating_key,
             title,
-        }];
+        }.into()];
     }
 
     // 3. Fallback: now-playing track → LoadSimilarTracks
@@ -770,10 +771,10 @@ pub(crate) fn get_similar_action(state: &mut AppState) -> Vec<Action> {
         state.similar.tab_album_title = Some(track.album_name().to_string());
         state.similar.tab_track_key = Some(track.rating_key.clone());
         state.similar.tab_track_title = Some(title.clone());
-        return vec![Action::LoadSimilarTracks {
+        return vec![DataAction::LoadSimilarTracks {
             rating_key: track.rating_key.clone(),
             title,
-        }];
+        }.into()];
     }
 
     vec![]
@@ -790,7 +791,7 @@ pub(crate) fn get_related_action(state: &mut AppState) -> Vec<Action> {
         if let Some(nav) = state.browse_nav() {
             if let Some(item) = nav.selected_item() {
                 if let BrowseItem::Artist { key, title, .. } = item {
-                    return vec![Action::LoadRelated { artist_key: key.clone(), title: title.clone() }];
+                    return vec![DataAction::LoadRelated { artist_key: key.clone(), title: title.clone() }.into()];
                 }
             }
         }
@@ -801,7 +802,7 @@ pub(crate) fn get_related_action(state: &mut AppState) -> Vec<Action> {
         if let Some(nav) = state.browse_nav() {
             if let Some(artist_key) = find_artist_key_in_nav(nav) {
                 let artist_name = find_artist_name_in_nav(nav, state);
-                return vec![Action::LoadRelated { artist_key, title: artist_name }];
+                return vec![DataAction::LoadRelated { artist_key, title: artist_name }.into()];
             }
         }
     }
@@ -810,7 +811,7 @@ pub(crate) fn get_related_action(state: &mut AppState) -> Vec<Action> {
     if let Some(track) = get_selected_track(state) {
         if let Some(artist_key) = track.grandparent_rating_key.clone() {
             let artist_name = track.artist_name().to_string();
-            return vec![Action::LoadRelated { artist_key, title: artist_name }];
+            return vec![DataAction::LoadRelated { artist_key, title: artist_name }.into()];
         }
     }
 
@@ -818,7 +819,7 @@ pub(crate) fn get_related_action(state: &mut AppState) -> Vec<Action> {
     if let Some(track) = state.current_track().cloned() {
         if let Some(artist_key) = track.grandparent_rating_key.clone() {
             let artist_name = track.artist_name().to_string();
-            return vec![Action::LoadRelated { artist_key, title: artist_name }];
+            return vec![DataAction::LoadRelated { artist_key, title: artist_name }.into()];
         }
     }
 
@@ -828,14 +829,14 @@ pub(crate) fn get_related_action(state: &mut AppState) -> Vec<Action> {
 /// Reset right panel state when switching categories.
 /// Clears album/track selections and resets focus to left panel.
 fn reset_right_panel(state: &mut AppState) {
-    state.right_panel_mode = RightPanelMode::Empty;
+    state.library.right_panel_mode = RightPanelMode::Empty;
     state.focus = Focus::Left;
-    state.selected_artist_albums.clear();
-    state.selected_album_tracks.clear();
-    state.genre_albums.clear();
-    state.genre_albums_index = 0;
-    state.selected_artist_name.clear();
-    state.selected_album_title.clear();
+    state.library.selected_artist_albums.clear();
+    state.library.selected_album_tracks.clear();
+    state.library.genre_albums.clear();
+    state.library.genre_albums_index = 0;
+    state.library.selected_artist_name.clear();
+    state.library.selected_album_title.clear();
 }
 
 /// Navigate to the album of the currently selected track (Ctrl+B).
@@ -875,11 +876,11 @@ pub(crate) fn navigate_to_album(state: &mut AppState) -> Vec<Action> {
     };
 
     // Navigate to the artist in Miller columns, with pending album auto-select
-    state.pending_album_key = Some(album_key);
-    state.selected_album_title = album_title;
-    state.selected_artist_name = artist_name;
+    state.search.pending_album_key = Some(album_key);
+    state.library.selected_album_title = album_title;
+    state.library.selected_artist_name = artist_name;
     state.set_view(View::Browse);
-    state.browse_category = BrowseCategory::Library;
+    state.set_browse_category(BrowseCategory::Library);
 
     // Select the artist in the Miller column
     if let Some(idx) = state.artist_nav.columns.first()
@@ -892,11 +893,11 @@ pub(crate) fn navigate_to_album(state: &mut AppState) -> Vec<Action> {
         state.artist_nav.truncate_right();
     }
     // Also update old state for backward compatibility
-    if let Some(idx) = state.artists.iter().position(|a| a.rating_key == artist_key) {
+    if let Some(idx) = state.library.artists.iter().position(|a| a.rating_key == artist_key) {
         state.list_state.artists_index = idx;
     }
 
-    vec![Action::LoadArtistAlbumsForMiller { artist_key }]
+    vec![MillerAction::LoadArtistAlbumsForMiller { artist_key }.into()]
 }
 
 /// Get album context from the selected folder track: (album_key, artist_key, album_title, artist_name).
@@ -971,7 +972,7 @@ fn find_artist_name_in_nav(nav: &BrowseNavigationState, state: &AppState) -> Str
             return title.clone();
         }
     }
-    state.selected_artist_name.clone()
+    state.library.selected_artist_name.clone()
 }
 
 /// Get the currently selected/highlighted track based on context.
@@ -981,8 +982,8 @@ fn get_selected_track(state: &AppState) -> Option<Track> {
         // Search popup - get track from search results
         View::Search => {
             let idx = state.list_state.search_item_index;
-            if let Some(ref results) = state.search_results {
-                match state.search_tab {
+            if let Some(ref results) = state.search.results {
+                match state.search.tab {
                     crate::app::state::SearchTab::Tracks => {
                         return results.tracks.get(idx).cloned();
                     }
@@ -1005,7 +1006,7 @@ fn get_selected_track(state: &AppState) -> Option<Track> {
             let idx = state.list_state.queue_index;
             match state.playback_mode {
                 PlaybackMode::Queue | PlaybackMode::None => {
-                    state.queue.get(idx).cloned()
+                    state.queue.tracks.get(idx).cloned()
                 }
                 PlaybackMode::Radio => {
                     state.radio.tracks.get(idx).cloned()
@@ -1026,9 +1027,9 @@ fn get_selected_track(state: &AppState) -> Option<Track> {
                 }
             }
             // Legacy right panel tracks
-            match state.right_panel_mode {
+            match state.library.right_panel_mode {
                 RightPanelMode::AlbumTracks | RightPanelMode::CategoryTracks => {
-                    state.selected_album_tracks.get(state.list_state.tracks_index).cloned()
+                    state.library.selected_album_tracks.get(state.list_state.tracks_index).cloned()
                 }
                 _ => None
             }
@@ -1063,15 +1064,15 @@ fn get_selected_album(state: &AppState) -> Option<(String, String)> {
                 }
             }
             // Legacy right panel: ArtistAlbums (index > 0) or CategoryAlbums
-            match state.right_panel_mode {
+            match state.library.right_panel_mode {
                 RightPanelMode::ArtistAlbums if state.list_state.right_albums_index > 0 => {
                     let album_idx = state.list_state.right_albums_index.saturating_sub(1);
-                    state.selected_artist_albums.get(album_idx).map(|a| {
+                    state.library.selected_artist_albums.get(album_idx).map(|a| {
                         (a.rating_key.clone(), format!("{} - {}", a.artist_name(), a.title))
                     })
                 }
                 RightPanelMode::CategoryAlbums => {
-                    state.genre_albums.get(state.genre_albums_index).map(|a| {
+                    state.library.genre_albums.get(state.library.genre_albums_index).map(|a| {
                         (a.rating_key.clone(), format!("{} - {}", a.artist_name(), a.title))
                     })
                 }
@@ -1143,18 +1144,18 @@ fn jump_to_letter(state: &mut AppState, letter: char) {
         // Jump in category list
         match state.browse_category {
             BrowseCategory::Library => {
-                if let Some(idx) = state.artists.iter().position(|a| starts_with(&a.title)) {
+                if let Some(idx) = state.library.artists.iter().position(|a| starts_with(&a.title)) {
                     state.list_state.artists_index = idx;
                 }
             }
             BrowseCategory::Playlists => {
-                if let Some(idx) = state.playlists.iter().position(|p| starts_with(&p.title)) {
+                if let Some(idx) = state.library.playlists.iter().position(|p| starts_with(&p.title)) {
                     state.list_state.playlists_index = idx;
                 }
             }
             BrowseCategory::Genres => {
-                if let Some(idx) = state.genres.iter().position(|g| starts_with(&g.title)) {
-                    state.genres_index = idx;
+                if let Some(idx) = state.library.genres.iter().position(|g| starts_with(&g.title)) {
+                    state.library.genres_index = idx;
                 }
             }
             BrowseCategory::Folders => {
@@ -1163,21 +1164,21 @@ fn jump_to_letter(state: &mut AppState, letter: char) {
         }
     } else {
         // Jump in right panel
-        match state.right_panel_mode {
+        match state.library.right_panel_mode {
             RightPanelMode::ArtistAlbums => {
                 // +1 offset for "All Tracks" at index 0
-                if let Some(idx) = state.selected_artist_albums.iter().position(|a| starts_with(&a.title)) {
+                if let Some(idx) = state.library.selected_artist_albums.iter().position(|a| starts_with(&a.title)) {
                     state.list_state.right_albums_index = idx + 1;
                 }
             }
             RightPanelMode::AlbumTracks | RightPanelMode::CategoryTracks => {
-                if let Some(idx) = state.selected_album_tracks.iter().position(|t| starts_with(&t.title)) {
+                if let Some(idx) = state.library.selected_album_tracks.iter().position(|t| starts_with(&t.title)) {
                     state.list_state.tracks_index = idx;
                 }
             }
             RightPanelMode::CategoryAlbums => {
-                if let Some(idx) = state.genre_albums.iter().position(|a| starts_with(&a.title)) {
-                    state.genre_albums_index = idx;
+                if let Some(idx) = state.library.genre_albums.iter().position(|a| starts_with(&a.title)) {
+                    state.library.genre_albums_index = idx;
                 }
             }
             RightPanelMode::Empty => {}

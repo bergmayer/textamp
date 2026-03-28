@@ -26,7 +26,7 @@ pub fn render(frame: &mut Frame, state: &AppState, rating_key: &str, area: Rect)
     frame.render_widget(block, area);
 
     // Find the playlist
-    if let Some(playlist) = state.playlists.iter().find(|p| p.rating_key == rating_key) {
+    if let Some(playlist) = state.library.playlists.iter().find(|p| p.rating_key == rating_key) {
         let text = format!(
             "{}\n{} tracks",
             playlist.title,

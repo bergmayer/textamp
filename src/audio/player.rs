@@ -50,7 +50,7 @@ type PendingPlayback = Arc<Mutex<Option<(Arc<StreamingBuffer>, u64)>>>;
 /// player.stop();
 /// ```
 pub struct AudioPlayer {
-    backend: RodioBackend,
+    backend: Option<RodioBackend>,
     /// Current streaming buffer (kept alive during playback)
     _stream_buffer: Option<Arc<StreamingBuffer>>,
     /// Shared inbox for pending playback — spawned tasks deliver buffers here,
@@ -73,7 +73,19 @@ impl AudioPlayer {
             .map_err(|e| anyhow!("Failed to create audio backend: {}", e))?;
 
         Ok(Self {
-            backend,
+            backend: Some(backend),
+            _stream_buffer: None,
+            pending_playback: Arc::new(Mutex::new(None)),
+            track_cache: Arc::new(TrackAudioCache::new()),
+            playback_generation: Arc::new(AtomicU64::new(0)),
+        })
+    }
+
+    /// Create an audio player without a backend (no audio output).
+    /// The app runs normally but playback operations are no-ops.
+    pub fn new_without_audio() -> Result<Self> {
+        Ok(Self {
+            backend: None,
             _stream_buffer: None,
             pending_playback: Arc::new(Mutex::new(None)),
             track_cache: Arc::new(TrackAudioCache::new()),
@@ -157,11 +169,17 @@ impl AudioPlayer {
     /// buffer has enough data for format detection and playback start.
     /// Returns `Ok(true)` if playback started, `Ok(false)` if no pending data
     /// (e.g., stale BufferingEnd event after audio was stopped).
+    /// Whether audio output is available.
+    pub fn has_audio(&self) -> bool {
+        self.backend.is_some()
+    }
+
     pub fn start_pending_playback(&mut self) -> Result<bool> {
+        let Some(ref mut backend) = self.backend else { return Ok(false) };
         let pending = super::lock_or_recover(&self.pending_playback).take();
         if let Some((buffer, byte_len_hint)) = pending {
             let reader = BlockingReader::new(&buffer);
-            self.backend.play_streaming(reader, byte_len_hint)
+            backend.play_streaming(reader, byte_len_hint)
                 .map_err(|e| anyhow!("Decode error: {}", e))?;
             self._stream_buffer = Some(buffer);
             Ok(true)
@@ -170,68 +188,52 @@ impl AudioPlayer {
         }
     }
 
-    /// Play audio from raw bytes.
-    ///
-    /// Use this when you already have the audio data (e.g., from cache).
     pub fn play_data(&mut self, data: Arc<Vec<u8>>) -> Result<()> {
+        let Some(ref mut backend) = self.backend else { return Ok(()) };
         self._stream_buffer = None;
-        self.backend
-            .play_data(data)
-            .map_err(|e| anyhow!("Playback error: {}", e))
+        backend.play_data(data).map_err(|e| anyhow!("Playback error: {}", e))
     }
 
-    /// Pause playback.
     pub fn pause(&mut self) {
-        self.backend.pause();
+        if let Some(ref mut b) = self.backend { b.pause(); }
     }
 
-    /// Resume playback.
     pub fn resume(&mut self) {
-        self.backend.resume();
+        if let Some(ref mut b) = self.backend { b.resume(); }
     }
 
-    /// Stop playback and clear pending state.
     pub fn stop(&mut self) {
         *super::lock_or_recover(&self.pending_playback) = None;
         self._stream_buffer = None;
-        self.backend.stop();
+        if let Some(ref mut b) = self.backend { b.stop(); }
     }
 
-    /// Set volume (0.0 to 1.0).
     pub fn set_volume(&mut self, volume: f32) {
-        self.backend.set_volume(volume);
+        if let Some(ref mut b) = self.backend { b.set_volume(volume); }
     }
 
-    /// Get current volume.
     pub fn volume(&self) -> f32 {
-        self.backend.volume()
+        self.backend.as_ref().map_or(0.8, |b| b.volume())
     }
 
-    /// Check if playback is finished.
     pub fn is_finished(&self) -> bool {
-        self.backend.is_finished()
+        self.backend.as_ref().map_or(true, |b| b.is_finished())
     }
 
-    /// Check if currently playing.
     pub fn is_playing(&self) -> bool {
-        self.backend.is_playing()
+        self.backend.as_ref().map_or(false, |b| b.is_playing())
     }
 
-    /// Check if paused.
     pub fn is_paused(&self) -> bool {
-        self.backend.is_paused()
+        self.backend.as_ref().map_or(false, |b| b.is_paused())
     }
 
-    /// Seek to a position in the current track.
-    ///
-    /// Returns true if seeking was successful.
     pub fn try_seek(&mut self, position: Duration) -> bool {
-        self.backend.seek(position)
+        self.backend.as_mut().map_or(false, |b| b.seek(position))
     }
 
-    /// Get the current playback position if available.
     pub fn position(&self) -> Option<Duration> {
-        self.backend.position()
+        self.backend.as_ref().and_then(|b| b.position())
     }
 }
 

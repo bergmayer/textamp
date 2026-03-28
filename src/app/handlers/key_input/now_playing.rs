@@ -1,5 +1,6 @@
 //! Queue and Now Playing view key handling.
 
+use crate::app::action::*;
 use crossterm::event::{self, KeyCode, KeyModifiers};
 
 use crate::app::Action;
@@ -12,13 +13,13 @@ pub(super) fn handle_queue_keys(key: event::KeyEvent, state: &mut AppState) -> V
     // Tab/Shift+Tab cycles through main views
     if key.code == KeyCode::Tab {
         return if key.modifiers.contains(KeyModifiers::SHIFT) {
-            vec![Action::PrevView]
+            vec![NavigationAction::PrevView.into()]
         } else {
-            vec![Action::NextView]
+            vec![NavigationAction::NextView.into()]
         };
     }
     if key.code == KeyCode::BackTab {
-        return vec![Action::PrevView];
+        return vec![NavigationAction::PrevView.into()];
     }
 
     // With stations focused, dispatch to station handler
@@ -60,11 +61,11 @@ pub(super) fn handle_now_playing_visualizer_keys(key: event::KeyEvent, state: &m
             // Esc does nothing (use Tab or Ctrl+key to navigate)
             vec![]
         }
-        KeyCode::F(1) | KeyCode::Char('?') => vec![Action::SetView(View::Help)],
+        KeyCode::F(1) | KeyCode::Char('?') => vec![NavigationAction::SetView(View::Help).into()],
 
         // Tab/Shift+Tab cycles through main views
-        KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => vec![Action::PrevView],
-        KeyCode::Tab => vec![Action::NextView],
+        KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => vec![NavigationAction::PrevView.into()],
+        KeyCode::Tab => vec![NavigationAction::NextView.into()],
 
         // Up arrow at top: focus the tab bar
         KeyCode::Up => {
@@ -73,8 +74,8 @@ pub(super) fn handle_now_playing_visualizer_keys(key: event::KeyEvent, state: &m
         }
 
         // Left/Right arrow seeking (1 second increments)
-        KeyCode::Left => vec![Action::SeekRelative(-1000)],
-        KeyCode::Right => vec![Action::SeekRelative(1000)],
+        KeyCode::Left => vec![PlaybackAction::SeekRelative(-1000).into()],
+        KeyCode::Right => vec![PlaybackAction::SeekRelative(1000).into()],
 
         _ => vec![],
     }
@@ -87,7 +88,7 @@ fn handle_station_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action
         match key.code {
             KeyCode::Enter => {
                 state.scroll.station_back_highlighted = false;
-                return vec![Action::NavigateStationsBack];
+                return vec![RadioAction::NavigateStationsBack.into()];
             }
             KeyCode::Down => {
                 state.scroll.station_back_highlighted = false;
@@ -116,7 +117,7 @@ fn handle_station_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action
             }
             vec![]
         }
-        KeyCode::F(1) | KeyCode::Char('?') => vec![Action::SetView(View::Help)],
+        KeyCode::F(1) | KeyCode::Char('?') => vec![NavigationAction::SetView(View::Help).into()],
 
         KeyCode::Up => {
             state.scroll.station = None;
@@ -187,7 +188,7 @@ fn handle_station_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action
             // Drill into categories only; non-categories → focus tracks
             if let Some(station) = state.station_nav.selected_station().cloned() {
                 if station.is_category() && !station.key.starts_with("action:") {
-                    return vec![Action::DrillIntoStation(station.key.clone(), station.title.clone())];
+                    return vec![RadioAction::DrillIntoStation(station.key.clone(), station.title.clone()).into()];
                 }
             }
             state.now_playing_focus = NowPlayingFocus::Tracks;
@@ -203,23 +204,23 @@ fn handle_station_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action
                 }
                 if station.key.starts_with("action:") {
                     return match station.key.as_str() {
-                        "action:adventure" => vec![Action::OpenAdventureLauncher],
-                        "action:artist_radio" => vec![Action::OpenArtistRadioPicker],
+                        "action:adventure" => vec![SearchAction::OpenAdventureLauncher.into()],
+                        "action:artist_radio" => vec![SearchAction::OpenArtistRadioPicker.into()],
                         _ => vec![],
                     };
                 }
                 // Remix items
                 if station.key.starts_with("remix:") {
                     return match station.key.as_str() {
-                        "remix:gemini" => vec![Action::RemixGemini],
-                        "remix:twofer" => vec![Action::RemixTwofer],
-                        "remix:stretch" => vec![Action::RemixStretch],
-                        "remix:doppelganger" => vec![Action::RemixDoppelganger],
+                        "remix:gemini" => vec![QueueAction::RemixGemini.into()],
+                        "remix:twofer" => vec![QueueAction::RemixTwofer.into()],
+                        "remix:stretch" => vec![QueueAction::RemixStretch.into()],
+                        "remix:doppelganger" => vec![QueueAction::RemixDoppelganger.into()],
                         "remix:shuffle" => {
-                            if state.shuffle_undo_queue.is_some() {
-                                vec![Action::RemixUndoShuffle]
+                            if state.queue.shuffle_undo_queue.is_some() {
+                                vec![QueueAction::RemixUndoShuffle.into()]
                             } else {
-                                vec![Action::RemixShuffle]
+                                vec![QueueAction::RemixShuffle.into()]
                             }
                         }
                         _ => vec![],
@@ -228,15 +229,15 @@ fn handle_station_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action
                 // DJ mode toggle
                 if station.is_dj_mode() {
                     if let Some(mode) = crate::app::state::DjMode::from_key(&station.key) {
-                        return vec![Action::ToggleDjMode(mode)];
+                        return vec![RadioAction::ToggleDjMode(mode).into()];
                     }
                     // Friendganger is unavailable
                     return vec![];
                 }
                 if station.is_category() {
-                    return vec![Action::DrillIntoStation(station.key.clone(), station.title.clone())];
+                    return vec![RadioAction::DrillIntoStation(station.key.clone(), station.title.clone()).into()];
                 }
-                return vec![Action::PlayStation(station.key.clone())];
+                return vec![RadioAction::PlayStation(station.key.clone()).into()];
             }
             vec![]
         }
@@ -330,7 +331,7 @@ fn handle_queue_track_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Ac
     // Get the max index based on current mode
     let get_max_index = |state: &AppState| -> usize {
         match state.playback_mode {
-            PlaybackMode::Queue | PlaybackMode::None => state.queue.len().saturating_sub(1),
+            PlaybackMode::Queue | PlaybackMode::None => state.queue.tracks.len().saturating_sub(1),
             PlaybackMode::Radio => state.radio.tracks.len().saturating_sub(1),
         }
     };
@@ -338,34 +339,34 @@ fn handle_queue_track_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Ac
     match key.code {
         KeyCode::Esc => {
             // If items are multi-selected, clear selection
-            if !state.queue_selected.is_empty() {
-                state.queue_selected.clear();
+            if !state.queue.selected.is_empty() {
+                state.queue.selected.clear();
                 return vec![];
             }
             // Otherwise ESC does nothing in queue (use Ctrl+shortcuts to navigate)
             vec![]
         }
-        KeyCode::F(1) | KeyCode::Char('?') => vec![Action::SetView(View::Help)],
+        KeyCode::F(1) | KeyCode::Char('?') => vec![NavigationAction::SetView(View::Help).into()],
 
         // Shift+Up/Down: move queue track(s) up/down (batch if multi-selected)
         KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
-            if state.queue_selected.is_empty() {
-                vec![Action::MoveQueueTrackUp]
+            if state.queue.selected.is_empty() {
+                vec![QueueAction::MoveQueueTrackUp.into()]
             } else {
-                vec![Action::MoveSelectedTracksUp]
+                vec![QueueAction::MoveSelectedTracksUp.into()]
             }
         }
         KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
-            if state.queue_selected.is_empty() {
-                vec![Action::MoveQueueTrackDown]
+            if state.queue.selected.is_empty() {
+                vec![QueueAction::MoveQueueTrackDown.into()]
             } else {
-                vec![Action::MoveSelectedTracksDown]
+                vec![QueueAction::MoveSelectedTracksDown.into()]
             }
         }
 
         // Ctrl+Z: undo last remix
         KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            vec![Action::UndoLastRemix]
+            vec![QueueAction::UndoLastRemix.into()]
         }
 
         KeyCode::Up => {
@@ -408,20 +409,20 @@ fn handle_queue_track_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Ac
             // If the selected track is already playing, switch to NowPlaying view
             let is_current = match state.playback_mode {
                 PlaybackMode::Queue | PlaybackMode::None => {
-                    state.queue_index == Some(state.list_state.queue_index)
+                    state.queue.index == Some(state.list_state.queue_index)
                 }
                 PlaybackMode::Radio => state.radio.track_index == Some(state.list_state.queue_index),
             };
             if is_current {
-                return vec![Action::SetView(View::NowPlaying), Action::LoadWaveform];
+                return vec![NavigationAction::SetView(View::NowPlaying).into(), SystemAction::LoadWaveform.into()];
             }
 
             // Play selected item from queue or radio (without modifying queue order)
             match state.playback_mode {
                 PlaybackMode::Queue | PlaybackMode::None => {
                     let queue_idx = state.list_state.queue_index;
-                    if queue_idx < state.queue.len() {
-                        vec![Action::JumpToQueueIndex(queue_idx)]
+                    if queue_idx < state.queue.tracks.len() {
+                        vec![QueueAction::JumpToQueueIndex(queue_idx).into()]
                     } else {
                         vec![]
                     }
@@ -429,7 +430,7 @@ fn handle_queue_track_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Ac
                 PlaybackMode::Radio => {
                     // Jump to selected radio track without clearing radio state
                     if state.list_state.queue_index < state.radio.tracks.len() {
-                        vec![Action::JumpToRadioTrack(state.list_state.queue_index)]
+                        vec![RadioAction::JumpToRadioTrack(state.list_state.queue_index).into()]
                     } else {
                         vec![]
                     }
@@ -438,18 +439,18 @@ fn handle_queue_track_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Ac
         }
 
         KeyCode::Delete => {
-            if !state.queue_selected.is_empty() {
-                return vec![Action::RemoveSelectedFromQueue];
+            if !state.queue.selected.is_empty() {
+                return vec![QueueAction::RemoveSelectedFromQueue.into()];
             }
             match state.playback_mode {
                 PlaybackMode::Queue | PlaybackMode::None => {
-                    vec![Action::RemoveFromQueue(state.list_state.queue_index)]
+                    vec![QueueAction::RemoveFromQueue(state.list_state.queue_index).into()]
                 }
                 PlaybackMode::Radio => {
                     let target_idx = state.list_state.queue_index;
                     let snapshot = state.convert_radio_to_queue("Delete track (from radio)");
-                    state.queue_undo_snapshot = Some(snapshot);
-                    vec![Action::RemoveFromQueue(target_idx)]
+                    state.queue.undo_snapshot = Some(snapshot);
+                    vec![QueueAction::RemoveFromQueue(target_idx).into()]
                 }
             }
         }
@@ -464,7 +465,7 @@ fn handle_queue_track_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Ac
         KeyCode::Char(c) if c.is_ascii_alphabetic() && key.modifiers.is_empty() => {
             let letter_lower = c.to_ascii_lowercase();
             let tracks: &[Track] = match state.playback_mode {
-                PlaybackMode::Queue | PlaybackMode::None => &state.queue,
+                PlaybackMode::Queue | PlaybackMode::None => &state.queue.tracks,
                 PlaybackMode::Radio => &state.radio.tracks,
             };
             if let Some(idx) = tracks.iter().position(|t| {

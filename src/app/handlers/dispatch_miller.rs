@@ -1,6 +1,8 @@
 //! Miller column dispatch handlers for all *ForMiller and *FromMiller actions.
 
+use crate::app::event::*;
 use crate::app::{Action, AppState, Event};
+use crate::app::action::{MillerAction, SystemAction};
 use crate::app::state::{BrowseCategory, BrowseColumn, BrowseItem};
 use crate::plex::PlexClient;
 use crate::plex::models::Track;
@@ -87,7 +89,7 @@ pub fn collect_viewport_art(state: &AppState) -> Vec<(String, String)> {
 /// Dispatch Miller column actions. Returns follow-up actions.
 pub async fn dispatch(
     event_tx: &mpsc::Sender<Event>,
-    action: Action,
+    action: MillerAction,
     state: &mut AppState,
     client: &mut PlexClient,
     audio: &mut AudioPlayer,
@@ -97,63 +99,63 @@ pub async fn dispatch(
         // Miller Column Actions for Artists View
         // ================================================================
 
-        Action::LoadArtistAlbumsForMiller { artist_key } => {
+        MillerAction::LoadArtistAlbumsForMiller { artist_key } => {
             // Load albums for artist and add as new column in artist_nav
             // Prepend "All Tracks" entry before albums (same as old render path)
             let auto_drill = std::mem::take(&mut state.auto_drill_pending);
             state.artist_nav.loading = true;
 
             // Check if this is a derived track-artist without a real Plex artist entry
-            let is_plex_artist = state.artists.iter().any(|a| a.rating_key == artist_key);
+            let is_plex_artist = state.library.artists.iter().any(|a| a.rating_key == artist_key);
 
             let albums_result = if is_plex_artist {
                 // Real Plex artist: use API
                 client.get_artist_albums(&artist_key).await
             } else {
                 // Derived artist: build album list from all_tracks
-                Ok(build_albums_from_tracks(&artist_key, &state.selected_artist_name, &state.all_tracks, &state.albums))
+                Ok(build_albums_from_tracks(&artist_key, &state.library.selected_artist_name, &state.library.all_tracks, &state.library.albums))
             };
 
             match albums_result {
                 Ok(albums) => {
                     // Create special entries
-                    let artist_thumb = state.artists.iter()
+                    let artist_thumb = state.library.artists.iter()
                         .find(|a| a.rating_key == artist_key)
-                        .or_else(|| state.track_artists.iter().find(|a| a.rating_key == artist_key))
+                        .or_else(|| state.library.track_artists.iter().find(|a| a.rating_key == artist_key))
                         .and_then(|a| a.thumb.clone());
                     let artist_radio = BrowseItem::ArtistRadio {
                         artist_key: artist_key.clone(),
-                        artist_name: state.selected_artist_name.clone(),
+                        artist_name: state.library.selected_artist_name.clone(),
                         thumb: None, // No artwork for ArtistRadio
                     };
                     let all_tracks = BrowseItem::AllTracks {
                         artist_key: artist_key.clone(),
-                        artist_name: state.selected_artist_name.clone(),
+                        artist_name: state.library.selected_artist_name.clone(),
                         thumb: artist_thumb, // Artist artwork on AllTracks
                     };
                     // Order: ArtistRadio → CompilationTracks → AllTracks → Albums
                     let mut items = vec![artist_radio];
 
                     // CompilationTracks after ArtistRadio (if artist has compilation tracks)
-                    if state.compilations.detected {
-                        if state.compilations.artist_map.contains_key(&artist_key) {
+                    if state.library.compilations.detected {
+                        if state.library.compilations.artist_map.contains_key(&artist_key) {
                             items.push(BrowseItem::CompilationTracks {
                                 artist_key: artist_key.clone(),
-                                artist_name: state.selected_artist_name.clone(),
+                                artist_name: state.library.selected_artist_name.clone(),
                             });
                         }
                     }
 
                     items.push(all_tracks);
 
-                    // Start with albums, then merge any from preloaded state.albums
+                    // Start with albums, then merge any from preloaded state.library.albums
                     // that the API missed (e.g. compilation-subtype albums)
                     let mut all_albums = albums;
                     if is_plex_artist {
                         let api_keys: std::collections::HashSet<&str> = all_albums.iter()
                             .map(|a| a.rating_key.as_str())
                             .collect();
-                        let missing: Vec<_> = state.albums.iter()
+                        let missing: Vec<_> = state.library.albums.iter()
                             .filter(|a| a.parent_rating_key.as_deref() == Some(&*artist_key)
                                 && !api_keys.contains(a.rating_key.as_str()))
                             .cloned()
@@ -164,12 +166,12 @@ pub async fn dispatch(
                         }
                     }
 
-                    items.extend(BrowseItem::from_albums(&all_albums, &state.album_display_artist));
+                    items.extend(BrowseItem::from_albums(&all_albums, &state.library.album_display_artist));
 
                     // Append single-artist compilations (albums where this artist
                     // is the sole performer but parent is a different artist)
-                    if state.compilations.detected {
-                        if let Some(solo_comps) = state.compilations.single_artist.get(&artist_key) {
+                    if state.library.compilations.detected {
+                        if let Some(solo_comps) = state.library.compilations.single_artist.get(&artist_key) {
                             let existing_keys: std::collections::HashSet<&str> = all_albums.iter()
                                 .map(|a| a.rating_key.as_str())
                                 .collect();
@@ -178,12 +180,12 @@ pub async fn dispatch(
                                 .cloned()
                                 .collect();
                             if !new_comps.is_empty() {
-                                items.extend(BrowseItem::from_albums(&new_comps, &state.album_display_artist));
+                                items.extend(BrowseItem::from_albums(&new_comps, &state.library.album_display_artist));
                             }
                         }
                     }
 
-                    let title = format!("albums \u{2014} {}", state.selected_artist_name);
+                    let title = format!("albums \u{2014} {}", state.library.selected_artist_name);
                     let mut col = BrowseColumn::new(title, items);
                     col.artwork_visible = state.artwork.default_visible;
                     state.artist_nav.drill_column(col, auto_drill);
@@ -196,18 +198,18 @@ pub async fn dispatch(
                     };
 
                     // Auto-select album and drill into tracks if pending_album_key is set (Alt+B)
-                    if let Some(album_key) = state.pending_album_key.take() {
+                    if let Some(album_key) = state.search.pending_album_key.take() {
                         if let Some(col) = state.artist_nav.columns.last_mut() {
                             if let Some(idx) = col.items.iter().position(|item| {
                                 matches!(item, BrowseItem::Album { key, .. } if *key == album_key)
                             }) {
                                 col.selected_index = idx;
                                 if let Some(BrowseItem::Album { title, .. }) = col.items.get(idx) {
-                                    state.selected_album_title = title.clone();
+                                    state.library.selected_album_title = title.clone();
                                 }
-                                let mut actions = vec![Action::LoadAlbumTracksForMiller { album_key }];
+                                let mut actions: Vec<Action> = vec![MillerAction::LoadAlbumTracksForMiller { album_key }.into()];
                                 if !art_batch.is_empty() {
-                                    actions.push(Action::LoadAlbumArt(art_batch));
+                                    actions.push(SystemAction::LoadAlbumArt(art_batch).into());
                                 }
                                 return Ok(actions);
                             }
@@ -216,7 +218,7 @@ pub async fn dispatch(
 
                     if !art_batch.is_empty() {
                         state.artist_nav.loading = false;
-                        return Ok(vec![Action::LoadAlbumArt(art_batch)]);
+                        return Ok(vec![SystemAction::LoadAlbumArt(art_batch).into()]);
                     }
                 }
                 Err(e) => {
@@ -226,7 +228,7 @@ pub async fn dispatch(
             state.artist_nav.loading = false;
         }
 
-        Action::LoadAlbumTracksForMiller { album_key } => {
+        MillerAction::LoadAlbumTracksForMiller { album_key } => {
             // Load tracks for album and add as new column in artist_nav
             let auto_drill = std::mem::take(&mut state.auto_drill_pending);
             state.artist_nav.loading = true;
@@ -234,19 +236,19 @@ pub async fn dispatch(
             match client.get_album_tracks(&album_key).await {
                 Ok(tracks) => {
                     let items = BrowseItem::from_tracks(&tracks);
-                    let title = format!("tracks \u{2014} {}", state.selected_album_title);
+                    let title = format!("tracks \u{2014} {}", state.library.selected_album_title);
                     // Store full tracks for playback (includes media info)
                     let col = BrowseColumn::new_with_tracks(title, items, tracks);
                     state.artist_nav.drill_column(col, auto_drill);
 
                     // Auto-select track if pending from search navigation
-                    if let Some(ref tk) = state.pending_track_key {
+                    if let Some(ref tk) = state.search.pending_track_key {
                         if let Some(col) = state.artist_nav.columns.last_mut() {
                             if let Some(pos) = col.items.iter().position(|i| i.key() == tk.as_str()) {
                                 col.selected_index = pos;
                             }
                         }
-                        state.pending_track_key = None;
+                        state.search.pending_track_key = None;
                     }
                 }
                 Err(e) => {
@@ -256,7 +258,7 @@ pub async fn dispatch(
             state.artist_nav.loading = false;
         }
 
-        Action::LoadArtistAllTracksForMiller { artist_key } => {
+        MillerAction::LoadArtistAllTracksForMiller { artist_key } => {
             // Load all tracks by an artist and add as new column in artist_nav
             // This is triggered by selecting "All Tracks" entry in the albums column
             let auto_drill = std::mem::take(&mut state.auto_drill_pending);
@@ -277,11 +279,11 @@ pub async fn dispatch(
             state.artist_nav.loading = false;
         }
 
-        Action::LoadAllAlbumsForMiller => {
+        MillerAction::LoadAllAlbumsForMiller => {
             // Load all albums as a Miller column (triggered by "► All Artists" entry)
-            // Uses already-loaded state.albums; fetches async if empty.
+            // Uses already-loaded state.library.albums; fetches async if empty.
             let auto_drill = std::mem::take(&mut state.auto_drill_pending);
-            if state.albums.is_empty() {
+            if state.library.albums.is_empty() {
                 state.artist_nav.loading = true;
                 // Fetch in background to avoid blocking the event loop
                 let tx = event_tx.clone();
@@ -290,10 +292,10 @@ pub async fn dispatch(
                 tokio::spawn(async move {
                     match client_clone.get_albums(&lib_key).await {
                         Ok(albums) => {
-                            let _ = tx.send(Event::AllAlbumsForMillerLoaded(albums)).await;
+                            let _ = tx.send(DataEvent::AllAlbumsForMillerLoaded(albums).into()).await;
                         }
                         Err(e) => {
-                            let _ = tx.send(Event::DataLoadError(format!("Failed to load albums: {}", e))).await;
+                            let _ = tx.send(DataEvent::DataLoadError(format!("Failed to load albums: {}", e)).into()).await;
                         }
                     }
                 });
@@ -304,7 +306,7 @@ pub async fn dispatch(
                 artist_name: "All Artists".to_string(),
                 thumb: None,
             }];
-            items.extend(BrowseItem::from_albums(&state.albums, &state.album_display_artist));
+            items.extend(BrowseItem::from_albums(&state.library.albums, &state.library.album_display_artist));
             let mut col = BrowseColumn::new("all albums", items);
             col.artwork_visible = state.artwork.default_visible;
             state.artist_nav.drill_column(col, auto_drill);
@@ -317,11 +319,11 @@ pub async fn dispatch(
             };
             state.artist_nav.loading = false;
             if !art_batch.is_empty() {
-                return Ok(vec![Action::LoadAlbumArt(art_batch)]);
+                return Ok(vec![SystemAction::LoadAlbumArt(art_batch).into()]);
             }
         }
 
-        Action::PlayTrackFromMiller { column_index, track_index, single_track } => {
+        MillerAction::PlayTrackFromMiller { column_index, track_index, single_track } => {
             if let Some(col) = state.artist_nav.columns.get(column_index) {
                 let tracks = collect_tracks_from_column(col, track_index, single_track);
                 if !tracks.is_empty() {
@@ -332,7 +334,7 @@ pub async fn dispatch(
         // Miller Column Actions for Genres View
         // ================================================================
 
-        Action::LoadGenreAlbumsForMiller { genre_key } => {
+        MillerAction::LoadGenreAlbumsForMiller { genre_key } => {
             // Load albums for genre and add as new column in genre_nav
             let auto_drill = std::mem::take(&mut state.auto_drill_pending);
             state.genre_nav.loading = true;
@@ -352,7 +354,7 @@ pub async fn dispatch(
                     client.get_style_albums(lib_key, stripped).await
                 } else {
                     // No prefix — use genre_content_type (for non-All tabs)
-                    match state.genre_content_type {
+                    match state.library.genre_content_type {
                         crate::app::state::GenreContentType::ArtistGenres => {
                             client.get_artist_genre_albums(lib_key, &genre_key).await
                         }
@@ -373,7 +375,7 @@ pub async fn dispatch(
 
                 match albums_result {
                     Ok(albums) => {
-                        let items = BrowseItem::from_albums(&albums, &state.album_display_artist);
+                        let items = BrowseItem::from_albums(&albums, &state.library.album_display_artist);
                         let genre_name = state.genre_nav.focused()
                             .and_then(|c| c.selected_item())
                             .map(|item| item.title().to_string())
@@ -392,7 +394,7 @@ pub async fn dispatch(
                             let art_batch = collect_art_to_load(state.genre_nav.columns.last(), &state.artwork.grid_cache, &state.artwork.grid_pending);
                             if !art_batch.is_empty() {
                                 state.genre_nav.loading = false;
-                                return Ok(vec![Action::LoadAlbumArt(art_batch)]);
+                                return Ok(vec![SystemAction::LoadAlbumArt(art_batch).into()]);
                             }
                         }
                     }
@@ -404,7 +406,7 @@ pub async fn dispatch(
             state.genre_nav.loading = false;
         }
 
-        Action::LoadGenreTracksForMiller { album_key } => {
+        MillerAction::LoadGenreTracksForMiller { album_key } => {
             // Load tracks for album and add as new column in genre_nav
             let auto_drill = std::mem::take(&mut state.auto_drill_pending);
             state.genre_nav.loading = true;
@@ -434,7 +436,7 @@ pub async fn dispatch(
             state.genre_nav.loading = false;
         }
 
-        Action::PlayGenreTrackFromMiller { column_index, track_index, single_track } => {
+        MillerAction::PlayGenreTrackFromMiller { column_index, track_index, single_track } => {
             if let Some(col) = state.genre_nav.columns.get(column_index) {
                 let tracks = collect_tracks_from_column(col, track_index, single_track);
                 if !tracks.is_empty() {
@@ -445,7 +447,7 @@ pub async fn dispatch(
         // Miller Column Actions for Playlists View
         // ================================================================
 
-        Action::LoadPlaylistTracksForMiller { playlist_key } => {
+        MillerAction::LoadPlaylistTracksForMiller { playlist_key } => {
             // Always fetch fresh from API (playlist contents may change, e.g. smart playlists)
             // Only show loading indicator if no child column exists yet.
             // When replacing an existing tracks column (navigating between playlists),
@@ -462,9 +464,9 @@ pub async fn dispatch(
                 for attempt in 0..3u32 {
                     match client_clone.get_playlist_tracks(&pk).await {
                         Ok(tracks) => {
-                            let _ = tx.send(Event::PlaylistTracksForMillerLoaded {
+                            let _ = tx.send(RadioEvent::PlaylistTracksForMillerLoaded {
                                 playlist_key: pk, tracks,
-                            }).await;
+                            }.into()).await;
                             return;
                         }
                         Err(e) => {
@@ -477,13 +479,13 @@ pub async fn dispatch(
                         }
                     }
                 }
-                let _ = tx.send(Event::PlaylistTracksForMillerFailed {
+                let _ = tx.send(RadioEvent::PlaylistTracksForMillerFailed {
                     playlist_key: pk, error: last_err,
-                }).await;
+                }.into()).await;
             });
         }
 
-        Action::PlayPlaylistTrackFromMiller { column_index, track_index, single_track } => {
+        MillerAction::PlayPlaylistTrackFromMiller { column_index, track_index, single_track } => {
             if let Some(col) = state.playlist_nav.columns.get(column_index) {
                 let tracks = collect_tracks_from_column(col, track_index, single_track);
                 if !tracks.is_empty() {
@@ -491,7 +493,7 @@ pub async fn dispatch(
                 }
             }
         }
-        Action::LoadCompilationsForMiller => {
+        MillerAction::LoadCompilationsForMiller => {
             // Push a new column with compilation albums, "All Tracks" pinned at top
             let auto_drill = std::mem::take(&mut state.auto_drill_pending);
             let mut items = vec![BrowseItem::AllTracks {
@@ -499,7 +501,7 @@ pub async fn dispatch(
                 artist_name: "Compilations".to_string(),
                 thumb: None,
             }];
-            items.extend(BrowseItem::from_albums(&state.compilations.albums, &state.album_display_artist));
+            items.extend(BrowseItem::from_albums(&state.library.compilations.albums, &state.library.album_display_artist));
             let mut col = BrowseColumn::new("compilations", items);
             col.artwork_visible = state.artwork.default_visible;
             state.artist_nav.drill_column(col, auto_drill);
@@ -507,23 +509,23 @@ pub async fn dispatch(
             // Batch load album art for visible items
             let art_batch = collect_viewport_art(state);
             if !art_batch.is_empty() {
-                return Ok(vec![Action::LoadAlbumArt(art_batch)]);
+                return Ok(vec![SystemAction::LoadAlbumArt(art_batch).into()]);
             }
         }
 
-        Action::LoadCompilationAlbumsForMiller { artist_key, artist_name } => {
+        MillerAction::LoadCompilationAlbumsForMiller { artist_key, artist_name } => {
             // Show compilation albums for this artist, with "All Tracks" pinned at top
             let auto_drill = std::mem::take(&mut state.auto_drill_pending);
-            if let Some(album_keys) = state.compilations.artist_map.get(&artist_key) {
+            if let Some(album_keys) = state.library.compilations.artist_map.get(&artist_key) {
                 let album_keys_set: std::collections::HashSet<&str> = album_keys.iter().map(|s| s.as_str()).collect();
-                let albums: Vec<_> = state.compilations.albums.iter()
+                let albums: Vec<_> = state.library.compilations.albums.iter()
                     .filter(|a| album_keys_set.contains(a.rating_key.as_str()))
                     .cloned()
                     .collect();
 
-                let artist_thumb = state.artists.iter()
+                let artist_thumb = state.library.artists.iter()
                     .find(|a| a.rating_key == artist_key)
-                    .or_else(|| state.track_artists.iter().find(|a| a.rating_key == artist_key))
+                    .or_else(|| state.library.track_artists.iter().find(|a| a.rating_key == artist_key))
                     .and_then(|a| a.thumb.clone());
 
                 let mut items = vec![BrowseItem::AllTracks {
@@ -531,7 +533,7 @@ pub async fn dispatch(
                     artist_name: artist_name.clone(),
                     thumb: artist_thumb,
                 }];
-                items.extend(BrowseItem::from_albums(&albums, &state.album_display_artist));
+                items.extend(BrowseItem::from_albums(&albums, &state.library.album_display_artist));
 
                 let title = format!("compilations \u{2014} {}", artist_name);
                 let mut col = BrowseColumn::new(title, items);
@@ -545,17 +547,17 @@ pub async fn dispatch(
                     vec![]
                 };
                 if !art_batch.is_empty() {
-                    return Ok(vec![Action::LoadAlbumArt(art_batch)]);
+                    return Ok(vec![SystemAction::LoadAlbumArt(art_batch).into()]);
                 }
             }
         }
 
-        Action::LoadCompilationAllTracksForMiller { artist_key, artist_name: _ } => {
+        MillerAction::LoadCompilationAllTracksForMiller { artist_key, artist_name: _ } => {
             // Load all tracks from this artist's compilation albums (all artists, not filtered)
             let auto_drill = std::mem::take(&mut state.auto_drill_pending);
-            if let Some(album_keys) = state.compilations.artist_map.get(&artist_key) {
+            if let Some(album_keys) = state.library.compilations.artist_map.get(&artist_key) {
                 let album_keys_set: std::collections::HashSet<&str> = album_keys.iter().map(|s| s.as_str()).collect();
-                let tracks: Vec<_> = state.all_tracks.iter()
+                let tracks: Vec<_> = state.library.all_tracks.iter()
                     .filter(|t| t.parent_rating_key.as_deref()
                         .map_or(false, |pk| album_keys_set.contains(pk)))
                     .cloned()
@@ -567,13 +569,13 @@ pub async fn dispatch(
             }
         }
 
-        Action::LoadAllCompilationTracksForMiller => {
+        MillerAction::LoadAllCompilationTracksForMiller => {
             // Load all tracks from all compilation albums
             let auto_drill = std::mem::take(&mut state.auto_drill_pending);
-            let album_keys_set: std::collections::HashSet<&str> = state.compilations.albums.iter()
+            let album_keys_set: std::collections::HashSet<&str> = state.library.compilations.albums.iter()
                 .map(|a| a.rating_key.as_str())
                 .collect();
-            let tracks: Vec<_> = state.all_tracks.iter()
+            let tracks: Vec<_> = state.library.all_tracks.iter()
                 .filter(|t| t.parent_rating_key.as_deref()
                     .map_or(false, |pk| album_keys_set.contains(pk)))
                 .cloned()
@@ -584,10 +586,10 @@ pub async fn dispatch(
             state.artist_nav.drill_column(col, auto_drill);
         }
 
-        Action::LoadAllLibraryTracksForMiller => {
+        MillerAction::LoadAllLibraryTracksForMiller => {
             // Load all library tracks into a Miller column (from "All Tracks" in All Artists)
             let auto_drill = std::mem::take(&mut state.auto_drill_pending);
-            if state.all_tracks.is_empty() {
+            if state.library.all_tracks.is_empty() {
                 // Push an empty placeholder column; AllTracksPreloaded will fill it
                 let col = BrowseColumn::new("tracks (loading...)", vec![]);
                 state.artist_nav.drill_column(col, auto_drill);
@@ -599,13 +601,13 @@ pub async fn dispatch(
                 }
                 return Ok(vec![]);
             }
-            let items = BrowseItem::from_tracks(&state.all_tracks);
-            let title = format!("tracks ({})", state.all_tracks.len());
-            let col = BrowseColumn::new_with_tracks(title, items, state.all_tracks.clone());
+            let items = BrowseItem::from_tracks(&state.library.all_tracks);
+            let title = format!("tracks ({})", state.library.all_tracks.len());
+            let col = BrowseColumn::new_with_tracks(title, items, state.library.all_tracks.clone());
             state.artist_nav.drill_column(col, auto_drill);
         }
 
-        Action::RefreshAlbumTracks { album_key } => {
+        MillerAction::RefreshAlbumTracks { album_key } => {
             // Refresh album tracks in the currently focused Miller column.
             // Works for both artist_nav and genre_nav.
             match client.get_album_tracks(&album_key).await {
@@ -633,7 +635,6 @@ pub async fn dispatch(
             }
         }
 
-        _ => unreachable!("dispatch_miller called with non-miller action: {:?}", action),
     }
     Ok(vec![])
 }
@@ -641,7 +642,7 @@ pub async fn dispatch(
 /// Build album list for a derived track-artist from the all_tracks cache.
 ///
 /// Groups tracks by parent_rating_key (album key) where the track's artist name
-/// matches, then looks up Album metadata from state.albums.
+/// matches, then looks up Album metadata from state.library.albums.
 fn build_albums_from_tracks(
     artist_key: &str,
     artist_name: &str,

@@ -1,7 +1,9 @@
 //! Playback dispatch handlers: TogglePlayPause, Pause, Play, Stop, Next, Previous,
 //! VolumeUp, VolumeDown, ToggleMute, Seek, SeekRelative, ToggleShuffle.
 
+use crate::app::event::*;
 use crate::app::{Action, AppState, Event};
+use crate::app::action::{PlaybackAction, RadioAction};
 use crate::app::state::{PlayStatus, PlaybackMode};
 use crate::plex::PlexClient;
 use crate::audio::AudioPlayer;
@@ -14,7 +16,7 @@ use super::helpers;
 /// Dispatch playback actions. Returns follow-up actions.
 pub async fn dispatch(
     event_tx: &mpsc::Sender<Event>,
-    action: Action,
+    action: PlaybackAction,
     state: &mut AppState,
     client: &mut PlexClient,
     audio: &mut AudioPlayer,
@@ -25,7 +27,7 @@ pub async fn dispatch(
     }
 
     match action {
-        Action::TogglePlayPause => {
+        PlaybackAction::TogglePlayPause => {
             match state.playback.status {
                 PlayStatus::Playing => {
                     audio.pause();
@@ -43,7 +45,7 @@ pub async fn dispatch(
                 _ => {}
             }
         }
-        Action::Stop => {
+        PlaybackAction::Stop => {
             // Report stop to Plex before stopping
             // continuing=false because playback is truly stopping
             if let Some(track) = state.current_track().cloned() {
@@ -55,7 +57,7 @@ pub async fn dispatch(
             // Clear session ID when playback truly stops
             state.plex_session_id = None;
         }
-        Action::Next => {
+        PlaybackAction::Next => {
             // Report stop for current track before switching
             // continuing=true because we're moving to the next track
             if let Some(track) = state.current_track().cloned() {
@@ -86,9 +88,9 @@ pub async fn dispatch(
                 }
                 PlaybackMode::Queue | PlaybackMode::None => {
                     // Queue mode: use state.queue
-                    if let Some(idx) = state.queue_index {
-                        if idx + 1 < state.queue.len() {
-                            state.queue_index = Some(idx + 1);
+                    if let Some(idx) = state.queue.index {
+                        if idx + 1 < state.queue.tracks.len() {
+                            state.queue.index = Some(idx + 1);
                             helpers::play_current_track(event_tx, state, client, audio).await;
                             track_advanced = true;
                         } else {
@@ -108,11 +110,11 @@ pub async fn dispatch(
             // All DJ modes are continuous: insert tracks after current position.
             if track_advanced && !state.dj.inserting {
                 if state.dj.active_mode.is_some() {
-                    return Ok(vec![Action::DjModeProcess]);
+                    return Ok(vec![RadioAction::DjModeProcess.into()]);
                 }
             }
         }
-        Action::Previous => {
+        PlaybackAction::Previous => {
             // If more than 3 seconds in, restart current track (no stop report needed)
             if state.playback.position_ms > 3000 {
                 state.playback.position_ms = 0;
@@ -135,9 +137,9 @@ pub async fn dispatch(
                         }
                     }
                     PlaybackMode::Queue | PlaybackMode::None => {
-                        if let Some(idx) = state.queue_index {
+                        if let Some(idx) = state.queue.index {
                             if idx > 0 {
-                                state.queue_index = Some(idx - 1);
+                                state.queue.index = Some(idx - 1);
                                 helpers::play_current_track(event_tx, state, client, audio).await;
                             }
                         }
@@ -145,31 +147,31 @@ pub async fn dispatch(
                 }
             }
         }
-        Action::VolumeUp => {
+        PlaybackAction::VolumeUp => {
             state.playback.volume = (state.playback.volume + 0.05).min(1.0);
             audio.set_volume(state.playback.volume);
         }
-        Action::VolumeDown => {
+        PlaybackAction::VolumeDown => {
             state.playback.volume = (state.playback.volume - 0.05).max(0.0);
             audio.set_volume(state.playback.volume);
         }
-        Action::SetVolume(vol) => {
+        PlaybackAction::SetVolume(vol) => {
             state.playback.volume = vol.clamp(0.0, 1.0);
             state.playback.muted = false;
             audio.set_volume(state.playback.volume);
         }
-        Action::ToggleMute => {
+        PlaybackAction::ToggleMute => {
             state.playback.muted = !state.playback.muted;
             audio.set_volume(if state.playback.muted { 0.0 } else { state.playback.volume });
         }
-        Action::Seek(position_ms) => {
+        PlaybackAction::Seek(position_ms) => {
             // Seek to absolute position
             let position = std::time::Duration::from_millis(position_ms);
             if audio.try_seek(position) {
                 state.playback.position_ms = position_ms;
             }
         }
-        Action::SeekRelative(delta_ms) => {
+        PlaybackAction::SeekRelative(delta_ms) => {
             // Seek relative to current position
             let current = state.playback.position_ms as i64;
             let duration = state.playback.duration_ms as i64;
@@ -179,7 +181,7 @@ pub async fn dispatch(
                 state.playback.position_ms = new_pos;
             }
         }
-        Action::StartPendingPlayback => {
+        PlaybackAction::StartPendingPlayback => {
             match audio.start_pending_playback() {
                 Ok(true) => {
                     state.playback.status = PlayStatus::Playing;
@@ -196,17 +198,16 @@ pub async fn dispatch(
                     let tx = event_tx.clone();
                     let msg = format!("{}", e);
                     tokio::spawn(async move {
-                        let _ = tx.send(Event::PlaybackError(msg)).await;
+                        let _ = tx.send(PlaybackEvent::PlaybackError(msg).into()).await;
                     });
                 }
             }
         }
-        Action::RetryCurrentTrack => {
+        PlaybackAction::RetryCurrentTrack => {
             // Replay the current track without resetting the error counter.
             // Used by PlaybackError handler to retry before skipping.
             helpers::play_current_track(event_tx, state, client, audio).await;
         }
-        _ => unreachable!("dispatch_playback called with non-playback action: {:?}", action),
     }
     Ok(vec![])
 }
@@ -214,7 +215,7 @@ pub async fn dispatch(
 /// Handle playback actions when output is a remote Plex player.
 async fn dispatch_remote(
     event_tx: &mpsc::Sender<Event>,
-    action: Action,
+    action: PlaybackAction,
     state: &mut AppState,
     client: &mut PlexClient,
     audio: &mut AudioPlayer,
@@ -233,14 +234,14 @@ async fn dispatch_remote(
     );
 
     match action {
-        Action::TogglePlayPause => {
+        PlaybackAction::TogglePlayPause => {
             match state.playback.status {
                 PlayStatus::Playing => {
                     let rc = rc.clone();
                     let event_tx = event_tx.clone();
                     tokio::spawn(async move {
                         if let Err(e) = rc.pause().await {
-                            let _ = event_tx.send(Event::RemotePlayerError(e.to_string())).await;
+                            let _ = event_tx.send(RemoteEvent::RemotePlayerError(e.to_string()).into()).await;
                         }
                     });
                     state.playback.status = PlayStatus::Paused;
@@ -250,7 +251,7 @@ async fn dispatch_remote(
                     let event_tx = event_tx.clone();
                     tokio::spawn(async move {
                         if let Err(e) = rc.resume().await {
-                            let _ = event_tx.send(Event::RemotePlayerError(e.to_string())).await;
+                            let _ = event_tx.send(RemoteEvent::RemotePlayerError(e.to_string()).into()).await;
                         }
                     });
                     state.playback.status = PlayStatus::Playing;
@@ -263,19 +264,19 @@ async fn dispatch_remote(
                 _ => {}
             }
         }
-        Action::Stop => {
+        PlaybackAction::Stop => {
             let rc = rc.clone();
             let event_tx = event_tx.clone();
             tokio::spawn(async move {
                 if let Err(e) = rc.stop().await {
-                    let _ = event_tx.send(Event::RemotePlayerError(e.to_string())).await;
+                    let _ = event_tx.send(RemoteEvent::RemotePlayerError(e.to_string()).into()).await;
                 }
             });
             state.playback.status = PlayStatus::Stopped;
             state.playback.position_ms = 0;
             state.plex_session_id = None;
         }
-        Action::Next => {
+        PlaybackAction::Next => {
             // Report stop for current track before switching
             if let Some(track) = state.current_track().cloned() {
                 helpers::report_playback_stop_to_plex(&track, state.playback.position_ms, true, state.plex_session_id.clone(), client);
@@ -301,9 +302,9 @@ async fn dispatch_remote(
                     }
                 }
                 PlaybackMode::Queue | PlaybackMode::None => {
-                    if let Some(idx) = state.queue_index {
-                        if idx + 1 < state.queue.len() {
-                            state.queue_index = Some(idx + 1);
+                    if let Some(idx) = state.queue.index {
+                        if idx + 1 < state.queue.tracks.len() {
+                            state.queue.index = Some(idx + 1);
                             helpers::play_current_track(event_tx, state, client, audio).await;
                             track_advanced = true;
                         } else {
@@ -323,11 +324,11 @@ async fn dispatch_remote(
             // Trigger DJ mode processing after every track transition
             if track_advanced && !state.dj.inserting {
                 if state.dj.active_mode.is_some() {
-                    return Ok(vec![Action::DjModeProcess]);
+                    return Ok(vec![RadioAction::DjModeProcess.into()]);
                 }
             }
         }
-        Action::Previous => {
+        PlaybackAction::Previous => {
             if state.playback.position_ms > 3000 {
                 state.playback.position_ms = 0;
                 helpers::play_current_track(event_tx, state, client, audio).await;
@@ -347,9 +348,9 @@ async fn dispatch_remote(
                         }
                     }
                     PlaybackMode::Queue | PlaybackMode::None => {
-                        if let Some(idx) = state.queue_index {
+                        if let Some(idx) = state.queue.index {
                             if idx > 0 {
-                                state.queue_index = Some(idx - 1);
+                                state.queue.index = Some(idx - 1);
                                 helpers::play_current_track(event_tx, state, client, audio).await;
                             }
                         }
@@ -357,29 +358,29 @@ async fn dispatch_remote(
                 }
             }
         }
-        Action::VolumeUp => {
+        PlaybackAction::VolumeUp => {
             state.playback.volume = (state.playback.volume + 0.05).min(1.0);
             let volume_pct = (state.playback.volume * 100.0) as u32;
             let rc = rc.clone();
             let event_tx = event_tx.clone();
             tokio::spawn(async move {
                 if let Err(e) = rc.set_volume(volume_pct).await {
-                    let _ = event_tx.send(Event::RemotePlayerError(e.to_string())).await;
+                    let _ = event_tx.send(RemoteEvent::RemotePlayerError(e.to_string()).into()).await;
                 }
             });
         }
-        Action::VolumeDown => {
+        PlaybackAction::VolumeDown => {
             state.playback.volume = (state.playback.volume - 0.05).max(0.0);
             let volume_pct = (state.playback.volume * 100.0) as u32;
             let rc = rc.clone();
             let event_tx = event_tx.clone();
             tokio::spawn(async move {
                 if let Err(e) = rc.set_volume(volume_pct).await {
-                    let _ = event_tx.send(Event::RemotePlayerError(e.to_string())).await;
+                    let _ = event_tx.send(RemoteEvent::RemotePlayerError(e.to_string()).into()).await;
                 }
             });
         }
-        Action::SetVolume(vol) => {
+        PlaybackAction::SetVolume(vol) => {
             state.playback.volume = vol.clamp(0.0, 1.0);
             state.playback.muted = false;
             let volume_pct = (state.playback.volume * 100.0) as u32;
@@ -387,22 +388,22 @@ async fn dispatch_remote(
             let event_tx = event_tx.clone();
             tokio::spawn(async move {
                 if let Err(e) = rc.set_volume(volume_pct).await {
-                    let _ = event_tx.send(Event::RemotePlayerError(e.to_string())).await;
+                    let _ = event_tx.send(RemoteEvent::RemotePlayerError(e.to_string()).into()).await;
                 }
             });
         }
-        Action::ToggleMute => {
+        PlaybackAction::ToggleMute => {
             state.playback.muted = !state.playback.muted;
             let volume_pct = if state.playback.muted { 0 } else { (state.playback.volume * 100.0) as u32 };
             let rc = rc.clone();
             let event_tx = event_tx.clone();
             tokio::spawn(async move {
                 if let Err(e) = rc.set_volume(volume_pct).await {
-                    let _ = event_tx.send(Event::RemotePlayerError(e.to_string())).await;
+                    let _ = event_tx.send(RemoteEvent::RemotePlayerError(e.to_string()).into()).await;
                 }
             });
         }
-        Action::Seek(position_ms) => {
+        PlaybackAction::Seek(position_ms) => {
             state.playback.position_ms = position_ms;
             // Recalibrate local clock so tick handler continues smoothly from the new position
             state.playback.playback_started_at = Some(
@@ -412,11 +413,11 @@ async fn dispatch_remote(
             let event_tx = event_tx.clone();
             tokio::spawn(async move {
                 if let Err(e) = rc.seek_to(position_ms).await {
-                    let _ = event_tx.send(Event::RemotePlayerError(e.to_string())).await;
+                    let _ = event_tx.send(RemoteEvent::RemotePlayerError(e.to_string()).into()).await;
                 }
             });
         }
-        Action::SeekRelative(delta_ms) => {
+        PlaybackAction::SeekRelative(delta_ms) => {
             let current = state.playback.position_ms as i64;
             let duration = state.playback.duration_ms as i64;
             let new_pos = (current + delta_ms).clamp(0, duration) as u64;
@@ -429,17 +430,16 @@ async fn dispatch_remote(
             let event_tx = event_tx.clone();
             tokio::spawn(async move {
                 if let Err(e) = rc.seek_to(new_pos).await {
-                    let _ = event_tx.send(Event::RemotePlayerError(e.to_string())).await;
+                    let _ = event_tx.send(RemoteEvent::RemotePlayerError(e.to_string()).into()).await;
                 }
             });
         }
-        Action::StartPendingPlayback => {
+        PlaybackAction::StartPendingPlayback => {
             // No-op for remote — remote player handles its own buffering
         }
-        Action::RetryCurrentTrack => {
+        PlaybackAction::RetryCurrentTrack => {
             helpers::play_current_track(event_tx, state, client, audio).await;
         }
-        _ => {}
     }
     Ok(vec![])
 }

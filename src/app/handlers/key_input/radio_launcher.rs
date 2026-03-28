@@ -1,5 +1,6 @@
 //! Radio launcher popup key handling.
 
+use crate::app::action::*;
 use crossterm::event::{self, KeyCode};
 
 use crate::app::Action;
@@ -15,7 +16,7 @@ pub(super) fn handle_radio_launcher_keys(key: event::KeyEvent, state: &mut AppSt
 
     match key.code {
         KeyCode::Esc => {
-            vec![Action::CloseRadioLauncher]
+            vec![SearchAction::CloseRadioLauncher.into()]
         }
         KeyCode::Enter => {
             match launcher.focus {
@@ -32,7 +33,7 @@ pub(super) fn handle_radio_launcher_keys(key: event::KeyEvent, state: &mut AppSt
                 }
                 SearchFocus::Results => {
                     // Select the highlighted result — start radio
-                    vec![Action::RadioLauncherSelectResult]
+                    vec![SearchAction::RadioLauncherSelectResult.into()]
                 }
             }
         }
@@ -89,7 +90,7 @@ pub(super) fn handle_radio_launcher_keys(key: event::KeyEvent, state: &mut AppSt
             launcher.focus = SearchFocus::Input;
             launcher.item_index = 0;
             if !launcher.query.is_empty() {
-                vec![Action::RadioLauncherSearch]
+                vec![SearchAction::RadioLauncherSearch.into()]
             } else {
                 launcher.results = None;
                 vec![]
@@ -99,7 +100,7 @@ pub(super) fn handle_radio_launcher_keys(key: event::KeyEvent, state: &mut AppSt
             launcher.query.push(c);
             launcher.focus = SearchFocus::Input;
             launcher.item_index = 0;
-            vec![Action::RadioLauncherSearch]
+            vec![SearchAction::RadioLauncherSearch.into()]
         }
         _ => vec![],
     }

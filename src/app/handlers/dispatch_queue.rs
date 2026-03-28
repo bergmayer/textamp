@@ -2,7 +2,9 @@
 //! ClearQueue, RemoveFromQueue, JumpToQueueIndex,
 //! EnqueueSelection, PromptSavePlaylist, SaveQueueAsPlaylist.
 
+use crate::app::event::*;
 use crate::app::{Action, AppState, Event};
+use crate::app::action::{QueueAction, DataAction};
 use crate::app::state::{BrowseCategory, BrowseItem, PlayStatus, PlaybackMode, QueueSortMode, SimilarMode, View};
 use crate::plex::PlexClient;
 use crate::plex::models::Track;
@@ -40,8 +42,8 @@ async fn get_folder_tracks_from_index(
     }
 
     // Fast path: look up from preloaded all_tracks cache (no network call)
-    if !state.all_tracks.is_empty() {
-        let track_map: std::collections::HashMap<&str, &Track> = state.all_tracks.iter()
+    if !state.library.all_tracks.is_empty() {
+        let track_map: std::collections::HashMap<&str, &Track> = state.library.all_tracks.iter()
             .map(|t| (t.rating_key.as_str(), t))
             .collect();
         let result: Vec<Track> = column_keys.iter()
@@ -73,7 +75,7 @@ async fn get_folder_tracks_from_index(
 /// Dispatch queue actions. Returns follow-up actions.
 pub async fn dispatch(
     event_tx: &mpsc::Sender<Event>,
-    action: Action,
+    action: QueueAction,
     state: &mut AppState,
     client: &mut PlexClient,
     audio: &mut AudioPlayer,
@@ -81,17 +83,17 @@ pub async fn dispatch(
     let mut follow_ups = vec![];
 
     match action {
-        Action::PlayTrack(track) => {
+        QueueAction::PlayTrack(track) => {
             helpers::play_track(event_tx, track, state, client, audio).await;
         }
-        Action::PlayTracksNow(tracks) => {
+        QueueAction::PlayTracksNow(tracks) => {
             // Play tracks immediately, replacing queue
             if !tracks.is_empty() {
                 helpers::queue_and_play(event_tx, state, client, audio, tracks, 0).await;
             }
         }
-        Action::PlayTrackFromCategory(idx) => {
-            if idx < state.selected_album_tracks.len() {
+        QueueAction::PlayTrackFromCategory(idx) => {
+            if idx < state.library.selected_album_tracks.len() {
                 // Report stop for currently playing track before switching
                 if let Some(current) = state.current_track().cloned() {
                     helpers::report_playback_stop_to_plex(&current, state.playback.position_ms, true, state.plex_session_id.clone(), client);
@@ -106,18 +108,18 @@ pub async fn dispatch(
                 }
 
                 // Prepend new tracks at front of queue
-                let new_tracks: Vec<Track> = state.selected_album_tracks[idx..].to_vec();
-                state.queue.splice(0..0, new_tracks);
-                state.queue_index = Some(0);
-                state.queue_original.clear();
-                state.queue_sort_mode = QueueSortMode::QueueOrder;
+                let new_tracks: Vec<Track> = state.library.selected_album_tracks[idx..].to_vec();
+                state.queue.tracks.splice(0..0, new_tracks);
+                state.queue.index = Some(0);
+                state.queue.original.clear();
+                state.queue.sort_mode = QueueSortMode::QueueOrder;
                 state.playback_mode = PlaybackMode::Queue;
                 state.list_state.queue_index = 0;
                 audio.track_cache.flush();
                 helpers::play_current_track(event_tx, state, client, audio).await;
             }
         }
-        Action::PlayAlbum { rating_key } => {
+        QueueAction::PlayAlbum { rating_key } => {
             // Load album tracks and play them (Shift+Enter on album)
             match client.get_album_tracks(&rating_key).await {
                 Ok(tracks) => {
@@ -130,7 +132,7 @@ pub async fn dispatch(
                 }
             }
         }
-        Action::PlayArtistTracks { artist_key } => {
+        QueueAction::PlayArtistTracks { artist_key } => {
             // Load all tracks by artist and play them (Shift+Enter on artist)
             match client.get_artist_all_tracks(&artist_key).await {
                 Ok(tracks) => {
@@ -143,30 +145,30 @@ pub async fn dispatch(
                 }
             }
         }
-        Action::PlaySearchResult => {
+        QueueAction::PlaySearchResult => {
             // Play the selected search result (Shift+Enter in search)
             let play_actions = play_search_result(state);
             follow_ups.extend(play_actions);
         }
-        Action::EnqueueAlbum { rating_key, title } => {
+        QueueAction::EnqueueAlbum { rating_key, title } => {
             // Load album tracks and append to end of queue
             match client.get_album_tracks(&rating_key).await {
                 Ok(tracks) => {
                     if !tracks.is_empty() {
                         // If radio is playing, convert to queue mode first
                         if state.playback_mode == PlaybackMode::Radio {
-                            state.queue = state.radio.tracks.clone();
-                            state.queue_index = state.radio.track_index;
+                            state.queue.tracks = state.radio.tracks.clone();
+                            state.queue.index = state.radio.track_index;
                             state.playback_mode = PlaybackMode::Queue;
                             state.radio.clear();
-                            if let Some(idx) = state.queue_index {
+                            if let Some(idx) = state.queue.index {
                                 state.list_state.queue_index = idx;
                             }
                         }
 
                         let added = tracks.len();
-                        let insert_pos = state.queue.len();
-                        state.queue.splice(insert_pos..insert_pos, tracks);
+                        let insert_pos = state.queue.tracks.len();
+                        state.queue.tracks.splice(insert_pos..insert_pos, tracks);
                         state.set_status(format!("Added {} tracks from \"{}\" to queue", added, title));
                     }
                 }
@@ -175,23 +177,23 @@ pub async fn dispatch(
                 }
             }
         }
-        Action::EnqueueArtistTracks { artist_key, artist_name } => {
+        QueueAction::EnqueueArtistTracks { artist_key, artist_name } => {
             // Load all tracks by artist and append to end of queue
             match client.get_artist_all_tracks(&artist_key).await {
                 Ok(tracks) => {
                     if !tracks.is_empty() {
                         if state.playback_mode == PlaybackMode::Radio {
-                            state.queue = state.radio.tracks.clone();
-                            state.queue_index = state.radio.track_index;
+                            state.queue.tracks = state.radio.tracks.clone();
+                            state.queue.index = state.radio.track_index;
                             state.playback_mode = PlaybackMode::Queue;
                             state.radio.clear();
-                            if let Some(idx) = state.queue_index {
+                            if let Some(idx) = state.queue.index {
                                 state.list_state.queue_index = idx;
                             }
                         }
                         let added = tracks.len();
-                        let insert_pos = state.queue.len();
-                        state.queue.splice(insert_pos..insert_pos, tracks);
+                        let insert_pos = state.queue.tracks.len();
+                        state.queue.tracks.splice(insert_pos..insert_pos, tracks);
                         state.set_status(format!("Added {} tracks by \"{}\" to queue", added, artist_name));
                     }
                 }
@@ -200,22 +202,22 @@ pub async fn dispatch(
                 }
             }
         }
-        Action::EnqueueTrack(track) => {
+        QueueAction::EnqueueTrack(track) => {
             // Append a single track to end of queue
             if state.playback_mode == PlaybackMode::Radio {
-                state.queue = state.radio.tracks.clone();
-                state.queue_index = state.radio.track_index;
+                state.queue.tracks = state.radio.tracks.clone();
+                state.queue.index = state.radio.track_index;
                 state.playback_mode = PlaybackMode::Queue;
                 state.radio.clear();
-                if let Some(idx) = state.queue_index {
+                if let Some(idx) = state.queue.index {
                     state.list_state.queue_index = idx;
                 }
             }
             let title = track.title.clone();
-            state.queue.push(track);
+            state.queue.tracks.push(track);
             state.set_status(format!("Added \"{}\" to queue", title));
         }
-        Action::PlayAlbumNow { rating_key, title } => {
+        QueueAction::PlayAlbumNow { rating_key, title } => {
             // Double-click play: load album tracks, replace queue, start playback
             match client.get_album_tracks(&rating_key).await {
                 Ok(tracks) => {
@@ -230,7 +232,7 @@ pub async fn dispatch(
                 }
             }
         }
-        Action::PlayPlaylistNow { playlist_key, title } => {
+        QueueAction::PlayPlaylistNow { playlist_key, title } => {
             // Double-click play: load playlist tracks, replace queue, start playback
             match client.get_playlist_tracks(&playlist_key).await {
                 Ok(tracks) => {
@@ -245,7 +247,7 @@ pub async fn dispatch(
                 }
             }
         }
-        Action::EnqueueSearchResult => {
+        QueueAction::EnqueueSearchResult => {
             // Enqueue the selected search result (at end of queue)
             let follow_up = enqueue_search_result(state);
             follow_ups.extend(follow_up);
@@ -253,7 +255,7 @@ pub async fn dispatch(
             state.popups.search_active = false;
             state.set_view(View::Queue);
         }
-        Action::EnqueueSearchResultNext => {
+        QueueAction::EnqueueSearchResultNext => {
             // Ctrl+Shift+E: insert search result NEXT in queue (after current track)
             let follow_up = enqueue_search_result_next(state);
             follow_ups.extend(follow_up);
@@ -261,13 +263,13 @@ pub async fn dispatch(
             state.popups.search_active = false;
             state.set_view(View::Queue);
         }
-        Action::EnqueueAlbumNext { rating_key, title } => {
+        QueueAction::EnqueueAlbumNext { rating_key, title } => {
             // Ctrl+Shift+E: Insert album tracks NEXT in queue (after current track)
             match client.get_album_tracks(&rating_key).await {
                 Ok(tracks) => {
                     if !tracks.is_empty() {
                         let added = helpers::insert_tracks_next(state, tracks);
-                        state.set_status(format!("Inserted {} tracks from \"{}\" next ({} total)", added, title, state.queue.len()));
+                        state.set_status(format!("Inserted {} tracks from \"{}\" next ({} total)", added, title, state.queue.tracks.len()));
                     }
                 }
                 Err(e) => {
@@ -275,13 +277,13 @@ pub async fn dispatch(
                 }
             }
         }
-        Action::EnqueueArtistTracksNext { artist_key, artist_name } => {
+        QueueAction::EnqueueArtistTracksNext { artist_key, artist_name } => {
             // Ctrl+Shift+E: Insert artist tracks NEXT in queue (after current track)
             match client.get_artist_all_tracks(&artist_key).await {
                 Ok(tracks) => {
                     if !tracks.is_empty() {
                         let added = helpers::insert_tracks_next(state, tracks);
-                        state.set_status(format!("Inserted {} tracks by \"{}\" next ({} total)", added, artist_name, state.queue.len()));
+                        state.set_status(format!("Inserted {} tracks by \"{}\" next ({} total)", added, artist_name, state.queue.tracks.len()));
                     }
                 }
                 Err(e) => {
@@ -289,29 +291,29 @@ pub async fn dispatch(
                 }
             }
         }
-        Action::EnqueueTracksNext(tracks) => {
+        QueueAction::EnqueueTracksNext(tracks) => {
             // Ctrl+Shift+E: Insert tracks NEXT in queue (after current track)
             if !tracks.is_empty() {
                 let title = tracks.first().map(|t| t.title.clone()).unwrap_or_default();
                 let added = helpers::insert_tracks_next(state, tracks);
                 if added == 1 {
-                    state.set_status(format!("Inserted \"{}\" next ({} total)", title, state.queue.len()));
+                    state.set_status(format!("Inserted \"{}\" next ({} total)", title, state.queue.tracks.len()));
                 } else {
-                    state.set_status(format!("Inserted {} tracks next, starting with \"{}\" ({} total)", added, title, state.queue.len()));
+                    state.set_status(format!("Inserted {} tracks next, starting with \"{}\" ({} total)", added, title, state.queue.tracks.len()));
                 }
             }
         }
-        Action::ClearQueue => {
+        QueueAction::ClearQueue => {
             // Clear the appropriate queue based on playback mode
             match state.playback_mode {
                 PlaybackMode::Radio => {
                     state.radio.clear();
                 }
                 PlaybackMode::Queue | PlaybackMode::None => {
-                    state.queue.clear();
-                    state.queue_index = None;
-                    state.queue_original.clear();
-                    state.queue_sort_mode = QueueSortMode::QueueOrder;
+                    state.queue.tracks.clear();
+                    state.queue.index = None;
+                    state.queue.original.clear();
+                    state.queue.sort_mode = QueueSortMode::QueueOrder;
                 }
             }
             state.list_state.queue_index = 0;
@@ -323,26 +325,26 @@ pub async fn dispatch(
             state.artwork.current_data = None;
             state.artwork.loading = false;
         }
-        Action::ToggleQueueShuffle => {
+        QueueAction::ToggleQueueShuffle => {
             use crate::audio::cache;
             use crate::services::PlaybackService;
 
             if state.playback_mode == PlaybackMode::Radio {
                 // Shuffle/unshuffle radio tracks
-                match state.queue_sort_mode {
+                match state.queue.sort_mode {
                     QueueSortMode::QueueOrder => {
-                        state.queue_original = state.radio.tracks.clone();
+                        state.queue.original = state.radio.tracks.clone();
                         let (shuffled, new_idx) = PlaybackService::shuffle_queue(
                             state.radio.tracks.clone(), state.radio.track_index,
                         );
                         state.radio.tracks = shuffled;
                         state.radio.track_index = new_idx;
-                        state.queue_sort_mode = QueueSortMode::Shuffle;
+                        state.queue.sort_mode = QueueSortMode::Shuffle;
                     }
                     QueueSortMode::Shuffle => {
                         let current_key = state.current_track().map(|t| t.rating_key.clone());
-                        state.radio.tracks = std::mem::take(&mut state.queue_original);
-                        state.queue_sort_mode = QueueSortMode::QueueOrder;
+                        state.radio.tracks = std::mem::take(&mut state.queue.original);
+                        state.queue.sort_mode = QueueSortMode::QueueOrder;
                         if let Some(key) = current_key {
                             state.radio.track_index = state.radio.tracks.iter().position(|t| t.rating_key == key);
                         }
@@ -350,25 +352,25 @@ pub async fn dispatch(
                 }
             } else {
                 // Shuffle/unshuffle queue tracks
-                match state.queue_sort_mode {
+                match state.queue.sort_mode {
                     QueueSortMode::QueueOrder => {
-                        state.queue_original = state.queue.clone();
+                        state.queue.original = state.queue.tracks.clone();
                         let (shuffled, new_idx) = PlaybackService::shuffle_queue(
-                            state.queue.clone(), state.queue_index,
+                            state.queue.tracks.clone(), state.queue.index,
                         );
-                        state.queue = shuffled;
-                        state.queue_index = new_idx; // always Some(0)
-                        state.queue_sort_mode = QueueSortMode::Shuffle;
+                        state.queue.tracks = shuffled;
+                        state.queue.index = new_idx; // always Some(0)
+                        state.queue.sort_mode = QueueSortMode::Shuffle;
                         state.list_state.queue_index = 0;
                     }
                     QueueSortMode::Shuffle => {
                         let current_key = state.current_track().map(|t| t.rating_key.clone());
-                        state.queue = std::mem::take(&mut state.queue_original);
-                        state.queue_sort_mode = QueueSortMode::QueueOrder;
+                        state.queue.tracks = std::mem::take(&mut state.queue.original);
+                        state.queue.sort_mode = QueueSortMode::QueueOrder;
                         if let Some(key) = current_key {
-                            state.queue_index = state.queue.iter().position(|t| t.rating_key == key);
+                            state.queue.index = state.queue.tracks.iter().position(|t| t.rating_key == key);
                         }
-                        if let Some(idx) = state.queue_index {
+                        if let Some(idx) = state.queue.index {
                             state.list_state.queue_index = idx;
                         }
                     }
@@ -379,31 +381,31 @@ pub async fn dispatch(
             let upcoming = helpers::get_upcoming_tracks(state);
             cache::trigger_prefetch(&audio.track_cache, &upcoming, client, state.transcode_kbps);
         }
-        Action::RemoveFromQueue(idx) => {
-            if idx < state.queue.len() {
-                state.queue.remove(idx);
+        QueueAction::RemoveFromQueue(idx) => {
+            if idx < state.queue.tracks.len() {
+                state.queue.tracks.remove(idx);
                 // Adjust queue_index if needed
-                if let Some(current) = state.queue_index {
+                if let Some(current) = state.queue.index {
                     if idx < current {
-                        state.queue_index = Some(current - 1);
-                    } else if idx == current && current >= state.queue.len() {
-                        state.queue_index = if state.queue.is_empty() {
+                        state.queue.index = Some(current - 1);
+                    } else if idx == current && current >= state.queue.tracks.len() {
+                        state.queue.index = if state.queue.tracks.is_empty() {
                             None
                         } else {
-                            Some(state.queue.len() - 1)
+                            Some(state.queue.tracks.len() - 1)
                         };
                     }
                 }
                 // Adjust list selection
-                let max_visual = state.queue.len().saturating_sub(1);
+                let max_visual = state.queue.tracks.len().saturating_sub(1);
                 if state.list_state.queue_index > max_visual {
                     state.list_state.queue_index = max_visual;
                 }
             }
         }
-        Action::JumpToQueueIndex(idx) => {
+        QueueAction::JumpToQueueIndex(idx) => {
             // Jump to and play a specific track in the queue (without modifying queue order)
-            if idx < state.queue.len() {
+            if idx < state.queue.tracks.len() {
                 // Report stop for currently playing track before switching
                 if let Some(current) = state.current_track().cloned() {
                     helpers::report_playback_stop_to_plex(&current, state.playback.position_ms, true, state.plex_session_id.clone(), client);
@@ -412,7 +414,7 @@ pub async fn dispatch(
                 // Generate new session ID for this playback context
                 state.plex_session_id = Some(helpers::generate_plex_session_id());
 
-                state.queue_index = Some(idx);
+                state.queue.index = Some(idx);
                 state.list_state.queue_index = idx;
                 state.playback_mode = PlaybackMode::Queue;
                 audio.track_cache.flush();
@@ -420,11 +422,11 @@ pub async fn dispatch(
 
                 // Trigger DJ mode processing after jump (all modes are continuous)
                 if !state.dj.inserting && state.dj.active_mode.is_some() {
-                    follow_ups.push(Action::DjModeProcess);
+                    follow_ups.push(crate::app::action::RadioAction::DjModeProcess.into());
                 }
             }
         }
-        Action::EnqueueSelection => {
+        QueueAction::EnqueueSelection => {
             // Ctrl+E: Add selected item + all following items to END of queue
             // For tracks: enqueue selected track + all following tracks in the view
             // For albums: enqueue the album
@@ -469,7 +471,7 @@ pub async fn dispatch(
             };
 
             if let Some((rating_key, title)) = album_to_enqueue {
-                return Ok(vec![Action::EnqueueAlbum { rating_key, title }]);
+                return Ok(vec![QueueAction::EnqueueAlbum { rating_key, title }.into()]);
             }
 
             // Folder tracks: fetch from API, ordered by column display order
@@ -482,19 +484,19 @@ pub async fn dispatch(
                 if !tracks_to_add.is_empty() {
                     // If radio is playing, convert to queue mode
                     if state.playback_mode == PlaybackMode::Radio {
-                        state.queue = state.radio.tracks.clone();
-                        state.queue_index = state.radio.track_index;
+                        state.queue.tracks = state.radio.tracks.clone();
+                        state.queue.index = state.radio.track_index;
                         state.playback_mode = PlaybackMode::Queue;
                         state.radio.clear();
-                        if let Some(idx) = state.queue_index {
+                        if let Some(idx) = state.queue.index {
                             state.list_state.queue_index = idx;
                         }
                     }
-                    state.queue_original.clear();
-                    state.queue_sort_mode = QueueSortMode::QueueOrder;
+                    state.queue.original.clear();
+                    state.queue.sort_mode = QueueSortMode::QueueOrder;
                     let added = tracks_to_add.len();
-                    state.queue.extend(tracks_to_add);
-                    state.set_status(format!("Added {} to queue ({} total)", added, state.queue.len()));
+                    state.queue.tracks.extend(tracks_to_add);
+                    state.set_status(format!("Added {} to queue ({} total)", added, state.queue.tracks.len()));
                 }
             }
 
@@ -533,12 +535,12 @@ pub async fn dispatch(
                 }
                 View::Search => {
                     use crate::app::state::SearchTab;
-                    if let Some(ref results) = state.search_results {
+                    if let Some(ref results) = state.search.results {
                         let idx = state.list_state.search_item_index;
-                        let (section, local_idx) = if state.search_tab == SearchTab::Global {
+                        let (section, local_idx) = if state.search.tab == SearchTab::Global {
                             super::dispatch_search::resolve_global_index(results, idx)
                         } else {
-                            (state.search_tab, idx)
+                            (state.search.tab, idx)
                         };
                         match section {
                             SearchTab::Tracks => {
@@ -556,24 +558,24 @@ pub async fn dispatch(
             if !tracks_to_add.is_empty() {
                 // If radio is playing, convert to queue mode
                 if state.playback_mode == PlaybackMode::Radio {
-                    state.queue = state.radio.tracks.clone();
-                    state.queue_index = state.radio.track_index;
+                    state.queue.tracks = state.radio.tracks.clone();
+                    state.queue.index = state.radio.track_index;
                     state.playback_mode = PlaybackMode::Queue;
                     state.radio.clear();
-                    if let Some(idx) = state.queue_index {
+                    if let Some(idx) = state.queue.index {
                         state.list_state.queue_index = idx;
                     }
                 }
 
-                state.queue_original.clear();
-                state.queue_sort_mode = QueueSortMode::QueueOrder;
+                state.queue.original.clear();
+                state.queue.sort_mode = QueueSortMode::QueueOrder;
 
                 let added = tracks_to_add.len();
-                state.queue.extend(tracks_to_add);
-                state.set_status(format!("Added {} to queue ({} total)", added, state.queue.len()));
+                state.queue.tracks.extend(tracks_to_add);
+                state.set_status(format!("Added {} to queue ({} total)", added, state.queue.tracks.len()));
             }
         }
-        Action::EnqueueSelectionNext => {
+        QueueAction::EnqueueSelectionNext => {
             // Ctrl+Shift+E: Insert selected item + all following items NEXT in queue (after current track)
             // For tracks: insert selected track + all following tracks
             // For albums: insert the album's tracks
@@ -618,7 +620,7 @@ pub async fn dispatch(
             };
 
             if let Some((rating_key, title)) = album_to_enqueue {
-                return Ok(vec![Action::EnqueueAlbumNext { rating_key, title }]);
+                return Ok(vec![QueueAction::EnqueueAlbumNext { rating_key, title }.into()]);
             }
 
             // Folder tracks: fetch from API, ordered by column display order
@@ -629,7 +631,7 @@ pub async fn dispatch(
                     .unwrap_or(0);
                 let tracks = get_folder_tracks_from_index(state, client, start).await;
                 if !tracks.is_empty() {
-                    return Ok(vec![Action::EnqueueTracksNext(tracks)]);
+                    return Ok(vec![QueueAction::EnqueueTracksNext(tracks).into()]);
                 }
             }
 
@@ -671,12 +673,12 @@ pub async fn dispatch(
                 View::Search => {
                     // Search results: get selected track + all following in tracks tab
                     use crate::app::state::SearchTab;
-                    if let Some(ref results) = state.search_results {
+                    if let Some(ref results) = state.search.results {
                         let idx = state.list_state.search_item_index;
-                        let (section, local_idx) = if state.search_tab == SearchTab::Global {
+                        let (section, local_idx) = if state.search.tab == SearchTab::Global {
                             super::dispatch_search::resolve_global_index(results, idx)
                         } else {
-                            (state.search_tab, idx)
+                            (state.search.tab, idx)
                         };
                         match section {
                             SearchTab::Tracks => {
@@ -692,17 +694,17 @@ pub async fn dispatch(
             };
 
             if !tracks_to_add.is_empty() {
-                return Ok(vec![Action::EnqueueTracksNext(tracks_to_add)]);
+                return Ok(vec![QueueAction::EnqueueTracksNext(tracks_to_add).into()]);
             }
         }
-        Action::PromptSavePlaylist => {
+        QueueAction::PromptSavePlaylist => {
             // Show input dialog for playlist name
             // Use queue if available, otherwise use radio tracks
-            let has_tracks = !state.queue.is_empty() || !state.radio.tracks.is_empty();
+            let has_tracks = !state.queue.tracks.is_empty() || !state.radio.tracks.is_empty();
             if !has_tracks {
                 state.set_error("No tracks to save".to_string());
             } else {
-                let title = if !state.queue.is_empty() {
+                let title = if !state.queue.tracks.is_empty() {
                     "Save Queue as Playlist"
                 } else {
                     "Save Station as Playlist"
@@ -715,11 +717,11 @@ pub async fn dispatch(
                 });
             }
         }
-        Action::SaveQueueAsPlaylist(name) => {
+        QueueAction::SaveQueueAsPlaylist(name) => {
             // Create playlist on Plex server
             // Use queue if available, otherwise use radio tracks
-            let tracks: Vec<&Track> = if !state.queue.is_empty() {
-                state.queue.iter().collect()
+            let tracks: Vec<&Track> = if !state.queue.tracks.is_empty() {
+                state.queue.tracks.iter().collect()
             } else {
                 state.radio.tracks.iter().collect()
             };
@@ -753,7 +755,7 @@ pub async fn dispatch(
                         Ok(()) => {
                             state.set_status(format!("Saved \"{}\" ({} tracks)", name_clone, track_count));
                             // Refresh playlists so the new one appears
-                            return Ok(vec![Action::LoadPlaylists]);
+                            return Ok(vec![DataAction::LoadPlaylists.into()]);
                         }
                         Err(e) => {
                             state.set_error(format!("Failed to save playlist: {}", e));
@@ -764,33 +766,33 @@ pub async fn dispatch(
                 state.set_error("No library selected".to_string());
             }
         }
-        Action::RemixGemini | Action::RemixTwofer | Action::RemixStretch | Action::RemixDoppelganger => {
+        QueueAction::RemixGemini | QueueAction::RemixTwofer | QueueAction::RemixStretch | QueueAction::RemixDoppelganger => {
             if state.playback_mode == PlaybackMode::Radio {
                 let desc = match action {
-                    Action::RemixGemini => "Remix: Gemini (from radio)",
-                    Action::RemixTwofer => "Remix: Twofer (from radio)",
-                    Action::RemixStretch => "Remix: Stretch (from radio)",
-                    Action::RemixDoppelganger => "Remix: Doppelganger (from radio)",
+                    QueueAction::RemixGemini => "Remix: Gemini (from radio)",
+                    QueueAction::RemixTwofer => "Remix: Twofer (from radio)",
+                    QueueAction::RemixStretch => "Remix: Stretch (from radio)",
+                    QueueAction::RemixDoppelganger => "Remix: Doppelganger (from radio)",
                     _ => "Remix (from radio)",
                 };
                 let snapshot = state.convert_radio_to_queue(desc);
-                state.queue_undo_snapshot = Some(snapshot);
+                state.queue.undo_snapshot = Some(snapshot);
             }
-            if state.queue.len() < 2 {
+            if state.queue.tracks.len() < 2 {
                 state.set_error("Need at least 2 tracks to remix".to_string());
                 return Ok(vec![]);
             }
 
             // Save snapshot for undo (skip if already set by radio conversion)
-            if state.queue_undo_snapshot.is_none() {
-                state.queue_undo_snapshot = Some(crate::app::state::QueueSnapshot {
-                    queue: state.queue.clone(),
-                    queue_index: state.queue_index,
+            if state.queue.undo_snapshot.is_none() {
+                state.queue.undo_snapshot = Some(crate::app::state::QueueSnapshot {
+                    queue: state.queue.tracks.clone(),
+                    queue_index: state.queue.index,
                     description: match action {
-                        Action::RemixGemini => "Remix: Gemini".to_string(),
-                        Action::RemixTwofer => "Remix: Twofer".to_string(),
-                        Action::RemixStretch => "Remix: Stretch".to_string(),
-                        Action::RemixDoppelganger => "Remix: Doppelganger".to_string(),
+                        QueueAction::RemixGemini => "Remix: Gemini".to_string(),
+                        QueueAction::RemixTwofer => "Remix: Twofer".to_string(),
+                        QueueAction::RemixStretch => "Remix: Stretch".to_string(),
+                        QueueAction::RemixDoppelganger => "Remix: Doppelganger".to_string(),
                         _ => "Remix".to_string(),
                     },
                     radio_snapshot: None,
@@ -799,29 +801,29 @@ pub async fn dispatch(
             }
 
             let mode_name = match action {
-                Action::RemixGemini => "Gemini",
-                Action::RemixTwofer => "Twofer",
-                Action::RemixStretch => "Stretch",
-                Action::RemixDoppelganger => "Doppelganger",
+                QueueAction::RemixGemini => "Gemini",
+                QueueAction::RemixTwofer => "Twofer",
+                QueueAction::RemixStretch => "Stretch",
+                QueueAction::RemixDoppelganger => "Doppelganger",
                 _ => "Remix",
             };
             state.set_status(format!("Remix: {} processing...", mode_name));
 
             spawn_remix_batch(event_tx, state, client, action);
         }
-        Action::RemixShuffle => {
+        QueueAction::RemixShuffle => {
             if state.playback_mode == PlaybackMode::Radio {
                 let snapshot = state.convert_radio_to_queue("Remix: Shuffle (from radio)");
-                state.queue_undo_snapshot = Some(snapshot);
+                state.queue.undo_snapshot = Some(snapshot);
             }
 
             use crate::services::PlaybackService;
 
             // Save snapshot for Ctrl+Z undo (skip if already set by radio conversion)
-            if state.queue_undo_snapshot.is_none() {
-                state.queue_undo_snapshot = Some(crate::app::state::QueueSnapshot {
-                    queue: state.queue.clone(),
-                    queue_index: state.queue_index,
+            if state.queue.undo_snapshot.is_none() {
+                state.queue.undo_snapshot = Some(crate::app::state::QueueSnapshot {
+                    queue: state.queue.tracks.clone(),
+                    queue_index: state.queue.index,
                     description: "Remix: Shuffle".to_string(),
                     radio_snapshot: None,
                     radio_state_snapshot: None,
@@ -829,29 +831,29 @@ pub async fn dispatch(
             }
 
             // Save shuffle-specific undo state (for toggle)
-            state.shuffle_undo_queue = Some(state.queue.clone());
-            state.shuffle_undo_index = state.queue_index;
+            state.queue.shuffle_undo_queue = Some(state.queue.tracks.clone());
+            state.queue.shuffle_undo_index = state.queue.index;
 
             let (shuffled, new_idx) = PlaybackService::shuffle_queue(
-                state.queue.clone(), state.queue_index,
+                state.queue.tracks.clone(), state.queue.index,
             );
-            state.queue = shuffled;
-            state.queue_index = new_idx;
+            state.queue.tracks = shuffled;
+            state.queue.index = new_idx;
             state.list_state.queue_index = 0;
             state.set_status("Queue shuffled".to_string());
         }
-        Action::RemixUndoShuffle => {
-            if let Some(original) = state.shuffle_undo_queue.take() {
+        QueueAction::RemixUndoShuffle => {
+            if let Some(original) = state.queue.shuffle_undo_queue.take() {
                 let current_key = state.current_track().map(|t| t.rating_key.clone());
-                state.queue = original;
-                state.queue_index = state.shuffle_undo_index;
+                state.queue.tracks = original;
+                state.queue.index = state.queue.shuffle_undo_index;
                 // Try to keep the currently playing track as the index
                 if let Some(key) = current_key {
-                    if let Some(idx) = state.queue.iter().position(|t| t.rating_key == key) {
-                        state.queue_index = Some(idx);
+                    if let Some(idx) = state.queue.tracks.iter().position(|t| t.rating_key == key) {
+                        state.queue.index = Some(idx);
                     }
                 }
-                if let Some(idx) = state.queue_index {
+                if let Some(idx) = state.queue.index {
                     state.list_state.queue_index = idx;
                 }
                 state.set_status("Shuffle undone".to_string());
@@ -859,8 +861,8 @@ pub async fn dispatch(
                 state.set_error("No shuffle to undo".to_string());
             }
         }
-        Action::UndoLastRemix => {
-            if let Some(snapshot) = state.queue_undo_snapshot.take() {
+        QueueAction::UndoLastRemix => {
+            if let Some(snapshot) = state.queue.undo_snapshot.take() {
                 if let Some(radio_snap) = snapshot.radio_snapshot {
                     // Restore radio mode
                     state.radio = radio_snap;
@@ -868,147 +870,147 @@ pub async fn dispatch(
                     if let Some(rs) = snapshot.radio_state_snapshot {
                         state.radio_state = rs;
                     }
-                    state.queue.clear();
-                    state.queue_index = None;
-                    state.queue_original.clear();
+                    state.queue.tracks.clear();
+                    state.queue.index = None;
+                    state.queue.original.clear();
                     if let Some(idx) = state.radio.track_index {
                         state.list_state.queue_index = idx;
                     }
                     state.set_status(format!("Undid {} — resumed radio", snapshot.description));
                 } else {
                     // Normal queue undo
-                    state.queue = snapshot.queue;
-                    state.queue_index = snapshot.queue_index;
-                    if let Some(idx) = state.queue_index {
+                    state.queue.tracks = snapshot.queue;
+                    state.queue.index = snapshot.queue_index;
+                    if let Some(idx) = state.queue.index {
                         state.list_state.queue_index = idx;
                     }
                     state.set_status(format!("Undid {}", snapshot.description));
                 }
-                state.shuffle_undo_queue = None;
-                state.shuffle_undo_index = None;
+                state.queue.shuffle_undo_queue = None;
+                state.queue.shuffle_undo_index = None;
             } else {
                 state.set_error("Nothing to undo".to_string());
             }
         }
-        Action::MoveQueueTrackUp => {
+        QueueAction::MoveQueueTrackUp => {
             if state.playback_mode == PlaybackMode::Radio {
                 let snapshot = state.convert_radio_to_queue("Move track (from radio)");
-                state.queue_undo_snapshot = Some(snapshot);
+                state.queue.undo_snapshot = Some(snapshot);
             }
             let idx = state.list_state.queue_index;
-            if idx == 0 || idx >= state.queue.len() { return Ok(vec![]); }
+            if idx == 0 || idx >= state.queue.tracks.len() { return Ok(vec![]); }
 
-            state.queue.swap(idx, idx - 1);
+            state.queue.tracks.swap(idx, idx - 1);
             state.list_state.queue_index -= 1;
 
             // Adjust queue_index if current track was moved
-            if let Some(qi) = state.queue_index {
+            if let Some(qi) = state.queue.index {
                 if qi == idx {
-                    state.queue_index = Some(idx - 1);
+                    state.queue.index = Some(idx - 1);
                 } else if qi == idx - 1 {
-                    state.queue_index = Some(idx);
+                    state.queue.index = Some(idx);
                 }
             }
         }
-        Action::MoveSelectedTracksUp => {
+        QueueAction::MoveSelectedTracksUp => {
             if state.playback_mode == PlaybackMode::Radio {
                 let snapshot = state.convert_radio_to_queue("Move tracks (from radio)");
-                state.queue_undo_snapshot = Some(snapshot);
+                state.queue.undo_snapshot = Some(snapshot);
             }
             // Move all selected tracks up by one position (process from top to bottom)
-            let selected: Vec<usize> = state.queue_selected.iter().copied().collect();
+            let selected: Vec<usize> = state.queue.selected.iter().copied().collect();
             if selected.is_empty() || selected[0] == 0 { return Ok(vec![]); }
             let mut new_selected = std::collections::BTreeSet::new();
             for &idx in &selected {
-                if idx > 0 && idx < state.queue.len() {
-                    state.queue.swap(idx, idx - 1);
+                if idx > 0 && idx < state.queue.tracks.len() {
+                    state.queue.tracks.swap(idx, idx - 1);
                     new_selected.insert(idx - 1);
                     // Adjust queue_index if current track was moved
-                    if let Some(qi) = state.queue_index {
-                        if qi == idx { state.queue_index = Some(idx - 1); }
-                        else if qi == idx - 1 { state.queue_index = Some(idx); }
+                    if let Some(qi) = state.queue.index {
+                        if qi == idx { state.queue.index = Some(idx - 1); }
+                        else if qi == idx - 1 { state.queue.index = Some(idx); }
                     }
                 } else {
                     new_selected.insert(idx);
                 }
             }
-            state.queue_selected = new_selected;
+            state.queue.selected = new_selected;
             if state.list_state.queue_index > 0 {
                 state.list_state.queue_index -= 1;
             }
         }
-        Action::MoveSelectedTracksDown => {
+        QueueAction::MoveSelectedTracksDown => {
             if state.playback_mode == PlaybackMode::Radio {
                 let snapshot = state.convert_radio_to_queue("Move tracks (from radio)");
-                state.queue_undo_snapshot = Some(snapshot);
+                state.queue.undo_snapshot = Some(snapshot);
             }
             // Move all selected tracks down by one position (process from bottom to top)
-            let selected: Vec<usize> = state.queue_selected.iter().copied().rev().collect();
-            if selected.is_empty() || *selected.first().unwrap() >= state.queue.len().saturating_sub(1) { return Ok(vec![]); }
+            let selected: Vec<usize> = state.queue.selected.iter().copied().rev().collect();
+            if selected.is_empty() || *selected.first().unwrap() >= state.queue.tracks.len().saturating_sub(1) { return Ok(vec![]); }
             let mut new_selected = std::collections::BTreeSet::new();
             for &idx in &selected {
-                if idx + 1 < state.queue.len() {
-                    state.queue.swap(idx, idx + 1);
+                if idx + 1 < state.queue.tracks.len() {
+                    state.queue.tracks.swap(idx, idx + 1);
                     new_selected.insert(idx + 1);
-                    if let Some(qi) = state.queue_index {
-                        if qi == idx { state.queue_index = Some(idx + 1); }
-                        else if qi == idx + 1 { state.queue_index = Some(idx); }
+                    if let Some(qi) = state.queue.index {
+                        if qi == idx { state.queue.index = Some(idx + 1); }
+                        else if qi == idx + 1 { state.queue.index = Some(idx); }
                     }
                 } else {
                     new_selected.insert(idx);
                 }
             }
-            state.queue_selected = new_selected;
-            let max = state.queue.len().saturating_sub(1);
+            state.queue.selected = new_selected;
+            let max = state.queue.tracks.len().saturating_sub(1);
             state.list_state.queue_index = (state.list_state.queue_index + 1).min(max);
         }
-        Action::RemoveSelectedFromQueue => {
+        QueueAction::RemoveSelectedFromQueue => {
             if state.playback_mode == PlaybackMode::Radio {
                 let snapshot = state.convert_radio_to_queue("Delete tracks (from radio)");
-                state.queue_undo_snapshot = Some(snapshot);
+                state.queue.undo_snapshot = Some(snapshot);
             }
             // Remove all selected tracks (process from highest index down)
-            let selected: Vec<usize> = state.queue_selected.iter().copied().rev().collect();
+            let selected: Vec<usize> = state.queue.selected.iter().copied().rev().collect();
             for &idx in &selected {
-                if idx < state.queue.len() {
-                    state.queue.remove(idx);
-                    if let Some(qi) = state.queue_index {
+                if idx < state.queue.tracks.len() {
+                    state.queue.tracks.remove(idx);
+                    if let Some(qi) = state.queue.index {
                         if idx < qi {
-                            state.queue_index = Some(qi - 1);
-                        } else if idx == qi && qi >= state.queue.len() {
-                            state.queue_index = if state.queue.is_empty() { None } else { Some(state.queue.len() - 1) };
+                            state.queue.index = Some(qi - 1);
+                        } else if idx == qi && qi >= state.queue.tracks.len() {
+                            state.queue.index = if state.queue.tracks.is_empty() { None } else { Some(state.queue.tracks.len() - 1) };
                         }
                     }
                 }
             }
-            state.queue_selected.clear();
+            state.queue.selected.clear();
             // Adjust visual index
-            let max = state.queue.len().saturating_sub(1);
+            let max = state.queue.tracks.len().saturating_sub(1);
             if state.list_state.queue_index > max {
                 state.list_state.queue_index = max;
             }
         }
-        Action::MoveQueueTrackDown => {
+        QueueAction::MoveQueueTrackDown => {
             if state.playback_mode == PlaybackMode::Radio {
                 let snapshot = state.convert_radio_to_queue("Move track (from radio)");
-                state.queue_undo_snapshot = Some(snapshot);
+                state.queue.undo_snapshot = Some(snapshot);
             }
             let idx = state.list_state.queue_index;
-            if idx + 1 >= state.queue.len() { return Ok(vec![]); }
+            if idx + 1 >= state.queue.tracks.len() { return Ok(vec![]); }
 
-            state.queue.swap(idx, idx + 1);
+            state.queue.tracks.swap(idx, idx + 1);
             state.list_state.queue_index += 1;
 
             // Adjust queue_index if current track was moved
-            if let Some(qi) = state.queue_index {
+            if let Some(qi) = state.queue.index {
                 if qi == idx {
-                    state.queue_index = Some(idx + 1);
+                    state.queue.index = Some(idx + 1);
                 } else if qi == idx + 1 {
-                    state.queue_index = Some(idx);
+                    state.queue.index = Some(idx);
                 }
             }
         }
-        Action::RemixBatchReady(inserts) => {
+        QueueAction::RemixBatchReady(inserts) => {
             if inserts.is_empty() {
                 state.set_status("Remix: no changes made".to_string());
                 return Ok(vec![]);
@@ -1025,9 +1027,9 @@ pub async fn dispatch(
             let mut total_inserted = 0usize;
             for pos in positions {
                 if let Some(insert_tracks) = inserts_map.get(&pos) {
-                    let insert_at = (pos + 1).min(state.queue.len());
+                    let insert_at = (pos + 1).min(state.queue.tracks.len());
                     total_inserted += insert_tracks.len();
-                    state.queue.splice(insert_at..insert_at, insert_tracks.iter().cloned());
+                    state.queue.tracks.splice(insert_at..insert_at, insert_tracks.iter().cloned());
                 }
             }
 
@@ -1037,7 +1039,7 @@ pub async fn dispatch(
             let upcoming = helpers::get_upcoming_tracks(state);
             crate::audio::cache::trigger_prefetch(&audio.track_cache, &upcoming, client, state.transcode_kbps);
         }
-        Action::RemixDoppelgangerReady(replacements) => {
+        QueueAction::RemixDoppelgangerReady(replacements) => {
             if replacements.is_empty() {
                 state.set_status("Remix: Doppelganger — no replacements found".to_string());
                 return Ok(vec![]);
@@ -1049,21 +1051,20 @@ pub async fn dispatch(
             let mut sorted = replacements;
             sorted.sort_unstable_by(|a, b| b.0.cmp(&a.0));
             for (idx, track) in sorted {
-                if idx < state.queue.len() {
-                    state.queue[idx] = track;
+                if idx < state.queue.tracks.len() {
+                    state.queue.tracks[idx] = track;
                 }
             }
 
             state.set_status(format!("Remix: Doppelganger — {} tracks replaced", count));
 
             // Stop currently playing track since it was replaced
-            follow_ups.push(Action::Stop);
+            follow_ups.push(crate::app::action::PlaybackAction::Stop.into());
 
             // Pre-cache upcoming tracks
             let upcoming = helpers::get_upcoming_tracks(state);
             crate::audio::cache::trigger_prefetch(&audio.track_cache, &upcoming, client, state.transcode_kbps);
         }
-        _ => unreachable!("dispatch_queue called with non-queue action: {:?}", action),
     }
     Ok(follow_ups)
 }
@@ -1086,13 +1087,13 @@ fn spawn_remix_batch(
     event_tx: &mpsc::Sender<Event>,
     state: &mut AppState,
     client: &mut PlexClient,
-    action: Action,
+    action: QueueAction,
 ) {
     // Collect tracks to process: from current position to end
     // Doppelganger includes the currently playing track (replaces all from current)
-    let base_idx = state.queue_index.unwrap_or(0).min(state.queue.len());
+    let base_idx = state.queue.index.unwrap_or(0).min(state.queue.tracks.len());
     let idx = base_idx;
-    let tracks_with_indices: Vec<(usize, Track)> = state.queue[idx..]
+    let tracks_with_indices: Vec<(usize, Track)> = state.queue.tracks[idx..]
         .iter()
         .enumerate()
         .map(|(i, t)| (idx + i, t.clone()))
@@ -1107,31 +1108,31 @@ fn spawn_remix_batch(
     let library_key = state.active_library.clone();
 
     // For Doppelganger: collect artist aliases to exclude same artist and all their aliases
-    let artist_aliases = state.artist_aliases.clone();
+    let artist_aliases = state.library.artist_aliases.clone();
 
     tokio::spawn(async move {
         let mut inserts: Vec<(usize, Vec<Track>)> = Vec::new();
         let mut history: Vec<String> = Vec::new();
 
         match action {
-            Action::RemixGemini => {
+            QueueAction::RemixGemini => {
                 remix_gemini_batch(&client_clone, tracks_with_indices, &mut history, &mut inserts).await;
-                let _ = tx.send(Event::RemixBatchReady { inserts }).await;
+                let _ = tx.send(UiEvent::RemixBatchReady { inserts }.into()).await;
             }
-            Action::RemixTwofer => {
+            QueueAction::RemixTwofer => {
                 remix_twofer_batch(&client_clone, tracks_with_indices, &mut history, &mut inserts).await;
-                let _ = tx.send(Event::RemixBatchReady { inserts }).await;
+                let _ = tx.send(UiEvent::RemixBatchReady { inserts }.into()).await;
             }
-            Action::RemixStretch => {
+            QueueAction::RemixStretch => {
                 remix_stretch_batch(&client_clone, tracks_with_indices, &mut history, &mut inserts, library_key.as_deref()).await;
-                let _ = tx.send(Event::RemixBatchReady { inserts }).await;
+                let _ = tx.send(UiEvent::RemixBatchReady { inserts }.into()).await;
             }
-            Action::RemixDoppelganger => {
+            QueueAction::RemixDoppelganger => {
                 let replacements = remix_doppelganger_batch(&client_clone, tracks_with_indices, &artist_aliases).await;
-                let _ = tx.send(Event::RemixDoppelgangerReady { replacements }).await;
+                let _ = tx.send(UiEvent::RemixDoppelgangerReady { replacements }.into()).await;
             }
             _ => {
-                let _ = tx.send(Event::RemixBatchReady { inserts }).await;
+                let _ = tx.send(UiEvent::RemixBatchReady { inserts }.into()).await;
             }
         }
     });
@@ -1494,30 +1495,30 @@ async fn remix_doppelganger_batch(
 fn enqueue_search_result(state: &mut AppState) -> Vec<Action> {
     use crate::app::state::SearchTab;
 
-    let Some(ref results) = state.search_results else { return vec![] };
+    let Some(ref results) = state.search.results else { return vec![] };
     let idx = state.list_state.search_item_index;
 
-    let (section, local_idx) = if state.search_tab == SearchTab::Global {
+    let (section, local_idx) = if state.search.tab == SearchTab::Global {
         super::dispatch_search::resolve_global_index(results, idx)
     } else {
-        (state.search_tab, idx)
+        (state.search.tab, idx)
     };
 
     match section {
         SearchTab::Artists => {
             if let Some(artist) = results.artists.get(local_idx) {
-                return vec![Action::EnqueueArtistTracks {
+                return vec![QueueAction::EnqueueArtistTracks {
                     artist_key: artist.rating_key.clone(),
                     artist_name: artist.title.clone(),
-                }];
+                }.into()];
             }
         }
         SearchTab::Albums => {
             if let Some(album) = results.albums.get(local_idx) {
-                return vec![Action::EnqueueAlbum {
+                return vec![QueueAction::EnqueueAlbum {
                     rating_key: album.rating_key.clone(),
                     title: album.title.clone(),
-                }];
+                }.into()];
             }
         }
         SearchTab::Tracks => {
@@ -1526,19 +1527,19 @@ fn enqueue_search_result(state: &mut AppState) -> Vec<Action> {
             if !tracks.is_empty() {
                 // If radio is playing, convert to queue mode
                 if state.playback_mode == PlaybackMode::Radio {
-                    state.queue = state.radio.tracks.clone();
-                    state.queue_index = state.radio.track_index;
+                    state.queue.tracks = state.radio.tracks.clone();
+                    state.queue.index = state.radio.track_index;
                     state.playback_mode = PlaybackMode::Queue;
                     state.radio.clear();
-                    if let Some(idx) = state.queue_index {
+                    if let Some(idx) = state.queue.index {
                         state.list_state.queue_index = idx;
                     }
                 }
-                state.queue_original.clear();
-                state.queue_sort_mode = QueueSortMode::QueueOrder;
+                state.queue.original.clear();
+                state.queue.sort_mode = QueueSortMode::QueueOrder;
                 let added = tracks.len();
-                state.queue.extend(tracks);
-                state.set_status(format!("Added {} to queue ({} total)", added, state.queue.len()));
+                state.queue.tracks.extend(tracks);
+                state.set_status(format!("Added {} to queue ({} total)", added, state.queue.tracks.len()));
             }
         }
         SearchTab::Playlists | SearchTab::Genres | SearchTab::Global => {
@@ -1554,33 +1555,33 @@ fn enqueue_search_result(state: &mut AppState) -> Vec<Action> {
 fn play_search_result(state: &AppState) -> Vec<Action> {
     use crate::app::state::SearchTab;
 
-    let Some(ref results) = state.search_results else { return vec![] };
+    let Some(ref results) = state.search.results else { return vec![] };
     let idx = state.list_state.search_item_index;
 
-    let (section, local_idx) = if state.search_tab == SearchTab::Global {
+    let (section, local_idx) = if state.search.tab == SearchTab::Global {
         super::dispatch_search::resolve_global_index(results, idx)
     } else {
-        (state.search_tab, idx)
+        (state.search.tab, idx)
     };
 
     match section {
         SearchTab::Artists => {
             if let Some(artist) = results.artists.get(local_idx) {
-                return vec![Action::PlayArtistTracks {
+                return vec![QueueAction::PlayArtistTracks {
                     artist_key: artist.rating_key.clone(),
-                }];
+                }.into()];
             }
         }
         SearchTab::Albums => {
             if let Some(album) = results.albums.get(local_idx) {
-                return vec![Action::PlayAlbum {
+                return vec![QueueAction::PlayAlbum {
                     rating_key: album.rating_key.clone(),
-                }];
+                }.into()];
             }
         }
         SearchTab::Tracks => {
             if let Some(track) = results.tracks.get(local_idx) {
-                return vec![Action::PlayTrack(track.clone())];
+                return vec![QueueAction::PlayTrack(track.clone()).into()];
             }
         }
         SearchTab::Playlists | SearchTab::Genres | SearchTab::Global => {}
@@ -1593,37 +1594,37 @@ fn play_search_result(state: &AppState) -> Vec<Action> {
 fn enqueue_search_result_next(state: &AppState) -> Vec<Action> {
     use crate::app::state::SearchTab;
 
-    let Some(ref results) = state.search_results else { return vec![] };
+    let Some(ref results) = state.search.results else { return vec![] };
     let idx = state.list_state.search_item_index;
 
-    let (section, local_idx) = if state.search_tab == SearchTab::Global {
+    let (section, local_idx) = if state.search.tab == SearchTab::Global {
         super::dispatch_search::resolve_global_index(results, idx)
     } else {
-        (state.search_tab, idx)
+        (state.search.tab, idx)
     };
 
     match section {
         SearchTab::Artists => {
             if let Some(artist) = results.artists.get(local_idx) {
-                return vec![Action::EnqueueArtistTracksNext {
+                return vec![QueueAction::EnqueueArtistTracksNext {
                     artist_key: artist.rating_key.clone(),
                     artist_name: artist.title.clone(),
-                }];
+                }.into()];
             }
         }
         SearchTab::Albums => {
             if let Some(album) = results.albums.get(local_idx) {
-                return vec![Action::EnqueueAlbumNext {
+                return vec![QueueAction::EnqueueAlbumNext {
                     rating_key: album.rating_key.clone(),
                     title: album.title.clone(),
-                }];
+                }.into()];
             }
         }
         SearchTab::Tracks => {
             // Get selected track + all following tracks
             let tracks: Vec<Track> = results.tracks[local_idx..].to_vec();
             if !tracks.is_empty() {
-                return vec![Action::EnqueueTracksNext(tracks)];
+                return vec![QueueAction::EnqueueTracksNext(tracks).into()];
             }
         }
         SearchTab::Playlists | SearchTab::Genres | SearchTab::Global => {
@@ -1671,82 +1672,82 @@ mod tests {
     #[test]
     fn remove_before_current_adjusts_index() {
         let mut state = AppState::new();
-        state.queue = sample_queue();
-        state.queue_index = Some(2); // playing Track 3
+        state.queue.tracks = sample_queue();
+        state.queue.index = Some(2); // playing Track 3
 
         // Simulate RemoveFromQueue(0) state mutation
         let idx = 0;
-        state.queue.remove(idx);
-        if let Some(current) = state.queue_index {
+        state.queue.tracks.remove(idx);
+        if let Some(current) = state.queue.index {
             if idx < current {
-                state.queue_index = Some(current - 1);
+                state.queue.index = Some(current - 1);
             }
         }
 
-        assert_eq!(state.queue_index, Some(1));
-        assert_eq!(state.queue.len(), 3);
-        assert_eq!(state.queue[1].rating_key, "t3"); // Track 3 is still current
+        assert_eq!(state.queue.index, Some(1));
+        assert_eq!(state.queue.tracks.len(), 3);
+        assert_eq!(state.queue.tracks[1].rating_key, "t3"); // Track 3 is still current
     }
 
     #[test]
     fn remove_after_current_no_change() {
         let mut state = AppState::new();
-        state.queue = sample_queue();
-        state.queue_index = Some(1); // playing Track 2
+        state.queue.tracks = sample_queue();
+        state.queue.index = Some(1); // playing Track 2
 
         let idx = 3;
-        state.queue.remove(idx);
-        if let Some(current) = state.queue_index {
+        state.queue.tracks.remove(idx);
+        if let Some(current) = state.queue.index {
             if idx < current {
-                state.queue_index = Some(current - 1);
+                state.queue.index = Some(current - 1);
             }
         }
 
-        assert_eq!(state.queue_index, Some(1));
-        assert_eq!(state.queue.len(), 3);
+        assert_eq!(state.queue.index, Some(1));
+        assert_eq!(state.queue.tracks.len(), 3);
     }
 
     #[test]
     fn remove_current_at_end_wraps_back() {
         let mut state = AppState::new();
-        state.queue = sample_queue();
-        state.queue_index = Some(3); // playing last track
+        state.queue.tracks = sample_queue();
+        state.queue.index = Some(3); // playing last track
 
         let idx = 3;
-        state.queue.remove(idx);
-        if let Some(current) = state.queue_index {
-            if idx == current && current >= state.queue.len() {
-                state.queue_index = if state.queue.is_empty() {
+        state.queue.tracks.remove(idx);
+        if let Some(current) = state.queue.index {
+            if idx == current && current >= state.queue.tracks.len() {
+                state.queue.index = if state.queue.tracks.is_empty() {
                     None
                 } else {
-                    Some(state.queue.len() - 1)
+                    Some(state.queue.tracks.len() - 1)
                 };
             }
         }
 
-        assert_eq!(state.queue_index, Some(2)); // wraps to new last
+        assert_eq!(state.queue.index, Some(2)); // wraps to new last
     }
 
     #[test]
     fn remove_last_element_gives_none() {
         let mut state = AppState::new();
-        state.queue = vec![make_track("t1", "Track 1")];
-        state.queue_index = Some(0);
+        state.queue.tracks = vec![make_track("t1", "Track 1")];
+        state.queue.index = Some(0);
 
         let idx = 0;
-        state.queue.remove(idx);
-        if let Some(current) = state.queue_index {
-            if idx == current && current >= state.queue.len() {
-                state.queue_index = if state.queue.is_empty() {
+        state.queue.tracks.remove(idx);
+        if let Some(current) = state.queue.index {
+            if idx == current && current >= state.queue.tracks.len() {
+                state.queue.index = if state.queue.tracks.is_empty() {
                     None
                 } else {
-                    Some(state.queue.len() - 1)
+                    Some(state.queue.tracks.len() - 1)
                 };
             }
         }
 
-        assert_eq!(state.queue_index, None);
-        assert!(state.queue.is_empty());
+        assert_eq!(state.queue.index, None);
+        assert!(state.queue.tracks.is_empty());
     }
 
     // --- MoveQueueTrack state logic tests ---
@@ -1754,80 +1755,80 @@ mod tests {
     #[test]
     fn move_track_up_swaps_and_adjusts() {
         let mut state = AppState::new();
-        state.queue = sample_queue();
-        state.queue_index = Some(2);
+        state.queue.tracks = sample_queue();
+        state.queue.index = Some(2);
         state.list_state.queue_index = 2;
 
         // Simulate MoveQueueTrackUp
         let idx = state.list_state.queue_index;
-        state.queue.swap(idx, idx - 1);
+        state.queue.tracks.swap(idx, idx - 1);
         state.list_state.queue_index -= 1;
-        if let Some(qi) = state.queue_index {
+        if let Some(qi) = state.queue.index {
             if qi == idx {
-                state.queue_index = Some(idx - 1);
+                state.queue.index = Some(idx - 1);
             } else if qi == idx - 1 {
-                state.queue_index = Some(idx);
+                state.queue.index = Some(idx);
             }
         }
 
         assert_eq!(state.list_state.queue_index, 1);
-        assert_eq!(state.queue_index, Some(1)); // current track moved up
-        assert_eq!(state.queue[1].rating_key, "t3"); // t3 moved from 2 to 1
-        assert_eq!(state.queue[2].rating_key, "t2"); // t2 moved from 1 to 2
+        assert_eq!(state.queue.index, Some(1)); // current track moved up
+        assert_eq!(state.queue.tracks[1].rating_key, "t3"); // t3 moved from 2 to 1
+        assert_eq!(state.queue.tracks[2].rating_key, "t2"); // t2 moved from 1 to 2
     }
 
     #[test]
     fn move_track_up_at_zero_is_noop() {
         let mut state = AppState::new();
-        state.queue = sample_queue();
+        state.queue.tracks = sample_queue();
         state.list_state.queue_index = 0;
 
         // MoveQueueTrackUp should be no-op at idx 0
         let idx = state.list_state.queue_index;
         if idx > 0 {
-            state.queue.swap(idx, idx - 1);
+            state.queue.tracks.swap(idx, idx - 1);
         }
 
-        assert_eq!(state.queue[0].rating_key, "t1"); // unchanged
+        assert_eq!(state.queue.tracks[0].rating_key, "t1"); // unchanged
     }
 
     #[test]
     fn move_track_down_swaps() {
         let mut state = AppState::new();
-        state.queue = sample_queue();
-        state.queue_index = Some(1);
+        state.queue.tracks = sample_queue();
+        state.queue.index = Some(1);
         state.list_state.queue_index = 1;
 
         // Simulate MoveQueueTrackDown
         let idx = state.list_state.queue_index;
-        state.queue.swap(idx, idx + 1);
+        state.queue.tracks.swap(idx, idx + 1);
         state.list_state.queue_index += 1;
-        if let Some(qi) = state.queue_index {
+        if let Some(qi) = state.queue.index {
             if qi == idx {
-                state.queue_index = Some(idx + 1);
+                state.queue.index = Some(idx + 1);
             } else if qi == idx + 1 {
-                state.queue_index = Some(idx);
+                state.queue.index = Some(idx);
             }
         }
 
         assert_eq!(state.list_state.queue_index, 2);
-        assert_eq!(state.queue_index, Some(2)); // current track moved down
-        assert_eq!(state.queue[1].rating_key, "t3");
-        assert_eq!(state.queue[2].rating_key, "t2");
+        assert_eq!(state.queue.index, Some(2)); // current track moved down
+        assert_eq!(state.queue.tracks[1].rating_key, "t3");
+        assert_eq!(state.queue.tracks[2].rating_key, "t2");
     }
 
     #[test]
     fn move_track_down_at_end_is_noop() {
         let mut state = AppState::new();
-        state.queue = sample_queue();
+        state.queue.tracks = sample_queue();
         state.list_state.queue_index = 3; // last index
 
         let idx = state.list_state.queue_index;
-        if idx + 1 < state.queue.len() {
-            state.queue.swap(idx, idx + 1);
+        if idx + 1 < state.queue.tracks.len() {
+            state.queue.tracks.swap(idx, idx + 1);
         }
 
-        assert_eq!(state.queue[3].rating_key, "t4"); // unchanged
+        assert_eq!(state.queue.tracks[3].rating_key, "t4"); // unchanged
     }
 
     // --- pick_diverse_remix tests ---

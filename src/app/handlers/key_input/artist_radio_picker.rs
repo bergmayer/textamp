@@ -1,5 +1,6 @@
 //! Multi-artist radio picker popup key handling.
 
+use crate::app::action::*;
 use crossterm::event::{self, KeyCode};
 
 use crate::app::Action;
@@ -23,12 +24,12 @@ pub(super) fn handle_artist_radio_picker_keys(key: event::KeyEvent, state: &mut 
 fn handle_count_step(key: event::KeyEvent, picker: &mut crate::app::state::ArtistRadioPickerState) -> Vec<Action> {
     match key.code {
         KeyCode::Esc => {
-            vec![Action::CloseArtistRadioPicker]
+            vec![SearchAction::CloseArtistRadioPicker.into()]
         }
         KeyCode::Enter => {
             let count = picker.count_input.parse::<usize>().unwrap_or(0);
             if count >= 1 && count <= 12 {
-                vec![Action::ArtistRadioPickerSetCount]
+                vec![SearchAction::ArtistRadioPickerSetCount.into()]
             } else {
                 vec![]
             }
@@ -55,9 +56,9 @@ fn handle_select_step(key: event::KeyEvent, picker: &mut crate::app::state::Arti
                 picker.query.clear();
                 picker.focus = SearchFocus::Input;
                 picker.item_index = 0;
-                return vec![Action::ArtistRadioPickerSearch];
+                return vec![SearchAction::ArtistRadioPickerSearch.into()];
             }
-            vec![Action::CloseArtistRadioPicker]
+            vec![SearchAction::CloseArtistRadioPicker.into()]
         }
         KeyCode::Enter => {
             match picker.focus {
@@ -71,7 +72,7 @@ fn handle_select_step(key: event::KeyEvent, picker: &mut crate::app::state::Arti
                 }
                 SearchFocus::Results => {
                     // Toggle artist selection, then auto-launch if max reached
-                    vec![Action::ArtistRadioPickerToggleArtist]
+                    vec![SearchAction::ArtistRadioPickerToggleArtist.into()]
                 }
             }
         }
@@ -111,7 +112,7 @@ fn handle_select_step(key: event::KeyEvent, picker: &mut crate::app::state::Arti
         // Tab launches when enough artists selected
         KeyCode::Tab => {
             if picker.selected_artists.len() == picker.max_artists {
-                vec![Action::ArtistRadioPickerLaunch]
+                vec![SearchAction::ArtistRadioPickerLaunch.into()]
             } else {
                 vec![]
             }
@@ -120,13 +121,13 @@ fn handle_select_step(key: event::KeyEvent, picker: &mut crate::app::state::Arti
             picker.query.pop();
             picker.focus = SearchFocus::Input;
             picker.item_index = 0;
-            vec![Action::ArtistRadioPickerSearch]
+            vec![SearchAction::ArtistRadioPickerSearch.into()]
         }
         KeyCode::Char(c) => {
             picker.query.push(c);
             picker.focus = SearchFocus::Input;
             picker.item_index = 0;
-            vec![Action::ArtistRadioPickerSearch]
+            vec![SearchAction::ArtistRadioPickerSearch.into()]
         }
         _ => vec![],
     }

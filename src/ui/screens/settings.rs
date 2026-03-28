@@ -246,17 +246,17 @@ fn render_account_content(frame: &mut Frame, state: &AppState, outer: Rect, area
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
-        let alias_count: usize = state.artist_aliases.values().map(|s| s.len()).sum();
+        let alias_count: usize = state.library.artist_aliases.values().map(|s| s.len()).sum();
 
         // Each row: (label, count, is_loading, refresh_category for age lookup)
         let rows: Vec<(&str, usize, bool, Option<RefreshCategory>)> = vec![
-            ("Artists", state.artists.len(), false, Some(RefreshCategory::Artists)),
-            ("Albums", state.albums.len(), false, Some(RefreshCategory::Albums)),
-            ("Tracks", state.all_tracks.len(), state.all_tracks.is_empty(), Some(RefreshCategory::AllTracks)),
-            ("Playlists", state.playlists.len(), false, Some(RefreshCategory::Playlists)),
-            ("Genres", state.genres.len(), false, Some(RefreshCategory::Genres)),
-            ("Moods", state.moods.len(), false, Some(RefreshCategory::Moods)),
-            ("Styles", state.styles.len(), false, Some(RefreshCategory::Styles)),
+            ("Artists", state.library.artists.len(), false, Some(RefreshCategory::Artists)),
+            ("Albums", state.library.albums.len(), false, Some(RefreshCategory::Albums)),
+            ("Tracks", state.library.all_tracks.len(), state.library.all_tracks.is_empty(), Some(RefreshCategory::AllTracks)),
+            ("Playlists", state.library.playlists.len(), false, Some(RefreshCategory::Playlists)),
+            ("Genres", state.library.genres.len(), false, Some(RefreshCategory::Genres)),
+            ("Moods", state.library.moods.len(), false, Some(RefreshCategory::Moods)),
+            ("Styles", state.library.styles.len(), false, Some(RefreshCategory::Styles)),
             ("Stations", state.stations.len(), false, Some(RefreshCategory::Stations)),
             ("Aliases", alias_count, false, None),
         ];

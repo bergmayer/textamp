@@ -5,6 +5,28 @@
 
 use std::collections::VecDeque;
 
+/// Generate `next()` and `prev()` methods for cyclic enums.
+///
+/// Given variants in order, `next()` advances to the next variant (wrapping around)
+/// and `prev()` goes to the previous variant (wrapping around).
+macro_rules! cyclic_enum {
+    ($name:ident, $($variant:ident),+ $(,)?) => {
+        impl $name {
+            const CYCLE_ORDER: &'static [$name] = &[$($name::$variant),+];
+
+            pub fn next(&self) -> Self {
+                let idx = Self::CYCLE_ORDER.iter().position(|v| v == self).unwrap_or(0);
+                Self::CYCLE_ORDER[(idx + 1) % Self::CYCLE_ORDER.len()]
+            }
+
+            pub fn prev(&self) -> Self {
+                let idx = Self::CYCLE_ORDER.iter().position(|v| v == self).unwrap_or(0);
+                Self::CYCLE_ORDER[(idx + Self::CYCLE_ORDER.len() - 1) % Self::CYCLE_ORDER.len()]
+            }
+        }
+    };
+}
+
 use crate::plex::models::{Album, Artist, Genre, Library, Playlist, PlexServer, RemotePlayer, Station, Track, SearchResults};
 use crate::miller::{MillerColumn, MillerState};
 use crate::plex::{CachedFolder, CachedPlaylistTracks};
@@ -1100,14 +1122,6 @@ impl ArtworkMode {
         }
     }
 
-    pub fn config_value(&self) -> &'static str {
-        match self {
-            ArtworkMode::Auto => "auto",
-            ArtworkMode::Halfblocks => "halfblocks",
-            ArtworkMode::Braille => "braille",
-        }
-    }
-
     pub fn from_config(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "halfblocks" | "ansi" => ArtworkMode::Halfblocks,
@@ -1116,14 +1130,9 @@ impl ArtworkMode {
         }
     }
 
-    pub fn next(&self) -> Self {
-        match self {
-            ArtworkMode::Auto => ArtworkMode::Halfblocks,
-            ArtworkMode::Halfblocks => ArtworkMode::Braille,
-            ArtworkMode::Braille => ArtworkMode::Auto,
-        }
-    }
 }
+
+cyclic_enum!(ArtworkMode, Auto, Halfblocks, Braille);
 
 /// Cache management state.
 #[derive(Debug)]
@@ -1333,36 +1342,13 @@ pub struct CompilationState {
     pub detected: bool,
 }
 
-/// Root application state.
-#[derive(Debug)]
-pub struct AppState {
-    // Connection
-    pub connection: ConnectionState,
-    pub libraries: Vec<Library>,
-    pub active_library: Option<String>,
-    pub available_servers: Vec<PlexServer>,
-    pub connected_server_url: Option<String>,
-
-    /// Libraries from all available servers: (server_identifier, server_name, libraries).
-    /// Only populated when multiple servers have music libraries.
-    pub all_server_libraries: Vec<(String, String, Vec<Library>)>,
-    /// Server identifier for the currently active library's server.
-    pub active_server_id: Option<String>,
-
-    // Authentication flow state
-    pub auth_state: AuthState,
-    /// True when user went through the login form (no stored credentials).
-    /// Used to ignore saved default_library and prefer "Music" by name.
-    pub is_fresh_login: bool,
-
-    // Navigation (musikcube-style)
-    pub view: View,
-    pub previous_view: Option<View>,  // For returning from Similar, Help, etc.
-    pub help_scroll: u16,  // Scroll position for help screen
-    pub browse_category: BrowseCategory,
-    pub focus: Focus,
-
-    // Library data cache with pagination info
+/// Library data — artists, albums, playlists, genres, and derived data.
+///
+/// Contains all cached data from the Plex library API, plus derived data
+/// like compilation detection and artist aliases.
+#[derive(Debug, Default)]
+pub struct LibraryData {
+    // Core collections
     pub artists: Vec<Artist>,
     pub artists_total: u32,
     pub artists_loading: bool,
@@ -1382,39 +1368,113 @@ pub struct AppState {
     pub compilations: CompilationState,
 
     // Artist aliases (uniform track artists that differ from album artist)
-    /// Maps album_artist_key → set of alias names (e.g. Robert Pollard → {"Guided by Voices"})
     pub artist_aliases: std::collections::HashMap<String, std::collections::HashSet<String>>,
-    /// Maps album_key → uniform track artist name (when all tracks agree and differ from album artist)
     pub album_display_artist: std::collections::HashMap<String, String>,
 
     // Genres, Artist Genres, Album Genres, Moods, and Styles
-    pub genres: Vec<Genre>,              // Actual genre tags from files
-    pub artist_genres: Vec<Genre>,       // Plex genres at artist level
-    pub album_genres: Vec<Genre>,        // Plex genres at album level
-    pub moods: Vec<Genre>,               // Moods use same structure as genres
-    pub styles: Vec<Genre>,              // Styles use same structure as genres
+    pub genres: Vec<Genre>,
+    pub artist_genres: Vec<Genre>,
+    pub album_genres: Vec<Genre>,
+    pub moods: Vec<Genre>,
+    pub styles: Vec<Genre>,
     pub genres_loading: bool,
     pub artist_genres_loading: bool,
     pub album_genres_loading: bool,
     pub moods_loading: bool,
     pub styles_loading: bool,
     pub genres_index: usize,
-    pub genre_content_type: GenreContentType,  // Genres / Artist / Album / Moods / Styles cycle
-    pub genre_albums: Vec<Album>,  // Albums in selected genre/mood
+    pub genre_content_type: GenreContentType,
+    pub genre_albums: Vec<Album>,
     pub genre_albums_index: usize,
 
-    // Library sub-mode for Alt+S cycling (Normal / AllByArtist / AllShuffled)
+    // Library sub-mode for Alt+S cycling
     pub library_sub_mode: LibrarySubMode,
 
-    // Right panel content (depends on browse category and depth)
-    // For Artists: first shows albums, then tracks when album selected
-    // For Albums/Playlists: shows tracks directly
+    // Right panel content
     pub right_panel_mode: RightPanelMode,
     pub selected_artist_albums: Vec<Album>,
     pub selected_album_tracks: Vec<Track>,
     pub selected_artist_name: String,
     pub selected_album_title: String,
     pub right_panel_loading: bool,
+}
+
+/// Search/filter state.
+#[derive(Debug, Clone, Default)]
+pub struct SearchState {
+    pub query: String,
+    pub results: Option<SearchResults>,
+    pub track_loading: bool,
+    pub track_version: u64,
+    pub focus: SearchFocus,
+    pub pending_album_key: Option<String>,
+    pub pending_track_key: Option<String>,
+    pub tab: SearchTab,
+}
+
+/// Queue and playback mode state.
+#[derive(Debug)]
+pub struct QueueState {
+    pub tracks: Vec<Track>,
+    pub index: Option<usize>,
+    pub selected: std::collections::BTreeSet<usize>,
+    pub original: Vec<Track>,
+    pub sort_mode: QueueSortMode,
+    pub history: VecDeque<Track>,
+    pub undo_snapshot: Option<QueueSnapshot>,
+    pub shuffle_undo_queue: Option<Vec<Track>>,
+    pub shuffle_undo_index: Option<usize>,
+}
+
+impl Default for QueueState {
+    fn default() -> Self {
+        Self {
+            tracks: Vec::new(),
+            index: None,
+            selected: std::collections::BTreeSet::new(),
+            original: Vec::new(),
+            sort_mode: QueueSortMode::default(),
+            history: VecDeque::new(),
+            undo_snapshot: None,
+            shuffle_undo_queue: None,
+            shuffle_undo_index: None,
+        }
+    }
+}
+
+/// Root application state.
+#[derive(Debug)]
+pub struct AppState {
+    // Connection
+    pub connection: ConnectionState,
+    pub libraries: Vec<Library>,
+    pub active_library: Option<String>,
+    pub available_servers: Vec<PlexServer>,
+    pub connected_server_url: Option<String>,
+
+    /// Libraries from all available servers: (server_identifier, server_name, libraries).
+    pub all_server_libraries: Vec<(String, String, Vec<Library>)>,
+    pub active_server_id: Option<String>,
+
+    // Authentication flow state
+    pub auth_state: AuthState,
+    pub is_fresh_login: bool,
+
+    // Navigation (musikcube-style)
+    pub view: View,
+    pub previous_view: Option<View>,
+    pub help_scroll: u16,
+    pub browse_category: BrowseCategory,
+    pub focus: Focus,
+
+    // Category column (column 0 in Browse view)
+    /// Whether the category selector column has keyboard focus.
+    pub category_column_focused: bool,
+    /// Selected index in the category column (0=Library, 1=Playlists, 2=Genres, 3=Folders).
+    pub category_column_index: usize,
+
+    // Library data (artists, albums, playlists, genres, etc.)
+    pub library: LibraryData,
 
     // Similar content (Plex sonic similarity)
     pub similar: SimilarViewState,
@@ -1424,36 +1484,19 @@ pub struct AppState {
 
     // Playback
     pub playback: PlaybackState,
-    pub queue: Vec<Track>,
-    pub queue_index: Option<usize>,
-    /// Multi-selected queue track indices (relative to queue vec, not including history)
-    pub queue_selected: std::collections::BTreeSet<usize>,
-    /// Original queue order (for restoring after sort/shuffle)
-    pub queue_original: Vec<Track>,
-    /// Current queue sort mode
-    pub queue_sort_mode: QueueSortMode,
-    /// Play history - recently played tracks for scrollback
-    pub play_history: VecDeque<Track>,
+    pub queue: QueueState,
     /// Whether user is currently dragging the seek indicator
     pub seeking_drag: bool,
     pub volume_drag: bool,
     /// Consecutive playback errors (for auto-skip with limit)
     pub consecutive_playback_errors: u32,
     /// Plex session identifier for timeline reporting.
-    /// Generated when starting a new playback context (queue, radio, etc.).
-    /// Used to correlate all timeline reports to a single session.
     pub plex_session_id: Option<String>,
     /// Last time a progress report was sent to Plex (for periodic ~10s updates).
     pub last_progress_report: Option<std::time::Instant>,
 
     // Search
-    pub search_query: String,
-    pub search_results: Option<SearchResults>,
-    pub search_track_loading: bool,  // True when tracks tab is doing async API search
-    pub search_track_version: u64,   // Debounce counter for track API searches
-    pub search_focus: SearchFocus,
-    pub pending_album_key: Option<String>,   // Album to auto-select after loading artist albums
-    pub pending_track_key: Option<String>,   // Track to auto-select after loading album tracks
+    pub search: SearchState,
 
     // UI state
     pub list_state: ListStates,
@@ -1518,6 +1561,9 @@ pub struct AppState {
     /// Transcode bitrate in kbps. 0 = disabled (direct play), e.g. 256 = transcode to 256kbps MP3.
     pub transcode_kbps: u32,
 
+    /// Whether audio output is available. False when audio init failed/timed out.
+    pub audio_available: bool,
+
     // NEW: Playback mode (Queue vs Radio)
     pub playback_mode: PlaybackMode,
 
@@ -1564,23 +1610,8 @@ pub struct AppState {
     // Spectrogram state
     pub spectrogram: SpectrogramState,
 
-    // (toast and status notifications are in `notifications` field above)
-
-    // (confirm_dialog moved to popups)
-
     // Inline list filter state (/ key in browse view)
     pub list_filter: ListFilterState,
-
-    // (search_popup_active, radio_launcher, adventure_launcher, artist_radio_picker moved to popups)
-
-    // Queue undo state
-    pub queue_undo_snapshot: Option<QueueSnapshot>,
-    /// Saved queue for shuffle toggle undo
-    pub shuffle_undo_queue: Option<Vec<Track>>,
-    /// Saved queue index for shuffle toggle undo
-    pub shuffle_undo_index: Option<usize>,
-
-    // (library_picker, sort_popup, artist_bio_popup moved to popups)
 
     /// Auto-drill flag: when true, the next load action replaces the child column
     /// instead of pushing a new one, and does not change focus.
@@ -1950,61 +1981,19 @@ impl AppState {
             help_scroll: 0,
             browse_category: BrowseCategory::Library,
             focus: Focus::Left,
-            artists: Vec::new(),
-            artists_total: 0,
-            artists_loading: false,
-            albums: Vec::new(),
-            albums_total: 0,
-            albums_loading: false,
-            playlists: Vec::new(),
-            playlists_loading: false,
-            all_tracks: Vec::new(),
-            track_artists: Vec::new(),
-            compilations: CompilationState::default(),
-            artist_aliases: std::collections::HashMap::new(),
-            album_display_artist: std::collections::HashMap::new(),
-            genres: Vec::new(),
-            artist_genres: Vec::new(),
-            album_genres: Vec::new(),
-            moods: Vec::new(),
-            styles: Vec::new(),
-            genres_loading: false,
-            artist_genres_loading: false,
-            album_genres_loading: false,
-            moods_loading: false,
-            styles_loading: false,
-            genres_index: 0,
-            genre_content_type: GenreContentType::default(),
-            genre_albums: Vec::new(),
-            genre_albums_index: 0,
-            library_sub_mode: LibrarySubMode::default(),
-            right_panel_mode: RightPanelMode::Empty,
-            selected_artist_albums: Vec::new(),
-            selected_album_tracks: Vec::new(),
-            selected_artist_name: String::new(),
-            selected_album_title: String::new(),
-            right_panel_loading: false,
+            category_column_focused: true,
+            category_column_index: 0,
+            library: LibraryData::default(),
             similar: SimilarViewState::default(),
             related: RelatedViewState::default(),
             playback: PlaybackState::default(),
-            queue: Vec::new(),
-            queue_index: None,
-            queue_selected: std::collections::BTreeSet::new(),
-            queue_original: Vec::new(),
-            queue_sort_mode: QueueSortMode::default(),
-            play_history: VecDeque::new(),
+            queue: QueueState::default(),
             seeking_drag: false,
             volume_drag: false,
             consecutive_playback_errors: 0,
             plex_session_id: None,
             last_progress_report: None,
-            search_query: String::new(),
-            search_results: None,
-            search_track_loading: false,
-            search_track_version: 0,
-            search_focus: SearchFocus::default(),
-            pending_album_key: None,
-            pending_track_key: None,
+            search: SearchState::default(),
             list_state: ListStates::default(),
             should_quit: false,
             pending_cache_save: None,
@@ -2030,6 +2019,7 @@ impl AppState {
             artwork: ArtworkState::default(),
             radio_state: RadioState::default(),
             transcode_kbps: 0,
+            audio_available: true,
             playback_mode: PlaybackMode::None,
             radio: RadioPlaybackState::default(),
             station_nav: StationNavigationState::default(),
@@ -2047,13 +2037,7 @@ impl AppState {
             cache_mgmt: CacheManagement::default(),
             waveform: WaveformState::default(),
             spectrogram: SpectrogramState::default(),
-            // (toast, confirm_dialog in notifications/popups above)
             list_filter: ListFilterState::default(),
-            // (search_popup, radio_launcher, etc. in popups above)
-            queue_undo_snapshot: None,
-            shuffle_undo_queue: None,
-            shuffle_undo_index: None,
-            // (library_picker, sort_popup, artist_bio in popups above)
             auto_drill_pending: false,
             marquee: std::cell::RefCell::new(MarqueeState::default()),
             marquee_subtitle: std::cell::RefCell::new(MarqueeState::default()),
@@ -2090,14 +2074,14 @@ impl AppState {
 
     /// Build artist root items, using compilation-aware version if compilations are detected.
     pub fn build_artist_root_items(&self) -> Vec<BrowseItem> {
-        if self.compilations.detected {
+        if self.library.compilations.detected {
             BrowseItem::artist_root_items_with_compilations(
-                &self.artists,
-                !self.compilations.albums.is_empty(),
-                &self.compilations.artist_keys,
+                &self.library.artists,
+                !self.library.compilations.albums.is_empty(),
+                &self.library.compilations.artist_keys,
             )
         } else {
-            BrowseItem::artist_root_items(&self.artists)
+            BrowseItem::artist_root_items(&self.library.artists)
         }
     }
 
@@ -2110,18 +2094,18 @@ impl AppState {
     pub fn build_track_artists(&mut self) {
         use std::collections::HashMap;
 
-        if self.all_tracks.is_empty() {
+        if self.library.all_tracks.is_empty() {
             return;
         }
 
         // Build name→Artist lookup from Plex artists (case-insensitive)
-        let plex_artist_by_name: HashMap<String, &Artist> = self.artists.iter()
+        let plex_artist_by_name: HashMap<String, &Artist> = self.library.artists.iter()
             .map(|a| (a.title.to_lowercase(), a))
             .collect();
 
         // Collect unique artist names from tracks
         let mut seen: HashMap<String, Artist> = HashMap::new();
-        for track in &self.all_tracks {
+        for track in &self.library.all_tracks {
             let artist_name = track.original_title.as_deref()
                 .unwrap_or_else(|| track.artist_name());
             if artist_name.is_empty() {
@@ -2154,8 +2138,8 @@ impl AppState {
             crate::app::handlers::helpers::sort_key(&a.title)
                 .cmp(&crate::app::handlers::helpers::sort_key(&b.title))
         });
-        self.track_artists = track_artists;
-        tracing::info!("Built {} track-level artists from {} tracks", self.track_artists.len(), self.all_tracks.len());
+        self.library.track_artists = track_artists;
+        tracing::info!("Built {} track-level artists from {} tracks", self.library.track_artists.len(), self.library.all_tracks.len());
     }
 
     /// Compute artist aliases from uniform track artists on non-compilation albums.
@@ -2165,8 +2149,8 @@ impl AppState {
     /// Example: Robert Pollard (album artist) → "Guided by Voices" (track artist alias).
     pub fn build_artist_aliases(&mut self) {
         let (aliases, album_display) = crate::services::artist_alias_service::compute_aliases(
-            &self.all_tracks,
-            &self.albums,
+            &self.library.all_tracks,
+            &self.library.albums,
         );
 
         let alias_count: usize = aliases.values().map(|s| s.len()).sum();
@@ -2177,8 +2161,8 @@ impl AppState {
             album_display.len(),
         );
 
-        self.artist_aliases = aliases;
-        self.album_display_artist = album_display;
+        self.library.artist_aliases = aliases;
+        self.library.album_display_artist = album_display;
     }
 
     /// Switch to a new view, deactivating the inline filter and clearing queue multi-select.
@@ -2187,9 +2171,17 @@ impl AppState {
             self.list_filter.deactivate();
         }
         if view != View::Queue {
-            self.queue_selected.clear();
+            self.queue.selected.clear();
         }
         self.view = view;
+    }
+
+    /// Set browse category, sync category_column_index, and unfocus category column.
+    pub fn set_browse_category(&mut self, cat: BrowseCategory) {
+        self.browse_category = cat;
+        self.category_column_index = BrowseCategory::all().iter()
+            .position(|c| *c == cat).unwrap_or(0);
+        self.category_column_focused = false;
     }
 
     pub fn set_error(&mut self, msg: String) {
@@ -2222,11 +2214,11 @@ impl AppState {
             radio_snapshot: Some(self.radio.clone()),
             radio_state_snapshot: Some(self.radio_state.clone()),
         };
-        // Same conversion pattern as DJ mode (dispatch_radio.rs)
-        self.queue = self.radio.tracks.clone();
-        self.queue_index = self.radio.track_index;
+        // Take tracks from radio instead of cloning (avoids redundant allocation)
+        self.queue.tracks = std::mem::take(&mut self.radio.tracks);
+        self.queue.index = self.radio.track_index;
         self.playback_mode = PlaybackMode::Queue;
-        if let Some(idx) = self.queue_index {
+        if let Some(idx) = self.queue.index {
             self.list_state.queue_index = idx;
         }
         self.radio.clear();
@@ -2269,7 +2261,7 @@ impl AppState {
                     BrowseItem::CompilationTracks { .. } => return true,
                     // Compilation album track column
                     BrowseItem::Album { key, .. } => {
-                        if self.compilations.albums.iter().any(|a| a.rating_key == *key) {
+                        if self.library.compilations.albums.iter().any(|a| a.rating_key == *key) {
                             return true;
                         }
                     }
@@ -2381,7 +2373,7 @@ impl AppState {
     pub fn current_track(&self) -> Option<&Track> {
         match self.playback_mode {
             PlaybackMode::Queue | PlaybackMode::None => {
-                self.queue_index.and_then(|idx| self.queue.get(idx))
+                self.queue.index.and_then(|idx| self.queue.tracks.get(idx))
             }
             PlaybackMode::Radio => {
                 self.radio.current_track()
@@ -2397,21 +2389,21 @@ impl AppState {
     /// Get the current category list length.
     pub fn category_len(&self) -> usize {
         match self.browse_category {
-            BrowseCategory::Library => self.artists.len(),
-            BrowseCategory::Playlists => self.playlists.len(),
+            BrowseCategory::Library => self.library.artists.len(),
+            BrowseCategory::Playlists => self.library.playlists.len(),
             BrowseCategory::Genres => self.current_genre_list().len(),
             BrowseCategory::Folders => 0, // Handled separately via folder_state
         }
     }
 
     /// Get the current genre list based on content type.
-    pub fn current_genre_list(&self) -> &Vec<Genre> {
-        match self.genre_content_type {
-            GenreContentType::Genres => &self.genres,
-            GenreContentType::ArtistGenres => &self.artist_genres,
-            GenreContentType::AlbumGenres => &self.album_genres,
-            GenreContentType::Moods => &self.moods,
-            GenreContentType::Styles => &self.styles,
+    pub fn current_genre_list(&self) -> &[Genre] {
+        match self.library.genre_content_type {
+            GenreContentType::Genres => &self.library.genres,
+            GenreContentType::ArtistGenres => &self.library.artist_genres,
+            GenreContentType::AlbumGenres => &self.library.album_genres,
+            GenreContentType::Moods => &self.library.moods,
+            GenreContentType::Styles => &self.library.styles,
         }
     }
 
@@ -2420,7 +2412,7 @@ impl AppState {
         match self.browse_category {
             BrowseCategory::Library => self.list_state.artists_index,
             BrowseCategory::Playlists => self.list_state.playlists_index,
-            BrowseCategory::Genres => self.genres_index,
+            BrowseCategory::Genres => self.library.genres_index,
             BrowseCategory::Folders => 0, // Handled separately via folder_state
         }
     }
@@ -2430,7 +2422,7 @@ impl AppState {
         match self.browse_category {
             BrowseCategory::Library => self.list_state.artists_index = idx,
             BrowseCategory::Playlists => self.list_state.playlists_index = idx,
-            BrowseCategory::Genres => self.genres_index = idx,
+            BrowseCategory::Genres => self.library.genres_index = idx,
             BrowseCategory::Folders => {}, // Handled separately via folder_state
         }
     }
@@ -2439,14 +2431,14 @@ impl AppState {
     pub fn selected_category_key(&self) -> Option<String> {
         match self.browse_category {
             BrowseCategory::Library => {
-                self.artists.get(self.list_state.artists_index)
+                self.library.artists.get(self.list_state.artists_index)
                     .map(|a| a.rating_key.clone())
             }
             BrowseCategory::Playlists => {
-                self.playlists.get(self.list_state.playlists_index)
+                self.library.playlists.get(self.list_state.playlists_index)
                     .map(|p| p.rating_key.clone())
             }
-            BrowseCategory::Genres => self.current_genre_list().get(self.genres_index)
+            BrowseCategory::Genres => self.current_genre_list().get(self.library.genres_index)
                 .map(|g| g.effective_key().to_string()),
             BrowseCategory::Folders => None, // Handled separately via folder_state
         }
@@ -2456,14 +2448,14 @@ impl AppState {
     pub fn selected_category_title(&self) -> Option<String> {
         match self.browse_category {
             BrowseCategory::Library => {
-                self.artists.get(self.list_state.artists_index)
+                self.library.artists.get(self.list_state.artists_index)
                     .map(|a| a.title.clone())
             }
             BrowseCategory::Playlists => {
-                self.playlists.get(self.list_state.playlists_index)
+                self.library.playlists.get(self.list_state.playlists_index)
                     .map(|p| p.title.clone())
             }
-            BrowseCategory::Genres => self.current_genre_list().get(self.genres_index)
+            BrowseCategory::Genres => self.current_genre_list().get(self.library.genres_index)
                 .map(|g| g.title.clone()),
             BrowseCategory::Folders => None, // Handled separately via folder_state
         }
@@ -2472,12 +2464,12 @@ impl AppState {
     /// Add a track to play history.
     pub fn add_to_history(&mut self, track: Track) {
         // Don't add duplicates consecutively
-        if self.play_history.back().map(|t| &t.rating_key) == Some(&track.rating_key) {
+        if self.queue.history.back().map(|t| &t.rating_key) == Some(&track.rating_key) {
             return;
         }
-        self.play_history.push_back(track);
-        while self.play_history.len() > MAX_HISTORY_SIZE {
-            self.play_history.pop_front();
+        self.queue.history.push_back(track);
+        while self.queue.history.len() > MAX_HISTORY_SIZE {
+            self.queue.history.pop_front();
         }
     }
 }
@@ -2532,23 +2524,9 @@ pub enum VisualizerTab {
     Spectrogram,
 }
 
+cyclic_enum!(VisualizerTab, Waveform, Spectrum, Spectrogram);
+
 impl VisualizerTab {
-    pub fn next(&self) -> Self {
-        match self {
-            VisualizerTab::Waveform => VisualizerTab::Spectrum,
-            VisualizerTab::Spectrum => VisualizerTab::Spectrogram,
-            VisualizerTab::Spectrogram => VisualizerTab::Waveform,
-        }
-    }
-
-    pub fn prev(&self) -> Self {
-        match self {
-            VisualizerTab::Waveform => VisualizerTab::Spectrogram,
-            VisualizerTab::Spectrum => VisualizerTab::Waveform,
-            VisualizerTab::Spectrogram => VisualizerTab::Spectrum,
-        }
-    }
-
     pub fn name(&self) -> &'static str {
         match self {
             VisualizerTab::Waveform => "waveform",
@@ -2576,29 +2554,9 @@ pub enum GenreTab {
     Style,
 }
 
+cyclic_enum!(GenreTab, All, Library, Artist, Album, Mood, Style);
+
 impl GenreTab {
-    pub fn next(&self) -> Self {
-        match self {
-            GenreTab::All => GenreTab::Library,
-            GenreTab::Library => GenreTab::Artist,
-            GenreTab::Artist => GenreTab::Album,
-            GenreTab::Album => GenreTab::Mood,
-            GenreTab::Mood => GenreTab::Style,
-            GenreTab::Style => GenreTab::All,
-        }
-    }
-
-    pub fn prev(&self) -> Self {
-        match self {
-            GenreTab::All => GenreTab::Style,
-            GenreTab::Library => GenreTab::All,
-            GenreTab::Artist => GenreTab::Library,
-            GenreTab::Album => GenreTab::Artist,
-            GenreTab::Mood => GenreTab::Album,
-            GenreTab::Style => GenreTab::Mood,
-        }
-    }
-
     pub fn name(&self) -> &'static str {
         match self {
             GenreTab::All => "genres",
@@ -2641,16 +2599,11 @@ pub enum SearchTab {
     Genres,
 }
 
+cyclic_enum!(SearchTab, Global, Artists, Albums, Playlists, Tracks, Genres);
+
 impl SearchTab {
     pub fn all() -> &'static [SearchTab] {
-        &[
-            SearchTab::Global,
-            SearchTab::Artists,
-            SearchTab::Albums,
-            SearchTab::Playlists,
-            SearchTab::Tracks,
-            SearchTab::Genres,
-        ]
+        Self::CYCLE_ORDER
     }
 
     pub fn name(&self) -> &'static str {
@@ -2661,28 +2614,6 @@ impl SearchTab {
             SearchTab::Playlists => "playlists",
             SearchTab::Tracks => "tracks",
             SearchTab::Genres => "genres",
-        }
-    }
-
-    pub fn next(&self) -> Self {
-        match self {
-            SearchTab::Global => SearchTab::Artists,
-            SearchTab::Artists => SearchTab::Albums,
-            SearchTab::Albums => SearchTab::Playlists,
-            SearchTab::Playlists => SearchTab::Tracks,
-            SearchTab::Tracks => SearchTab::Genres,
-            SearchTab::Genres => SearchTab::Global,
-        }
-    }
-
-    pub fn prev(&self) -> Self {
-        match self {
-            SearchTab::Global => SearchTab::Genres,
-            SearchTab::Artists => SearchTab::Global,
-            SearchTab::Albums => SearchTab::Artists,
-            SearchTab::Playlists => SearchTab::Albums,
-            SearchTab::Tracks => SearchTab::Playlists,
-            SearchTab::Genres => SearchTab::Tracks,
         }
     }
 }
@@ -2734,15 +2665,7 @@ pub enum LibrarySubMode {
     AllShuffled,   // All albums shuffled
 }
 
-impl LibrarySubMode {
-    pub fn next(&self) -> Self {
-        match self {
-            LibrarySubMode::Normal => LibrarySubMode::AllByArtist,
-            LibrarySubMode::AllByArtist => LibrarySubMode::AllShuffled,
-            LibrarySubMode::AllShuffled => LibrarySubMode::Normal,
-        }
-    }
-}
+cyclic_enum!(LibrarySubMode, Normal, AllByArtist, AllShuffled);
 
 
 /// Genre content type - genres, normalized genres, moods, or styles.
@@ -2756,29 +2679,9 @@ pub enum GenreContentType {
     Styles,
 }
 
+cyclic_enum!(GenreContentType, Genres, ArtistGenres, AlbumGenres, Moods, Styles);
+
 impl GenreContentType {
-    /// Cycle to the next content type (Genres -> Artist -> Album -> Moods -> Styles -> Genres).
-    pub fn next(&self) -> Self {
-        match self {
-            GenreContentType::Genres => GenreContentType::ArtistGenres,
-            GenreContentType::ArtistGenres => GenreContentType::AlbumGenres,
-            GenreContentType::AlbumGenres => GenreContentType::Moods,
-            GenreContentType::Moods => GenreContentType::Styles,
-            GenreContentType::Styles => GenreContentType::Genres,
-        }
-    }
-
-    /// Cycle to the previous content type (Genres <- Artist <- Album <- Moods <- Styles <- Genres).
-    pub fn prev(&self) -> Self {
-        match self {
-            GenreContentType::Genres => GenreContentType::Styles,
-            GenreContentType::ArtistGenres => GenreContentType::Genres,
-            GenreContentType::AlbumGenres => GenreContentType::ArtistGenres,
-            GenreContentType::Moods => GenreContentType::AlbumGenres,
-            GenreContentType::Styles => GenreContentType::Moods,
-        }
-    }
-
     pub fn name(&self) -> &'static str {
         match self {
             GenreContentType::Genres => "genres",
@@ -2929,29 +2832,17 @@ pub enum RadioLauncherTab {
     Artists,
 }
 
+cyclic_enum!(RadioLauncherTab, All, Artists);
+
 impl RadioLauncherTab {
     pub fn all() -> &'static [RadioLauncherTab] {
-        &[RadioLauncherTab::All, RadioLauncherTab::Artists]
+        Self::CYCLE_ORDER
     }
 
     pub fn name(&self) -> &'static str {
         match self {
             RadioLauncherTab::All => "All",
             RadioLauncherTab::Artists => "Artists",
-        }
-    }
-
-    pub fn next(&self) -> Self {
-        match self {
-            RadioLauncherTab::All => RadioLauncherTab::Artists,
-            RadioLauncherTab::Artists => RadioLauncherTab::All,
-        }
-    }
-
-    pub fn prev(&self) -> Self {
-        match self {
-            RadioLauncherTab::All => RadioLauncherTab::Artists,
-            RadioLauncherTab::Artists => RadioLauncherTab::All,
         }
     }
 }

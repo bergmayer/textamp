@@ -1,5 +1,6 @@
 //! Settings and Help view key handling.
 
+use crate::app::action::*;
 use crossterm::event::{self, KeyCode};
 
 use crate::app::Action;
@@ -12,7 +13,7 @@ pub(super) fn handle_help_keys(key: event::KeyEvent, state: &mut AppState) -> Ve
     match key.code {
         KeyCode::Esc | KeyCode::F(1) | KeyCode::Char('?') => {
             state.help_scroll = 0;  // Reset scroll when closing
-            vec![Action::SetView(View::Browse)]
+            vec![NavigationAction::SetView(View::Browse).into()]
         }
         KeyCode::Up => {
             state.help_scroll = state.help_scroll.saturating_sub(1);
@@ -69,7 +70,7 @@ pub(super) fn handle_settings_keys(key: event::KeyEvent, state: &mut AppState, c
             KeyCode::Enter => {
                 // Save credential and exit edit mode
                 state.settings_state.editing_credential = None;
-                return vec![Action::SaveCredentials];
+                return vec![SettingsAction::SaveCredentials.into()];
             }
             KeyCode::Backspace => {
                 // Delete last character
@@ -108,7 +109,7 @@ pub(super) fn handle_settings_keys(key: event::KeyEvent, state: &mut AppState, c
                 state.settings_state.editing_credential = None;
                 vec![]
             } else {
-                vec![Action::SetView(View::Browse)]
+                vec![NavigationAction::SetView(View::Browse).into()]
             }
         }
         // Panel switching
@@ -236,16 +237,16 @@ pub(super) fn handle_settings_keys(key: event::KeyEvent, state: &mut AppState, c
                     }
                     2 => {
                         // Sign In button - authenticate with entered credentials
-                        vec![Action::SettingsSignIn]
+                        vec![SettingsAction::SettingsSignIn.into()]
                     }
                     _ => {
                         // Server selection (index 3+)
-                        vec![Action::SettingsSelect]
+                        vec![SettingsAction::SettingsSelect.into()]
                     }
                 }
             } else {
                 // Enter on content -> select item
-                vec![Action::SettingsSelect]
+                vec![SettingsAction::SettingsSelect.into()]
             }
         }
         _ => vec![],

@@ -215,11 +215,13 @@ fn build_right_content(state: &AppState) -> RightContent {
             slider_bar = Some((bar_offset, bar_width));
         }
 
-        // Speaker icon + percentage
-        let vol_pct = (state.playback.volume * 100.0) as u8;
-        if state.playback.muted {
+        // Speaker icon + percentage (or no-audio indicator)
+        if !state.audio_available {
+            right.push_str("🔇 no audio");
+        } else if state.playback.muted {
             right.push_str("🔇 muted");
         } else {
+            let vol_pct = (state.playback.volume * 100.0) as u8;
             right.push_str(&format!("🔊 {}%", vol_pct));
         }
     }

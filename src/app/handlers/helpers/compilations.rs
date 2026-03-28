@@ -1,5 +1,6 @@
 //! Compilation detection from cached track data.
 
+use crate::app::event::*;
 use std::collections::{HashMap, HashSet};
 
 use crate::plex::models::{Album, Artist, Track};
@@ -18,11 +19,11 @@ pub fn maybe_detect(
     _client: &PlexClient,
 ) {
     // Already detected (or currently detecting)
-    if state.compilations.detected {
+    if state.library.compilations.detected {
         return;
     }
     // Need artists, albums, and all_tracks loaded
-    if state.artists.is_empty() || state.albums.is_empty() || state.all_tracks.is_empty() {
+    if state.library.artists.is_empty() || state.library.albums.is_empty() || state.library.all_tracks.is_empty() {
         return;
     }
     // Need an active library
@@ -32,31 +33,31 @@ pub fn maybe_detect(
 
     tracing::info!(
         "Starting compilation detection: {} albums, {} artists, {} tracks",
-        state.albums.len(),
-        state.artists.len(),
-        state.all_tracks.len()
+        state.library.albums.len(),
+        state.library.artists.len(),
+        state.library.all_tracks.len()
     );
 
     // Pure function — no API calls needed
     let result = detect_compilations_from_tracks(
-        &state.albums,
-        &state.all_tracks,
-        &state.artists,
-        &state.artist_aliases,
+        &state.library.albums,
+        &state.library.all_tracks,
+        &state.library.artists,
+        &state.library.artist_aliases,
     );
 
     let tx = event_tx.clone();
     // Send result via event (keeps same pattern, could be made sync but event
     // pattern ensures consistent state update path)
     tokio::spawn(async move {
-        let _ = tx.send(Event::CompilationsDetected {
+        let _ = tx.send(PreloadEvent::CompilationsDetected {
             library_key: lib_key,
             albums: result.confirmed_compilations,
             artist_only_keys: result.artist_only_keys,
             track_artist_keys: result.compilation_track_artist_keys,
             artist_compilation_map: result.artist_compilation_map,
             single_artist_compilations: result.single_artist_compilations,
-        }).await;
+        }.into()).await;
     });
 }
 

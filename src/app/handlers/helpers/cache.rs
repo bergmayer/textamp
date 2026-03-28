@@ -1,5 +1,6 @@
 //! Cache saving and background data refresh.
 
+use crate::app::event::*;
 use crate::app::{AppState, Event};
 use crate::plex::LibraryCache;
 use tokio::sync::mpsc;
@@ -42,9 +43,9 @@ pub fn maybe_save_cache_async(event_tx: &mpsc::Sender<Event>, state: &mut AppSta
     if let Some(&ts) = state.cache_mgmt.category_timestamps.get(&crate::app::state::RefreshCategory::Playlists) {
         cache_data.playlist_timestamp = ts;
     }
-    cache_data.artists = state.artists.clone();
-    cache_data.albums = state.albums.clone();
-    cache_data.playlists = state.playlists.clone();
+    cache_data.artists = state.library.artists.clone();
+    cache_data.albums = state.library.albums.clone();
+    cache_data.playlists = state.library.playlists.clone();
     if let Some(ref folder_state) = state.folder_state {
         if folder_state.library_key == lib_key {
             if let Some(root_col) = folder_state.columns.first() {
@@ -64,11 +65,11 @@ pub fn maybe_save_cache_async(event_tx: &mpsc::Sender<Event>, state: &mut AppSta
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
     };
-    cache_data.genres = state.genres.clone();
-    cache_data.artist_genres = state.artist_genres.clone();
-    cache_data.album_genres = state.album_genres.clone();
-    cache_data.moods = state.moods.clone();
-    cache_data.styles = state.styles.clone();
+    cache_data.genres = state.library.genres.clone();
+    cache_data.artist_genres = state.library.artist_genres.clone();
+    cache_data.album_genres = state.library.album_genres.clone();
+    cache_data.moods = state.library.moods.clone();
+    cache_data.styles = state.library.styles.clone();
     // Save root column stations (not state.stations which may be drilled children)
     cache_data.stations = state.station_nav.columns.first()
         .map(|c| c.stations.clone())
@@ -77,23 +78,23 @@ pub fn maybe_save_cache_async(event_tx: &mpsc::Sender<Event>, state: &mut AppSta
 
     // All tracks + track-level artists + aliases
     // Only save if non-empty to avoid overwriting cached data when preload is in-flight
-    if !state.all_tracks.is_empty() {
-        cache_data.all_tracks = state.all_tracks.clone();
-        cache_data.track_artists = state.track_artists.clone();
+    if !state.library.all_tracks.is_empty() {
+        cache_data.all_tracks = state.library.all_tracks.clone();
+        cache_data.track_artists = state.library.track_artists.clone();
     }
-    cache_data.artist_aliases = state.artist_aliases.clone();
-    cache_data.album_display_artist = state.album_display_artist.clone();
+    cache_data.artist_aliases = state.library.artist_aliases.clone();
+    cache_data.album_display_artist = state.library.album_display_artist.clone();
 
     // Compilation detection results
-    cache_data.compilation_albums = state.compilations.albums.clone();
-    cache_data.compilation_artist_keys = state.compilations.artist_keys.clone();
-    cache_data.compilation_track_artist_keys = state.compilations.track_artist_keys.clone();
-    cache_data.artist_compilation_map = state.compilations.artist_map.clone();
-    cache_data.single_artist_compilations = state.compilations.single_artist.clone();
+    cache_data.compilation_albums = state.library.compilations.albums.clone();
+    cache_data.compilation_artist_keys = state.library.compilations.artist_keys.clone();
+    cache_data.compilation_track_artist_keys = state.library.compilations.track_artist_keys.clone();
+    cache_data.artist_compilation_map = state.library.compilations.artist_map.clone();
+    cache_data.single_artist_compilations = state.library.compilations.single_artist.clone();
 
     // Save non-smart playlist tracks to disk cache
     for (key, cached) in &state.playlist_tracks_cache {
-        let is_smart = state.playlists.iter().any(|p| p.rating_key == *key && p.smart);
+        let is_smart = state.library.playlists.iter().any(|p| p.rating_key == *key && p.smart);
         if !is_smart {
             cache_data.playlist_tracks.insert(key.clone(), cached.clone());
         }
@@ -127,6 +128,6 @@ pub fn maybe_save_cache_async(event_tx: &mpsc::Sender<Event>, state: &mut AppSta
             }
         }
 
-        let _ = event_tx.send(Event::CacheSaved).await;
+        let _ = event_tx.send(CacheEvent::CacheSaved.into()).await;
     });
 }

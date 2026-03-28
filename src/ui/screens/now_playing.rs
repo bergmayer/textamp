@@ -271,7 +271,7 @@ fn render_station_panel(frame: &mut Frame, state: &AppState, area: Rect) {
             let is_active_station = active_station_key == Some(station.key.as_str());
             let is_active_dj = is_dj && active_dj_mode.map(|m| m.key() == station.key.as_str()).unwrap_or(false);
             let is_friendganger = station.key == "dj:friendganger";
-            let is_active_shuffle = station.key == "remix:shuffle" && state.shuffle_undo_queue.is_some();
+            let is_active_shuffle = station.key == "remix:shuffle" && state.queue.shuffle_undo_queue.is_some();
             let is_ancestor_of_playing = ancestor_key == Some(station.key.as_str());
 
             // Build display text with prefix
@@ -337,7 +337,7 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
     // Title depends on playback mode
     let title = match state.playback_mode {
         PlaybackMode::Radio => {
-            let suffix = if state.queue_sort_mode == QueueSortMode::Shuffle { " (shuffled)" } else { "" };
+            let suffix = if state.queue.sort_mode == QueueSortMode::Shuffle { " (shuffled)" } else { "" };
             if let Some(ref station) = state.radio.active_station {
                 format!(" {}{} ", station.title, suffix)
             } else if let Some(ref seed) = state.radio.seed {
@@ -351,7 +351,7 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
             if let Some(dj) = state.dj.active_mode {
                 parts.push(format!("({})", dj.name()));
             }
-            if state.queue_sort_mode == QueueSortMode::Shuffle {
+            if state.queue.sort_mode == QueueSortMode::Shuffle {
                 parts.push("(shuffled)".to_string());
             }
             format!(" {} ", parts.join(" "))
@@ -371,7 +371,7 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
     // Get tracks and current index based on mode
     let (tracks, current_idx) = match state.playback_mode {
         PlaybackMode::Radio => (&state.radio.tracks, state.radio.track_index),
-        PlaybackMode::Queue | PlaybackMode::None => (&state.queue, state.queue_index),
+        PlaybackMode::Queue | PlaybackMode::None => (&state.queue.tracks, state.queue.index),
     };
 
     if tracks.is_empty() {
@@ -412,7 +412,7 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
 
         let is_current = current_idx == Some(i);
         let is_selected = i == selected_idx;
-        let is_multi_selected = state.queue_selected.contains(&i);
+        let is_multi_selected = state.queue.selected.contains(&i);
 
         let prefix = if is_current && is_multi_selected { "♪●" } else if is_current { "♪ " } else if is_multi_selected { "● " } else { "  " };
 

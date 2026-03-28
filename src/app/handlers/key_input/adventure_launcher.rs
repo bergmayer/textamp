@@ -1,5 +1,6 @@
 //! Adventure launcher popup key handling.
 
+use crate::app::action::*;
 use crossterm::event::{self, KeyCode};
 
 use crate::app::Action;
@@ -32,13 +33,13 @@ fn handle_track_finder_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<A
 
     match key.code {
         KeyCode::Esc => {
-            vec![Action::AdventureLauncherBack]
+            vec![SearchAction::AdventureLauncherBack.into()]
         }
         KeyCode::Left => {
             // Left arrow: same as Esc in drill levels, ignored in Search
             match &launcher.drill {
                 AdventureDrillLevel::ArtistAlbums { .. } | AdventureDrillLevel::AlbumTracks { .. } => {
-                    vec![Action::AdventureLauncherBack]
+                    vec![SearchAction::AdventureLauncherBack.into()]
                 }
                 AdventureDrillLevel::Search => vec![],
             }
@@ -119,7 +120,7 @@ fn handle_track_finder_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<A
                     launcher.focus = SearchFocus::Input;
                     launcher.item_index = 0;
                     if !launcher.query.is_empty() {
-                        vec![Action::AdventureLauncherSearch]
+                        vec![SearchAction::AdventureLauncherSearch.into()]
                     } else {
                         launcher.results = None;
                         vec![]
@@ -127,7 +128,7 @@ fn handle_track_finder_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<A
                 }
                 _ => {
                     // In drill mode, backspace goes back
-                    vec![Action::AdventureLauncherBack]
+                    vec![SearchAction::AdventureLauncherBack.into()]
                 }
             }
         }
@@ -137,7 +138,7 @@ fn handle_track_finder_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<A
                     launcher.query.push(c);
                     launcher.focus = SearchFocus::Input;
                     launcher.item_index = 0;
-                    vec![Action::AdventureLauncherSearch]
+                    vec![SearchAction::AdventureLauncherSearch.into()]
                 }
                 _ => vec![], // No typing in drill mode
             }
@@ -157,23 +158,23 @@ fn handle_enter_on_result(launcher: &mut crate::app::state::AdventureLauncherSta
                 match launcher.search_tab {
                     SearchTab::Artists => {
                         if let Some(artist) = results.artists.get(idx) {
-                            return vec![Action::AdventureLauncherDrillArtist {
+                            return vec![SearchAction::AdventureLauncherDrillArtist {
                                 key: artist.rating_key.clone(),
                                 name: artist.title.clone(),
-                            }];
+                            }.into()];
                         }
                     }
                     SearchTab::Albums => {
                         if let Some(album) = results.albums.get(idx) {
-                            return vec![Action::AdventureLauncherDrillAlbum {
+                            return vec![SearchAction::AdventureLauncherDrillAlbum {
                                 key: album.rating_key.clone(),
                                 title: album.title.clone(),
                                 artist_name: album.artist_name().to_string(),
-                            }];
+                            }.into()];
                         }
                     }
                     SearchTab::Tracks => {
-                        return vec![Action::AdventureLauncherSelectTrack];
+                        return vec![SearchAction::AdventureLauncherSelectTrack.into()];
                     }
                     SearchTab::Playlists | SearchTab::Genres => {
                         // Not actionable in adventure mode
@@ -186,19 +187,19 @@ fn handle_enter_on_result(launcher: &mut crate::app::state::AdventureLauncherSta
 
                         if idx < artist_count {
                             let artist = &results.artists[idx];
-                            return vec![Action::AdventureLauncherDrillArtist {
+                            return vec![SearchAction::AdventureLauncherDrillArtist {
                                 key: artist.rating_key.clone(),
                                 name: artist.title.clone(),
-                            }];
+                            }.into()];
                         } else if idx < artist_count + album_count {
                             let album = &results.albums[idx - artist_count];
-                            return vec![Action::AdventureLauncherDrillAlbum {
+                            return vec![SearchAction::AdventureLauncherDrillAlbum {
                                 key: album.rating_key.clone(),
                                 title: album.title.clone(),
                                 artist_name: album.artist_name().to_string(),
-                            }];
+                            }.into()];
                         } else {
-                            return vec![Action::AdventureLauncherSelectTrack];
+                            return vec![SearchAction::AdventureLauncherSelectTrack.into()];
                         }
                     }
                 }
@@ -207,17 +208,17 @@ fn handle_enter_on_result(launcher: &mut crate::app::state::AdventureLauncherSta
         }
         AdventureDrillLevel::ArtistAlbums { albums, artist_name, .. } => {
             if let Some(album) = albums.get(launcher.item_index) {
-                vec![Action::AdventureLauncherDrillAlbum {
+                vec![SearchAction::AdventureLauncherDrillAlbum {
                     key: album.rating_key.clone(),
                     title: album.title.clone(),
                     artist_name: artist_name.clone(),
-                }]
+                }.into()]
             } else {
                 vec![]
             }
         }
         AdventureDrillLevel::AlbumTracks { .. } => {
-            vec![Action::AdventureLauncherSelectTrack]
+            vec![SearchAction::AdventureLauncherSelectTrack.into()]
         }
     }
 }
@@ -232,7 +233,7 @@ fn handle_track_count_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Ac
     match key.code {
         KeyCode::Esc => {
             // Go back to FindStartTrack
-            vec![Action::AdventureLauncherBack]
+            vec![SearchAction::AdventureLauncherBack.into()]
         }
         KeyCode::Enter => {
             // Parse count and advance to FindEndTrack

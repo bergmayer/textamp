@@ -66,7 +66,7 @@ fn render_tabs(frame: &mut Frame, state: &AppState, area: Rect) {
     let t = theme();
 
     let labels = SearchTab::all();
-    let selected_idx = match state.search_tab {
+    let selected_idx = match state.search.tab {
         SearchTab::Global => 0,
         SearchTab::Artists => 1,
         SearchTab::Albums => 2,
@@ -75,7 +75,7 @@ fn render_tabs(frame: &mut Frame, state: &AppState, area: Rect) {
         SearchTab::Genres => 5,
     };
 
-    let is_tab_focused = state.search_focus == SearchFocus::Input;
+    let is_tab_focused = state.search.focus == SearchFocus::Input;
 
     let titles: Vec<Line> = labels.iter().enumerate().map(|(i, tab)| {
         if i == selected_idx && is_tab_focused {
@@ -113,7 +113,7 @@ fn render_tabs(frame: &mut Frame, state: &AppState, area: Rect) {
 fn render_search_input(frame: &mut Frame, state: &AppState, area: Rect) {
     let t = theme();
 
-    let is_input_focused = state.search_focus == SearchFocus::Input;
+    let is_input_focused = state.search.focus == SearchFocus::Input;
 
     let input_block = Block::default()
         .title(" search ")
@@ -130,9 +130,9 @@ fn render_search_input(frame: &mut Frame, state: &AppState, area: Rect) {
 
     // Show search query with cursor only when input is focused
     let query_text = if is_input_focused {
-        format!("{}▋", state.search_query)
+        format!("{}▋", state.search.query)
     } else {
-        state.search_query.clone()
+        state.search.query.clone()
     };
     let fg = if is_input_focused { t.colors.fg_primary } else { t.colors.fg_muted };
     let input = Paragraph::new(query_text).style(Style::default().fg(fg));
@@ -143,10 +143,10 @@ fn render_results(frame: &mut Frame, state: &AppState, area: Rect) {
     let scroll_pin = state.scroll.search;
     let t = theme();
 
-    let results = match &state.search_results {
+    let results = match &state.search.results {
         Some(r) => r,
         None => {
-            let msg = if state.search_query.is_empty() {
+            let msg = if state.search.query.is_empty() {
                 "Type to search library"
             } else {
                 "Searching..."
@@ -159,10 +159,10 @@ fn render_results(frame: &mut Frame, state: &AppState, area: Rect) {
         }
     };
 
-    let is_results_focused = state.search_focus == SearchFocus::Results;
+    let is_results_focused = state.search.focus == SearchFocus::Results;
     let selected_idx = state.list_state.search_item_index;
 
-    match state.search_tab {
+    match state.search.tab {
         SearchTab::Global => render_all_tab(frame, results, is_results_focused, selected_idx, scroll_pin, area),
         SearchTab::Artists => render_single_section(
             frame, &results.artists, |a| if a.title.is_empty() { "Unknown Artist".to_string() } else { a.title.clone() },
@@ -187,7 +187,7 @@ fn render_results(frame: &mut Frame, state: &AppState, area: Rect) {
             is_results_focused, selected_idx, scroll_pin, area,
         ),
         SearchTab::Tracks => {
-            if state.search_track_loading && results.tracks.is_empty() {
+            if state.search.track_loading && results.tracks.is_empty() {
                 let loading = Paragraph::new("Searching tracks...")
                     .style(Style::default().fg(t.colors.fg_muted))
                     .alignment(Alignment::Center);

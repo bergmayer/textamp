@@ -46,7 +46,7 @@ pub fn render(frame: &mut Frame, state: &AppState, _rating_key: &str, area: Rect
     }
 
     // Albums list
-    if state.albums.is_empty() {
+    if state.library.albums.is_empty() {
         let empty = Paragraph::new("Loading albums...")
             .style(Style::default().fg(t.colors.fg_muted))
             .alignment(Alignment::Center);

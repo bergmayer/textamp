@@ -2,6 +2,7 @@
 //! SetCategory, ToggleFocus.
 
 use crate::app::{Action, AppState, Event};
+use crate::app::action::{NavigationAction, BrowseAction, FolderAction, SystemAction};
 use crate::app::state::{BrowseCategory, Focus, GenreContentType, RightPanelMode, View};
 use crate::plex::PlexClient;
 
@@ -13,19 +14,19 @@ use super::helpers;
 /// Dispatch navigation actions. Returns follow-up actions.
 pub async fn dispatch(
     event_tx: &mpsc::Sender<Event>,
-    action: Action,
+    action: NavigationAction,
     state: &mut AppState,
     client: &mut PlexClient,
 ) -> Result<Vec<Action>> {
     let mut follow_ups = vec![];
 
     // Deactivate inline filter on view or category change
-    if matches!(action, Action::SetView(_) | Action::SetCategory(_)) && state.list_filter.active {
+    if matches!(action, NavigationAction::SetView(_) | NavigationAction::SetCategory(_)) && state.list_filter.active {
         state.list_filter.deactivate();
     }
 
     match action {
-        Action::SetView(view) => {
+        NavigationAction::SetView(view) => {
             // Clear artwork cache when leaving Similar view to force re-render
             // (Similar popup's Clear widget can corrupt terminal images)
             if state.view == View::Similar {
@@ -37,71 +38,44 @@ pub async fn dispatch(
                 && state.station_nav.columns.is_empty()
                 && !state.station_nav.loading
             {
-                follow_ups.push(Action::LoadStations);
+                follow_ups.push(BrowseAction::LoadStations.into());
             }
             // Load waveform and spectrogram when entering NowPlaying view
             if view == View::NowPlaying {
-                follow_ups.push(Action::LoadWaveform);
-                follow_ups.push(Action::LoadSpectrogram);
+                follow_ups.push(SystemAction::LoadWaveform.into());
+                follow_ups.push(SystemAction::LoadSpectrogram.into());
             }
         }
-        Action::NextView => {
-            // Tab: cycle through views in displayed tab bar order
-            // Order: Library → Playlists → Genres → Folders → Queue → Now Playing → Library
+        NavigationAction::NextView => {
+            // Tab: cycle through top-level views
+            // Order: Browse → Queue → Now Playing → Browse
             if state.view == View::NowPlaying {
                 state.set_view(View::Browse);
-                follow_ups.push(Action::SetCategory(BrowseCategory::Library));
             } else if state.view == View::Queue {
                 state.set_view(View::NowPlaying);
             } else if state.view == View::Browse {
-                match state.browse_category {
-                    BrowseCategory::Library => {
-                        follow_ups.push(Action::SetCategory(BrowseCategory::Playlists));
-                    }
-                    BrowseCategory::Playlists => {
-                        follow_ups.push(Action::SetCategory(BrowseCategory::Genres));
-                    }
-                    BrowseCategory::Genres => {
-                        follow_ups.push(Action::SetCategory(BrowseCategory::Folders));
-                    }
-                    BrowseCategory::Folders => {
-                        state.set_view(View::Queue);
-                    }
-                }
+                state.set_view(View::Queue);
             } else {
-                // From other views (Help, Settings, Search, Similar), go to Browse
                 state.set_view(View::Browse);
             }
         }
-        Action::PrevView => {
-            // Shift+Tab: cycle backwards through views in displayed tab bar order
-            // Order: Library ← Playlists ← Genres ← Folders ← Queue ← Now Playing ← Library
+        NavigationAction::PrevView => {
+            // Shift+Tab: cycle backwards through top-level views
+            // Order: Browse ← Queue ← Now Playing ← Browse
             if state.view == View::NowPlaying {
                 state.set_view(View::Queue);
             } else if state.view == View::Queue {
                 state.set_view(View::Browse);
-                follow_ups.push(Action::SetCategory(BrowseCategory::Folders));
             } else if state.view == View::Browse {
-                match state.browse_category {
-                    BrowseCategory::Library => {
-                        state.set_view(View::NowPlaying);
-                    }
-                    BrowseCategory::Playlists => {
-                        follow_ups.push(Action::SetCategory(BrowseCategory::Library));
-                    }
-                    BrowseCategory::Genres => {
-                        follow_ups.push(Action::SetCategory(BrowseCategory::Playlists));
-                    }
-                    BrowseCategory::Folders => {
-                        follow_ups.push(Action::SetCategory(BrowseCategory::Genres));
-                    }
-                }
+                state.set_view(View::NowPlaying);
             } else {
-                // From other views (Help, Settings, Search, Similar), go to Browse
                 state.set_view(View::Browse);
             }
         }
-        Action::SetCategory(category) => {
+        NavigationAction::SetCategory(category) => {
+            // Always unfocus category column when a category is selected
+            state.category_column_focused = false;
+
             if state.browse_category != category {
                 // Unshuffle Library root when leaving, so "All Artists" is in correct position
                 if state.browse_category == BrowseCategory::Library {
@@ -111,17 +85,17 @@ pub async fn dispatch(
                         }
                     }
                 }
-                state.browse_category = category;
+                state.set_browse_category(category);
                 state.focus = Focus::Left;
                 // Clear right panel
-                state.right_panel_mode = RightPanelMode::Empty;
-                state.selected_artist_albums.clear();
-                state.selected_album_tracks.clear();
+                state.library.right_panel_mode = RightPanelMode::Empty;
+                state.library.selected_artist_albums.clear();
+                state.library.selected_album_tracks.clear();
 
                 // Load category data if needed (and not already loading)
                 match category {
                     BrowseCategory::Library => {
-                        if state.artists.is_empty() && !state.artists_loading {
+                        if state.library.artists.is_empty() && !state.library.artists_loading {
                             helpers::load_artists(event_tx, state, client);
                         } else {
                             // Build second column synchronously from cached data
@@ -129,12 +103,12 @@ pub async fn dispatch(
                         }
                     }
                     BrowseCategory::Playlists => {
-                        if state.playlists.is_empty() && !state.playlists_loading {
+                        if state.library.playlists.is_empty() && !state.library.playlists_loading {
                             helpers::load_playlists(event_tx, state, client);
                         } else {
-                            // Rebuild root column from state.playlists to ensure it's populated
+                            // Rebuild root column from state.library.playlists to ensure it's populated
                             // (guards against stale/empty nav from preload race conditions)
-                            let items = crate::app::state::BrowseItem::from_playlists(&state.playlists);
+                            let items = crate::app::state::BrowseItem::from_playlists(&state.library.playlists);
                             state.playlist_nav.reset("playlists", items);
                             // Build second column synchronously (async fallback for smart playlists)
                             follow_ups.extend(super::dispatch_data::auto_drill_from_cache(state));
@@ -142,33 +116,33 @@ pub async fn dispatch(
                     }
                     BrowseCategory::Genres => {
                         if state.genre_tab == crate::app::state::GenreTab::All {
-                            follow_ups.push(Action::RefreshGenreView);
+                            follow_ups.push(BrowseAction::RefreshGenreView.into());
                         } else {
                             // Load the appropriate content based on current genre content type
-                            match state.genre_content_type {
+                            match state.library.genre_content_type {
                                 GenreContentType::Genres => {
-                                    if state.genres.is_empty() && !state.genres_loading {
-                                        follow_ups.push(Action::LoadGenres);
+                                    if state.library.genres.is_empty() && !state.library.genres_loading {
+                                        follow_ups.push(BrowseAction::LoadGenres.into());
                                     }
                                 }
                                 GenreContentType::ArtistGenres => {
-                                    if state.artist_genres.is_empty() && !state.artist_genres_loading {
-                                        follow_ups.push(Action::LoadArtistGenres);
+                                    if state.library.artist_genres.is_empty() && !state.library.artist_genres_loading {
+                                        follow_ups.push(BrowseAction::LoadArtistGenres.into());
                                     }
                                 }
                                 GenreContentType::AlbumGenres => {
-                                    if state.album_genres.is_empty() && !state.album_genres_loading {
-                                        follow_ups.push(Action::LoadAlbumGenres);
+                                    if state.library.album_genres.is_empty() && !state.library.album_genres_loading {
+                                        follow_ups.push(BrowseAction::LoadAlbumGenres.into());
                                     }
                                 }
                                 GenreContentType::Moods => {
-                                    if state.moods.is_empty() && !state.moods_loading {
-                                        follow_ups.push(Action::LoadMoods);
+                                    if state.library.moods.is_empty() && !state.library.moods_loading {
+                                        follow_ups.push(BrowseAction::LoadMoods.into());
                                     }
                                 }
                                 GenreContentType::Styles => {
-                                    if state.styles.is_empty() && !state.styles_loading {
-                                        follow_ups.push(Action::LoadStyles);
+                                    if state.library.styles.is_empty() && !state.library.styles_loading {
+                                        follow_ups.push(BrowseAction::LoadStyles.into());
                                     }
                                 }
                             }
@@ -176,19 +150,18 @@ pub async fn dispatch(
                     }
                     BrowseCategory::Folders => {
                         if state.folder_state.is_none() {
-                            follow_ups.push(Action::LoadFolderRoot);
+                            follow_ups.push(FolderAction::LoadFolderRoot.into());
                         }
                     }
                 }
             }
         }
-        Action::ToggleFocus => {
+        NavigationAction::ToggleFocus => {
             state.focus = match state.focus {
                 Focus::Left => Focus::Right,
                 Focus::Right => Focus::Left,
             };
         }
-        _ => unreachable!("dispatch_navigation called with non-navigation action: {:?}", action),
     }
     Ok(follow_ups)
 }
@@ -210,7 +183,7 @@ mod tests {
         let (tx, _rx, mut state, mut client) = setup();
         state.focus = Focus::Left;
 
-        dispatch(&tx, Action::ToggleFocus, &mut state, &mut client).await.unwrap();
+        dispatch(&tx, NavigationAction::ToggleFocus.into(), &mut state, &mut client).await.unwrap();
         assert_eq!(state.focus, Focus::Right);
     }
 
@@ -219,7 +192,7 @@ mod tests {
         let (tx, _rx, mut state, mut client) = setup();
         state.focus = Focus::Right;
 
-        dispatch(&tx, Action::ToggleFocus, &mut state, &mut client).await.unwrap();
+        dispatch(&tx, NavigationAction::ToggleFocus.into(), &mut state, &mut client).await.unwrap();
         assert_eq!(state.focus, Focus::Left);
     }
 
@@ -227,10 +200,10 @@ mod tests {
     async fn set_view_changes_state() {
         let (tx, _rx, mut state, mut client) = setup();
 
-        dispatch(&tx, Action::SetView(View::Queue), &mut state, &mut client).await.unwrap();
+        dispatch(&tx, NavigationAction::SetView(View::Queue).into(), &mut state, &mut client).await.unwrap();
         assert_eq!(state.view, View::Queue);
 
-        dispatch(&tx, Action::SetView(View::Help), &mut state, &mut client).await.unwrap();
+        dispatch(&tx, NavigationAction::SetView(View::Help).into(), &mut state, &mut client).await.unwrap();
         assert_eq!(state.view, View::Help);
     }
 
@@ -238,38 +211,27 @@ mod tests {
     async fn set_view_queue_requests_load_stations() {
         let (tx, _rx, mut state, mut client) = setup();
 
-        let follow_ups = dispatch(&tx, Action::SetView(View::Queue), &mut state, &mut client).await.unwrap();
-        assert!(follow_ups.iter().any(|a| matches!(a, Action::LoadStations)));
+        let follow_ups = dispatch(&tx, NavigationAction::SetView(View::Queue).into(), &mut state, &mut client).await.unwrap();
+        assert!(follow_ups.iter().any(|a| matches!(a, Action::Browse(BrowseAction::LoadStations))));
     }
 
     #[tokio::test]
     async fn set_view_now_playing_requests_waveform() {
         let (tx, _rx, mut state, mut client) = setup();
 
-        let follow_ups = dispatch(&tx, Action::SetView(View::NowPlaying), &mut state, &mut client).await.unwrap();
-        assert!(follow_ups.iter().any(|a| matches!(a, Action::LoadWaveform)));
-        assert!(follow_ups.iter().any(|a| matches!(a, Action::LoadSpectrogram)));
+        let follow_ups = dispatch(&tx, NavigationAction::SetView(View::NowPlaying).into(), &mut state, &mut client).await.unwrap();
+        assert!(follow_ups.iter().any(|a| matches!(a, Action::System(SystemAction::LoadWaveform))));
+        assert!(follow_ups.iter().any(|a| matches!(a, Action::System(SystemAction::LoadSpectrogram))));
     }
 
     #[tokio::test]
-    async fn next_view_cycles_library_to_playlists() {
+    async fn next_view_browse_to_queue() {
         let (tx, _rx, mut state, mut client) = setup();
         state.view = View::Browse;
-        state.browse_category = BrowseCategory::Library;
+        state.set_browse_category(BrowseCategory::Library);
 
-        let follow_ups = dispatch(&tx, Action::NextView, &mut state, &mut client).await.unwrap();
-        // Should request SetCategory(Playlists) as a follow-up
-        assert!(follow_ups.iter().any(|a| matches!(a, Action::SetCategory(BrowseCategory::Playlists))));
-    }
-
-    #[tokio::test]
-    async fn next_view_playlists_to_genres() {
-        let (tx, _rx, mut state, mut client) = setup();
-        state.view = View::Browse;
-        state.browse_category = BrowseCategory::Playlists;
-
-        let follow_ups = dispatch(&tx, Action::NextView, &mut state, &mut client).await.unwrap();
-        assert!(follow_ups.iter().any(|a| matches!(a, Action::SetCategory(BrowseCategory::Genres))));
+        dispatch(&tx, NavigationAction::NextView.into(), &mut state, &mut client).await.unwrap();
+        assert_eq!(state.view, View::Queue);
     }
 
     #[tokio::test]
@@ -277,27 +239,26 @@ mod tests {
         let (tx, _rx, mut state, mut client) = setup();
         state.view = View::Queue;
 
-        dispatch(&tx, Action::NextView, &mut state, &mut client).await.unwrap();
+        dispatch(&tx, NavigationAction::NextView.into(), &mut state, &mut client).await.unwrap();
         assert_eq!(state.view, View::NowPlaying);
     }
 
     #[tokio::test]
-    async fn next_view_now_playing_to_library() {
+    async fn next_view_now_playing_to_browse() {
         let (tx, _rx, mut state, mut client) = setup();
         state.view = View::NowPlaying;
 
-        let follow_ups = dispatch(&tx, Action::NextView, &mut state, &mut client).await.unwrap();
+        dispatch(&tx, NavigationAction::NextView.into(), &mut state, &mut client).await.unwrap();
         assert_eq!(state.view, View::Browse);
-        assert!(follow_ups.iter().any(|a| matches!(a, Action::SetCategory(BrowseCategory::Library))));
     }
 
     #[tokio::test]
     async fn prev_view_library_to_now_playing() {
         let (tx, _rx, mut state, mut client) = setup();
         state.view = View::Browse;
-        state.browse_category = BrowseCategory::Library;
+        state.set_browse_category(BrowseCategory::Library);
 
-        dispatch(&tx, Action::PrevView, &mut state, &mut client).await.unwrap();
+        dispatch(&tx, NavigationAction::PrevView.into(), &mut state, &mut client).await.unwrap();
         assert_eq!(state.view, View::NowPlaying);
     }
 
@@ -306,7 +267,7 @@ mod tests {
         let (tx, _rx, mut state, mut client) = setup();
         state.view = View::NowPlaying;
 
-        dispatch(&tx, Action::PrevView, &mut state, &mut client).await.unwrap();
+        dispatch(&tx, NavigationAction::PrevView.into(), &mut state, &mut client).await.unwrap();
         assert_eq!(state.view, View::Queue);
     }
 
@@ -314,10 +275,10 @@ mod tests {
     async fn set_category_changes_and_resets_focus() {
         let (tx, _rx, mut state, mut client) = setup();
         state.view = View::Browse;
-        state.browse_category = BrowseCategory::Library;
+        state.set_browse_category(BrowseCategory::Library);
         state.focus = Focus::Right;
 
-        dispatch(&tx, Action::SetCategory(BrowseCategory::Genres), &mut state, &mut client).await.unwrap();
+        dispatch(&tx, NavigationAction::SetCategory(BrowseCategory::Genres).into(), &mut state, &mut client).await.unwrap();
         assert_eq!(state.browse_category, BrowseCategory::Genres);
         assert_eq!(state.focus, Focus::Left);
     }
@@ -326,10 +287,10 @@ mod tests {
     async fn set_category_same_is_noop() {
         let (tx, _rx, mut state, mut client) = setup();
         state.view = View::Browse;
-        state.browse_category = BrowseCategory::Library;
+        state.set_browse_category(BrowseCategory::Library);
         state.focus = Focus::Right; // keep right focus
 
-        dispatch(&tx, Action::SetCategory(BrowseCategory::Library), &mut state, &mut client).await.unwrap();
+        dispatch(&tx, NavigationAction::SetCategory(BrowseCategory::Library).into(), &mut state, &mut client).await.unwrap();
         // Category didn't change, so focus should remain Right
         assert_eq!(state.focus, Focus::Right);
     }

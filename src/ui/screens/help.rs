@@ -16,6 +16,10 @@ VIEWS
   Ctrl+L  Library         Ctrl+P  Playlists       Ctrl+G  Genres
   Ctrl+O  Folders         Ctrl+U  Queue           Ctrl+N  Now Playing
 
+BROWSE
+  Left column shows categories (Library, Playlists, Genres, Folders).
+  Right/Enter drills into a category. Left at root returns to categories.
+
 COMMANDS
   Arrow keys, PgUp/PgDn, Home/End navigate lists
   Tab / Shift+Tab   Cycle views

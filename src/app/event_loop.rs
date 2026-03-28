@@ -2,6 +2,7 @@
 //!
 //! Handles input events, async task coordination, and state updates.
 
+use crate::app::event::*;
 use super::{Action, AppState, Event};
 use super::state::{ConnectionState, PlayStatus};
 use super::handlers;
@@ -133,7 +134,7 @@ impl EventLoop {
 
                         // Detect track end locally — don't rely solely on server poll
                         if state.playback.duration_ms > 0 && pos >= state.playback.duration_ms {
-                            let action = Action::Next;
+                            let action = Action::Playback(super::action::PlaybackAction::Next);
                             self.dispatch(action, state, client, audio).await?;
                         }
                     }
@@ -181,16 +182,16 @@ impl EventLoop {
                                     );
                                     match rc.poll_timeline().await {
                                         Ok(status) => {
-                                            let _ = tx.send(Event::RemotePlayerStatus {
+                                            let _ = tx.send(RemoteEvent::RemotePlayerStatus {
                                                 session_found: status.session_found,
                                                 playing: status.playing,
                                                 position_ms: status.position_ms,
                                                 track_key: status.track_key,
                                                 finished: status.finished,
-                                            }).await;
+                                            }.into()).await;
                                         }
                                         Err(e) => {
-                                            let _ = tx.send(Event::RemotePlayerError(e.to_string())).await;
+                                            let _ = tx.send(RemoteEvent::RemotePlayerError(e.to_string()).into()).await;
                                         }
                                     }
                                 });
@@ -246,15 +247,15 @@ impl EventLoop {
                                         || (expected_ms > 5000 && actual_pos_ms >= expected_ms.saturating_sub(5000));
 
                                     if completed_normally {
-                                        let _ = tick_event_tx.send(Event::TrackEnded).await;
+                                        let _ = tick_event_tx.send(PlaybackEvent::TrackEnded.into()).await;
                                     } else {
                                         tracing::warn!(
                                             "Premature track end detected: played {}ms of {}ms expected",
                                             actual_pos_ms, expected_ms
                                         );
-                                        let _ = tick_event_tx.send(Event::PlaybackError(
+                                        let _ = tick_event_tx.send(PlaybackEvent::PlaybackError(
                                             "Track ended prematurely".to_string()
-                                        )).await;
+                                        ).into()).await;
                                     }
                                 }
                             }
@@ -314,14 +315,14 @@ impl EventLoop {
                 // A background task validates the URL and recovers if it's stale.
                 if let (Some(ref server_url), Some(ref username)) = (&stored.server_url, &stored.username) {
                     tracing::info!("Fast path: using stored credentials (instant startup)");
-                    let _ = event_tx.send(Event::AuthSuccess {
+                    let _ = event_tx.send(AuthEvent::AuthSuccess {
                         token: stored.token.clone(),
                         username: username.clone(),
                         server_url: server_url.clone(),
                         servers: vec![],
                         client_identifier: stored.client_identifier.clone(),
                         has_plex_pass: stored.has_plex_pass,
-                    }).await;
+                    }.into()).await;
 
                     // Background: discover servers and validate stored URL.
                     // If the stored URL is stale, find a working one and update.
@@ -335,7 +336,7 @@ impl EventLoop {
                         // Step 1: Discover servers from plex.tv (for settings + recovery)
                         let servers = match auth.get_servers(token).await {
                             Ok(s) => {
-                                let _ = event_tx_bg.send(Event::ServersDiscovered(s.clone())).await;
+                                let _ = event_tx_bg.send(AuthEvent::ServersDiscovered(s.clone()).into()).await;
                                 s
                             }
                             Err(e) => {
@@ -365,18 +366,18 @@ impl EventLoop {
                                 .find(|s| s.connections.iter().any(|c| c.uri == url))
                                 .map(|s| s.name.clone())
                                 .unwrap_or_else(|| "Server".to_string());
-                            let _ = event_tx_bg.send(Event::ServerConnectionSucceeded {
+                            let _ = event_tx_bg.send(AuthEvent::ServerConnectionSucceeded {
                                 server_name,
                                 url,
-                            }).await;
+                            }.into()).await;
                         } else {
                             tracing::warn!("Background: no working connections found for any server");
                             let server_name = stored_bg.server_name.clone()
                                 .or_else(|| servers.first().map(|s| s.name.clone()))
                                 .unwrap_or_else(|| "Server".to_string());
-                            let _ = event_tx_bg.send(Event::ServerConnectionFailed {
+                            let _ = event_tx_bg.send(AuthEvent::ServerConnectionFailed {
                                 server_name,
-                            }).await;
+                            }.into()).await;
                         }
                     });
                     return;
@@ -402,14 +403,14 @@ impl EventLoop {
 
                         if let Some(url) = final_server_url {
                             let has_plex_pass = user.has_plex_pass();
-                            let _ = event_tx.send(Event::AuthSuccess {
+                            let _ = event_tx.send(AuthEvent::AuthSuccess {
                                 token: stored.token,
                                 username: user.username,
                                 server_url: url,
                                 servers,
                                 client_identifier: stored.client_identifier,
                                 has_plex_pass,
-                            }).await;
+                            }.into()).await;
                             return;
                         }
                     }
@@ -418,7 +419,7 @@ impl EventLoop {
             }
 
             // No valid stored token - show login form
-            let _ = event_tx.send(Event::AuthShowLogin).await;
+            let _ = event_tx.send(AuthEvent::AuthShowLogin.into()).await;
         });
     }
 
@@ -446,129 +447,40 @@ impl EventLoop {
         client: &mut PlexClient,
         audio: &mut AudioPlayer,
     ) -> Result<()> {
-        use Action::*;
-
         let follow_ups = match action {
-            // System
-            Quit | ShowError(_) | ClearError | SetStatus(_) | ClearStatus
-            | RefreshCategory(_) | CheckStaleness(_) | LoadArtwork | LoadWaveform
-            | LoadSpectrogram | LoadAlbumArt(_) => {
-                handlers::dispatch_system::dispatch(&self.event_tx, &mut self.config, action, state, client).await?
+            Action::System(a) => {
+                handlers::dispatch_system::dispatch(&self.event_tx, &mut self.config, a, state, client).await?
             }
-
-            // Navigation
-            SetView(_) | NextView | PrevView
-            | SetCategory(_) | ToggleFocus => {
-                handlers::dispatch_navigation::dispatch(&self.event_tx, action, state, client).await?
+            Action::Navigation(a) => {
+                handlers::dispatch_navigation::dispatch(&self.event_tx, a, state, client).await?
             }
-
-            // Data loading
-            LoadInitialData | LoadArtists | LoadPlaylists
-            | LoadArtistAlbums | LoadArtistAllTracks | LoadSelectedAlbumTracks
-            | LoadAlbumTracks { .. } | LoadCategoryTracks | GoBackInRightPanel
-            | LoadSimilarAlbums { .. } | LoadSimilarTracks { .. } | LoadSimilarArtists { .. }
-            | LoadRelated { .. }
-            | ListUp | ListDown | ListPageUp | ListPageDown | ListTop | ListBottom => {
-                handlers::dispatch_data::dispatch(&self.event_tx, &self.config, action, state, client).await?
+            Action::Data(a) => {
+                handlers::dispatch_data::dispatch(&self.event_tx, &self.config, a, state, client).await?
             }
-
-            // Miller columns
-            LoadArtistAlbumsForMiller { .. } | LoadAlbumTracksForMiller { .. }
-            | LoadArtistAllTracksForMiller { .. } | LoadAllAlbumsForMiller | PlayTrackFromMiller { .. }
-            | LoadGenreAlbumsForMiller { .. } | LoadGenreTracksForMiller { .. }
-            | PlayGenreTrackFromMiller { .. } | LoadPlaylistTracksForMiller { .. }
-            | PlayPlaylistTrackFromMiller { .. }
-            | RefreshAlbumTracks { .. }
-            | LoadCompilationsForMiller | LoadCompilationAlbumsForMiller { .. }
-            | LoadCompilationAllTracksForMiller { .. }
-            | LoadAllCompilationTracksForMiller
-            | LoadAllLibraryTracksForMiller => {
-                handlers::dispatch_miller::dispatch(&self.event_tx, action, state, client, audio).await?
+            Action::Miller(a) => {
+                handlers::dispatch_miller::dispatch(&self.event_tx, a, state, client, audio).await?
             }
-
-            // Playback control
-            TogglePlayPause | Stop | Next | Previous
-            | VolumeUp | VolumeDown | ToggleMute | SetVolume(_) | Seek(_) | SeekRelative(_)
-            | StartPendingPlayback | RetryCurrentTrack => {
-                handlers::dispatch_playback::dispatch(&self.event_tx, action, state, client, audio).await?
+            Action::Playback(a) => {
+                handlers::dispatch_playback::dispatch(&self.event_tx, a, state, client, audio).await?
             }
-
-            // Queue operations
-            PlayTrack(_) | PlayTracksNow(_) | PlayTrackFromCategory(_) | PlayAlbum { .. }
-            | PlayArtistTracks { .. } | PlaySearchResult
-            | EnqueueAlbum { .. } | EnqueueArtistTracks { .. } | EnqueueTrack(_)
-            | PlayAlbumNow { .. } | PlayPlaylistNow { .. }
-            | EnqueueSearchResult | ClearQueue | RemoveFromQueue(_)
-            | JumpToQueueIndex(_)
-            | EnqueueSelection | EnqueueSelectionNext | PromptSavePlaylist | SaveQueueAsPlaylist(_)
-            | ToggleQueueShuffle
-            | RemixGemini | RemixTwofer | RemixStretch | RemixDoppelganger
-            | RemixShuffle | RemixUndoShuffle | UndoLastRemix
-            | MoveQueueTrackUp | MoveQueueTrackDown
-            | MoveSelectedTracksUp | MoveSelectedTracksDown | RemoveSelectedFromQueue
-            | RemixBatchReady(_) | RemixDoppelgangerReady(_)
-            | EnqueueAlbumNext { .. } | EnqueueArtistTracksNext { .. }
-            | EnqueueTracksNext(_) | EnqueueSearchResultNext => {
-                handlers::dispatch_queue::dispatch(&self.event_tx, action, state, client, audio).await?
+            Action::Queue(a) => {
+                handlers::dispatch_queue::dispatch(&self.event_tx, a, state, client, audio).await?
             }
-
-            // Search and filter
-            ExecuteLocalSearch | SelectSearchResult
-            | ActivateListFilter | DeactivateListFilter | FilteredListUp | FilteredListDown
-            | SelectFilteredItem | AppendListFilterChar(_) | DeleteListFilterChar
-            | OpenSearchPopup | CloseSearchPopup
-            | CloseRadioLauncher | RadioLauncherSearch
-            | RadioLauncherSelectResult
-            | OpenAdventureLauncher | CloseAdventureLauncher | AdventureLauncherSearch
-            | AdventureLauncherDrillArtist { .. } | AdventureLauncherDrillAlbum { .. }
-            | AdventureLauncherSelectTrack | AdventureLauncherBack
-            | OpenLibraryPicker | CloseLibraryPicker
-            | OpenSortPopup | CloseSortPopup
-            | OpenArtistRadioPicker | CloseArtistRadioPicker | ArtistRadioPickerSearch
-            | ArtistRadioPickerSetCount | ArtistRadioPickerToggleArtist
-            | ArtistRadioPickerLaunch
-            | ShowArtistBio { .. } => {
-                handlers::dispatch_search::dispatch(&self.event_tx, action, state, client).await?
+            Action::Search(a) => {
+                handlers::dispatch_search::dispatch(&self.event_tx, a, state, client).await?
             }
-
-            // Browse modes
-            LoadStations | LoadGenres | LoadArtistGenres | LoadAlbumGenres
-            | LoadMoods | LoadStyles | LoadGenreAlbums
-            | RefreshGenreView
-            | CycleGenreTab | SetGenreTab(_)
-            | DrillGenreCategory { .. } => {
-                handlers::dispatch_browse::dispatch(&self.event_tx, action, state, client).await?
+            Action::Browse(a) => {
+                handlers::dispatch_browse::dispatch(&self.event_tx, a, state, client).await?
             }
-
-            // Folder navigation
-            LoadFolderRoot | NavigateIntoFolder(_)
-            | RefreshSubfolder(_) | PlayFolderTracks | PlayFolderTrack { .. } => {
-                handlers::dispatch_folders::dispatch(&self.event_tx, action, state, client, audio).await?
+            Action::Folders(a) => {
+                handlers::dispatch_folders::dispatch(&self.event_tx, a, state, client, audio).await?
             }
-
-            // Radio, stations, and DJ modes
-            JumpToRadioTrack(_)
-            | PlayCurrentRadioTrack
-            | StartPlexRadio { .. }
-            | PlayStation(_) | DrillIntoStation(_, _) | NavigateStationsBack
-            | ToggleDjMode(_) | DjModeProcess | DjModeTracksReady(_, _, _)
-            | DjModeBatchReady(_) => {
-                handlers::dispatch_radio::dispatch(&self.event_tx, action, state, client, audio).await?
+            Action::Radio(a) => {
+                handlers::dispatch_radio::dispatch(&self.event_tx, a, state, client, audio).await?
             }
-
-            // Settings, auth, adventure, remote players
-            Logout | AuthSignIn | AuthSelectServer | OpenSettings | SaveCredentials
-            | SettingsSelect | SettingsSignIn
-            | SelectServer(_) | SelectLibrary(_) | SelectLibraryOnServer(_, _)
-            | SaveSettings
-            | ClearLibraryCache | ClearArtworkCache | ClearSubfolderCache
-            | StartSubfolderCrawl | StopSubfolderCrawl | ToggleKeepSubfolderCache
-            | DiscoverPlayers | SetOutputTarget(_)
-            | SetAdventureLength(_) | CancelAdventure | AdventureComplete(_)
-            | AdventureError(_) | ArtistRadioComplete(_) => {
-                handlers::dispatch_settings::dispatch(&self.event_tx, &mut self.config, action, state, client, audio).await?
+            Action::Settings(a) => {
+                handlers::dispatch_settings::dispatch(&self.event_tx, &mut self.config, a, state, client, audio).await?
             }
-
         };
 
         // Process follow-up actions

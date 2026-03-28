@@ -203,7 +203,7 @@ pub fn get_artist_for_bio(state: &crate::app::state::AppState) -> Option<(String
             // If track artist differs from album artist, try to find the track artist
             if !track_artist.is_empty() && track_artist != album_artist {
                 // Search for artist by name in cached artists
-                if let Some(found) = state.artists.iter().find(|a| a.title == *track_artist) {
+                if let Some(found) = state.library.artists.iter().find(|a| a.title == *track_artist) {
                     return Some((found.rating_key.clone(), found.title.clone()));
                 }
                 // Fall back to album artist if track artist not found in library
@@ -238,16 +238,16 @@ pub fn get_artist_for_bio(state: &crate::app::state::AppState) -> Option<(String
                     if let Some(item) = col.items.get(item_idx) {
                         match item {
                             BrowseItem::Album { key, artist, .. } => {
-                                // Look up album in state.albums to get artist key
-                                if let Some(album) = state.albums.iter().find(|a| a.rating_key == *key) {
+                                // Look up album in state.library.albums to get artist key
+                                if let Some(album) = state.library.albums.iter().find(|a| a.rating_key == *key) {
                                     if let (Some(artist_key), Some(artist_name)) = (&album.parent_rating_key, &album.parent_title) {
                                         return Some((artist_key.clone(), artist_name.clone()));
                                     }
                                 }
                                 // Fall back to artist name from BrowseItem
                                 if !artist.is_empty() {
-                                    // Try to find artist by name in state.artists
-                                    if let Some(found) = state.artists.iter().find(|a| a.title == *artist) {
+                                    // Try to find artist by name in state.library.artists
+                                    if let Some(found) = state.library.artists.iter().find(|a| a.title == *artist) {
                                         return Some((found.rating_key.clone(), found.title.clone()));
                                     }
                                 }
@@ -271,7 +271,7 @@ pub fn get_artist_for_bio(state: &crate::app::state::AppState) -> Option<(String
             // Check selected queue/radio track
             let tracks = match state.playback_mode {
                 PlaybackMode::Radio => &state.radio.tracks,
-                _ => &state.queue,
+                _ => &state.queue.tracks,
             };
             if let Some(track) = tracks.get(state.list_state.queue_index) {
                 if let Some(result) = artist_from_track(track) {
@@ -281,11 +281,11 @@ pub fn get_artist_for_bio(state: &crate::app::state::AppState) -> Option<(String
         }
         View::Search => {
             // Check selected search result based on active tab
-            if let Some(ref results) = state.search_results {
+            if let Some(ref results) = state.search.results {
                 use crate::app::state::SearchTab;
                 let idx = state.list_state.search_item_index;
 
-                match state.search_tab {
+                match state.search.tab {
                     SearchTab::Tracks => {
                         if let Some(track) = results.tracks.get(idx) {
                             if let Some(result) = artist_from_track(track) {
@@ -380,7 +380,7 @@ pub fn spawn_api_call<T, F, Fut>(
     event_tx: &tokio::sync::mpsc::Sender<crate::app::Event>,
     client: &crate::plex::PlexClient,
     call: F,
-    on_success: fn(T) -> crate::app::Event,
+    on_success: impl Fn(T) -> crate::app::Event + Send + 'static,
     error_msg: &str,
 ) where
     F: FnOnce(crate::plex::PlexClient) -> Fut + Send + 'static,
@@ -393,7 +393,7 @@ pub fn spawn_api_call<T, F, Fut>(
     tokio::spawn(async move {
         match call(c).await {
             Ok(data) => { let _ = tx.send(on_success(data)).await; }
-            Err(e) => { let _ = tx.send(crate::app::Event::DataLoadError(format!("{}: {}", msg, e))).await; }
+            Err(e) => { let _ = tx.send(crate::app::event::DataEvent::DataLoadError(format!("{}: {}", msg, e)).into()).await; }
         }
     });
 }

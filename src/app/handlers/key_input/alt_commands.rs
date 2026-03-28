@@ -89,7 +89,7 @@ pub fn available_alt_commands(state: &AppState) -> Vec<AltCommand> {
 
     // Ctrl+W save
     let save_enabled = (state.view == View::Queue || state.view == View::NowPlaying)
-        && (!state.queue.is_empty() || !state.radio.tracks.is_empty());
+        && (!state.queue.tracks.is_empty() || !state.radio.tracks.is_empty());
     cmds.push(AltCommand { modifier: CommandModifier::Ctrl, key: 'w', label: "save", display_key: None,
         enabled: save_enabled });
 
@@ -149,7 +149,7 @@ fn has_track_context(state: &AppState) -> bool {
         View::NowPlaying | View::Queue => {
             let idx = state.list_state.queue_index;
             match state.playback_mode {
-                PlaybackMode::Queue | PlaybackMode::None => idx < state.queue.len(),
+                PlaybackMode::Queue | PlaybackMode::None => idx < state.queue.tracks.len(),
                 PlaybackMode::Radio => idx < state.radio.tracks.len(),
             }
         }
@@ -172,15 +172,15 @@ fn has_track_context(state: &AppState) -> bool {
             }
             // Legacy right panel tracks
             matches!(
-                state.right_panel_mode,
+                state.library.right_panel_mode,
                 RightPanelMode::AlbumTracks | RightPanelMode::CategoryTracks
-            ) && state.list_state.tracks_index < state.selected_album_tracks.len()
+            ) && state.list_state.tracks_index < state.library.selected_album_tracks.len()
         }
         View::Search => {
             // Search popup tracks: check if a track tab result is selected
-            matches!(state.search_tab,
+            matches!(state.search.tab,
                 crate::app::state::SearchTab::Tracks | crate::app::state::SearchTab::Global
-            ) && state.search_results.as_ref()
+            ) && state.search.results.as_ref()
                 .map(|r| !r.tracks.is_empty())
                 .unwrap_or(false)
         }
@@ -205,14 +205,14 @@ fn has_album_context(state: &AppState) -> bool {
                 return true;
             }
             // Fall back to legacy right panel mode
-            match state.right_panel_mode {
+            match state.library.right_panel_mode {
                 RightPanelMode::ArtistAlbums => {
                     // Index 0 is "All Tracks", 1+ are albums
                     state.list_state.right_albums_index > 0
-                        && state.list_state.right_albums_index <= state.selected_artist_albums.len()
+                        && state.list_state.right_albums_index <= state.library.selected_artist_albums.len()
                 }
                 RightPanelMode::CategoryAlbums => {
-                    state.genre_albums_index < state.genre_albums.len()
+                    state.library.genre_albums_index < state.library.genre_albums.len()
                 }
                 _ => false,
             }
@@ -236,15 +236,15 @@ fn has_enqueue_context(state: &AppState) -> bool {
         View::Browse => {
             // Left panel artist selected (enqueues all tracks)
             if state.focus == Focus::Left && state.browse_category == BrowseCategory::Library {
-                return !state.artists.is_empty();
+                return !state.library.artists.is_empty();
             }
             // Right panel with albums or tracks
-            match state.right_panel_mode {
+            match state.library.right_panel_mode {
                 RightPanelMode::ArtistAlbums => true,
                 RightPanelMode::AlbumTracks | RightPanelMode::CategoryTracks => {
-                    !state.selected_album_tracks.is_empty()
+                    !state.library.selected_album_tracks.is_empty()
                 }
-                RightPanelMode::CategoryAlbums => !state.genre_albums.is_empty(),
+                RightPanelMode::CategoryAlbums => !state.library.genre_albums.is_empty(),
                 _ => false,
             }
         }
@@ -259,7 +259,7 @@ fn has_track_with_album(state: &AppState) -> bool {
         View::NowPlaying | View::Queue => {
             let idx = state.list_state.queue_index;
             let track = match state.playback_mode {
-                PlaybackMode::Queue | PlaybackMode::None => state.queue.get(idx),
+                PlaybackMode::Queue | PlaybackMode::None => state.queue.tracks.get(idx),
                 PlaybackMode::Radio => state.radio.tracks.get(idx),
             };
             track.map(|t| t.parent_rating_key.is_some()).unwrap_or(false)
@@ -278,9 +278,9 @@ fn has_track_with_album(state: &AppState) -> bool {
                 }
             }
             // Legacy right panel tracks
-            match state.right_panel_mode {
+            match state.library.right_panel_mode {
                 RightPanelMode::AlbumTracks | RightPanelMode::CategoryTracks => {
-                    state.selected_album_tracks.get(state.list_state.tracks_index)
+                    state.library.selected_album_tracks.get(state.list_state.tracks_index)
                         .map(|t| t.parent_rating_key.is_some())
                         .unwrap_or(false)
                 }

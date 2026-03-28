@@ -1,5 +1,7 @@
 //! View refresh, stale data detection, and background category refresh.
 
+use crate::app::event::*;
+use crate::app::action::*;
 use crate::app::{Action, AppState, Event};
 use crate::app::state::{BrowseCategory, View};
 use crate::plex::PlexClient;
@@ -22,7 +24,7 @@ pub fn refresh_current_view(state: &mut AppState) -> Vec<Action> {
 
         if let Some(folder_key) = subfolder_key {
             state.set_status("Refreshing folder...".to_string());
-            return vec![Action::RefreshSubfolder(folder_key)];
+            return vec![FolderAction::RefreshSubfolder(folder_key).into()];
         }
     }
 
@@ -34,7 +36,7 @@ pub fn refresh_current_view(state: &mut AppState) -> Vec<Action> {
                 if let Some(item) = parent_col.selected_item() {
                     if matches!(item, crate::app::state::BrowseItem::AllTracks { ref artist_key, .. } if artist_key == "__all_library__") {
                         state.set_status("Refreshing all tracks...".to_string());
-                        return vec![Action::RefreshCategory(RefreshCategory::AllTracks)];
+                        return vec![SystemAction::RefreshCategory(RefreshCategory::AllTracks).into()];
                     }
                 }
             }
@@ -83,7 +85,7 @@ pub fn refresh_current_view(state: &mut AppState) -> Vec<Action> {
 
         if let Some(key) = album_key {
             state.set_status("Refreshing album tracks...".to_string());
-            return vec![Action::RefreshAlbumTracks { album_key: key }];
+            return vec![MillerAction::RefreshAlbumTracks { album_key: key }.into()];
         }
     }
 
@@ -91,7 +93,7 @@ pub fn refresh_current_view(state: &mut AppState) -> Vec<Action> {
         View::Browse => match state.browse_category {
             BrowseCategory::Library => Some(RefreshCategory::Artists),
             BrowseCategory::Playlists => Some(RefreshCategory::Playlists),
-            BrowseCategory::Genres => match state.genre_content_type {
+            BrowseCategory::Genres => match state.library.genre_content_type {
                 GenreContentType::Genres => Some(RefreshCategory::Genres),
                 GenreContentType::ArtistGenres => Some(RefreshCategory::ArtistGenres),
                 GenreContentType::AlbumGenres => Some(RefreshCategory::AlbumGenres),
@@ -106,7 +108,7 @@ pub fn refresh_current_view(state: &mut AppState) -> Vec<Action> {
     if let Some(cat) = category {
         if !state.cache_mgmt.background_refresh.contains(&cat) {
             state.set_status(format!("Refreshing {}...", cat.display_name()));
-            return vec![Action::RefreshCategory(cat)];
+            return vec![SystemAction::RefreshCategory(cat).into()];
         }
     }
     vec![]
@@ -125,19 +127,19 @@ pub fn is_viewing_category(category: &crate::app::state::RefreshCategory, state:
         (BrowseCategory::Library, RefreshCategory::AlbumArtists) => true,
         (BrowseCategory::Playlists, RefreshCategory::Playlists) => true,
         (BrowseCategory::Genres, RefreshCategory::Genres) => {
-            matches!(state.genre_content_type, GenreContentType::Genres)
+            matches!(state.library.genre_content_type, GenreContentType::Genres)
         }
         (BrowseCategory::Genres, RefreshCategory::ArtistGenres) => {
-            matches!(state.genre_content_type, GenreContentType::ArtistGenres)
+            matches!(state.library.genre_content_type, GenreContentType::ArtistGenres)
         }
         (BrowseCategory::Genres, RefreshCategory::AlbumGenres) => {
-            matches!(state.genre_content_type, GenreContentType::AlbumGenres)
+            matches!(state.library.genre_content_type, GenreContentType::AlbumGenres)
         }
         (BrowseCategory::Genres, RefreshCategory::Moods) => {
-            matches!(state.genre_content_type, GenreContentType::Moods)
+            matches!(state.library.genre_content_type, GenreContentType::Moods)
         }
         (BrowseCategory::Genres, RefreshCategory::Styles) => {
-            matches!(state.genre_content_type, GenreContentType::Styles)
+            matches!(state.library.genre_content_type, GenreContentType::Styles)
         }
         (BrowseCategory::Folders, RefreshCategory::Folders) => true,
         _ => false,
@@ -152,7 +154,7 @@ pub fn current_view_category(state: &AppState) -> Option<crate::app::state::Refr
         View::Browse => match state.browse_category {
             BrowseCategory::Library => Some(RefreshCategory::Artists),
             BrowseCategory::Playlists => Some(RefreshCategory::Playlists),
-            BrowseCategory::Genres => match state.genre_content_type {
+            BrowseCategory::Genres => match state.library.genre_content_type {
                 GenreContentType::Genres => Some(RefreshCategory::Genres),
                 GenreContentType::ArtistGenres => Some(RefreshCategory::ArtistGenres),
                 GenreContentType::AlbumGenres => Some(RefreshCategory::AlbumGenres),
@@ -234,16 +236,16 @@ pub fn spawn_category_refresh(
     state.cache_mgmt.background_refresh.insert(category);
 
     let old_count = match category {
-        RefreshCategory::Artists | RefreshCategory::AlbumArtists => state.artists.len(),
-        RefreshCategory::Albums => state.albums.len(),
-        RefreshCategory::Playlists => state.playlists.len(),
-        RefreshCategory::Genres => state.genres.len(),
-        RefreshCategory::ArtistGenres => state.artist_genres.len(),
-        RefreshCategory::AlbumGenres => state.album_genres.len(),
-        RefreshCategory::Moods => state.moods.len(),
-        RefreshCategory::Styles => state.styles.len(),
+        RefreshCategory::Artists | RefreshCategory::AlbumArtists => state.library.artists.len(),
+        RefreshCategory::Albums => state.library.albums.len(),
+        RefreshCategory::Playlists => state.library.playlists.len(),
+        RefreshCategory::Genres => state.library.genres.len(),
+        RefreshCategory::ArtistGenres => state.library.artist_genres.len(),
+        RefreshCategory::AlbumGenres => state.library.album_genres.len(),
+        RefreshCategory::Moods => state.library.moods.len(),
+        RefreshCategory::Styles => state.library.styles.len(),
         RefreshCategory::Stations => state.stations.len(),
-        RefreshCategory::AllTracks => state.all_tracks.len(),
+        RefreshCategory::AllTracks => state.library.all_tracks.len(),
         RefreshCategory::Folders => state.folder_state.as_ref().map(|f| f.columns.first().map(|c| c.items.len()).unwrap_or(0)).unwrap_or(0),
     };
 
@@ -257,7 +259,7 @@ pub fn spawn_category_refresh(
                 match client.get_artists(&lib_key).await {
                     Ok(artists) => {
                         let new_count = artists.len();
-                        let _ = event_tx.send(Event::ArtistsPreloaded { library_key: lib_key.clone(), artists }).await;
+                        let _ = event_tx.send(PreloadEvent::ArtistsPreloaded { library_key: lib_key.clone(), artists }.into()).await;
                         new_count != old_count
                     }
                     Err(e) => {
@@ -270,7 +272,7 @@ pub fn spawn_category_refresh(
                 match client.get_albums(&lib_key).await {
                     Ok(albums) => {
                         let new_count = albums.len();
-                        let _ = event_tx.send(Event::AlbumsPreloaded { library_key: lib_key.clone(), albums }).await;
+                        let _ = event_tx.send(PreloadEvent::AlbumsPreloaded { library_key: lib_key.clone(), albums }.into()).await;
                         new_count != old_count
                     }
                     Err(e) => {
@@ -283,7 +285,7 @@ pub fn spawn_category_refresh(
                 match client.get_playlists(Some(&lib_key)).await {
                     Ok(playlists) => {
                         let new_count = playlists.len();
-                        let _ = event_tx.send(Event::PlaylistsPreloaded { library_key: lib_key.clone(), playlists }).await;
+                        let _ = event_tx.send(PreloadEvent::PlaylistsPreloaded { library_key: lib_key.clone(), playlists }.into()).await;
                         new_count != old_count
                     }
                     Err(e) => {
@@ -296,7 +298,7 @@ pub fn spawn_category_refresh(
                 match client.get_genres(&lib_key).await {
                     Ok(genres) => {
                         let new_count = genres.len();
-                        let _ = event_tx.send(Event::GenresPreloaded { library_key: lib_key.clone(), genres }).await;
+                        let _ = event_tx.send(PreloadEvent::GenresPreloaded { library_key: lib_key.clone(), genres }.into()).await;
                         new_count != old_count
                     }
                     Err(e) => {
@@ -309,7 +311,7 @@ pub fn spawn_category_refresh(
                 match client.get_artist_genres(&lib_key).await {
                     Ok(genres) => {
                         let new_count = genres.len();
-                        let _ = event_tx.send(Event::ArtistGenresPreloaded { library_key: lib_key.clone(), genres }).await;
+                        let _ = event_tx.send(PreloadEvent::ArtistGenresPreloaded { library_key: lib_key.clone(), genres }.into()).await;
                         new_count != old_count
                     }
                     Err(e) => {
@@ -322,7 +324,7 @@ pub fn spawn_category_refresh(
                 match client.get_album_genres(&lib_key).await {
                     Ok(genres) => {
                         let new_count = genres.len();
-                        let _ = event_tx.send(Event::AlbumGenresPreloaded { library_key: lib_key.clone(), genres }).await;
+                        let _ = event_tx.send(PreloadEvent::AlbumGenresPreloaded { library_key: lib_key.clone(), genres }.into()).await;
                         new_count != old_count
                     }
                     Err(e) => {
@@ -335,7 +337,7 @@ pub fn spawn_category_refresh(
                 match client.get_moods(&lib_key).await {
                     Ok(moods) => {
                         let new_count = moods.len();
-                        let _ = event_tx.send(Event::MoodsPreloaded { library_key: lib_key.clone(), moods }).await;
+                        let _ = event_tx.send(PreloadEvent::MoodsPreloaded { library_key: lib_key.clone(), moods }.into()).await;
                         new_count != old_count
                     }
                     Err(e) => {
@@ -348,7 +350,7 @@ pub fn spawn_category_refresh(
                 match client.get_styles(&lib_key).await {
                     Ok(styles) => {
                         let new_count = styles.len();
-                        let _ = event_tx.send(Event::StylesPreloaded { library_key: lib_key.clone(), styles }).await;
+                        let _ = event_tx.send(PreloadEvent::StylesPreloaded { library_key: lib_key.clone(), styles }.into()).await;
                         new_count != old_count
                     }
                     Err(e) => {
@@ -361,7 +363,7 @@ pub fn spawn_category_refresh(
                 match client.get_stations(&lib_key).await {
                     Ok(stations) => {
                         let new_count = stations.len();
-                        let _ = event_tx.send(Event::StationsPreloaded { library_key: lib_key.clone(), stations }).await;
+                        let _ = event_tx.send(PreloadEvent::StationsPreloaded { library_key: lib_key.clone(), stations }.into()).await;
                         new_count != old_count
                     }
                     Err(e) => {
@@ -374,7 +376,7 @@ pub fn spawn_category_refresh(
                 match client.get_tracks(&lib_key).await {
                     Ok(tracks) => {
                         let new_count = tracks.len();
-                        let _ = event_tx.send(Event::AllTracksPreloaded { library_key: lib_key.clone(), tracks }).await;
+                        let _ = event_tx.send(PreloadEvent::AllTracksPreloaded { library_key: lib_key.clone(), tracks }.into()).await;
                         new_count != old_count
                     }
                     Err(e) => {
@@ -391,7 +393,7 @@ pub fn spawn_category_refresh(
                         let new_count = items.len();
                         let root_column = FolderColumn::new(None, "Music".to_string(), items);
                         let folder_state = FolderNavigationState::with_root(lib_key.clone(), root_column);
-                        let _ = event_tx.send(Event::FoldersPreloaded { library_key: lib_key.clone(), folder_state }).await;
+                        let _ = event_tx.send(FolderEvent::FoldersPreloaded { library_key: lib_key.clone(), folder_state }.into()).await;
                         new_count != old_count
                     }
                     Err(e) => {
@@ -402,6 +404,6 @@ pub fn spawn_category_refresh(
             }
         };
 
-        let _ = event_tx.send(Event::CacheRefreshCompleted { category, changed }).await;
+        let _ = event_tx.send(CacheEvent::CacheRefreshCompleted { category, changed }.into()).await;
     });
 }

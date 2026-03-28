@@ -2,6 +2,7 @@
 //!
 //! All mouse event processing extracted from the event loop as free functions.
 
+use crate::app::action::*;
 use crate::app::Action;
 use crate::app::state::{
     BrowseCategory, BrowseItem, BrowseNavigationState, PlaybackMode,
@@ -32,7 +33,7 @@ fn is_two_row_browse_column(
         .and_then(|c| c.selected_item())
         .map_or(false, |item| matches!(item, BrowseItem::AllArtists))
         || (state.browse_category == BrowseCategory::Library
-            && state.library_sub_mode != crate::app::state::LibrarySubMode::Normal
+            && state.library.library_sub_mode != crate::app::state::LibrarySubMode::Normal
             && col_idx == 0))
     {
         return true;
@@ -103,10 +104,10 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
     let click_col = event.column;
 
     // Calculate layout regions
-    // Layout: [tab_bar(1)] [content] [transport(2)] [commands(3)]
-    let tab_bar_row = 0u16;
+    // Layout: [content] [transport(2)] [commands(3)]
     let commands_start = state.terminal_height.saturating_sub(3); // bottom 3 rows
     let transport_start = state.terminal_height.saturating_sub(5); // 2 rows above commands
+    let command_top_row = commands_start; // top row of command bar (has tabs + F-keys)
 
     // Confirm dialog intercepts mouse clicks when active
     if state.popups.confirm_dialog.is_some() {
@@ -141,10 +142,10 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
                                 use crate::app::state::ConfirmAction;
                                 return match dialog.on_confirm {
                                     ConfirmAction::RefreshCache => helpers::refresh_current_view(state),
-                                    ConfirmAction::ClearLibraryCache => vec![Action::ClearLibraryCache],
-                                    ConfirmAction::ClearArtworkCache => vec![Action::ClearArtworkCache],
-                                    ConfirmAction::ClearSubfolderCache => vec![Action::ClearSubfolderCache],
-                                    ConfirmAction::Quit => vec![Action::Quit],
+                                    ConfirmAction::ClearLibraryCache => vec![SettingsAction::ClearLibraryCache.into()],
+                                    ConfirmAction::ClearArtworkCache => vec![SettingsAction::ClearArtworkCache.into()],
+                                    ConfirmAction::ClearSubfolderCache => vec![SettingsAction::ClearSubfolderCache.into()],
+                                    ConfirmAction::Quit => vec![SystemAction::Quit.into()],
                                 };
                             }
                             return vec![];
@@ -234,14 +235,13 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
                 // to normal handlers. Filter stays active until Esc or view change.
             }
 
-            // Check tab bar (top row)
-            if click_row == tab_bar_row {
-                return handle_tab_bar_click(click_col, state);
-            }
-
-            // Check command bar (bottom 3 rows: top commands, spacer, bottom commands)
+            // Check command bar (bottom 3 rows: top row has tabs+F-keys, spacer, bottom has contextual)
             if click_row >= commands_start {
-                if click_row == commands_start {
+                if click_row == command_top_row {
+                    // Top row: check tab bar items first (library label, quit, view tabs),
+                    // then F-key items
+                    let tab_result = handle_tab_bar_click(click_col, state);
+                    if !tab_result.is_empty() { return tab_result; }
                     return handle_command_bar_click(click_col, state, true);
                 } else if click_row == commands_start + 2 {
                     return handle_command_bar_click(click_col, state, false);
@@ -378,11 +378,11 @@ fn handle_library_picker_mouse(event: crossterm::event::MouseEvent, state: &mut 
                                 let is_different_server = state.active_server_id.as_deref() != Some(*server_id);
                                 if is_different_server && multi_server {
                                     return vec![
-                                        Action::SelectLibraryOnServer(lib_key, server_id.to_string()),
-                                        Action::CloseLibraryPicker,
+                                        SettingsAction::SelectLibraryOnServer(lib_key, server_id.to_string()).into(),
+                                        SearchAction::CloseLibraryPicker.into(),
                                     ];
                                 } else {
-                                    return vec![Action::SelectLibrary(lib_key), Action::CloseLibraryPicker];
+                                    return vec![SettingsAction::SelectLibrary(lib_key).into(), SearchAction::CloseLibraryPicker.into()];
                                 }
                             }
                         } else {
@@ -392,7 +392,7 @@ fn handle_library_picker_mouse(event: crossterm::event::MouseEvent, state: &mut 
                     }
                 }
             } else {
-                return vec![Action::CloseLibraryPicker];
+                return vec![SearchAction::CloseLibraryPicker.into()];
             }
         }
         MouseEventKind::ScrollUp if inside_popup => {
@@ -424,12 +424,12 @@ fn handle_search_tab_click(rel_col: u16, state: &mut AppState) -> Vec<Action> {
             4 => SearchTab::Tracks,
             _ => SearchTab::Genres,
         };
-        state.search_tab = new_tab;
-        state.search_focus = crate::app::state::SearchFocus::Input;
+        state.search.tab = new_tab;
+        state.search.focus = crate::app::state::SearchFocus::Input;
         state.list_state.search_item_index = 0;
         state.scroll.search = None;
-        if !state.search_query.is_empty() {
-            return vec![Action::ExecuteLocalSearch];
+        if !state.search.query.is_empty() {
+            return vec![SearchAction::ExecuteLocalSearch.into()];
         }
     }
     vec![]
@@ -444,16 +444,16 @@ fn handle_search_result_click(visual_row: usize, results_height: usize, state: &
         return vec![];
     }
 
-    let Some(ref results) = state.search_results else { return vec![] };
+    let Some(ref results) = state.search.results else { return vec![] };
     let prev_idx = state.list_state.search_item_index;
-    let was_focused = matches!(state.search_focus, crate::app::state::SearchFocus::Results);
+    let was_focused = matches!(state.search.focus, crate::app::state::SearchFocus::Results);
 
     // Check if this is a rapid click (within 500ms) - if so, don't open on second click
     let is_rapid_click = state.scroll.search_click_time
         .map(|t| t.elapsed().as_millis() < 500)
         .unwrap_or(false);
 
-    match state.search_tab {
+    match state.search.tab {
         SearchTab::Global => {
             let section_counts = [
                 results.artists.len(),
@@ -485,18 +485,18 @@ fn handle_search_result_click(visual_row: usize, results_height: usize, state: &
             let abs_row = scroll_offset + visual_row;
             if let Some(Some(idx)) = entries.get(abs_row) {
                 let already_selected = was_focused && *idx == prev_idx;
-                state.search_focus = crate::app::state::SearchFocus::Results;
+                state.search.focus = crate::app::state::SearchFocus::Results;
                 state.list_state.search_item_index = *idx;
                 state.scroll.search = Some(scroll_offset);
                 state.scroll.search_click_time = Some(std::time::Instant::now());
                 // Open in library only if already selected AND not a rapid click
                 if already_selected && !is_rapid_click {
-                    return vec![Action::SelectSearchResult];
+                    return vec![SearchAction::SelectSearchResult.into()];
                 }
             }
         }
         _ => {
-            let total = match state.search_tab {
+            let total = match state.search.tab {
                 SearchTab::Artists => results.artists.len(),
                 SearchTab::Albums => results.albums.len(),
                 SearchTab::Playlists => results.playlists.len(),
@@ -513,13 +513,13 @@ fn handle_search_result_click(visual_row: usize, results_height: usize, state: &
             let actual_idx = scroll_offset + visual_row;
             if actual_idx < total {
                 let already_selected = was_focused && actual_idx == prev_idx;
-                state.search_focus = crate::app::state::SearchFocus::Results;
+                state.search.focus = crate::app::state::SearchFocus::Results;
                 state.list_state.search_item_index = actual_idx;
                 state.scroll.search = Some(scroll_offset);
                 state.scroll.search_click_time = Some(std::time::Instant::now());
                 // Open in library only if already selected AND not a rapid click
                 if already_selected && !is_rapid_click {
-                    return vec![Action::SelectSearchResult];
+                    return vec![SearchAction::SelectSearchResult.into()];
                 }
             }
         }
@@ -540,10 +540,10 @@ fn handle_search_popup_click(click_row: u16, click_col: u16, state: &mut AppStat
     if click_row < regions.outer.y || click_row >= regions.outer.bottom()
         || click_col < regions.outer.x || click_col >= regions.outer.right()
     {
-        state.search_query.clear();
-        state.search_results = None;
-        state.search_focus = crate::app::state::SearchFocus::Input;
-        return vec![Action::CloseSearchPopup];
+        state.search.query.clear();
+        state.search.results = None;
+        state.search.focus = crate::app::state::SearchFocus::Input;
+        return vec![SearchAction::CloseSearchPopup.into()];
     }
 
     // Tab area
@@ -558,7 +558,7 @@ fn handle_search_popup_click(click_row: u16, click_col: u16, state: &mut AppStat
 
     // Search input area
     if click_row >= regions.input_area.y && click_row < regions.input_area.bottom() {
-        state.search_focus = crate::app::state::SearchFocus::Input;
+        state.search.focus = crate::app::state::SearchFocus::Input;
         return vec![];
     }
 
@@ -585,7 +585,7 @@ fn handle_tab_bar_click(click_col: u16, state: &mut AppState) -> Vec<Action> {
     // Click on library name opens library picker
     if let Some(lib_rect) = &regions.library_label {
         if click_col >= lib_rect.x && click_col < lib_rect.right() {
-            return vec![Action::OpenLibraryPicker];
+            return vec![SearchAction::OpenLibraryPicker.into()];
         }
     }
 
@@ -597,7 +597,7 @@ fn handle_tab_bar_click(click_col: u16, state: &mut AppState) -> Vec<Action> {
             state.popups.confirm_dialog = Some(ConfirmDialog {
                 title: "Quit".to_string(),
                 message: "Are you sure you want to quit?".to_string(),
-                on_confirm: ConfirmAction::Quit,
+                on_confirm: ConfirmAction::Quit.into(),
                 selected_yes: false,
             });
             return vec![];
@@ -674,26 +674,26 @@ fn handle_command_bar_click(click_col: u16, state: &mut AppState, is_top_row: bo
 fn alt_bar_item_action(cmd: &crate::app::handlers::key_input::AltCommand, state: &mut AppState) -> Vec<Action> {
     use crate::app::handlers::key_input::CommandModifier;
     match (cmd.modifier, cmd.key) {
-        (CommandModifier::Ctrl, 'e') => vec![Action::EnqueueSelection],
+        (CommandModifier::Ctrl, 'e') => vec![QueueAction::EnqueueSelection.into()],
         (CommandModifier::Ctrl, 'm') => super::key_input::get_similar_action(state),
         (CommandModifier::Ctrl, 'j') => super::key_input::navigate_to_album(state),
-        (CommandModifier::Ctrl, 'w') => vec![Action::PromptSavePlaylist],
-        (CommandModifier::Ctrl, 'x') => vec![Action::ClearQueue],
-        (CommandModifier::Alt, 'f') => vec![Action::ActivateListFilter],
+        (CommandModifier::Ctrl, 'w') => vec![QueueAction::PromptSavePlaylist.into()],
+        (CommandModifier::Ctrl, 'x') => vec![QueueAction::ClearQueue.into()],
+        (CommandModifier::Alt, 'f') => vec![SearchAction::ActivateListFilter.into()],
         (CommandModifier::Alt, 'r') => {
             if let Some(ref lib_key) = state.active_library {
                 let key = format!("/library/sections/{}/stations/randomAlbum", lib_key);
-                vec![Action::PlayStation(key)]
+                vec![RadioAction::PlayStation(key).into()]
             } else {
                 vec![]
             }
         }
-        (CommandModifier::Ctrl, 's') => vec![Action::OpenSortPopup],
+        (CommandModifier::Ctrl, 's') => vec![SearchAction::OpenSortPopup.into()],
         (CommandModifier::Ctrl, 'f') => {
             if state.popups.search_active {
-                vec![Action::CloseSearchPopup]
+                vec![SearchAction::CloseSearchPopup.into()]
             } else {
-                vec![Action::OpenSearchPopup]
+                vec![SearchAction::OpenSearchPopup.into()]
             }
         }
         (CommandModifier::Ctrl, 'q') => {
@@ -702,7 +702,7 @@ fn alt_bar_item_action(cmd: &crate::app::handlers::key_input::AltCommand, state:
             state.popups.confirm_dialog = Some(ConfirmDialog {
                 title: "Quit".to_string(),
                 message: "Are you sure you want to quit?".to_string(),
-                on_confirm: ConfirmAction::Quit,
+                on_confirm: ConfirmAction::Quit.into(),
                 selected_yes: false,
             });
             vec![]
@@ -710,12 +710,12 @@ fn alt_bar_item_action(cmd: &crate::app::handlers::key_input::AltCommand, state:
         (CommandModifier::None, _) => {
             // Function keys
             match cmd.display_key {
-                Some("F1") => vec![Action::SetView(View::Help)],
-                Some("F2") => vec![Action::OpenSettings],
-                Some("F3") => vec![Action::OpenLibraryPicker],
+                Some("F1") => vec![NavigationAction::SetView(View::Help).into()],
+                Some("F2") => vec![SettingsAction::OpenSettings.into()],
+                Some("F3") => vec![SearchAction::OpenLibraryPicker.into()],
                 Some("F4") => {
                     if let Some((artist_key, artist_name)) = helpers::get_artist_for_bio(state) {
-                        vec![Action::ShowArtistBio { artist_key, artist_name }]
+                        vec![SearchAction::ShowArtistBio { artist_key, artist_name }.into()]
                     } else {
                         vec![]
                     }
@@ -730,30 +730,19 @@ fn alt_bar_item_action(cmd: &crate::app::handlers::key_input::AltCommand, state:
 
 /// Return the action for clicking a shortcut bar item (with cycling support).
 fn tab_bar_action(idx: usize, _state: &AppState) -> Vec<Action> {
+    // Tab indices match the reduced tab bar: 0=Library, 1=Queue, 2=Now Playing
     match idx {
         0 => {
-            // Library: just switch (no cycling)
-            vec![Action::SetCategory(BrowseCategory::Library), Action::SetView(View::Browse)]
+            // Library (Browse view)
+            vec![NavigationAction::SetView(View::Browse).into()]
         }
         1 => {
-            // Playlists: just switch (no cycling)
-            vec![Action::SetCategory(BrowseCategory::Playlists), Action::SetView(View::Browse)]
+            // Queue
+            vec![NavigationAction::SetView(View::Queue).into()]
         }
         2 => {
-            // Genres: just switch (no cycling -- use tabs)
-            vec![Action::SetCategory(BrowseCategory::Genres), Action::SetView(View::Browse)]
-        }
-        3 => {
-            // Folders: just switch (no cycling)
-            vec![Action::SetCategory(BrowseCategory::Folders), Action::SetView(View::Browse)]
-        }
-        4 => {
-            // Queue
-            vec![Action::SetView(View::Queue)]
-        }
-        5 => {
             // Now Playing (visualizer)
-            vec![Action::SetView(View::NowPlaying), Action::LoadWaveform]
+            vec![NavigationAction::SetView(View::NowPlaying).into(), SystemAction::LoadWaveform.into()]
         }
         _ => vec![],
     }
@@ -776,7 +765,7 @@ fn handle_transport_down(click_col: u16, _click_row: u16, _transport_start: u16,
             let vol = (relative_pos as f32 / slider_rect.width as f32).clamp(0.0, 1.0);
             state.volume_slider_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
             state.volume_drag = true;
-            return vec![Action::SetVolume(vol)];
+            return vec![PlaybackAction::SetVolume(vol).into()];
         }
     }
 
@@ -785,7 +774,7 @@ fn handle_transport_down(click_col: u16, _click_row: u16, _transport_start: u16,
         if click_col >= speaker_rect.x && click_col < speaker_rect.right() {
             if state.volume_slider_until.map_or(false, |t| t > std::time::Instant::now()) {
                 // Slider already visible: toggle mute
-                return vec![Action::ToggleMute];
+                return vec![PlaybackAction::ToggleMute.into()];
             } else {
                 // Show volume slider
                 state.volume_slider_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
@@ -798,16 +787,16 @@ fn handle_transport_down(click_col: u16, _click_row: u16, _transport_start: u16,
     if let Some(ref search_rect) = regions.search_icon {
         if state.view == View::Browse && click_col >= search_rect.x && click_col < search_rect.right() {
             if state.list_filter.active {
-                return vec![Action::DeactivateListFilter];
+                return vec![SearchAction::DeactivateListFilter.into()];
             } else {
-                return vec![Action::ActivateListFilter];
+                return vec![SearchAction::ActivateListFilter.into()];
             }
         }
     }
 
     // Play/pause button
     if click_col >= regions.play_pause.x && click_col < regions.play_pause.right() {
-        return vec![Action::TogglePlayPause];
+        return vec![PlaybackAction::TogglePlayPause.into()];
     }
 
     // Seek bar
@@ -831,23 +820,23 @@ fn handle_transport_down(click_col: u16, _click_row: u16, _transport_start: u16,
 
         let seek_progress = (relative_pos as f64 / seekable_width as f64).clamp(0.0, 1.0);
         let seek_ms = (seek_progress * state.playback.duration_ms as f64) as u64;
-        return vec![Action::Seek(seek_ms)];
+        return vec![PlaybackAction::Seek(seek_ms).into()];
     }
 
     // Previous track button
     if click_col >= regions.prev_track.x && click_col < regions.prev_track.right() {
-        return vec![Action::Previous];
+        return vec![PlaybackAction::Previous.into()];
     }
 
     // Next track button
     if click_col >= regions.next_track.x && click_col < regions.next_track.right() {
-        return vec![Action::Next];
+        return vec![PlaybackAction::Next.into()];
     }
 
     // Track info area: navigate to Now Playing
     if let Some(ref info_rect) = regions.track_info {
         if click_col >= info_rect.x && click_col < info_rect.right() {
-            return vec![Action::SetView(View::NowPlaying), Action::LoadWaveform];
+            return vec![NavigationAction::SetView(View::NowPlaying).into(), SystemAction::LoadWaveform.into()];
         }
     }
 
@@ -866,7 +855,7 @@ fn handle_volume_drag(click_col: u16, state: &mut AppState) -> Vec<Action> {
     let relative_pos = clamped_col - slider.x;
     let vol = (relative_pos as f32 / slider.width as f32).clamp(0.0, 1.0);
     state.volume_slider_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
-    vec![Action::SetVolume(vol)]
+    vec![PlaybackAction::SetVolume(vol).into()]
 }
 
 /// Handle mouse drag on the transport bar (only when seeking_drag is true).
@@ -885,7 +874,7 @@ fn handle_transport_drag(click_col: u16, state: &AppState) -> Vec<Action> {
         let relative_pos = clamped_col - seekbar.x;
         let progress = (relative_pos as f64 / seekbar.width as f64).clamp(0.0, 1.0);
         let seek_ms = (progress * state.playback.duration_ms as f64) as u64;
-        return vec![Action::Seek(seek_ms)];
+        return vec![PlaybackAction::Seek(seek_ms).into()];
     }
     vec![]
 }
@@ -1271,6 +1260,34 @@ fn miller_column_at(click_col: u16, _nav: &BrowseNavigationState, state: &AppSta
 
 /// Handle click in Browse view using Miller column hit-testing.
 fn handle_browse_click(click_row: u16, click_col: u16, state: &mut AppState) -> Vec<Action> {
+    // Check category column click first
+    {
+        let hr = state.hit_regions.borrow();
+        if let Some(ref cat_region) = hr.category_column {
+            if click_col >= cat_region.inner.x
+                && click_col < cat_region.inner.x + cat_region.inner.width
+                && click_row >= cat_region.inner.y
+                && click_row < cat_region.inner.y + cat_region.inner.height
+            {
+                let item_idx = (click_row - cat_region.inner.y) as usize;
+                if item_idx < cat_region.item_count {
+                    drop(hr);
+                    let was_selected = state.category_column_index == item_idx;
+                    state.category_column_index = item_idx;
+                    state.category_column_focused = true;
+
+                    if was_selected {
+                        // Click on already-selected category: drill in
+                        let cat = crate::app::state::BrowseCategory::all()[item_idx];
+                        state.category_column_focused = false;
+                        return vec![NavigationAction::SetCategory(cat).into()];
+                    }
+                    return vec![];
+                }
+            }
+        }
+    }
+
     // Check scrollbar click first (before item selection)
     match state.browse_category {
         BrowseCategory::Folders => {
@@ -1348,27 +1365,20 @@ fn handle_browse_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
                     _ => unreachable!(),
                 };
 
-                // If clicking a different column, change focus (preserve child columns)
+                // Update focus and selection
+                state.scroll.browse = Some((col_idx, scroll_offset));
+                state.scroll.browse_click_time = Some(std::time::Instant::now());
+
                 if col_idx != nav.focused_column {
-                    state.scroll.browse = Some((col_idx, scroll_offset));
-                    state.scroll.browse_click_time = Some(std::time::Instant::now());
                     nav.focused_column = col_idx;
-                    if let Some(col) = nav.columns.get_mut(col_idx) {
-                        col.selected_index = item_idx;
-                    }
-                    // Moving to a different column clears filter
                     if state.list_filter.active {
                         state.list_filter.deactivate();
                     }
-                    return vec![];
                 }
 
-                // Determine if this click should drill down or just select
                 let col_sel = nav.columns.get(col_idx).map(|c| c.selected_index).unwrap_or(0);
                 let should_drill = if filter_on_click_col {
-                    // Filter active: use helper (first click = select, second = drill)
                     let drill = handle_filtered_column_click(state, col_idx, item_idx, scroll_offset, col_sel);
-                    // Always update column selection
                     let nav = match state.browse_category {
                         BrowseCategory::Library => &mut state.artist_nav,
                         BrowseCategory::Genres => &mut state.genre_nav,
@@ -1379,20 +1389,33 @@ fn handle_browse_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
                         col.selected_index = item_idx;
                     }
                     drill
+                } else if col_sel == item_idx {
+                    // Already selected — drill down (same as Enter)
+                    true
                 } else {
-                    // No filter: first click highlights, second click on same item drills down
-                    state.scroll.browse = Some((col_idx, scroll_offset));
-                    state.scroll.browse_click_time = Some(std::time::Instant::now());
-                    if col_sel == item_idx {
-                        // Already selected — drill down (same as Enter)
-                        true
-                    } else {
-                        // Update selection
-                        if let Some(col) = nav.columns.get_mut(col_idx) {
-                            col.selected_index = item_idx;
-                        }
-                        false
+                    // Different item: update selection and auto-drill to refresh child columns
+                    let nav = match state.browse_category {
+                        BrowseCategory::Library => &mut state.artist_nav,
+                        BrowseCategory::Genres => &mut state.genre_nav,
+                        BrowseCategory::Playlists => &mut state.playlist_nav,
+                        _ => return vec![],
+                    };
+                    if let Some(col) = nav.columns.get_mut(col_idx) {
+                        col.selected_index = item_idx;
                     }
+                    // Auto-drill: replace child columns in-place
+                    use super::key_input::{auto_drill_artist_action, auto_drill_genre_action, auto_drill_playlist_action};
+                    let drill = match state.browse_category {
+                        BrowseCategory::Library => auto_drill_artist_action(state),
+                        BrowseCategory::Genres => auto_drill_genre_action(state),
+                        BrowseCategory::Playlists => auto_drill_playlist_action(state),
+                        _ => None,
+                    };
+                    if let Some(action) = drill {
+                        state.auto_drill_pending = true;
+                        return vec![action];
+                    }
+                    false
                 };
 
                 if should_drill {
@@ -1421,42 +1444,42 @@ fn browse_drill_down_action(item: BrowseItem, col_idx: usize, item_idx: usize, s
         BrowseCategory::Library => {
             match item {
                 BrowseItem::Artist { key, title, .. } => {
-                    state.selected_artist_name = title;
-                    vec![Action::LoadArtistAlbumsForMiller { artist_key: key }]
+                    state.library.selected_artist_name = title;
+                    vec![MillerAction::LoadArtistAlbumsForMiller { artist_key: key }.into()]
                 }
                 BrowseItem::Album { key, title, .. } => {
-                    state.selected_album_title = title;
-                    vec![Action::LoadAlbumTracksForMiller { album_key: key }]
+                    state.library.selected_album_title = title;
+                    vec![MillerAction::LoadAlbumTracksForMiller { album_key: key }.into()]
                 }
                 BrowseItem::AllTracks { artist_key, artist_name, .. } => {
                     if artist_key == "__all_library__" {
-                        state.selected_album_title = "All Tracks".to_string();
-                        vec![Action::LoadAllLibraryTracksForMiller]
+                        state.library.selected_album_title = "All Tracks".to_string();
+                        vec![MillerAction::LoadAllLibraryTracksForMiller.into()]
                     } else if artist_key == "__all_comp__" {
-                        state.selected_album_title = "All Tracks".to_string();
-                        vec![Action::LoadAllCompilationTracksForMiller]
+                        state.library.selected_album_title = "All Tracks".to_string();
+                        vec![MillerAction::LoadAllCompilationTracksForMiller.into()]
                     } else if let Some(real_key) = artist_key.strip_prefix("__comp_tracks:") {
-                        vec![Action::LoadCompilationAllTracksForMiller {
+                        vec![MillerAction::LoadCompilationAllTracksForMiller {
                             artist_key: real_key.to_string(),
                             artist_name,
-                        }]
+                        }.into()]
                     } else {
-                        state.selected_album_title = format!("All tracks by {}", artist_name);
-                        vec![Action::LoadArtistAllTracksForMiller { artist_key }]
+                        state.library.selected_album_title = format!("All tracks by {}", artist_name);
+                        vec![MillerAction::LoadArtistAllTracksForMiller { artist_key }.into()]
                     }
                 }
                 BrowseItem::AllArtists => {
-                    vec![Action::LoadAllAlbumsForMiller]
+                    vec![MillerAction::LoadAllAlbumsForMiller.into()]
                 }
                 BrowseItem::Compilations => {
-                    vec![Action::LoadCompilationsForMiller]
+                    vec![MillerAction::LoadCompilationsForMiller.into()]
                 }
                 BrowseItem::CompilationTracks { artist_key, artist_name } => {
-                    vec![Action::LoadCompilationAlbumsForMiller { artist_key, artist_name }]
+                    vec![MillerAction::LoadCompilationAlbumsForMiller { artist_key, artist_name }.into()]
                 }
                 BrowseItem::Track { .. } => {
                     // Click already-selected track: play track + all following (replaces queue)
-                    vec![Action::PlayTrackFromMiller { column_index: col_idx, track_index: item_idx, single_track: false }]
+                    vec![MillerAction::PlayTrackFromMiller { column_index: col_idx, track_index: item_idx, single_track: false }.into()]
                 }
                 _ => vec![],
             }
@@ -1464,17 +1487,17 @@ fn browse_drill_down_action(item: BrowseItem, col_idx: usize, item_idx: usize, s
         BrowseCategory::Genres => {
             match item {
                 BrowseItem::GenreCategory { key, .. } => {
-                    vec![Action::DrillGenreCategory { category_key: key }]
+                    vec![BrowseAction::DrillGenreCategory { category_key: key }.into()]
                 }
                 BrowseItem::Genre { key, .. } => {
-                    vec![Action::LoadGenreAlbumsForMiller { genre_key: key }]
+                    vec![MillerAction::LoadGenreAlbumsForMiller { genre_key: key }.into()]
                 }
                 BrowseItem::Album { key, .. } => {
-                    vec![Action::LoadGenreTracksForMiller { album_key: key }]
+                    vec![MillerAction::LoadGenreTracksForMiller { album_key: key }.into()]
                 }
                 BrowseItem::Track { .. } => {
                     // Click already-selected track: play track + all following (replaces queue)
-                    vec![Action::PlayGenreTrackFromMiller { column_index: col_idx, track_index: item_idx, single_track: false }]
+                    vec![MillerAction::PlayGenreTrackFromMiller { column_index: col_idx, track_index: item_idx, single_track: false }.into()]
                 }
                 _ => vec![],
             }
@@ -1482,7 +1505,7 @@ fn browse_drill_down_action(item: BrowseItem, col_idx: usize, item_idx: usize, s
         BrowseCategory::Playlists => {
             match item {
                 BrowseItem::Playlist { key, .. } => {
-                    vec![Action::LoadPlaylistTracksForMiller { playlist_key: key }]
+                    vec![MillerAction::LoadPlaylistTracksForMiller { playlist_key: key }.into()]
                 }
                 BrowseItem::Album { key, title, .. } => {
                     // Grouped-by-album: drill into local track group
@@ -1494,12 +1517,12 @@ fn browse_drill_down_action(item: BrowseItem, col_idx: usize, item_idx: usize, s
                             }
                         }
                     }
-                    state.selected_album_title = title;
-                    vec![Action::LoadAlbumTracksForMiller { album_key: key }]
+                    state.library.selected_album_title = title;
+                    vec![MillerAction::LoadAlbumTracksForMiller { album_key: key }.into()]
                 }
                 BrowseItem::Track { .. } => {
                     // Click already-selected track: play track + all following (replaces queue)
-                    vec![Action::PlayPlaylistTrackFromMiller { column_index: col_idx, track_index: item_idx, single_track: false }]
+                    vec![MillerAction::PlayPlaylistTrackFromMiller { column_index: col_idx, track_index: item_idx, single_track: false }.into()]
                 }
                 _ => vec![],
             }
@@ -1518,24 +1541,24 @@ fn browse_double_click_action(item: &BrowseItem, _state: &mut AppState) -> Optio
         }
         BrowseItem::Album { key, title, .. } => {
             // Double-click album → play album now
-            Some(vec![Action::PlayAlbumNow {
+            Some(vec![QueueAction::PlayAlbumNow {
                 rating_key: key.clone(),
                 title: title.clone(),
-            }])
+            }.into()])
         }
         BrowseItem::Playlist { key, title, .. } => {
             // Double-click playlist → play playlist now
-            Some(vec![Action::PlayPlaylistNow {
+            Some(vec![QueueAction::PlayPlaylistNow {
                 playlist_key: key.clone(),
                 title: title.clone(),
-            }])
+            }.into()])
         }
         BrowseItem::ArtistRadio { artist_key, artist_name, .. } => {
             // Double-click ArtistRadio entry → start radio
-            Some(vec![Action::StartPlexRadio {
+            Some(vec![RadioAction::StartPlexRadio {
                 key: artist_key.clone(),
                 title: artist_name.clone(),
-            }])
+            }.into()])
         }
         BrowseItem::Genre { .. } => {
             // Fall through to drill — playing all genre tracks is complex
@@ -1565,11 +1588,11 @@ fn handle_folder_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
                 match item.item_type {
                     FolderItemType::Folder => {
                         // Double-click folder → play all tracks in it
-                        return vec![Action::PlayFolderTracks];
+                        return vec![FolderAction::PlayFolderTracks.into()];
                     }
                     FolderItemType::Track => {
                         // Double-click track → play track + following (matches library behavior)
-                        return vec![Action::PlayFolderTracks];
+                        return vec![FolderAction::PlayFolderTracks.into()];
                     }
                 }
             }
@@ -1586,7 +1609,7 @@ fn handle_folder_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
             return vec![];
         };
 
-        // If clicking a different column, change focus (preserve child columns)
+        // Clicking a different column: change focus and auto-drill from new selection
         if col_idx != folder_state.focused_column {
             state.scroll.browse = Some((col_idx, scroll_offset));
             state.scroll.browse_click_time = Some(std::time::Instant::now());
@@ -1596,6 +1619,11 @@ fn handle_folder_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
             }
             if state.list_filter.active {
                 state.list_filter.deactivate();
+            }
+            // Auto-drill to refresh child columns for the new selection
+            let drill = super::key_input::auto_drill_folder(state);
+            if !drill.is_empty() {
+                return drill;
             }
             return vec![];
         }
@@ -1616,14 +1644,16 @@ fn handle_folder_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
             if col_sel == item_idx {
                 true
             } else {
-                // Click highlights and truncates stale child columns
-                // (matches Up/Down keyboard behavior)
+                // Click different item: update selection and auto-drill
+                // Don't truncate — let auto-drill replace child columns in-place
                 if let Some(ref mut fs) = state.folder_state {
                     if let Some(col) = fs.columns.get_mut(col_idx) {
                         col.selected_index = item_idx;
                     }
-                    fs.truncate_right_columns();
-                    fs.ensure_placeholder();
+                }
+                let drill = super::key_input::auto_drill_folder(state);
+                if !drill.is_empty() {
+                    return drill;
                 }
                 false
             }
@@ -1636,10 +1666,10 @@ fn handle_folder_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
             {
                 match item.item_type {
                     FolderItemType::Folder => {
-                        return vec![Action::NavigateIntoFolder(item.key)];
+                        return vec![FolderAction::NavigateIntoFolder(item.key).into()];
                     }
                     FolderItemType::Track => {
-                        return vec![Action::PlayFolderTracks];
+                        return vec![FolderAction::PlayFolderTracks.into()];
                     }
                 }
             }
@@ -1681,7 +1711,7 @@ fn handle_now_playing_down(click_row: u16, click_col: u16, modifiers: crossterm:
 
                     // Click on back item row
                     if has_back_item && click_row == inner_top {
-                        return vec![Action::NavigateStationsBack];
+                        return vec![RadioAction::NavigateStationsBack.into()];
                     }
 
                     let back_rows: u16 = if has_back_item { 1 } else { 0 };
@@ -1720,22 +1750,22 @@ fn handle_now_playing_down(click_row: u16, click_col: u16, modifiers: crossterm:
                                 }
                                 if station.key.starts_with("action:") {
                                     return match station.key.as_str() {
-                                        "action:adventure" => vec![Action::OpenAdventureLauncher],
-                                        "action:artist_radio" => vec![Action::OpenArtistRadioPicker],
+                                        "action:adventure" => vec![SearchAction::OpenAdventureLauncher.into()],
+                                        "action:artist_radio" => vec![SearchAction::OpenArtistRadioPicker.into()],
                                         _ => vec![],
                                     };
                                 }
                                 if station.key.starts_with("remix:") {
                                     return match station.key.as_str() {
-                                        "remix:gemini" => vec![Action::RemixGemini],
-                                        "remix:twofer" => vec![Action::RemixTwofer],
-                                        "remix:stretch" => vec![Action::RemixStretch],
-                                        "remix:doppelganger" => vec![Action::RemixDoppelganger],
+                                        "remix:gemini" => vec![QueueAction::RemixGemini.into()],
+                                        "remix:twofer" => vec![QueueAction::RemixTwofer.into()],
+                                        "remix:stretch" => vec![QueueAction::RemixStretch.into()],
+                                        "remix:doppelganger" => vec![QueueAction::RemixDoppelganger.into()],
                                         "remix:shuffle" => {
-                                            if state.shuffle_undo_queue.is_some() {
-                                                vec![Action::RemixUndoShuffle]
+                                            if state.queue.shuffle_undo_queue.is_some() {
+                                                vec![QueueAction::RemixUndoShuffle.into()]
                                             } else {
-                                                vec![Action::RemixShuffle]
+                                                vec![QueueAction::RemixShuffle.into()]
                                             }
                                         }
                                         _ => vec![],
@@ -1743,14 +1773,14 @@ fn handle_now_playing_down(click_row: u16, click_col: u16, modifiers: crossterm:
                                 }
                                 if station.is_dj_mode() {
                                     if let Some(mode) = crate::app::state::DjMode::from_key(&station.key) {
-                                        return vec![Action::ToggleDjMode(mode)];
+                                        return vec![RadioAction::ToggleDjMode(mode).into()];
                                     }
                                     return vec![];
                                 }
                                 if station.is_category() {
-                                    return vec![Action::DrillIntoStation(station.key.clone(), station.title.clone())];
+                                    return vec![RadioAction::DrillIntoStation(station.key.clone(), station.title.clone()).into()];
                                 }
-                                return vec![Action::PlayStation(station.key.clone())];
+                                return vec![RadioAction::PlayStation(station.key.clone()).into()];
                             }
                         } else {
                             // Pin current scroll offset to prevent viewport jump on selection change
@@ -1765,8 +1795,8 @@ fn handle_now_playing_down(click_row: u16, click_col: u16, modifiers: crossterm:
             }
 
             // Click on title bar (first content row) of track list toggles shuffle
-            if click_row == qr.track_list.y && click_col >= qr.track_list.x && !state.queue.is_empty() {
-                return vec![Action::ToggleQueueShuffle];
+            if click_row == qr.track_list.y && click_col >= qr.track_list.x && !state.queue.tracks.is_empty() {
+                return vec![QueueAction::ToggleQueueShuffle.into()];
             }
 
             // Track list area (right column)
@@ -1783,7 +1813,7 @@ fn handle_now_playing_down(click_row: u16, click_col: u16, modifiers: crossterm:
                 let tracks_len = if state.playback_mode == PlaybackMode::Radio {
                     state.radio.tracks.len()
                 } else {
-                    state.queue.len()
+                    state.queue.tracks.len()
                 };
 
                 // Match the renderer's scroll offset calculation
@@ -1797,10 +1827,10 @@ fn handle_now_playing_down(click_row: u16, click_col: u16, modifiers: crossterm:
                 if actual_idx < tracks_len {
                     // Shift+Click: toggle multi-select
                     if modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
-                        if state.queue_selected.contains(&actual_idx) {
-                            state.queue_selected.remove(&actual_idx);
+                        if state.queue.selected.contains(&actual_idx) {
+                            state.queue.selected.remove(&actual_idx);
                         } else {
-                            state.queue_selected.insert(actual_idx);
+                            state.queue.selected.insert(actual_idx);
                         }
                         state.scroll.queue = Some(scroll_offset);
                         state.list_state.queue_index = actual_idx;
@@ -1808,8 +1838,8 @@ fn handle_now_playing_down(click_row: u16, click_col: u16, modifiers: crossterm:
                     }
 
                     // Normal click: clear multi-select
-                    if !state.queue_selected.is_empty() {
-                        state.queue_selected.clear();
+                    if !state.queue.selected.is_empty() {
+                        state.queue.selected.clear();
                     }
 
                     let already_selected = state.list_state.queue_index == actual_idx;
@@ -1820,13 +1850,13 @@ fn handle_now_playing_down(click_row: u16, click_col: u16, modifiers: crossterm:
                     if already_selected {
                         match state.playback_mode {
                             PlaybackMode::Queue | PlaybackMode::None => {
-                                if actual_idx < state.queue.len() {
-                                    return vec![Action::JumpToQueueIndex(actual_idx)];
+                                if actual_idx < state.queue.tracks.len() {
+                                    return vec![QueueAction::JumpToQueueIndex(actual_idx).into()];
                                 }
                             }
                             PlaybackMode::Radio => {
                                 if actual_idx < state.radio.tracks.len() {
-                                    return vec![Action::JumpToRadioTrack(actual_idx)];
+                                    return vec![RadioAction::JumpToRadioTrack(actual_idx).into()];
                                 }
                             }
                         }
@@ -1889,7 +1919,7 @@ fn handle_now_playing_down(click_row: u16, click_col: u16, modifiers: crossterm:
                 let relative_col = click_col - ca.x;
                 let seek_progress = relative_col as f64 / inner_width as f64;
                 let seek_ms = (seek_progress * state.playback.duration_ms as f64) as u64;
-                return vec![Action::Seek(seek_ms)];
+                return vec![PlaybackAction::Seek(seek_ms).into()];
             }
         }
         _ => {}
@@ -1915,7 +1945,7 @@ fn handle_visualizer_drag(click_col: u16, state: &AppState) -> Vec<Action> {
                 let relative_col = clamped_col - ca.x;
                 let progress = (relative_col as f64 / inner_width as f64).clamp(0.0, 1.0);
                 let seek_ms = (progress * state.playback.duration_ms as f64) as u64;
-                return vec![Action::Seek(seek_ms)];
+                return vec![PlaybackAction::Seek(seek_ms).into()];
             }
         }
     }
@@ -1996,7 +2026,7 @@ fn handle_auth_click(click_row: u16, click_col: u16, state: &mut AppState) -> Ve
                     state.auth_state.field_index = 2;
                     state.auth_state.editing = false;
                     // Trigger login action
-                    return vec![Action::AuthSignIn];
+                    return vec![SettingsAction::AuthSignIn.into()];
                 }
             }
         }
@@ -2018,7 +2048,7 @@ fn handle_auth_click(click_row: u16, click_col: u16, state: &mut AppState) -> Ve
                     if server_index < state.available_servers.len() {
                         let already_highlighted = state.auth_state.server_index == server_index;
                         if already_highlighted {
-                            return vec![Action::AuthSelectServer];
+                            return vec![SettingsAction::AuthSelectServer.into()];
                         } else {
                             state.auth_state.server_index = server_index;
                         }
@@ -2039,8 +2069,8 @@ fn handle_settings_click(click_row: u16, click_col: u16, state: &mut AppState) -
     // Settings layout: left panel (sections, 16 wide) | right panel (content)
     let left_panel_width = 16u16;
 
-    // Account for content starting at row 1 (after tab bar) + top border
-    let visual_row = click_row.saturating_sub(2) as usize;
+    // Account for top border (content starts at row 0, border adds 1)
+    let visual_row = click_row.saturating_sub(1) as usize;
 
     if click_col < left_panel_width {
         // Click on section list
@@ -2063,7 +2093,7 @@ fn handle_settings_click(click_row: u16, click_col: u16, state: &mut AppState) -
 
             if was_selected {
                 // Double-click / click already-selected: activate
-                return vec![Action::SettingsSelect];
+                return vec![SettingsAction::SettingsSelect.into()];
             }
         }
     }
@@ -2212,7 +2242,7 @@ fn handle_similar_click(click_row: u16, click_col: u16, state: &mut AppState) ->
     if click_col < regions.outer.x || click_col >= regions.outer.right()
         || click_row < regions.outer.y || click_row >= regions.outer.bottom()
     {
-        return vec![Action::SetView(state.previous_view.unwrap_or(View::Browse))];
+        return vec![NavigationAction::SetView(state.previous_view.unwrap_or(View::Browse)).into()];
     }
 
     // Check [Tab] hint click (footer area)
@@ -2289,7 +2319,7 @@ fn handle_related_click(click_row: u16, click_col: u16, state: &mut AppState) ->
     if click_col < regions.outer.x || click_col >= regions.outer.right()
         || click_row < regions.outer.y || click_row >= regions.outer.bottom()
     {
-        return vec![Action::SetView(state.previous_view.unwrap_or(View::Browse))];
+        return vec![NavigationAction::SetView(state.previous_view.unwrap_or(View::Browse)).into()];
     }
 
     // Check scrollbar click first
@@ -2380,7 +2410,7 @@ fn handle_scroll(up: bool, click_row: u16, click_col: u16, state: &mut AppState)
             let tracks_len = if state.playback_mode == PlaybackMode::Radio {
                 state.radio.tracks.len()
             } else {
-                state.queue.len()
+                state.queue.tracks.len()
             };
             let max = tracks_len.saturating_sub(1);
             let new_idx = (state.list_state.queue_index as i32 + delta).clamp(0, max as i32) as usize;
@@ -2468,10 +2498,13 @@ fn handle_browse_scroll(up: bool, click_row: u16, click_col: u16, state: &mut Ap
                         }
                         if col_idx != folder_state.focused_column {
                             folder_state.focused_column = col_idx;
-                            folder_state.truncate_right_columns();
-                            folder_state.ensure_placeholder();
                         }
                     }
+                }
+                // Auto-drill after scroll
+                let drill = super::key_input::auto_drill_folder(state);
+                if !drill.is_empty() {
+                    return drill;
                 }
             }
         }
@@ -2541,11 +2574,10 @@ fn handle_browse_scroll(up: bool, click_row: u16, click_col: u16, state: &mut Ap
 
                     if col_idx != nav.focused_column {
                         nav.focused_column = col_idx;
-                        nav.truncate_right();
                     }
 
-                    // Auto-drill: always update child column on scroll so the right
-                    // panel reflects the highlighted item (matches keyboard Up/Down)
+                    // Auto-drill: update child column on scroll so rightmost columns
+                    // stay visible (matches keyboard Up/Down)
                     {
                         use super::key_input::{auto_drill_artist_action, auto_drill_genre_action, auto_drill_playlist_action};
                         let drill = match state.browse_category {
@@ -2557,14 +2589,6 @@ fn handle_browse_scroll(up: bool, click_row: u16, click_col: u16, state: &mut Ap
                         if let Some(action) = drill {
                             state.auto_drill_pending = true;
                             return vec![action];
-                        } else {
-                            // Non-drillable item: truncate child columns
-                            match state.browse_category {
-                                BrowseCategory::Library => state.artist_nav.truncate_right(),
-                                BrowseCategory::Genres => state.genre_nav.truncate_right(),
-                                BrowseCategory::Playlists => state.playlist_nav.truncate_right(),
-                                _ => {}
-                            }
                         }
                     }
                 }
@@ -2576,7 +2600,7 @@ fn handle_browse_scroll(up: bool, click_row: u16, click_col: u16, state: &mut Ap
     let mut actions = vec![];
     let art_batch = super::dispatch_miller::collect_viewport_art(state);
     if !art_batch.is_empty() {
-        actions.push(Action::LoadAlbumArt(art_batch));
+        actions.push(SystemAction::LoadAlbumArt(art_batch).into());
     }
     actions
 }
@@ -2596,7 +2620,7 @@ fn handle_artist_radio_picker_click(click_row: u16, click_col: u16, state: &mut 
     if click_col < regions.outer.x || click_col >= regions.outer.right()
         || click_row < regions.outer.y || click_row >= regions.outer.bottom()
     {
-        return vec![Action::CloseArtistRadioPicker];
+        return vec![SearchAction::CloseArtistRadioPicker.into()];
     }
 
     let picker = match &state.popups.artist_radio_picker {
@@ -2631,7 +2655,7 @@ fn handle_artist_radio_picker_click(click_row: u16, click_col: u16, state: &mut 
 
     if already_selected {
         // Second click on same item — toggle selection
-        return vec![Action::ArtistRadioPickerToggleArtist];
+        return vec![SearchAction::ArtistRadioPickerToggleArtist.into()];
     }
 
     // First click — highlight (set scroll pin)
@@ -2658,7 +2682,7 @@ fn handle_adventure_launcher_click(click_row: u16, click_col: u16, state: &mut A
     if click_col < regions.outer.x || click_col >= regions.outer.right()
         || click_row < regions.outer.y || click_row >= regions.outer.bottom()
     {
-        return vec![Action::CloseAdventureLauncher];
+        return vec![SearchAction::CloseAdventureLauncher.into()];
     }
 
     let launcher = match &state.popups.adventure_launcher {
@@ -2756,33 +2780,33 @@ fn handle_adventure_launcher_click(click_row: u16, click_col: u16, state: &mut A
                     let album_count = results.albums.len();
                     if item_idx < artist_count {
                         let artist = &results.artists[item_idx];
-                        return vec![Action::AdventureLauncherDrillArtist {
+                        return vec![SearchAction::AdventureLauncherDrillArtist {
                             key: artist.rating_key.clone(),
                             name: artist.title.clone(),
-                        }];
+                        }.into()];
                     } else if item_idx < artist_count + album_count {
                         let album = &results.albums[item_idx - artist_count];
-                        return vec![Action::AdventureLauncherDrillAlbum {
+                        return vec![SearchAction::AdventureLauncherDrillAlbum {
                             key: album.rating_key.clone(),
                             title: album.title.clone(),
                             artist_name: album.artist_name().to_string(),
-                        }];
+                        }.into()];
                     } else {
-                        return vec![Action::AdventureLauncherSelectTrack];
+                        return vec![SearchAction::AdventureLauncherSelectTrack.into()];
                     }
                 }
             }
             AdventureDrillLevel::ArtistAlbums { albums, artist_name, .. } => {
                 if let Some(album) = albums.get(item_idx) {
-                    return vec![Action::AdventureLauncherDrillAlbum {
+                    return vec![SearchAction::AdventureLauncherDrillAlbum {
                         key: album.rating_key.clone(),
                         title: album.title.clone(),
                         artist_name: artist_name.clone(),
-                    }];
+                    }.into()];
                 }
             }
             AdventureDrillLevel::AlbumTracks { .. } => {
-                return vec![Action::AdventureLauncherSelectTrack];
+                return vec![SearchAction::AdventureLauncherSelectTrack.into()];
             }
         }
         return vec![];
@@ -3174,7 +3198,7 @@ fn try_queue_scrollbar_click(
     let tracks_len = if state.playback_mode == PlaybackMode::Radio {
         state.radio.tracks.len()
     } else {
-        state.queue.len()
+        state.queue.tracks.len()
     };
 
     // 2-row items
@@ -3364,7 +3388,7 @@ fn handle_sort_popup_click(click_row: u16, click_col: u16, state: &mut AppState)
     if click_col < regions.outer.x || click_col >= regions.outer.right()
         || click_row < regions.outer.y || click_row >= regions.outer.bottom()
     {
-        return vec![Action::CloseSortPopup];
+        return vec![SearchAction::CloseSortPopup.into()];
     }
 
     // Options occupy inner area minus footer (last row)

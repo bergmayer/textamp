@@ -1,5 +1,6 @@
 //! Sort popup key handling (Ctrl+S).
 
+use crate::app::action::*;
 use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::app::Action;
@@ -15,7 +16,7 @@ pub(super) fn handle_sort_popup_keys(key: KeyEvent, state: &mut AppState) -> Vec
 
     match key.code {
         KeyCode::Esc => {
-            return vec![Action::CloseSortPopup];
+            return vec![SearchAction::CloseSortPopup.into()];
         }
         KeyCode::Up => {
             if popup.selected_index > 0 {

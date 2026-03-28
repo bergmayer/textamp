@@ -1,5 +1,6 @@
 //! Playback helpers: track playing, Plex reporting, radio fetching.
 
+use crate::app::event::*;
 use crate::app::{AppState, Event};
 use crate::app::state::{PlayStatus, PlaybackMode, View};
 use crate::plex::PlexClient;
@@ -20,11 +21,11 @@ fn find_artist_thumb(track: &Track, artists: &[Artist]) -> Option<String> {
 pub fn get_upcoming_tracks(state: &AppState) -> Vec<Track> {
     match state.playback_mode {
         PlaybackMode::Queue | PlaybackMode::None => {
-            if let Some(idx) = state.queue_index {
+            if let Some(idx) = state.queue.index {
                 let start = idx + 1;
-                let end = (start + 10).min(state.queue.len());
-                if start < state.queue.len() {
-                    return state.queue[start..end].to_vec();
+                let end = (start + 10).min(state.queue.tracks.len());
+                if start < state.queue.tracks.len() {
+                    return state.queue.tracks[start..end].to_vec();
                 }
             }
             vec![]
@@ -52,10 +53,10 @@ fn audio_event_adapter(event_tx: &mpsc::Sender<Event>) -> mpsc::Sender<AudioEven
     tokio::spawn(async move {
         while let Some(ev) = audio_rx.recv().await {
             let app_event = match ev {
-                AudioEvent::BufferingReady => Event::BufferingEnd,
-                AudioEvent::Error(msg) => Event::PlaybackError(msg),
+                AudioEvent::BufferingReady => PlaybackEvent::BufferingEnd,
+                AudioEvent::Error(msg) => PlaybackEvent::PlaybackError(msg),
             };
-            let _ = event_tx.send(app_event).await;
+            let _ = event_tx.send(app_event.into()).await;
         }
     });
     audio_tx
@@ -79,17 +80,17 @@ pub async fn play_track(
 
     // Migrate radio tracks to queue before clearing radio mode
     if state.playback_mode == PlaybackMode::Radio {
-        state.queue = state.radio.tracks.clone();
-        state.queue_index = state.radio.track_index;
+        state.queue.tracks = state.radio.tracks.clone();
+        state.queue.index = state.radio.track_index;
         state.radio.clear();
     }
 
     // Prepend new track at front of queue
-    state.queue.insert(0, track);
-    state.queue_index = Some(0);
-    state.queue_selected.clear();
-    state.queue_original.clear();
-    state.queue_sort_mode = crate::app::state::QueueSortMode::QueueOrder;
+    state.queue.tracks.insert(0, track);
+    state.queue.index = Some(0);
+    state.queue.selected.clear();
+    state.queue.original.clear();
+    state.queue.sort_mode = crate::app::state::QueueSortMode::QueueOrder;
     state.playback_mode = PlaybackMode::Queue;
 
     // Scroll queue view to top
@@ -123,11 +124,11 @@ pub async fn queue_and_play(
         state.radio.clear();
     }
     audio.track_cache.flush();
-    state.queue = tracks;
-    state.queue_index = Some(play_idx);
-    state.queue_selected.clear();
-    state.queue_original.clear();
-    state.queue_sort_mode = crate::app::state::QueueSortMode::QueueOrder;
+    state.queue.tracks = tracks;
+    state.queue.index = Some(play_idx);
+    state.queue.selected.clear();
+    state.queue.original.clear();
+    state.queue.sort_mode = crate::app::state::QueueSortMode::QueueOrder;
     state.playback_mode = PlaybackMode::Queue;
     state.list_state.queue_index = play_idx;
     state.set_view(View::Queue);
@@ -140,21 +141,21 @@ pub async fn queue_and_play(
 pub fn insert_tracks_next(state: &mut AppState, tracks: Vec<Track>) -> usize {
     // Convert radio to queue if needed
     if state.playback_mode == PlaybackMode::Radio {
-        state.queue = state.radio.tracks.clone();
-        state.queue_index = state.radio.track_index;
+        state.queue.tracks = state.radio.tracks.clone();
+        state.queue.index = state.radio.track_index;
         state.playback_mode = PlaybackMode::Queue;
         state.radio.clear();
-        if let Some(idx) = state.queue_index {
+        if let Some(idx) = state.queue.index {
             state.list_state.queue_index = idx;
         }
     }
 
-    state.queue_original.clear();
-    state.queue_sort_mode = crate::app::state::QueueSortMode::QueueOrder;
+    state.queue.original.clear();
+    state.queue.sort_mode = crate::app::state::QueueSortMode::QueueOrder;
 
-    let insert_pos = state.queue_index.map(|idx| idx + 1).unwrap_or(0);
+    let insert_pos = state.queue.index.map(|idx| idx + 1).unwrap_or(0);
     let added = tracks.len();
-    state.queue.splice(insert_pos..insert_pos, tracks);
+    state.queue.tracks.splice(insert_pos..insert_pos, tracks);
     added
 }
 
@@ -209,22 +210,22 @@ pub async fn play_current_track(
                             client.fetch_artwork(&thumb_path_owned, 600)
                         ).await {
                             Ok(Ok(data)) => {
-                                let _ = event_tx.send(Event::ArtworkLoaded {
+                                let _ = event_tx.send(ArtworkEvent::ArtworkLoaded {
                                     thumb_path: thumb_path_owned,
                                     data,
-                                }).await;
+                                }.into()).await;
                             }
                             Ok(Err(e)) => {
                                 tracing::warn!("Failed to load artwork: {}", e);
-                                let _ = event_tx.send(Event::ArtworkFailed {
+                                let _ = event_tx.send(ArtworkEvent::ArtworkFailed {
                                     thumb_path: thumb_path_owned,
-                                }).await;
+                                }.into()).await;
                             }
                             Err(_) => {
                                 tracing::warn!("Artwork loading timed out");
-                                let _ = event_tx.send(Event::ArtworkFailed {
+                                let _ = event_tx.send(ArtworkEvent::ArtworkFailed {
                                     thumb_path: thumb_path_owned,
-                                }).await;
+                                }.into()).await;
                             }
                         }
                     });
@@ -235,7 +236,7 @@ pub async fn play_current_track(
             } else {
                 state.artwork.loading = false;
             }
-        } else if let Some(artist_thumb) = find_artist_thumb(&track, &state.artists) {
+        } else if let Some(artist_thumb) = find_artist_thumb(&track, &state.library.artists) {
             if state.artwork.current_thumb.as_deref() != Some(&artist_thumb) {
                 if let Some(server_url) = client.server_url() {
                     state.artwork.loading = true;
@@ -252,22 +253,22 @@ pub async fn play_current_track(
                             client.fetch_artwork(&thumb_path_owned, 600)
                         ).await {
                             Ok(Ok(data)) => {
-                                let _ = event_tx.send(Event::ArtworkLoaded {
+                                let _ = event_tx.send(ArtworkEvent::ArtworkLoaded {
                                     thumb_path: thumb_path_owned,
                                     data,
-                                }).await;
+                                }.into()).await;
                             }
                             Ok(Err(e)) => {
                                 tracing::warn!("Failed to load artist artwork: {}", e);
-                                let _ = event_tx.send(Event::ArtworkFailed {
+                                let _ = event_tx.send(ArtworkEvent::ArtworkFailed {
                                     thumb_path: thumb_path_owned,
-                                }).await;
+                                }.into()).await;
                             }
                             Err(_) => {
                                 tracing::warn!("Artist artwork loading timed out");
-                                let _ = event_tx.send(Event::ArtworkFailed {
+                                let _ = event_tx.send(ArtworkEvent::ArtworkFailed {
                                     thumb_path: thumb_path_owned,
-                                }).await;
+                                }.into()).await;
                             }
                         }
                     });
@@ -453,18 +454,18 @@ pub fn fetch_more_radio_tracks(event_tx: &mpsc::Sender<Event>, state: &mut AppSt
                 tokio::spawn(async move {
                     match client.fetch_time_travel_tracks_from_index(&lib_key, &decades, current_index).await {
                         Ok(tracks) => {
-                            let _ = event_tx.send(Event::RadioTracksLoaded {
+                            let _ = event_tx.send(RadioEvent::RadioTracksLoaded {
                                 tracks,
                                 time_travel_index: Some(current_index + 3),
-                            }).await;
+                            }.into()).await;
                         }
                         Err(e) => {
                             tracing::warn!("Time Travel Radio: failed to fetch more tracks: {}", e);
                             // Send empty result to clear fetching flag
-                            let _ = event_tx.send(Event::RadioTracksLoaded {
+                            let _ = event_tx.send(RadioEvent::RadioTracksLoaded {
                                 tracks: vec![],
                                 time_travel_index: None,
-                            }).await;
+                            }.into()).await;
                         }
                     }
                 });
@@ -481,17 +482,17 @@ pub fn fetch_more_radio_tracks(event_tx: &mpsc::Sender<Event>, state: &mut AppSt
         tokio::spawn(async move {
             match client.create_station_queue(&station_key).await {
                 Ok(tracks) => {
-                    let _ = event_tx.send(Event::RadioTracksLoaded {
+                    let _ = event_tx.send(RadioEvent::RadioTracksLoaded {
                         tracks,
                         time_travel_index: None,
-                    }).await;
+                    }.into()).await;
                 }
                 Err(e) => {
                     tracing::warn!("Failed to fetch more radio tracks: {}", e);
-                    let _ = event_tx.send(Event::RadioTracksLoaded {
+                    let _ = event_tx.send(RadioEvent::RadioTracksLoaded {
                         tracks: vec![],
                         time_travel_index: None,
-                    }).await;
+                    }.into()).await;
                 }
             }
         });
@@ -544,21 +545,21 @@ async fn play_current_track_remote(
                             client.fetch_artwork(&thumb_path_owned, 600)
                         ).await {
                             Ok(Ok(data)) => {
-                                let _ = event_tx_clone.send(Event::ArtworkLoaded {
+                                let _ = event_tx_clone.send(ArtworkEvent::ArtworkLoaded {
                                     thumb_path: thumb_path_owned,
                                     data,
-                                }).await;
+                                }.into()).await;
                             }
                             _ => {
-                                let _ = event_tx_clone.send(Event::ArtworkFailed {
+                                let _ = event_tx_clone.send(ArtworkEvent::ArtworkFailed {
                                     thumb_path: thumb_path_owned,
-                                }).await;
+                                }.into()).await;
                             }
                         }
                     });
                 }
             }
-        } else if let Some(artist_thumb) = find_artist_thumb(&track, &state.artists) {
+        } else if let Some(artist_thumb) = find_artist_thumb(&track, &state.library.artists) {
             if state.artwork.current_thumb.as_deref() != Some(&artist_thumb) {
                 if let Some(server_url) = client.server_url() {
                     state.artwork.loading = true;
@@ -575,15 +576,15 @@ async fn play_current_track_remote(
                             client.fetch_artwork(&thumb_path_owned, 600)
                         ).await {
                             Ok(Ok(data)) => {
-                                let _ = event_tx_clone.send(Event::ArtworkLoaded {
+                                let _ = event_tx_clone.send(ArtworkEvent::ArtworkLoaded {
                                     thumb_path: thumb_path_owned,
                                     data,
-                                }).await;
+                                }.into()).await;
                             }
                             _ => {
-                                let _ = event_tx_clone.send(Event::ArtworkFailed {
+                                let _ = event_tx_clone.send(ArtworkEvent::ArtworkFailed {
                                     thumb_path: thumb_path_owned,
-                                }).await;
+                                }.into()).await;
                             }
                         }
                     });
@@ -613,7 +614,7 @@ async fn play_current_track_remote(
                     // Signal that playback started on remote device
                 }
                 Err(e) => {
-                    let _ = event_tx_clone.send(Event::RemotePlayerError(e.to_string())).await;
+                    let _ = event_tx_clone.send(RemoteEvent::RemotePlayerError(e.to_string()).into()).await;
                 }
             }
         });

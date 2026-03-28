@@ -2,7 +2,9 @@
 //! PlayStation, DrillIntoStation, NavigateStationsBack, PlayCurrentRadioTrack,
 //! ToggleDjMode, DjModeProcess, DjModeTracksReady, DjModeBatchReady.
 
+use crate::app::event::*;
 use crate::app::{Action, AppState, Event};
+use crate::app::action::RadioAction;
 use crate::app::state::{DjMode, PlaybackMode, RadioMode, View};
 use crate::plex::PlexClient;
 use crate::audio::AudioPlayer;
@@ -28,13 +30,13 @@ const NEARBY_TRACKS_WINDOW: usize = 5;
 /// Dispatch radio and station actions. Returns follow-up actions.
 pub async fn dispatch(
     event_tx: &mpsc::Sender<Event>,
-    action: Action,
+    action: RadioAction,
     state: &mut AppState,
     client: &mut PlexClient,
     audio: &mut AudioPlayer,
 ) -> Result<Vec<Action>> {
     match action {
-        Action::JumpToRadioTrack(idx) => {
+        RadioAction::JumpToRadioTrack(idx) => {
             // Report stop for current track before jumping
             // continuing=true because we're jumping to another track
             if let Some(track) = state.current_track().cloned() {
@@ -48,7 +50,7 @@ pub async fn dispatch(
                 helpers::play_current_track(event_tx, state, client, audio).await;
             }
         }
-        Action::StartPlexRadio { key, title } => {
+        RadioAction::StartPlexRadio { key, title } => {
             // Start radio using Plex playQueue API (full heuristics)
             if let Some(current) = state.current_track().cloned() {
                 helpers::report_playback_stop_to_plex(&current, state.playback.position_ms, true, state.plex_session_id.clone(), client);
@@ -83,7 +85,7 @@ pub async fn dispatch(
             state.set_status(format!("Starting radio: {}...", title));
 
             // Pre-load artist artwork for the radio display
-            let artist_thumb = state.artists.iter()
+            let artist_thumb = state.library.artists.iter()
                 .find(|a| a.rating_key == key)
                 .and_then(|a| a.thumb.clone());
             if let Some(ref thumb) = artist_thumb {
@@ -93,7 +95,7 @@ pub async fn dispatch(
                 tokio::spawn(async move {
                     match art_client.fetch_artwork(&thumb_path, 300).await {
                         Ok(data) => {
-                            let _ = art_tx.send(Event::ArtworkLoaded { thumb_path, data }).await;
+                            let _ = art_tx.send(ArtworkEvent::ArtworkLoaded { thumb_path, data }.into()).await;
                         }
                         Err(e) => {
                             tracing::debug!("Failed to load artist artwork for radio: {}", e);
@@ -110,29 +112,29 @@ pub async fn dispatch(
                 let timeout_duration = std::time::Duration::from_secs(STATION_TIMEOUT_SECS);
                 match tokio::time::timeout(timeout_duration, client_clone.create_radio_from_metadata(&rk)).await {
                     Ok(Ok(tracks)) => {
-                        let _ = tx.send(Event::StationTracksLoaded {
+                        let _ = tx.send(RadioEvent::StationTracksLoaded {
                             station_key: format!("plex_radio:{}", rk),
                             station_title: rt,
                             tracks,
                             time_travel_decades: vec![],
-                        }).await;
+                        }.into()).await;
                     }
                     Ok(Err(e)) => {
-                        let _ = tx.send(Event::StationLoadFailed {
+                        let _ = tx.send(RadioEvent::StationLoadFailed {
                             station_key: format!("plex_radio:{}", rk),
                             error: format!("Failed to start radio: {}", e),
-                        }).await;
+                        }.into()).await;
                     }
                     Err(_) => {
-                        let _ = tx.send(Event::StationLoadFailed {
+                        let _ = tx.send(RadioEvent::StationLoadFailed {
                             station_key: format!("plex_radio:{}", rk),
                             error: "Radio creation timed out".into(),
-                        }).await;
+                        }.into()).await;
                     }
                 }
             });
         }
-        Action::PlayStation(station_key) => {
+        RadioAction::PlayStation(station_key) => {
             // Report stop for currently playing track before starting station
             // continuing=true because we're starting new content
             if let Some(current) = state.current_track().cloned() {
@@ -204,30 +206,30 @@ pub async fn dispatch(
                             vec![]
                         };
 
-                        let _ = tx.send(Event::StationTracksLoaded {
+                        let _ = tx.send(RadioEvent::StationTracksLoaded {
                             station_key: sk,
                             station_title: st,
                             tracks,
                             time_travel_decades,
-                        }).await;
+                        }.into()).await;
                     }
                     Ok(Err(e)) => {
-                        let _ = tx.send(Event::StationLoadFailed {
+                        let _ = tx.send(RadioEvent::StationLoadFailed {
                             station_key: sk,
                             error: format!("Failed to start station: {}", e),
-                        }).await;
+                        }.into()).await;
                     }
                     Err(_) => {
                         tracing::warn!("Station queue creation timed out after {} seconds: {}", STATION_TIMEOUT_SECS, sk);
-                        let _ = tx.send(Event::StationLoadFailed {
+                        let _ = tx.send(RadioEvent::StationLoadFailed {
                             station_key: sk,
                             error: "Station timed out - try a different station".into(),
-                        }).await;
+                        }.into()).await;
                     }
                 }
             });
         }
-        Action::DrillIntoStation(station_key, station_title) => {
+        RadioAction::DrillIntoStation(station_key, station_title) => {
             // Check cache first for instant loading
             if let Some(cached_children) = state.station_children_cache.get(&station_key).cloned() {
                 state.station_nav.push_column(crate::app::state::StationColumn::new(
@@ -260,45 +262,45 @@ pub async fn dispatch(
 
                             match tokio::time::timeout(timeout_duration, queue_future).await {
                                 Ok(Ok(tracks)) => {
-                                    let _ = tx.send(Event::StationTracksLoaded {
+                                    let _ = tx.send(RadioEvent::StationTracksLoaded {
                                         station_key: sk,
                                         station_title: st,
                                         tracks,
                                         time_travel_decades: vec![],
-                                    }).await;
+                                    }.into()).await;
                                 }
                                 Ok(Err(e)) => {
-                                    let _ = tx.send(Event::StationLoadFailed {
+                                    let _ = tx.send(RadioEvent::StationLoadFailed {
                                         station_key: sk,
                                         error: format!("Failed to start station: {}", e),
-                                    }).await;
+                                    }.into()).await;
                                 }
                                 Err(_) => {
                                     tracing::warn!("Station queue creation timed out after {} seconds: {}", STATION_TIMEOUT_SECS, sk);
-                                    let _ = tx.send(Event::StationLoadFailed {
+                                    let _ = tx.send(RadioEvent::StationLoadFailed {
                                         station_key: sk,
                                         error: "Station timed out - try a different station".into(),
-                                    }).await;
+                                    }.into()).await;
                                 }
                             }
                         } else {
-                            let _ = tx.send(Event::StationChildrenLoaded {
+                            let _ = tx.send(RadioEvent::StationChildrenLoaded {
                                 station_key: sk,
                                 station_title: st,
                                 children,
-                            }).await;
+                            }.into()).await;
                         }
                     }
                     Err(e) => {
-                        let _ = tx.send(Event::StationLoadFailed {
+                        let _ = tx.send(RadioEvent::StationLoadFailed {
                             station_key: sk,
                             error: format!("Failed to load station children: {}", e),
-                        }).await;
+                        }.into()).await;
                     }
                 }
             });
         }
-        Action::NavigateStationsBack => {
+        RadioAction::NavigateStationsBack => {
             state.scroll.station_back_highlighted = false;
             // Go back in Miller columns (just move focus left - data already in memory)
             if state.station_nav.can_go_left() {
@@ -309,15 +311,15 @@ pub async fn dispatch(
                 }
             }
         }
-        Action::PlayCurrentRadioTrack => {
+        RadioAction::PlayCurrentRadioTrack => {
             // Play the current track in radio mode (stays in Radio playback mode)
             state.consecutive_playback_errors = 0;
             helpers::play_current_track(event_tx, state, client, audio).await;
         }
-        Action::ToggleDjMode(mode) => {
+        RadioAction::ToggleDjMode(mode) => {
             tracing::info!("ToggleDjMode: {:?}, current_mode={:?}, playback_mode={:?}, queue_len={}, queue_index={:?}, current_track={}",
                 mode, state.dj.active_mode, state.playback_mode,
-                state.queue.len(), state.queue_index,
+                state.queue.tracks.len(), state.queue.index,
                 state.current_track().map(|t| t.title.as_str()).unwrap_or("None"));
 
             if state.dj.active_mode == Some(mode) {
@@ -332,8 +334,8 @@ pub async fn dispatch(
                 if state.playback_mode == PlaybackMode::Radio {
                     tracing::info!("DJ mode: converting radio to queue (radio.tracks={}, radio.track_index={:?})",
                         state.radio.tracks.len(), state.radio.track_index);
-                    state.queue = state.radio.tracks.clone();
-                    state.queue_index = state.radio.track_index;
+                    state.queue.tracks = state.radio.tracks.clone();
+                    state.queue.index = state.radio.track_index;
                     state.playback_mode = PlaybackMode::Queue;
                     state.radio.clear();
                 }
@@ -346,14 +348,14 @@ pub async fn dispatch(
                 state.set_status(format!("{} on", mode.name()));
 
                 // All DJ modes are continuous: insert DJ tracks after current position
-                return Ok(vec![Action::DjModeProcess]);
+                return Ok(vec![RadioAction::DjModeProcess.into()]);
             }
         }
-        Action::DjModeProcess => {
+        RadioAction::DjModeProcess => {
             // Only for continuous modes (Freeze, Contempo, Groupie)
             dispatch_dj_continuous(event_tx, state, client).await;
         }
-        Action::DjModeTracksReady(tracks, _insert_next, error) => {
+        RadioAction::DjModeTracksReady(tracks, _insert_next, error) => {
             // Insert DJ-picked tracks right after the current track position.
             state.dj.inserting = false;
 
@@ -387,7 +389,7 @@ pub async fn dispatch(
             let upcoming = helpers::get_upcoming_tracks(state);
             crate::audio::cache::trigger_prefetch(&audio.track_cache, &upcoming, client, state.transcode_kbps);
         }
-        Action::DjModeBatchReady(inserts) => {
+        RadioAction::DjModeBatchReady(inserts) => {
             // Inserter mode batch results: interleave into queue
             state.dj.inserting = false;
 
@@ -414,8 +416,8 @@ pub async fn dispatch(
                 PlaybackMode::Queue | PlaybackMode::None => {
                     for pos in positions {
                         if let Some(insert_tracks) = inserts_map.get(&pos) {
-                            let insert_at = (pos + 1).min(state.queue.len());
-                            state.queue.splice(insert_at..insert_at, insert_tracks.iter().cloned());
+                            let insert_at = (pos + 1).min(state.queue.tracks.len());
+                            state.queue.tracks.splice(insert_at..insert_at, insert_tracks.iter().cloned());
                         }
                     }
                 }
@@ -433,7 +435,6 @@ pub async fn dispatch(
             let upcoming = helpers::get_upcoming_tracks(state);
             crate::audio::cache::trigger_prefetch(&audio.track_cache, &upcoming, client, state.transcode_kbps);
         }
-        _ => unreachable!("dispatch_radio called with non-radio action: {:?}", action),
     }
     Ok(vec![])
 }
@@ -447,9 +448,9 @@ pub async fn dispatch(
 fn insert_tracks_after_current(state: &mut AppState, tracks: Vec<crate::plex::models::Track>) {
     match state.playback_mode {
         PlaybackMode::Queue | PlaybackMode::None => {
-            let insert_at = state.queue_index.unwrap_or(0) + 1;
-            let insert_at = insert_at.min(state.queue.len());
-            state.queue.splice(insert_at..insert_at, tracks);
+            let insert_at = state.queue.index.unwrap_or(0) + 1;
+            let insert_at = insert_at.min(state.queue.tracks.len());
+            state.queue.tracks.splice(insert_at..insert_at, tracks);
         }
         PlaybackMode::Radio => {
             let insert_at = state.radio.track_index.unwrap_or(0) + 1;
@@ -478,10 +479,10 @@ fn build_diversity_context(state: &AppState) -> (std::collections::HashSet<Strin
     // Gather from nearby queue tracks
     let nearby: &[crate::plex::models::Track] = match state.playback_mode {
         PlaybackMode::Queue | PlaybackMode::None => {
-            let idx = state.queue_index.unwrap_or(0);
+            let idx = state.queue.index.unwrap_or(0);
             let start = idx.saturating_sub(NEARBY_TRACKS_WINDOW);
-            let end = (idx + NEARBY_TRACKS_WINDOW).min(state.queue.len());
-            &state.queue[start..end]
+            let end = (idx + NEARBY_TRACKS_WINDOW).min(state.queue.tracks.len());
+            &state.queue.tracks[start..end]
         }
         PlaybackMode::Radio => {
             let idx = state.radio.track_index.unwrap_or(0);
@@ -585,7 +586,7 @@ async fn dispatch_dj_continuous(
     };
 
     tracing::info!("dispatch_dj_continuous: mode={:?}, playback_mode={:?}, queue_len={}, queue_index={:?}",
-        mode, state.playback_mode, state.queue.len(), state.queue_index);
+        mode, state.playback_mode, state.queue.tracks.len(), state.queue.index);
 
     // Interleaving modes: skip insertion when the last track was DJ-inserted
     // (let the next original queue track play through)
@@ -611,8 +612,8 @@ async fn dispatch_dj_continuous(
     // Get the next track in queue (needed for Twofer and Stretch)
     let next_track = match state.playback_mode {
         PlaybackMode::Queue | PlaybackMode::None => {
-            let idx = state.queue_index.unwrap_or(0);
-            state.queue.get(idx + 1).cloned()
+            let idx = state.queue.index.unwrap_or(0);
+            state.queue.tracks.get(idx + 1).cloned()
         }
         PlaybackMode::Radio => {
             let idx = state.radio.track_index.unwrap_or(0);
@@ -654,7 +655,7 @@ async fn dispatch_dj_continuous(
 
         tracing::info!("{}: async task completed, {} tracks found", mode.name(), result.len());
         // Always send the event, even if empty — this ensures dj_inserting gets cleared
-        let _ = tx.send(Event::DjTracksReady { tracks: result, insert_next: true, error: None }).await;
+        let _ = tx.send(UiEvent::DjTracksReady { tracks: result, insert_next: true, error: None }.into()).await;
     });
 }
 

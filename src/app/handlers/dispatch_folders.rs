@@ -1,7 +1,9 @@
 //! Folder navigation dispatch handlers: LoadFolderRoot, NavigateIntoFolder,
 //! NavigateUpFolder, RefreshSubfolder, PlayFolderTracks.
 
+use crate::app::event::*;
 use crate::app::{Action, AppState, Event};
+use crate::app::action::FolderAction;
 use crate::plex::PlexClient;
 use crate::audio::AudioPlayer;
 use crate::plex::CachedFolder;
@@ -16,7 +18,7 @@ use super::helpers;
 /// Returns tracks in column display order (only track items, skipping folders).
 /// Returns empty vec if all_tracks cache is not loaded.
 fn resolve_folder_column_tracks(state: &AppState) -> Vec<crate::plex::models::Track> {
-    if state.all_tracks.is_empty() {
+    if state.library.all_tracks.is_empty() {
         return vec![];
     }
     let col = match state.folder_state.as_ref().and_then(|fs| fs.focused()) {
@@ -24,7 +26,7 @@ fn resolve_folder_column_tracks(state: &AppState) -> Vec<crate::plex::models::Tr
         None => return vec![],
     };
 
-    let track_map: std::collections::HashMap<&str, &crate::plex::models::Track> = state.all_tracks.iter()
+    let track_map: std::collections::HashMap<&str, &crate::plex::models::Track> = state.library.all_tracks.iter()
         .map(|t| (t.rating_key.as_str(), t))
         .collect();
 
@@ -96,10 +98,10 @@ pub(crate) fn spawn_path_discovery(
                         if let Some(pos) = child_path.rfind(|c: char| c == '/' || c == '\\') {
                             let parent = &child_path[..pos];
                             if !parent.is_empty() {
-                                let _ = event_tx.send(Event::FolderPathDiscovered {
+                                let _ = event_tx.send(FolderEvent::FolderPathDiscovered {
                                     folder_key: fk,
                                     path: parent.to_string(),
-                                }).await;
+                                }.into()).await;
                             }
                         }
                     }
@@ -134,13 +136,13 @@ pub(crate) fn backfill_parent_path(folder_state: &mut FolderNavigationState) {
 /// Dispatch folder navigation actions. Returns follow-up actions.
 pub async fn dispatch(
     event_tx: &mpsc::Sender<Event>,
-    action: Action,
+    action: FolderAction,
     state: &mut AppState,
     client: &mut PlexClient,
     audio: &mut AudioPlayer,
 ) -> Result<Vec<Action>> {
     match action {
-        Action::LoadFolderRoot => {
+        FolderAction::LoadFolderRoot => {
             if let Some(lib_key) = &state.active_library {
                 let lib_title = state.libraries.iter()
                     .find(|l| &l.key == lib_key)
@@ -155,22 +157,22 @@ pub async fn dispatch(
                     match client.get_library_folders(&lk).await {
                         Ok(response) => {
                             let items = FolderService::from_response(&response);
-                            let _ = event_tx.send(Event::FolderRootLoaded {
+                            let _ = event_tx.send(FolderEvent::FolderRootLoaded {
                                 library_key: lk,
                                 lib_title: lt,
                                 items,
-                            }).await;
+                            }.into()).await;
                         }
                         Err(e) => {
-                            let _ = event_tx.send(Event::FolderLoadFailed(
+                            let _ = event_tx.send(FolderEvent::FolderLoadFailed(
                                 format!("Failed to load folders: {}", e)
-                            )).await;
+                            ).into()).await;
                         }
                     }
                 });
             }
         }
-        Action::NavigateIntoFolder(folder_key) => {
+        FolderAction::NavigateIntoFolder(folder_key) => {
             // Get the filesystem path from the selected folder item in the current column
             let item_path = state.folder_state.as_ref()
                 .and_then(|fs| fs.focused())
@@ -189,7 +191,12 @@ pub async fn dispatch(
                 let items_for_discovery = if needs_path_discovery { Some(cached_folder.items.clone()) } else { None };
                 if let Some(ref mut folder_state) = state.folder_state {
                     let new_column = FolderColumn::new(Some(folder_key.clone()), folder_title, cached_folder.items.clone());
-                    folder_state.push_column(new_column);
+                    if state.auto_drill_pending {
+                        folder_state.replace_child_column(new_column);
+                        state.auto_drill_pending = false;
+                    } else {
+                        folder_state.push_column(new_column);
+                    }
                     backfill_parent_path(folder_state);
                 }
 
@@ -215,10 +222,10 @@ pub async fn dispatch(
                             Ok(response) => {
                                 let items = FolderService::from_response(&response);
                                 let folder_path = FolderService::folder_path(&response);
-                                let _ = event_tx.send(Event::SubfolderRefreshed {
+                                let _ = event_tx.send(FolderEvent::SubfolderRefreshed {
                                     folder_key: fk,
                                     cached_folder: CachedFolder::with_path(items, folder_path),
-                                }).await;
+                                }.into()).await;
                             }
                             Err(e) => {
                                 tracing::warn!("Warm subfolder re-fetch failed for {}: {}", fk, e);
@@ -239,23 +246,23 @@ pub async fn dispatch(
                         Ok(response) => {
                             let items = FolderService::from_response(&response);
                             let folder_path = FolderService::folder_path(&response);
-                            let _ = event_tx.send(Event::FolderContentsLoaded {
+                            let _ = event_tx.send(FolderEvent::FolderContentsLoaded {
                                 folder_key: fk,
                                 items,
                                 folder_path,
                                 item_path: ip,
-                            }).await;
+                            }.into()).await;
                         }
                         Err(e) => {
-                            let _ = event_tx.send(Event::FolderLoadFailed(
+                            let _ = event_tx.send(FolderEvent::FolderLoadFailed(
                                 format!("Failed to load folder: {}", e)
-                            )).await;
+                            ).into()).await;
                         }
                     }
                 });
             }
         }
-        Action::RefreshSubfolder(folder_key) => {
+        FolderAction::RefreshSubfolder(folder_key) => {
             // Manual refresh of a specific subfolder (F5 when focused on subfolder)
             // This is the ONLY way subfolder caches get manually refreshed.
             state.set_status("Refreshing folder\u{2026}".to_string());
@@ -267,21 +274,21 @@ pub async fn dispatch(
                     Ok(response) => {
                         let items = FolderService::from_response(&response);
                         let folder_path = FolderService::folder_path(&response);
-                        let _ = event_tx.send(Event::FolderRefreshLoaded {
+                        let _ = event_tx.send(FolderEvent::FolderRefreshLoaded {
                             folder_key: fk,
                             items,
                             folder_path,
-                        }).await;
+                        }.into()).await;
                     }
                     Err(e) => {
-                        let _ = event_tx.send(Event::FolderLoadFailed(
+                        let _ = event_tx.send(FolderEvent::FolderLoadFailed(
                             format!("Failed to refresh folder: {}", e)
-                        )).await;
+                        ).into()).await;
                     }
                 }
             });
         }
-        Action::PlayFolderTracks => {
+        FolderAction::PlayFolderTracks => {
             // Play tracks in the focused column's folder, starting from selected item
             if let Some(ref folder_state) = state.folder_state {
                 let selected_index = folder_state.focused().map(|col| col.selected_index).unwrap_or(0);
@@ -300,8 +307,8 @@ pub async fn dispatch(
                         );
                     }
                     state.plex_session_id = Some(helpers::generate_plex_session_id());
-                    state.queue_original.clear();
-                    state.queue_sort_mode = crate::app::state::QueueSortMode::QueueOrder;
+                    state.queue.original.clear();
+                    state.queue.sort_mode = crate::app::state::QueueSortMode::QueueOrder;
                     helpers::queue_and_play(event_tx, state, client, audio, tracks, start_idx).await;
                 } else {
                     // Fallback: fetch from API if all_tracks cache is empty
@@ -350,8 +357,8 @@ pub async fn dispatch(
                                     );
                                 }
                                 state.plex_session_id = Some(helpers::generate_plex_session_id());
-                                state.queue_original.clear();
-                                state.queue_sort_mode = crate::app::state::QueueSortMode::QueueOrder;
+                                state.queue.original.clear();
+                                state.queue.sort_mode = crate::app::state::QueueSortMode::QueueOrder;
                                 helpers::queue_and_play(event_tx, state, client, audio, tracks, start_idx).await;
                             }
                             Ok(_) => {} // empty
@@ -363,7 +370,7 @@ pub async fn dispatch(
                 }
             }
         }
-        Action::PlayFolderTrack { track_index } => {
+        FolderAction::PlayFolderTrack { track_index } => {
             // Play a single track from the focused folder column
             if let Some(ref folder_state) = state.folder_state {
                 let selected_key = folder_state.focused()
@@ -372,10 +379,10 @@ pub async fn dispatch(
 
                 // Fast path: look up from all_tracks cache
                 if let Some(ref sel_key) = selected_key {
-                    if let Some(track) = state.all_tracks.iter().find(|t| t.rating_key == *sel_key) {
+                    if let Some(track) = state.library.all_tracks.iter().find(|t| t.rating_key == *sel_key) {
                         state.plex_session_id = Some(helpers::generate_plex_session_id());
-                        state.queue_original.clear();
-                        state.queue_sort_mode = crate::app::state::QueueSortMode::QueueOrder;
+                        state.queue.original.clear();
+                        state.queue.sort_mode = crate::app::state::QueueSortMode::QueueOrder;
                         helpers::queue_and_play(event_tx, state, client, audio, vec![track.clone()], 0).await;
                         return Ok(vec![]);
                     }
@@ -393,8 +400,8 @@ pub async fn dispatch(
                                 };
                                 if let Some(track) = track {
                                     state.plex_session_id = Some(helpers::generate_plex_session_id());
-                                    state.queue_original.clear();
-                                    state.queue_sort_mode = crate::app::state::QueueSortMode::QueueOrder;
+                                    state.queue.original.clear();
+                                    state.queue.sort_mode = crate::app::state::QueueSortMode::QueueOrder;
                                     helpers::queue_and_play(event_tx, state, client, audio, vec![track], 0).await;
                                 }
                             }
@@ -406,7 +413,6 @@ pub async fn dispatch(
                 }
             }
         }
-        _ => unreachable!("dispatch_folders called with non-folder action: {:?}", action),
     }
     Ok(vec![])
 }

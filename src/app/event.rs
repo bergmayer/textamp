@@ -1,42 +1,68 @@
 //! Application events.
 //!
 //! Events represent things that happen (input, async completions, etc.).
+//! Organized into sub-enums by domain.
 
 use crate::plex::models::{Album, Artist, Genre, Hub, Library, Playlist, PlexServer, Station, Track, SearchResults};
 use crate::services::WaveformData;
 use crossterm::event::{KeyEvent, MouseEvent};
 
-/// Application events.
+/// Top-level application events.
 #[derive(Debug, Clone)]
 pub enum Event {
-    // Terminal input events
+    /// Terminal input events
     Key(KeyEvent),
     Mouse(MouseEvent),
     Resize(u16, u16),
-
-    // Periodic tick for animations/updates
+    /// Periodic tick for animations/updates
     Tick,
 
-    // Authentication events
+    /// Authentication and connection events
+    Auth(AuthEvent),
+    /// API data loading responses
+    Data(DataEvent),
+    /// Playback state changes
+    Playback(PlaybackEvent),
+    /// Artwork and image loading
+    Artwork(ArtworkEvent),
+    /// Folder browsing events
+    Folder(FolderEvent),
+    /// Background preloading results
+    Preload(PreloadEvent),
+    /// Cache management events
+    Cache(CacheEvent),
+    /// Waveform and spectrogram generation
+    Visualizer(VisualizerEvent),
+    /// Station and radio events
+    Radio(RadioEvent),
+    /// UI popup events (adventure launcher, filter, DJ, remix, bio)
+    Ui(UiEvent),
+    /// Remote player control events
+    Remote(RemoteEvent),
+}
+
+// ============================================================================
+// Sub-enums
+// ============================================================================
+
+#[derive(Debug, Clone)]
+pub enum AuthEvent {
     AuthSuccess { token: String, username: String, server_url: String, servers: Vec<PlexServer>, client_identifier: String, has_plex_pass: bool },
     AuthFailed(String),
-    AuthShowLogin,  // No stored token - show login form
-    AuthServersReady { token: String, username: String, servers: Vec<PlexServer>, client_identifier: String, has_plex_pass: bool },  // Login succeeded, select server
-    AuthLoginFailed(String),  // Login failed with message
+    AuthShowLogin,
+    AuthServersReady { token: String, username: String, servers: Vec<PlexServer>, client_identifier: String, has_plex_pass: bool },
+    AuthLoginFailed(String),
     AuthPinReady { code: String, pin_id: u64 },
     ServersDiscovered(Vec<PlexServer>),
     ServerDiscoveryFailed(String),
     ServerConnectionSucceeded { server_name: String, url: String },
     ServerConnectionFailed { server_name: String },
+}
 
-    // API response events
+#[derive(Debug, Clone)]
+pub enum DataEvent {
     LibrariesLoaded(Vec<Library>),
-    /// Libraries loaded from another server (for multi-server support).
-    ServerLibrariesLoaded {
-        server_identifier: String,
-        server_name: String,
-        libraries: Vec<Library>,
-    },
+    ServerLibrariesLoaded { server_identifier: String, server_name: String, libraries: Vec<Library> },
     ArtistsLoaded(Vec<Artist>),
     AlbumsLoaded(Vec<Album>),
     TracksLoaded(Vec<Track>),
@@ -50,7 +76,6 @@ pub enum Event {
     CategoryTracksLoaded(Vec<Track>),
     CategoryAlbumsLoaded { albums: Vec<Album>, status_message: String },
     DataLoadError(String),
-    /// All albums loaded asynchronously for the "All Artists" Miller column.
     AllAlbumsForMillerLoaded(Vec<Album>),
     SimilarAlbumsLoaded(Vec<Album>),
     SimilarTracksLoaded(Vec<Track>),
@@ -58,11 +83,11 @@ pub enum Event {
     RelatedDataLoaded { groups: Vec<crate::app::state::RelatedArtistGroup> },
     SearchCompleted(SearchResults),
     TrackSearchCompleted { version: u64, tracks: Vec<Track> },
-
-    // API errors
     ApiError(String),
+}
 
-    // Playback events
+#[derive(Debug, Clone)]
+pub enum PlaybackEvent {
     TrackStarted,
     TrackEnded,
     PlaybackPaused,
@@ -73,78 +98,38 @@ pub enum Event {
     BufferingStart,
     BufferingEnd,
     RetryAfterDelay,
+}
 
-    // Image loading events
+#[derive(Debug, Clone)]
+pub enum ArtworkEvent {
     ImageLoaded { key: String },
     ImageFailed { key: String, error: String },
-
-    // Artwork loading (non-blocking)
     ArtworkLoaded { thumb_path: String, data: Vec<u8> },
     ArtworkFailed { thumb_path: String },
-
-    // Album art grid loading (for cover art view)
     AlbumArtLoaded { key: String, data: Vec<u8> },
     AlbumArtFailed { key: String },
+    ArtworkCacheStats { count: usize, total_bytes: u64 },
+}
 
-    // Folder preloading (background)
+#[derive(Debug, Clone)]
+pub enum FolderEvent {
     FoldersPreloaded { library_key: String, folder_state: crate::services::FolderNavigationState },
-    /// Background subfolder pre-caching completed a batch.
     SubfoldersPreloaded {
         library_key: String,
         entries: Vec<(String, crate::plex::CachedFolder)>,
         done: bool,
-        /// All valid folder keys seen during crawl (only set when done=true, for pruning).
         valid_keys: Option<std::collections::HashSet<String>>,
     },
-    /// Background subfolder warm-cache re-fetch completed.
-    SubfolderRefreshed {
-        folder_key: String,
-        cached_folder: crate::plex::CachedFolder,
-    },
-    /// Folder root loaded in background (LoadFolderRoot).
-    FolderRootLoaded {
-        library_key: String,
-        lib_title: String,
-        items: Vec<crate::plex::models::FolderItem>,
-    },
-    /// Subfolder contents loaded in background (NavigateIntoFolder cache miss).
-    FolderContentsLoaded {
-        folder_key: String,
-        items: Vec<crate::plex::models::FolderItem>,
-        folder_path: Option<String>,
-        /// Filesystem path from the selected item before navigation (preserved for title).
-        item_path: Option<String>,
-    },
-    /// Folder load failed (background).
+    SubfolderRefreshed { folder_key: String, cached_folder: crate::plex::CachedFolder },
+    FolderRootLoaded { library_key: String, lib_title: String, items: Vec<crate::plex::models::FolderItem> },
+    FolderContentsLoaded { folder_key: String, items: Vec<crate::plex::models::FolderItem>, folder_path: Option<String>, item_path: Option<String> },
     FolderLoadFailed(String),
-    /// Subfolder refresh completed in background (RefreshSubfolder / F5).
-    FolderRefreshLoaded {
-        folder_key: String,
-        items: Vec<crate::plex::models::FolderItem>,
-        folder_path: Option<String>,
-    },
-    /// Async path discovery completed for a folder column.
-    FolderPathDiscovered {
-        folder_key: String,
-        path: String,
-    },
-    /// Artwork cache stats computed in background.
-    ArtworkCacheStats {
-        count: usize,
-        total_bytes: u64,
-    },
-    /// Library cache size and per-field breakdown for active library.
-    LibraryCacheStats {
-        total_bytes: u64,
-        breakdown: Vec<(String, u64)>,
-    },
-    /// Waveform cache stats computed in background.
-    WaveformCacheStats {
-        count: usize,
-        total_bytes: u64,
-    },
+    FolderRefreshLoaded { folder_key: String, items: Vec<crate::plex::models::FolderItem>, folder_path: Option<String> },
+    FolderPathDiscovered { folder_key: String, path: String },
+}
 
-    // Background data preloading (all events include library_key for race condition safety)
+#[derive(Debug, Clone)]
+pub enum PreloadEvent {
     ArtistsPreloaded { library_key: String, artists: Vec<Artist> },
     AlbumsPreloaded { library_key: String, albums: Vec<Album> },
     PlaylistsPreloaded { library_key: String, playlists: Vec<Playlist> },
@@ -154,87 +139,66 @@ pub enum Event {
     MoodsPreloaded { library_key: String, moods: Vec<Genre> },
     StylesPreloaded { library_key: String, styles: Vec<Genre> },
     StationsPreloaded { library_key: String, stations: Vec<Station> },
-    /// All tracks preloaded for compilation detection and track-level artist derivation.
     AllTracksPreloaded { library_key: String, tracks: Vec<Track> },
-    /// A background preload failed (clear tracking so notification doesn't hang).
     PreloadFailed { category: String },
-    /// Background compilation detection completed.
     CompilationsDetected {
         library_key: String,
         albums: Vec<Album>,
         artist_only_keys: std::collections::HashSet<String>,
         track_artist_keys: std::collections::HashSet<String>,
-        /// Maps artist_key → Vec<album_rating_key> for compilation appearances.
         artist_compilation_map: std::collections::HashMap<String, Vec<String>>,
-        /// Single-artist "compilations" mapped to actual artist key.
         single_artist_compilations: std::collections::HashMap<String, Vec<Album>>,
     },
-    // Library switch (async cache load)
     LibraryCacheLoaded { library_key: String, cached: Box<crate::plex::CacheData> },
     LibraryCacheLoadFailed { library_key: String },
+    PlaylistTracksPreloaded { playlist_key: String, tracks: Vec<Track> },
+}
 
-    // Cache management
+#[derive(Debug, Clone)]
+pub enum CacheEvent {
     CacheSaved,
-    CacheRefreshCompleted {
-        category: crate::app::state::RefreshCategory,
-        changed: bool,
-    },
+    CacheRefreshCompleted { category: crate::app::state::RefreshCategory, changed: bool },
+    LibraryCacheStats { total_bytes: u64, breakdown: Vec<(String, u64)> },
+    WaveformCacheStats { count: usize, total_bytes: u64 },
+}
 
-    // Waveform generation
+#[derive(Debug, Clone)]
+pub enum VisualizerEvent {
     WaveformGenerated { track_key: String, data: WaveformData },
     WaveformFailed { track_key: String, error: String },
     WaveformCacheHit { track_key: String, data: WaveformData },
     WaveformRetry(String),
-
-    // Spectrogram generation
     SpectrogramGenerated { track_key: String, data: crate::plex::SpectrogramData },
     SpectrogramFailed { track_key: String, error: String },
     SpectrogramCacheHit { track_key: String, data: crate::plex::SpectrogramData },
+}
 
-    // Station loading (background)
+#[derive(Debug, Clone)]
+pub enum RadioEvent {
     StationTracksLoaded { station_key: String, station_title: String, tracks: Vec<Track>, time_travel_decades: Vec<String> },
     StationLoadFailed { station_key: String, error: String },
     StationChildrenLoaded { station_key: String, station_title: String, children: Vec<Station> },
-
-    // Radio track fetching (background)
     RadioTracksLoaded { tracks: Vec<Track>, time_travel_index: Option<usize> },
-
-    // Playlist tracks loading (non-blocking)
     PlaylistTracksForMillerLoaded { playlist_key: String, tracks: Vec<Track> },
     PlaylistTracksForMillerFailed { playlist_key: String, error: String },
+}
 
-    // Playlist tracks preloading (background, cache-only, no Miller column push)
-    PlaylistTracksPreloaded { playlist_key: String, tracks: Vec<Track> },
-
-    // Adventure launcher drill-down events
+#[derive(Debug, Clone)]
+pub enum UiEvent {
     AdventureLauncherAlbumsLoaded { artist_key: String, artist_name: String, albums: Vec<Album> },
     AdventureLauncherTracksLoaded { album_key: String, album_title: String, artist_name: String, tracks: Vec<Track> },
-
-    // Inline list filter
-    ListFilterCompleted {
-        version: u64,
-        results: crate::app::state::ListFilterResults,
-    },
-
-    // DJ mode
+    ListFilterCompleted { version: u64, results: crate::app::state::ListFilterResults },
     DjTracksReady { tracks: Vec<Track>, insert_next: bool, error: Option<String> },
-    /// Batch result from inserter DJ modes: (original_queue_index, tracks_to_insert_after)
     DjBatchReady { inserts: Vec<(usize, Vec<Track>)> },
-
-    // Queue remix
-    /// Batch result from remix operations: (original_queue_index, tracks_to_insert_after)
     RemixBatchReady { inserts: Vec<(usize, Vec<Track>)> },
-    /// Doppelganger remix result: (queue_index, replacement_track)
     RemixDoppelgangerReady { replacements: Vec<(usize, Track)> },
-
-    // Multi-artist radio
     ArtistRadioComplete { tracks: Vec<Track> },
-
-    // Artist bio popup (F4)
     ArtistBioLoaded { artist_name: String, bio: String, thumb: Option<String> },
     ArtistBioArtworkLoaded { data: Vec<u8>, thumb: String },
+}
 
-    // Remote player control
+#[derive(Debug, Clone)]
+pub enum RemoteEvent {
     PlayersDiscovered(Vec<crate::plex::models::RemotePlayer>),
     PlayerDiscoveryFailed(String),
     RemotePlayerStatus {
@@ -246,3 +210,19 @@ pub enum Event {
     },
     RemotePlayerError(String),
 }
+
+// ============================================================================
+// From impls for ergonomic construction
+// ============================================================================
+
+impl From<AuthEvent> for Event { fn from(e: AuthEvent) -> Self { Event::Auth(e) } }
+impl From<DataEvent> for Event { fn from(e: DataEvent) -> Self { Event::Data(e) } }
+impl From<PlaybackEvent> for Event { fn from(e: PlaybackEvent) -> Self { Event::Playback(e) } }
+impl From<ArtworkEvent> for Event { fn from(e: ArtworkEvent) -> Self { Event::Artwork(e) } }
+impl From<FolderEvent> for Event { fn from(e: FolderEvent) -> Self { Event::Folder(e) } }
+impl From<PreloadEvent> for Event { fn from(e: PreloadEvent) -> Self { Event::Preload(e) } }
+impl From<CacheEvent> for Event { fn from(e: CacheEvent) -> Self { Event::Cache(e) } }
+impl From<VisualizerEvent> for Event { fn from(e: VisualizerEvent) -> Self { Event::Visualizer(e) } }
+impl From<RadioEvent> for Event { fn from(e: RadioEvent) -> Self { Event::Radio(e) } }
+impl From<UiEvent> for Event { fn from(e: UiEvent) -> Self { Event::Ui(e) } }
+impl From<RemoteEvent> for Event { fn from(e: RemoteEvent) -> Self { Event::Remote(e) } }
