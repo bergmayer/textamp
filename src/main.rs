@@ -179,12 +179,14 @@ async fn run_app(
     tracing::info!("PlexClient created with client_identifier: {}", client.client_identifier());
 
     // Create audio player (with timeout — WSL2 PulseAudio can hang on fresh reboot)
+    // Uses block_in_place instead of spawn_blocking because on macOS the CoreAudio
+    // stream type is !Send and cannot be returned across thread boundaries.
     let mut audio = match tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        tokio::task::spawn_blocking(AudioPlayer::new),
+        async { tokio::task::block_in_place(AudioPlayer::new) },
     ).await {
-        Ok(Ok(Ok(a))) => a,
-        Ok(Ok(Err(e))) => {
+        Ok(Ok(a)) => a,
+        Ok(Err(e)) => {
             tracing::warn!("Audio device unavailable: {} — launching without playback", e);
             AudioPlayer::new_without_audio().unwrap()
         }
