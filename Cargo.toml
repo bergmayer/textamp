@@ -25,7 +25,7 @@ ratatui = "0.29"
 crossterm = "0.28"
 
 # Album art (Kitty graphics protocol)
-ratatui-image = "9"
+ratatui-image = { version = "9", default-features = false, features = ["crossterm", "image-defaults"] }
 image = "0.25"
 base64 = "0.22"
 
