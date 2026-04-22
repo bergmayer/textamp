@@ -1272,17 +1272,10 @@ fn handle_browse_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
                 let item_idx = (click_row - cat_region.inner.y) as usize;
                 if item_idx < cat_region.item_count {
                     drop(hr);
-                    let was_selected = state.category_column_index == item_idx;
-                    state.category_column_index = item_idx;
-                    state.category_column_focused = true;
-
-                    if was_selected {
-                        // Click on already-selected category: drill in
-                        let cat = crate::app::state::BrowseCategory::all()[item_idx];
-                        state.category_column_focused = false;
-                        return vec![NavigationAction::SetCategory(cat).into()];
-                    }
-                    return vec![];
+                    let cat = crate::app::state::BrowseCategory::all()[item_idx];
+                    // Clicking any category item immediately switches to it.
+                    // SetCategory will sync category_column_index and unfocus.
+                    return vec![NavigationAction::SetCategory(cat).into()];
                 }
             }
         }

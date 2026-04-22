@@ -275,6 +275,11 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
     // When it's scrolled off, they get full width (3 content column slots).
     let current_track_key = state.current_track().map(|t| t.rating_key.as_str());
 
+    // When category column is focused, anchor the inner content viewport to
+    // column 0 so the root column (e.g. Artists) is always visible next to the
+    // category column.
+    let content_focus_override = if state.category_column_focused { Some(0) } else { None };
+
     match state.browse_category {
         BrowseCategory::Library => {
             let (filter_results, filter_column) = if state.list_filter.active
@@ -285,7 +290,7 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
                 frame, state, &state.artist_nav, "artists", current_track_key,
                 filter_results, filter_column, false,
                 content_area, Rect { x: 0, y: 0, width: 0, height: 0 },
-                Some(col_width),
+                Some(col_width), content_focus_override,
             );
         }
         BrowseCategory::Playlists => {
@@ -297,7 +302,7 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
                 frame, state, &state.playlist_nav, "playlists", current_track_key,
                 filter_results, filter_column, true,
                 content_area, Rect { x: 0, y: 0, width: 0, height: 0 },
-                Some(col_width),
+                Some(col_width), content_focus_override,
             );
         }
         BrowseCategory::Genres => {
@@ -309,7 +314,7 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
                 frame, state, &state.genre_nav, "genres", current_track_key,
                 filter_results, filter_column, false,
                 content_area, Rect { x: 0, y: 0, width: 0, height: 0 },
-                Some(col_width),
+                Some(col_width), content_focus_override,
             );
         }
         BrowseCategory::Folders => {
@@ -319,7 +324,7 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
             } else { (None, None) };
             render_folder_view(frame, state, filter_results, filter_column,
                 content_area, Rect { x: 0, y: 0, width: 0, height: 0 },
-                Some(col_width));
+                Some(col_width), content_focus_override);
         }
     }
 
@@ -424,6 +429,7 @@ fn render_folder_view(
     left_area: Rect,
     right_area: Rect,
     fixed_col_width: Option<u16>,
+    focus_override: Option<usize>,
 ) {
     use crate::services::FolderItemType;
 
@@ -478,10 +484,12 @@ fn render_folder_view(
         // Determine which columns to show.
         // Slide based on deepest column, not focus — prevents jumps when clicking
         // between already-visible columns.
-        let rightmost_col = effective_columns.saturating_sub(1).max(folder_state.focused_column);
+        // When focus_override is provided (category column focused), anchor viewport left.
+        let viewport_focus = focus_override.unwrap_or(folder_state.focused_column);
+        let rightmost_col = effective_columns.saturating_sub(1).max(viewport_focus);
         let start_col = if rightmost_col + 1 > max_visible {
             let s = rightmost_col + 1 - max_visible;
-            s.min(folder_state.focused_column)
+            s.min(viewport_focus)
         } else {
             0
         };
@@ -522,7 +530,7 @@ fn render_folder_view(
 
         for (vis_idx, col_idx) in (start_col..effective_columns.min(start_col + max_visible)).enumerate() {
             let col = &folder_state.columns[col_idx];
-            let is_focused = col_idx == folder_state.focused_column;
+            let is_focused = focus_override.is_none() && col_idx == folder_state.focused_column;
 
             let col_area = Rect {
                 x: area.x + (vis_idx as u16 * col_width),
@@ -753,6 +761,7 @@ fn render_browse_miller_columns(
     left_area: Rect,
     right_area: Rect,
     fixed_col_width: Option<u16>,
+    focus_override: Option<usize>,
 ) {
     use crate::app::state::BrowseItem;
     use crate::util::truncate_middle;
@@ -823,10 +832,13 @@ fn render_browse_miller_columns(
     // Determine which columns to show.
     // Slide based on the deepest column with content, not focus — prevents jumps
     // when clicking between already-visible columns.
-    let rightmost_col = effective_columns.saturating_sub(1).max(nav.focused_column);
+    // When focus_override is provided (e.g. category column is focused), use that
+    // instead of nav.focused_column so the viewport stays anchored to the left.
+    let viewport_focus = focus_override.unwrap_or(nav.focused_column);
+    let rightmost_col = effective_columns.saturating_sub(1).max(viewport_focus);
     let start_col = if rightmost_col + 1 > max_visible {
         let s = rightmost_col + 1 - max_visible;
-        s.min(nav.focused_column) // ensure focused column stays visible
+        s.min(viewport_focus) // ensure focused column stays visible
     } else {
         0
     };
@@ -866,7 +878,7 @@ fn render_browse_miller_columns(
 
     for (vis_idx, col_idx) in (start_col..effective_columns.min(start_col + max_visible)).enumerate() {
         let col = &nav.columns[col_idx];
-        let is_focused = col_idx == nav.focused_column;
+        let is_focused = focus_override.is_none() && col_idx == nav.focused_column;
         let is_root = col_idx == 0;
 
         let col_area = Rect {

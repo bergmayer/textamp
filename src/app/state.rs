@@ -2184,6 +2184,14 @@ impl AppState {
         self.category_column_focused = false;
     }
 
+    /// Focus the category column, syncing category_column_index to match
+    /// the active browse_category so the highlight is always correct.
+    pub fn focus_category_column(&mut self) {
+        self.category_column_index = BrowseCategory::all().iter()
+            .position(|c| *c == self.browse_category).unwrap_or(0);
+        self.category_column_focused = true;
+    }
+
     pub fn set_error(&mut self, msg: String) {
         self.notifications.last_error = Some(msg);
     }

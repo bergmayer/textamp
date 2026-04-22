@@ -366,10 +366,10 @@ pub(super) fn handle_folder_browse_keys(key: event::KeyEvent, state: &mut AppSta
                 if folder_state.can_go_left() {
                     folder_state.focus_left();
                 } else {
-                    state.category_column_focused = true;
+                    state.focus_category_column();
                 }
             } else {
-                state.category_column_focused = true;
+                state.focus_category_column();
             }
             vec![]
         }
@@ -448,7 +448,7 @@ pub(super) fn handle_artist_browse_keys(key: event::KeyEvent, state: &mut AppSta
     let is_up_down = matches!(key.code, KeyCode::Up | KeyCode::Down);
     // Left/Backspace at root column → return to category column
     if matches!(key.code, KeyCode::Left | KeyCode::Backspace) && !state.artist_nav.can_go_left() {
-        state.category_column_focused = true;
+        state.focus_category_column();
         return vec![];
     }
 
@@ -538,7 +538,7 @@ pub(super) fn handle_genre_browse_keys(key: event::KeyEvent, state: &mut AppStat
 
     // Left/Backspace at root column → return to category column
     if matches!(key.code, KeyCode::Left | KeyCode::Backspace) && !state.genre_nav.can_go_left() {
-        state.category_column_focused = true;
+        state.focus_category_column();
         return vec![];
     }
 
@@ -605,7 +605,7 @@ pub(super) fn handle_playlist_browse_keys(key: event::KeyEvent, state: &mut AppS
 
     // Left/Backspace at root column → return to category column
     if matches!(key.code, KeyCode::Left | KeyCode::Backspace) && !state.playlist_nav.can_go_left() {
-        state.category_column_focused = true;
+        state.focus_category_column();
         return vec![];
     }
 
