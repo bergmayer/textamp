@@ -167,15 +167,26 @@ fn toggle_group_by_album(state: &mut AppState, col_idx: usize) -> Vec<Action> {
 }
 
 /// Toggle artwork visibility for an album column.
+/// Updates both the current column and the global default so all album columns
+/// reflect the new setting (not just the one being viewed).
 fn toggle_artwork(state: &mut AppState, col_idx: usize) -> Vec<Action> {
-    let nav = match state.browse_nav_mut() {
-        Some(n) => n,
-        None => return vec![],
+    let new_visible = {
+        let nav = match state.browse_nav_mut() {
+            Some(n) => n,
+            None => return vec![],
+        };
+
+        if let Some(col) = nav.columns.get_mut(col_idx) {
+            col.artwork_visible = !col.artwork_visible;
+            col.artwork_visible
+        } else {
+            return vec![];
+        }
     };
 
-    if let Some(col) = nav.columns.get_mut(col_idx) {
-        col.artwork_visible = !col.artwork_visible;
-    }
+    // Update the global default so all future/existing album columns use this setting
+    state.artwork.default_visible = new_visible;
+
     vec![]
 }
 
