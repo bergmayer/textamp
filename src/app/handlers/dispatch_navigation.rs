@@ -29,6 +29,7 @@ pub async fn dispatch(
         NavigationAction::SetView(view) => {
             // Clear artwork cache when leaving Similar view to force re-render
             // (Similar popup's Clear widget can corrupt terminal images)
+            #[cfg(feature = "tui")]
             if state.view == View::Similar {
                 crate::ui::screens::now_playing::clear_artwork_cache();
             }
@@ -73,6 +74,15 @@ pub async fn dispatch(
             }
         }
         NavigationAction::SetCategory(category) => {
+            // Picking a category implies "show me that part of the
+            // library", so always switch to the Browse view too.
+            // Without this, the View menu / Ctrl+L|P|G|O shortcuts
+            // would silently change the category state but leave the
+            // user stuck on Queue/Now Playing/Help/etc.
+            if state.view != View::Browse {
+                state.set_view(View::Browse);
+            }
+
             // Always unfocus category column when a category is selected
             state.category_column_focused = false;
 

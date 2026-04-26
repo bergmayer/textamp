@@ -31,7 +31,7 @@ use crate::plex::models::{Album, Artist, Genre, Library, Playlist, PlexServer, R
 use crate::miller::{MillerColumn, MillerState};
 use crate::plex::{CachedFolder, CachedPlaylistTracks};
 use crate::services::{FolderNavigationState, WaveformData, MAX_HISTORY_SIZE};
-use crate::ui::theme::ThemeName;
+use crate::app::theme::ThemeName;
 use std::collections::HashMap;
 
 /// Marquee scroll animation phase.
@@ -641,6 +641,17 @@ pub struct BrowseColumn {
     pub grouped_by_album: bool,
     /// Album group indices into tracks (replaces global track_album_groups)
     pub album_groups: Option<Vec<Vec<usize>>>,
+    /// When this column is the tracks-of-an-album column, holds the
+    /// (rating_key, title) of that album so the GUI can render a
+    /// "Play Album" action header at the top.
+    pub play_album: Option<(String, String)>,
+    /// When this column is a virtual "all tracks" view (artist's full
+    /// track list, library-wide track list, compilation tracks, …)
+    /// it has no single album_key. Storing a label here flags the
+    /// header to render a "Play {label}" button that queues every
+    /// track in `tracks` instead of fetching from the API. Mutually
+    /// exclusive with `play_album`.
+    pub play_all_label: Option<String>,
 }
 
 impl BrowseColumn {
@@ -657,6 +668,8 @@ impl BrowseColumn {
             artwork_visible: false,
             grouped_by_album: false,
             album_groups: None,
+            play_album: None,
+            play_all_label: None,
         }
     }
 
@@ -674,6 +687,8 @@ impl BrowseColumn {
             artwork_visible: false,
             grouped_by_album: false,
             album_groups: None,
+            play_album: None,
+            play_all_label: None,
         }
     }
 
@@ -1624,6 +1639,8 @@ pub struct AppState {
 
     /// Hit-test region registry (RefCell for interior mutability during render).
     /// Populated each frame by render code, consumed by mouse_input handlers.
+    /// TUI only — the GUI uses Iced's own hit-testing.
+    #[cfg(feature = "tui")]
     pub hit_regions: std::cell::RefCell<crate::ui::hit_regions::HitRegions>,
 
     // Library switch loading state
@@ -1639,6 +1656,12 @@ pub struct AppState {
     pub waveform_cache_stats: Option<(usize, u64)>,
     // Scroll pins and cooldowns
     pub scroll: ScrollPins,
+
+    /// GUI track-details pane. When `Some`, the browse view renders a
+    /// fixed-width details pane to the right of the Miller columns
+    /// showing the selected track's metadata + a Play Track button.
+    /// Replaced (not stacked) by each new track click.
+    pub track_details: Option<crate::plex::models::Track>,
 }
 
 /// Which view a scrollbar drag is operating on.
@@ -2041,12 +2064,14 @@ impl AppState {
             auto_drill_pending: false,
             marquee: std::cell::RefCell::new(MarqueeState::default()),
             marquee_subtitle: std::cell::RefCell::new(MarqueeState::default()),
+            #[cfg(feature = "tui")]
             hit_regions: std::cell::RefCell::new(crate::ui::hit_regions::HitRegions::default()),
             library_loading: false,
             remote: RemoteControl::default(),
             library_cache_stats: None,
             waveform_cache_stats: None,
             scroll: ScrollPins::default(),
+            track_details: None,
         }
     }
 
@@ -2882,7 +2907,14 @@ pub enum AdventureDrillLevel {
     AlbumTracks { album_key: String, album_title: String, artist_name: String, tracks: Vec<Track> },
 }
 
-/// Adventure launcher popup state (3-step: find start → set count → find end).
+/// Adventure launcher popup state. The original 3-step wizard
+/// (FindStartTrack → EnterTrackCount → FindEndTrack) was replaced in
+/// the GUI with a single-screen form that always shows all three
+/// fields; `step` now indicates which field the user is currently
+/// editing (so the search panel knows whether a chosen result becomes
+/// `start_track` or `end_track`). Both tracks are stored separately
+/// so a "Reverse" button can swap them and a "Generate" button can
+/// fire only when both are set.
 #[derive(Debug, Clone)]
 pub struct AdventureLauncherState {
     pub step: AdventureStep,
@@ -2893,6 +2925,7 @@ pub struct AdventureLauncherState {
     pub loading: bool,
     pub drill: AdventureDrillLevel,
     pub start_track: Option<Track>,
+    pub end_track: Option<Track>,
     pub track_count_input: String,
     pub scroll_pin: Option<usize>,
     pub search_tab: SearchTab,
@@ -2925,6 +2958,7 @@ pub enum SettingsSection {
     #[default]
     Account,
     Textamp,
+    Cache,
     About,
 }
 
@@ -2933,6 +2967,7 @@ impl SettingsSection {
         &[
             SettingsSection::Account,
             SettingsSection::Textamp,
+            SettingsSection::Cache,
             SettingsSection::About,
         ]
     }
@@ -2941,6 +2976,7 @@ impl SettingsSection {
         match self {
             SettingsSection::Account => "account",
             SettingsSection::Textamp => "textamp",
+            SettingsSection::Cache => "cache",
             SettingsSection::About => "about",
         }
     }
@@ -2948,7 +2984,8 @@ impl SettingsSection {
     pub fn next(&self) -> Self {
         match self {
             SettingsSection::Account => SettingsSection::Textamp,
-            SettingsSection::Textamp => SettingsSection::About,
+            SettingsSection::Textamp => SettingsSection::Cache,
+            SettingsSection::Cache => SettingsSection::About,
             SettingsSection::About => SettingsSection::Account,
         }
     }
@@ -2957,7 +2994,8 @@ impl SettingsSection {
         match self {
             SettingsSection::Account => SettingsSection::About,
             SettingsSection::Textamp => SettingsSection::Account,
-            SettingsSection::About => SettingsSection::Textamp,
+            SettingsSection::Cache => SettingsSection::Textamp,
+            SettingsSection::About => SettingsSection::Cache,
         }
     }
 }

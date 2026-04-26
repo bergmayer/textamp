@@ -19,7 +19,10 @@ mod settings;
 
 // Re-export public items used by other handler modules.
 pub use browse::{update_filter_column_selection, get_filter_drilldown_actions, truncate_filter_right_columns};
-pub(crate) use browse::{auto_drill_artist_action, auto_drill_genre_action, auto_drill_playlist_action, auto_drill_folder};
+pub(crate) use browse::{auto_drill_artist_action, auto_drill_genre_action, auto_drill_playlist_action};
+// `auto_drill_folder` is consumed only by the TUI mouse handler.
+#[cfg(feature = "tui")]
+pub(crate) use browse::auto_drill_folder;
 pub use self::alt_commands::{AltCommand, CommandModifier, available_alt_commands};
 
 mod alt_commands;
@@ -81,11 +84,16 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
 
     // Handle confirm dialog if active
     if let Some(mut dialog) = state.popups.confirm_dialog.take() {
-        // Pressing the same shortcut again (e.g. Ctrl+Q Ctrl+Q) confirms immediately
-        if matches!(dialog.on_confirm, crate::app::state::ConfirmAction::Quit)
-            && key.modifiers == KeyModifiers::CONTROL
-            && key.code == KeyCode::Char('q')
-        {
+        // Pressing any quit shortcut a second time confirms immediately.
+        let repeat_quit = matches!(dialog.on_confirm, crate::app::state::ConfirmAction::Quit)
+            && match (key.modifiers, key.code) {
+                (KeyModifiers::CONTROL, KeyCode::Char('q')) => true,
+                (KeyModifiers::SUPER,   KeyCode::Char('q')) => true,
+                (KeyModifiers::SUPER,   KeyCode::Char('w')) => true,
+                (KeyModifiers::ALT,     KeyCode::F(4))      => true,
+                _ => false,
+            };
+        if repeat_quit {
             return vec![SystemAction::Quit.into()];
         }
         match key.code {
@@ -185,9 +193,23 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
     }
 
     // Global CUA shortcuts (work everywhere)
+    //
+    // Quit shortcuts (with confirmation):
+    //   - Ctrl+Q       (Linux/Windows/TUI standard)
+    //   - Cmd+Q        (Mac standard — `SUPER` is the cross-platform
+    //                   crossterm name for the OS Logo / Cmd / Win key)
+    //   - Cmd+W        (Mac single-window app convention — closes the
+    //                   only window so the app is effectively quit)
+    //   - Alt+F4       (Windows standard)
+    let is_quit_keypress = match (key.modifiers, key.code) {
+        (KeyModifiers::CONTROL, KeyCode::Char('q')) => true,
+        (KeyModifiers::SUPER,   KeyCode::Char('q')) => true,
+        (KeyModifiers::SUPER,   KeyCode::Char('w')) => true,
+        (KeyModifiers::ALT,     KeyCode::F(4))      => true,
+        _ => false,
+    };
     match (key.modifiers, key.code) {
-        // Quit: Ctrl+Q (with confirmation)
-        (KeyModifiers::CONTROL, KeyCode::Char('q')) => {
+        _ if is_quit_keypress => {
             use crate::app::state::{ConfirmDialog, ConfirmAction};
             state.popups.close_all();
             state.popups.confirm_dialog = Some(ConfirmDialog {
@@ -381,6 +403,12 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
         (KeyModifiers::CONTROL, KeyCode::Char('j')) if alt_commands::is_action_command_available(state, 'j') => {
             return navigate_to_album(state);
         }
+        // Ctrl+S = Save queue as playlist (standard Save shortcut).
+        // The previous Ctrl+W was non-standard; left in place as an
+        // alias so existing muscle memory still works.
+        (KeyModifiers::CONTROL, KeyCode::Char('s')) if alt_commands::is_action_command_available(state, 's') => {
+            return vec![QueueAction::PromptSavePlaylist.into()];
+        }
         (KeyModifiers::CONTROL, KeyCode::Char('w')) if alt_commands::is_action_command_available(state, 'w') => {
             return vec![QueueAction::PromptSavePlaylist.into()];
         }
@@ -407,8 +435,10 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
             }
             return vec![];
         }
-        (KeyModifiers::CONTROL, KeyCode::Char('s')) if alt_commands::is_action_command_available(state, 's') => {
-            // Ctrl+S = Sort popup for current column
+        // F6 = Sort popup for current column. Was Ctrl+S until that
+        // became the standard Save shortcut; F6 keeps sort reachable
+        // from the keyboard without colliding with save.
+        (KeyModifiers::NONE, KeyCode::F(6)) => {
             return vec![SearchAction::OpenSortPopup.into()];
         }
 

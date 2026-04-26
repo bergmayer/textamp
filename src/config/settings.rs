@@ -149,12 +149,34 @@ pub struct UiConfig {
     pub theme: String,
 
     /// Persist cover art view mode across sessions (Alt+C toggle).
-    #[serde(default)]
+    /// Default ON — album art is a core part of the browsing experience.
+    /// TUI users on limited terminals can turn it off and the choice
+    /// will stick after Alt+C persists the flag.
+    #[serde(default = "default_cover_art_view")]
     pub cover_art_view: bool,
 
     /// Artwork rendering mode: "auto", "halfblocks", or "braille".
     #[serde(default = "default_artwork_mode")]
     pub artwork_mode: String,
+
+    /// GUI-only: last window geometry. Ignored by the TUI.
+    #[serde(default)]
+    pub window: WindowConfig,
+
+    /// GUI content scale (zoom). 1.0 = native size. Ignored by the TUI.
+    /// Adjustable from Settings → View Options. Clamped to a sensible
+    /// range at runtime to keep the UI usable.
+    #[serde(default = "default_ui_scale")]
+    pub ui_scale: f32,
+}
+
+/// GUI window geometry persisted across launches.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct WindowConfig {
+    #[serde(default = "default_window_width")]
+    pub width: u32,
+    #[serde(default = "default_window_height")]
+    pub height: u32,
 }
 
 impl Default for UiConfig {
@@ -163,8 +185,36 @@ impl Default for UiConfig {
             show_album_art: default_show_album_art(),
             album_art_size: default_album_art_size(),
             theme: default_theme(),
-            cover_art_view: false,
+            cover_art_view: default_cover_art_view(),
             artwork_mode: default_artwork_mode(),
+            window: WindowConfig::default(),
+            ui_scale: default_ui_scale(),
+        }
+    }
+}
+
+fn default_ui_scale() -> f32 {
+    // 1.25 reads comfortably on a typical 1080p+ display. Existing
+    // 1.0 saved values are honoured (serde reads them back); only
+    // fresh installs / rest-to-default land on 1.25.
+    1.25
+}
+
+/// Clamp bounds for the user-settable UI scale. Keep the UI within
+/// reach of the cursor at both ends.
+pub const UI_SCALE_MIN: f32 = 0.75;
+pub const UI_SCALE_MAX: f32 = 2.0;
+pub const UI_SCALE_STEP: f32 = 0.1;
+
+fn default_cover_art_view() -> bool {
+    true
+}
+
+impl Default for WindowConfig {
+    fn default() -> Self {
+        Self {
+            width: default_window_width(),
+            height: default_window_height(),
         }
     }
 }
@@ -183,4 +233,12 @@ fn default_theme() -> String {
 
 fn default_artwork_mode() -> String {
     "auto".to_string()
+}
+
+fn default_window_width() -> u32 {
+    1280
+}
+
+fn default_window_height() -> u32 {
+    840
 }

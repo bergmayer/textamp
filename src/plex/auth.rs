@@ -75,6 +75,24 @@ pub struct ServerInfo {
     pub name: String,
 }
 
+/// Persistent marker recording which account the on-disk caches were
+/// populated for. Survives logout; consulted at sign-in to decide
+/// whether to keep the cache (same user, recently signed in) or wipe
+/// it (different user / stale > 30 days).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountMarker {
+    pub username: String,
+    /// Unix-epoch second the marker was last refreshed (sign-in or
+    /// sign-out time).
+    pub last_seen_unix: u64,
+}
+
+/// Filesystem path for the account marker — sibling of `auth.toml`
+/// in the data directory so XDG and platform fallbacks both apply.
+fn account_marker_path(paths: &crate::config::XdgPaths) -> std::path::PathBuf {
+    paths.data_dir.join("account_marker.toml")
+}
+
 impl PlexAuth {
     /// Create a new PlexAuth with default client info.
     pub fn new() -> Self {
@@ -338,6 +356,34 @@ impl PlexAuth {
         } else {
             None
         }
+    }
+
+    /// Persist a marker recording which Plex account was last signed
+    /// in plus the unix-epoch second the session ended (or started).
+    /// This file survives `delete_token`; the marker is what lets
+    /// sign-in decide whether the on-disk caches still belong to the
+    /// user logging in.
+    pub fn save_account_marker(username: &str) -> Result<(), std::io::Error> {
+        let paths = crate::config::XdgPaths::new("textamp");
+        paths.ensure_dirs()?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let marker = AccountMarker { username: username.to_string(), last_seen_unix: now };
+        let toml_str = toml::to_string(&marker)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        std::fs::write(account_marker_path(&paths), toml_str)
+    }
+
+    /// Load the persisted account marker if present. Returns `None`
+    /// when nothing has been written yet (first-run / fresh install).
+    pub fn load_account_marker() -> Option<AccountMarker> {
+        let paths = crate::config::XdgPaths::new("textamp");
+        let p = account_marker_path(&paths);
+        if !p.exists() { return None; }
+        let contents = std::fs::read_to_string(p).ok()?;
+        toml::from_str(&contents).ok()
     }
 
     /// Get available remote players (devices that provide "player" capability).

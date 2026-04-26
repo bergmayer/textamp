@@ -55,7 +55,7 @@ pub fn apply_selected_option(state: &mut AppState) -> Vec<Action> {
 }
 
 /// Apply a sort mode to the column and update the popup.
-fn apply_sort_mode(state: &mut AppState, col_idx: usize, mode: ColumnSortMode) -> Vec<Action> {
+pub fn apply_sort_mode(state: &mut AppState, col_idx: usize, mode: ColumnSortMode) -> Vec<Action> {
     let nav = match state.browse_nav_mut() {
         Some(n) => n,
         None => return vec![],
@@ -103,7 +103,7 @@ fn apply_sort_mode(state: &mut AppState, col_idx: usize, mode: ColumnSortMode) -
 
 /// Toggle sort direction for the current column.
 /// Reverses the non-pinned items/tracks and flips the ascending flag.
-fn toggle_sort_direction(state: &mut AppState, col_idx: usize) -> Vec<Action> {
+pub fn toggle_sort_direction(state: &mut AppState, col_idx: usize) -> Vec<Action> {
     let nav = match state.browse_nav_mut() {
         Some(n) => n,
         None => return vec![],
@@ -131,7 +131,7 @@ fn toggle_sort_direction(state: &mut AppState, col_idx: usize) -> Vec<Action> {
 }
 
 /// Toggle group-by-album for a playlist track column.
-fn toggle_group_by_album(state: &mut AppState, col_idx: usize) -> Vec<Action> {
+pub fn toggle_group_by_album(state: &mut AppState, col_idx: usize) -> Vec<Action> {
     use crate::app::state::SortColumnType;
 
     let nav = match state.browse_nav_mut() {
@@ -169,7 +169,7 @@ fn toggle_group_by_album(state: &mut AppState, col_idx: usize) -> Vec<Action> {
 /// Toggle artwork visibility for an album column.
 /// Updates both the current column and the global default so all album columns
 /// reflect the new setting (not just the one being viewed).
-fn toggle_artwork(state: &mut AppState, col_idx: usize) -> Vec<Action> {
+pub fn toggle_artwork(state: &mut AppState, col_idx: usize) -> Vec<Action> {
     let new_visible = {
         let nav = match state.browse_nav_mut() {
             Some(n) => n,

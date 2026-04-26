@@ -105,6 +105,23 @@ pub async fn dispatch(
             let auto_drill = std::mem::take(&mut state.auto_drill_pending);
             state.artist_nav.loading = true;
 
+            // Sync `selected_artist_name` from the cached artist roster
+            // before any column titles are formatted. Some callers (the
+            // GUI's miller-click handler, in particular) dispatch this
+            // action without setting it themselves, which would leave
+            // the album column header reading "albums — " (no artist).
+            // The OpenInLibrary path sets it pre-dispatch and is
+            // therefore unaffected by this fallback.
+            if let Some(name) = state.library.artists.iter()
+                .find(|a| a.rating_key == artist_key)
+                .or_else(|| state.library.track_artists.iter().find(|a| a.rating_key == artist_key))
+                .map(|a| a.title.clone())
+            {
+                if !name.is_empty() {
+                    state.library.selected_artist_name = name;
+                }
+            }
+
             // Check if this is a derived track-artist without a real Plex artist entry
             let is_plex_artist = state.library.artists.iter().any(|a| a.rating_key == artist_key);
 
@@ -133,20 +150,21 @@ pub async fn dispatch(
                         artist_name: state.library.selected_artist_name.clone(),
                         thumb: artist_thumb, // Artist artwork on AllTracks
                     };
-                    // Order: ArtistRadio → CompilationTracks → AllTracks → Albums
-                    let mut items = vec![artist_radio];
+                    // Order: AllTracks → ArtistRadio → CompilationTracks → Albums.
+                    // Mirrors the artists column (AllArtists → Compilations
+                    // button), so the action button (Artist Radio) lines
+                    // up vertically with the Compilations button across
+                    // columns.
+                    let mut items = vec![all_tracks, artist_radio];
 
-                    // CompilationTracks after ArtistRadio (if artist has compilation tracks)
-                    if state.library.compilations.detected {
-                        if state.library.compilations.artist_map.contains_key(&artist_key) {
-                            items.push(BrowseItem::CompilationTracks {
-                                artist_key: artist_key.clone(),
-                                artist_name: state.library.selected_artist_name.clone(),
-                            });
-                        }
+                    if state.library.compilations.detected
+                        && state.library.compilations.artist_map.contains_key(&artist_key)
+                    {
+                        items.push(BrowseItem::CompilationTracks {
+                            artist_key: artist_key.clone(),
+                            artist_name: state.library.selected_artist_name.clone(),
+                        });
                     }
-
-                    items.push(all_tracks);
 
                     // Start with albums, then merge any from preloaded state.library.albums
                     // that the API missed (e.g. compilation-subtype albums)
@@ -238,7 +256,8 @@ pub async fn dispatch(
                     let items = BrowseItem::from_tracks(&tracks);
                     let title = format!("tracks \u{2014} {}", state.library.selected_album_title);
                     // Store full tracks for playback (includes media info)
-                    let col = BrowseColumn::new_with_tracks(title, items, tracks);
+                    let mut col = BrowseColumn::new_with_tracks(title, items, tracks);
+                    col.play_album = Some((album_key.clone(), state.library.selected_album_title.clone()));
                     state.artist_nav.drill_column(col, auto_drill);
 
                     // Auto-select track if pending from search navigation
@@ -268,8 +287,13 @@ pub async fn dispatch(
                 Ok(tracks) => {
                     let items = BrowseItem::from_tracks(&tracks);
                     let title = format!("tracks ({})", tracks.len());
-                    // Store full tracks for playback (includes media info)
-                    let col = BrowseColumn::new_with_tracks(title, items, tracks);
+                    // Store full tracks for playback (includes media info).
+                    // Set play_all_label so the GUI header renders a
+                    // "Play All Tracks" button alongside the column,
+                    // matching the "Play Album" button on per-album
+                    // tracks columns.
+                    let mut col = BrowseColumn::new_with_tracks(title, items, tracks);
+                    col.play_all_label = Some("Play All Tracks".to_string());
                     state.artist_nav.drill_column(col, auto_drill);
                 }
                 Err(e) => {
@@ -426,7 +450,8 @@ pub async fn dispatch(
                         format!("tracks \u{2014} {}", album_name)
                     };
                     // Store full tracks for playback (includes media info)
-                    let col = BrowseColumn::new_with_tracks(title, items, tracks);
+                    let mut col = BrowseColumn::new_with_tracks(title, items, tracks);
+                    col.play_album = Some((album_key.clone(), album_name.clone()));
                     state.genre_nav.drill_column(col, auto_drill);
                 }
                 Err(e) => {
@@ -564,7 +589,8 @@ pub async fn dispatch(
                     .collect();
                 let items = BrowseItem::from_tracks(&tracks);
                 let title = format!("tracks ({})", tracks.len());
-                let col = BrowseColumn::new_with_tracks(title, items, tracks);
+                let mut col = BrowseColumn::new_with_tracks(title, items, tracks);
+                col.play_all_label = Some("Play Compilation Tracks".to_string());
                 state.artist_nav.drill_column(col, auto_drill);
             }
         }
@@ -582,7 +608,8 @@ pub async fn dispatch(
                 .collect();
             let items = BrowseItem::from_tracks(&tracks);
             let title = format!("tracks ({})", tracks.len());
-            let col = BrowseColumn::new_with_tracks(title, items, tracks);
+            let mut col = BrowseColumn::new_with_tracks(title, items, tracks);
+            col.play_all_label = Some("Play All Compilation Tracks".to_string());
             state.artist_nav.drill_column(col, auto_drill);
         }
 
@@ -597,13 +624,14 @@ pub async fn dispatch(
                 if let Some(ref lib_key) = state.active_library.clone() {
                     state.cache_mgmt.preloads_in_progress.insert("Tracks".to_string());
                     if state.cache_mgmt.preloads_total == 0 { state.cache_mgmt.preloads_total = 1; }
-                    helpers::preload_data(event_tx, crate::app::event_loop::PreloadType::AllTracks, lib_key, client);
+                    helpers::preload_data(event_tx, helpers::PreloadType::AllTracks, lib_key, client);
                 }
                 return Ok(vec![]);
             }
             let items = BrowseItem::from_tracks(&state.library.all_tracks);
             let title = format!("tracks ({})", state.library.all_tracks.len());
-            let col = BrowseColumn::new_with_tracks(title, items, state.library.all_tracks.clone());
+            let mut col = BrowseColumn::new_with_tracks(title, items, state.library.all_tracks.clone());
+            col.play_all_label = Some("Play All Library Tracks".to_string());
             state.artist_nav.drill_column(col, auto_drill);
         }
 

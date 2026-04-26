@@ -174,6 +174,21 @@ impl AudioPlayer {
         self.backend.is_some()
     }
 
+    /// Try to (re)attach a live audio backend. Used to recover from a
+    /// startup where no device was available yet (e.g. Windows audio
+    /// service still initializing right after login). Returns Ok(true)
+    /// if the device is now usable, Ok(false) if we already had one,
+    /// and Err with the cpal failure if retrying still fails.
+    pub fn try_attach_backend(&mut self) -> Result<bool> {
+        if self.backend.is_some() {
+            return Ok(false);
+        }
+        let backend = RodioBackend::new()
+            .map_err(|e| anyhow!("Failed to create audio backend: {}", e))?;
+        self.backend = Some(backend);
+        Ok(true)
+    }
+
     pub fn start_pending_playback(&mut self) -> Result<bool> {
         let Some(ref mut backend) = self.backend else { return Ok(false) };
         let pending = super::lock_or_recover(&self.pending_playback).take();

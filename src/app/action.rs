@@ -145,6 +145,9 @@ pub enum QueueAction {
     UndoLastRemix,
     MoveQueueTrackUp,
     MoveQueueTrackDown,
+    /// Drag-and-drop reorder: pull the track at `from` and insert it at
+    /// `to` (with `to` interpreted in the post-removal index space).
+    MoveQueueTrack { from: usize, to: usize },
     MoveSelectedTracksUp,
     MoveSelectedTracksDown,
     RemoveSelectedFromQueue,
@@ -163,22 +166,68 @@ pub enum SearchAction {
     FilteredListDown,
     AppendListFilterChar(char),
     DeleteListFilterChar,
+    /// Replace the list filter query with the given string in one shot
+    /// and re-run the filter. Activates the filter if currently inactive;
+    /// deactivates it when the new query is empty. Used by the GUI
+    /// `text_input` (which delivers the full edited value on each edit)
+    /// rather than the TUI's char-at-a-time path.
+    SetListFilterQuery(String),
     OpenSearchPopup,
     CloseSearchPopup,
+    /// Replace the global-search query (text input handler) and
+    /// kick off a fresh `ExecuteLocalSearch`. Mirrors the way the
+    /// adventure launcher's `AdventureLauncherSetQuery` works.
+    SetSearchQuery(String),
+    /// Switch the active result-category tab in the global search
+    /// popup (Global / Artists / Albums / Tracks / Playlists / Genres).
+    SetSearchTab(crate::app::state::SearchTab),
     CloseRadioLauncher,
     RadioLauncherSearch,
     RadioLauncherSelectResult,
     OpenAdventureLauncher,
+    /// Open the Sonic Adventure launcher with a pre-selected start
+    /// track — skips the start-track search step and goes straight to
+    /// "enter track count". Used by the track context menu and the
+    /// Now Playing "Adventure" action when the source already
+    /// identifies a specific track.
+    OpenAdventureLauncherWithStart { start_track: Box<crate::plex::models::Track> },
     CloseAdventureLauncher,
     AdventureLauncherSearch,
     AdventureLauncherDrillArtist { key: String, name: String },
     AdventureLauncherDrillAlbum { key: String, title: String, artist_name: String },
     AdventureLauncherSelectTrack,
     AdventureLauncherBack,
+    /// Switch which adventure-launcher field is being edited
+    /// (start track vs end track). The single-screen popup uses this
+    /// to route the search panel's selections to the right slot.
+    AdventureLauncherSetStep(crate::app::state::AdventureStep),
+    /// Swap the launcher's `start_track` and `end_track` slots.
+    /// Greyed out in the UI when both slots are empty (no-op then).
+    AdventureLauncherReverse,
+    /// Replace the track-count input with the given string. Used by
+    /// the GUI text-input handler.
+    AdventureLauncherSetTrackCount(String),
+    /// Clear `start_track` (X-button on the start-track row).
+    AdventureLauncherClearStart,
+    /// Clear `end_track` (X-button on the end-track row).
+    AdventureLauncherClearEnd,
+    /// Fire generation when the user clicks the "Generate" button.
+    /// Validates start/end/count and dispatches the same path the
+    /// old multi-step launcher used on FindEndTrack select.
+    AdventureLauncherGenerate,
+    /// Replace the search query (TextInput handler) and re-run search.
+    AdventureLauncherSetQuery(String),
     OpenLibraryPicker,
     CloseLibraryPicker,
     OpenSortPopup,
     CloseSortPopup,
+    /// Menu-driven sort actions. These let the GUI expose sort controls
+    /// in the menu bar without going through the modal popup. They
+    /// always operate on the focused Miller column.
+    ApplyFocusedSortMode(crate::app::state::ColumnSortMode),
+    ReverseFocusedSortDirection,
+    ToggleFocusedColumnArtwork,
+    ToggleFocusedColumnGrouping,
     OpenArtistRadioPicker,
     CloseArtistRadioPicker,
     ArtistRadioPickerSearch,
@@ -201,6 +250,21 @@ pub enum BrowseAction {
     CycleGenreTab,
     SetGenreTab(crate::app::state::GenreTab),
     DrillGenreCategory { category_key: String },
+    /// GUI: open the track-details pane for the given track. Replaces
+    /// any existing details pane (no stacking). The TUI ignores this.
+    OpenTrackDetails(Track),
+    /// GUI: close the track-details pane.
+    CloseTrackDetails,
+    /// "Open in Library": switch to the Library category, drill into
+    /// the given artist, and (when `album_key` is `Some`) auto-select
+    /// the album underneath. Used by the right-click "Open in Library"
+    /// item from a track or album row in any view.
+    OpenInLibrary {
+        artist_key: String,
+        artist_name: String,
+        album_key: Option<String>,
+        album_title: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -242,6 +306,14 @@ pub enum SettingsAction {
     ClearLibraryCache,
     ClearArtworkCache,
     ClearSubfolderCache,
+    /// Recompute on-disk cache stats (library breakdown + artwork +
+    /// waveform sizes) and post the results back via CacheEvent /
+    /// ArtworkEvent. Used by the Settings popup to make sure the
+    /// Cache tab shows fresh sizes the moment it opens.
+    RefreshCacheStats,
+    /// Wipe library + artwork caches, then trigger a fresh load from
+    /// the server. The "Refresh all cache" button in Settings → Cache.
+    RefreshAllCache,
     StartSubfolderCrawl,
     StopSubfolderCrawl,
     ToggleKeepSubfolderCache,

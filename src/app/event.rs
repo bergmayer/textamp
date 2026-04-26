@@ -1,228 +1,66 @@
 //! Application events.
 //!
-//! Events represent things that happen (input, async completions, etc.).
-//! Organized into sub-enums by domain.
+//! The top-level `Event` enum carries everything that flows through the
+//! application's main channel. Payloads are grouped into sub-enums
+//! (`AuthEvent`, `DataEvent`, etc.) defined in `event_core` so the GUI can
+//! reuse them without pulling in any terminal types.
+//!
+//! Terminal-only input variants (`Key`, `Mouse`, `Resize`) are gated on
+//! `feature = "tui"`. Under `feature = "gui"` they don't exist, so GUI builds
+//! never see a crossterm type.
 
-use crate::plex::models::{Album, Artist, Genre, Hub, Library, Playlist, PlexServer, Station, Track, SearchResults};
-use crate::services::WaveformData;
+// Re-export sub-enums so `use crate::app::event::*` keeps working unchanged
+// for all existing handler code.
+pub use crate::app::event_core::*;
+
+#[cfg(feature = "tui")]
 use crossterm::event::{KeyEvent, MouseEvent};
 
-/// Top-level application events.
+/// Top-level application event.
+///
+/// Every async task and the TUI input reader deposit values of this type
+/// into the shared `mpsc::Sender<Event>`.
 #[derive(Debug, Clone)]
 pub enum Event {
-    /// Terminal input events
+    // Terminal input (TUI only) -----------------------------------------
+    /// Raw terminal key press. TUI builds only.
+    #[cfg(feature = "tui")]
     Key(KeyEvent),
+    /// Raw terminal mouse event. TUI builds only.
+    #[cfg(feature = "tui")]
     Mouse(MouseEvent),
+    /// Terminal resized to (cols, rows). TUI builds only.
+    #[cfg(feature = "tui")]
     Resize(u16, u16),
-    /// Periodic tick for animations/updates
+
+    // Core / portable events --------------------------------------------
+    /// Periodic tick for animations/updates.
     Tick,
-
-    /// Authentication and connection events
     Auth(AuthEvent),
-    /// API data loading responses
     Data(DataEvent),
-    /// Playback state changes
     Playback(PlaybackEvent),
-    /// Artwork and image loading
     Artwork(ArtworkEvent),
-    /// Folder browsing events
     Folder(FolderEvent),
-    /// Background preloading results
     Preload(PreloadEvent),
-    /// Cache management events
     Cache(CacheEvent),
-    /// Waveform and spectrogram generation
     Visualizer(VisualizerEvent),
-    /// Station and radio events
     Radio(RadioEvent),
-    /// UI popup events (adventure launcher, filter, DJ, remix, bio)
     Ui(UiEvent),
-    /// Remote player control events
     Remote(RemoteEvent),
-}
-
-// ============================================================================
-// Sub-enums
-// ============================================================================
-
-#[derive(Debug, Clone)]
-pub enum AuthEvent {
-    AuthSuccess { token: String, username: String, server_url: String, servers: Vec<PlexServer>, client_identifier: String, has_plex_pass: bool },
-    AuthFailed(String),
-    AuthShowLogin,
-    AuthServersReady { token: String, username: String, servers: Vec<PlexServer>, client_identifier: String, has_plex_pass: bool },
-    AuthLoginFailed(String),
-    AuthPinReady { code: String, pin_id: u64 },
-    ServersDiscovered(Vec<PlexServer>),
-    ServerDiscoveryFailed(String),
-    ServerConnectionSucceeded { server_name: String, url: String },
-    ServerConnectionFailed { server_name: String },
-}
-
-#[derive(Debug, Clone)]
-pub enum DataEvent {
-    LibrariesLoaded(Vec<Library>),
-    ServerLibrariesLoaded { server_identifier: String, server_name: String, libraries: Vec<Library> },
-    ArtistsLoaded(Vec<Artist>),
-    AlbumsLoaded(Vec<Album>),
-    TracksLoaded(Vec<Track>),
-    PlaylistsLoaded(Vec<Playlist>),
-    HomeHubsLoaded(Vec<Hub>),
-    ArtistLoaded(Artist),
-    AlbumLoaded(Album),
-    AlbumTracksLoaded(Vec<Track>),
-    ArtistAlbumsLoaded(Vec<Album>),
-    ArtistAllTracksLoaded(Vec<Track>),
-    CategoryTracksLoaded(Vec<Track>),
-    CategoryAlbumsLoaded { albums: Vec<Album>, status_message: String },
-    DataLoadError(String),
-    AllAlbumsForMillerLoaded(Vec<Album>),
-    SimilarAlbumsLoaded(Vec<Album>),
-    SimilarTracksLoaded(Vec<Track>),
-    SimilarArtistsLoaded(Vec<Artist>),
-    RelatedDataLoaded { groups: Vec<crate::app::state::RelatedArtistGroup> },
-    SearchCompleted(SearchResults),
-    TrackSearchCompleted { version: u64, tracks: Vec<Track> },
-    ApiError(String),
-}
-
-#[derive(Debug, Clone)]
-pub enum PlaybackEvent {
-    TrackStarted,
-    TrackEnded,
-    PlaybackPaused,
-    PlaybackResumed,
-    PlaybackStopped,
-    PlaybackError(String),
-    PositionUpdate(u64),
-    BufferingStart,
-    BufferingEnd,
-    RetryAfterDelay,
-}
-
-#[derive(Debug, Clone)]
-pub enum ArtworkEvent {
-    ImageLoaded { key: String },
-    ImageFailed { key: String, error: String },
-    ArtworkLoaded { thumb_path: String, data: Vec<u8> },
-    ArtworkFailed { thumb_path: String },
-    AlbumArtLoaded { key: String, data: Vec<u8> },
-    AlbumArtFailed { key: String },
-    ArtworkCacheStats { count: usize, total_bytes: u64 },
-}
-
-#[derive(Debug, Clone)]
-pub enum FolderEvent {
-    FoldersPreloaded { library_key: String, folder_state: crate::services::FolderNavigationState },
-    SubfoldersPreloaded {
-        library_key: String,
-        entries: Vec<(String, crate::plex::CachedFolder)>,
-        done: bool,
-        valid_keys: Option<std::collections::HashSet<String>>,
-    },
-    SubfolderRefreshed { folder_key: String, cached_folder: crate::plex::CachedFolder },
-    FolderRootLoaded { library_key: String, lib_title: String, items: Vec<crate::plex::models::FolderItem> },
-    FolderContentsLoaded { folder_key: String, items: Vec<crate::plex::models::FolderItem>, folder_path: Option<String>, item_path: Option<String> },
-    FolderLoadFailed(String),
-    FolderRefreshLoaded { folder_key: String, items: Vec<crate::plex::models::FolderItem>, folder_path: Option<String> },
-    FolderPathDiscovered { folder_key: String, path: String },
-}
-
-#[derive(Debug, Clone)]
-pub enum PreloadEvent {
-    ArtistsPreloaded { library_key: String, artists: Vec<Artist> },
-    AlbumsPreloaded { library_key: String, albums: Vec<Album> },
-    PlaylistsPreloaded { library_key: String, playlists: Vec<Playlist> },
-    GenresPreloaded { library_key: String, genres: Vec<Genre> },
-    ArtistGenresPreloaded { library_key: String, genres: Vec<Genre> },
-    AlbumGenresPreloaded { library_key: String, genres: Vec<Genre> },
-    MoodsPreloaded { library_key: String, moods: Vec<Genre> },
-    StylesPreloaded { library_key: String, styles: Vec<Genre> },
-    StationsPreloaded { library_key: String, stations: Vec<Station> },
-    AllTracksPreloaded { library_key: String, tracks: Vec<Track> },
-    PreloadFailed { category: String },
-    CompilationsDetected {
-        library_key: String,
-        albums: Vec<Album>,
-        artist_only_keys: std::collections::HashSet<String>,
-        track_artist_keys: std::collections::HashSet<String>,
-        artist_compilation_map: std::collections::HashMap<String, Vec<String>>,
-        single_artist_compilations: std::collections::HashMap<String, Vec<Album>>,
-    },
-    LibraryCacheLoaded { library_key: String, cached: Box<crate::plex::CacheData> },
-    LibraryCacheLoadFailed { library_key: String },
-    PlaylistTracksPreloaded { playlist_key: String, tracks: Vec<Track> },
-}
-
-#[derive(Debug, Clone)]
-pub enum CacheEvent {
-    CacheSaved,
-    CacheRefreshCompleted { category: crate::app::state::RefreshCategory, changed: bool },
-    LibraryCacheStats { total_bytes: u64, breakdown: Vec<(String, u64)> },
-    WaveformCacheStats { count: usize, total_bytes: u64 },
-}
-
-#[derive(Debug, Clone)]
-pub enum VisualizerEvent {
-    WaveformGenerated { track_key: String, data: WaveformData },
-    WaveformFailed { track_key: String, error: String },
-    WaveformCacheHit { track_key: String, data: WaveformData },
-    WaveformRetry(String),
-    SpectrogramGenerated { track_key: String, data: crate::plex::SpectrogramData },
-    SpectrogramFailed { track_key: String, error: String },
-    SpectrogramCacheHit { track_key: String, data: crate::plex::SpectrogramData },
-}
-
-#[derive(Debug, Clone)]
-pub enum RadioEvent {
-    StationTracksLoaded { station_key: String, station_title: String, tracks: Vec<Track>, time_travel_decades: Vec<String> },
-    StationLoadFailed { station_key: String, error: String },
-    StationChildrenLoaded { station_key: String, station_title: String, children: Vec<Station> },
-    RadioTracksLoaded { tracks: Vec<Track>, time_travel_index: Option<usize> },
-    PlaylistTracksForMillerLoaded { playlist_key: String, tracks: Vec<Track> },
-    PlaylistTracksForMillerFailed { playlist_key: String, error: String },
-}
-
-#[derive(Debug, Clone)]
-pub enum UiEvent {
-    AdventureLauncherAlbumsLoaded { artist_key: String, artist_name: String, albums: Vec<Album> },
-    AdventureLauncherTracksLoaded { album_key: String, album_title: String, artist_name: String, tracks: Vec<Track> },
-    ListFilterCompleted { version: u64, results: crate::app::state::ListFilterResults },
-    DjTracksReady { tracks: Vec<Track>, insert_next: bool, error: Option<String> },
-    DjBatchReady { inserts: Vec<(usize, Vec<Track>)> },
-    RemixBatchReady { inserts: Vec<(usize, Vec<Track>)> },
-    RemixDoppelgangerReady { replacements: Vec<(usize, Track)> },
-    ArtistRadioComplete { tracks: Vec<Track> },
-    ArtistBioLoaded { artist_name: String, bio: String, thumb: Option<String> },
-    ArtistBioArtworkLoaded { data: Vec<u8>, thumb: String },
-}
-
-#[derive(Debug, Clone)]
-pub enum RemoteEvent {
-    PlayersDiscovered(Vec<crate::plex::models::RemotePlayer>),
-    PlayerDiscoveryFailed(String),
-    RemotePlayerStatus {
-        session_found: bool,
-        playing: bool,
-        position_ms: u64,
-        track_key: Option<String>,
-        finished: bool,
-    },
-    RemotePlayerError(String),
 }
 
 // ============================================================================
 // From impls for ergonomic construction
 // ============================================================================
 
-impl From<AuthEvent> for Event { fn from(e: AuthEvent) -> Self { Event::Auth(e) } }
-impl From<DataEvent> for Event { fn from(e: DataEvent) -> Self { Event::Data(e) } }
-impl From<PlaybackEvent> for Event { fn from(e: PlaybackEvent) -> Self { Event::Playback(e) } }
-impl From<ArtworkEvent> for Event { fn from(e: ArtworkEvent) -> Self { Event::Artwork(e) } }
-impl From<FolderEvent> for Event { fn from(e: FolderEvent) -> Self { Event::Folder(e) } }
-impl From<PreloadEvent> for Event { fn from(e: PreloadEvent) -> Self { Event::Preload(e) } }
-impl From<CacheEvent> for Event { fn from(e: CacheEvent) -> Self { Event::Cache(e) } }
+impl From<AuthEvent>       for Event { fn from(e: AuthEvent)       -> Self { Event::Auth(e) } }
+impl From<DataEvent>       for Event { fn from(e: DataEvent)       -> Self { Event::Data(e) } }
+impl From<PlaybackEvent>   for Event { fn from(e: PlaybackEvent)   -> Self { Event::Playback(e) } }
+impl From<ArtworkEvent>    for Event { fn from(e: ArtworkEvent)    -> Self { Event::Artwork(e) } }
+impl From<FolderEvent>     for Event { fn from(e: FolderEvent)     -> Self { Event::Folder(e) } }
+impl From<PreloadEvent>    for Event { fn from(e: PreloadEvent)    -> Self { Event::Preload(e) } }
+impl From<CacheEvent>      for Event { fn from(e: CacheEvent)      -> Self { Event::Cache(e) } }
 impl From<VisualizerEvent> for Event { fn from(e: VisualizerEvent) -> Self { Event::Visualizer(e) } }
-impl From<RadioEvent> for Event { fn from(e: RadioEvent) -> Self { Event::Radio(e) } }
-impl From<UiEvent> for Event { fn from(e: UiEvent) -> Self { Event::Ui(e) } }
-impl From<RemoteEvent> for Event { fn from(e: RemoteEvent) -> Self { Event::Remote(e) } }
+impl From<RadioEvent>      for Event { fn from(e: RadioEvent)      -> Self { Event::Radio(e) } }
+impl From<UiEvent>         for Event { fn from(e: UiEvent)         -> Self { Event::Ui(e) } }
+impl From<RemoteEvent>     for Event { fn from(e: RemoteEvent)     -> Self { Event::Remote(e) } }

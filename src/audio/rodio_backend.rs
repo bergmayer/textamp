@@ -5,7 +5,7 @@
 
 use super::streaming::BlockingReader;
 use super::traits::{AudioBackend, AudioError};
-use rodio::{Decoder, OutputStream, OutputStreamBuilder, Sink};
+use rodio::{cpal::traits::{DeviceTrait, HostTrait}, Decoder, OutputStream, OutputStreamBuilder, Sink};
 use std::io::Cursor;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
@@ -35,10 +35,60 @@ pub struct RodioBackend {
 impl RodioBackend {
     /// Create a new rodio-based audio backend.
     ///
-    /// Returns an error if no audio device is available.
+    /// First tries the system default output device. If Windows has
+    /// no default configured (HRESULT 0x80070490 "Element not found"
+    /// from `GetDefaultAudioEndpoint` — common after a Bluetooth or
+    /// USB output is disconnected), walks the host's available output
+    /// devices and opens the first one that accepts a stream. This
+    /// keeps playback working when the user still has usable outputs,
+    /// just not a preferred default.
     pub fn new() -> Result<Self, AudioError> {
-        let mut stream = OutputStreamBuilder::open_default_stream()
-            .map_err(|_| AudioError::NoDevice)?;
+        let mut stream = match OutputStreamBuilder::open_default_stream() {
+            Ok(s) => s,
+            Err(default_err) => {
+                // Walk every available output endpoint and try each one.
+                // Uses `open_stream_or_fallback` so rodio will cycle
+                // through supported configs (RDP virtual sinks and
+                // some USB DACs reject the default sample-rate/channel
+                // combo and only accept a specific one).
+                let host = rodio::cpal::default_host();
+                tracing::error!("audio: default stream failed: {}", default_err);
+                let mut last_err = default_err.to_string();
+                let mut opened: Option<OutputStream> = None;
+                let devices = host.output_devices().map_err(|e| {
+                    AudioError::NoDevice(format!("host.output_devices() failed: {e}"))
+                })?;
+                let mut count = 0usize;
+                for dev in devices {
+                    count += 1;
+                    let name = dev.name().unwrap_or_else(|_| "<unnamed>".to_string());
+                    match OutputStreamBuilder::from_device(dev) {
+                        Ok(builder) => match builder.open_stream_or_fallback() {
+                            Ok(s) => {
+                                tracing::error!("audio: opened fallback output device '{}'", name);
+                                opened = Some(s);
+                                break;
+                            }
+                            Err(e) => {
+                                tracing::error!("audio: '{}' open_stream_or_fallback failed: {}", name, e);
+                                last_err = format!("{name}: {e}");
+                            }
+                        },
+                        Err(e) => {
+                            tracing::error!("audio: '{}' from_device failed: {}", name, e);
+                            last_err = format!("{name}: {e}");
+                        }
+                    }
+                }
+                if count == 0 {
+                    tracing::error!("audio: host enumerated zero output devices");
+                }
+                match opened {
+                    Some(s) => s,
+                    None => return Err(AudioError::NoDevice(last_err)),
+                }
+            }
+        };
 
         // Don't log messages on drop that could corrupt the TUI
         stream.log_on_drop(false);

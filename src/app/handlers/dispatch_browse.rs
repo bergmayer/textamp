@@ -4,7 +4,7 @@
 //! RefreshArtistView, CycleGenreTab, SetGenreTab.
 
 use crate::app::{Action, AppState, Event};
-use crate::app::action::{BrowseAction, SystemAction};
+use crate::app::action::{BrowseAction, MillerAction, SystemAction};
 use crate::app::state::{
     BrowseColumn, BrowseItem,
     GenreContentType, GenreTab, RefreshCategory, StationColumn,
@@ -368,6 +368,63 @@ pub async fn dispatch(
                 let col = BrowseColumn::new(title, items);
                 state.genre_nav.drill_column(col, auto_drill);
             }
+        }
+        BrowseAction::OpenTrackDetails(track) => {
+            state.track_details = Some(track);
+        }
+        BrowseAction::CloseTrackDetails => {
+            state.track_details = None;
+        }
+        BrowseAction::OpenInLibrary { artist_key, artist_name, album_key, album_title } => {
+            // Mirrors the Ctrl+J keyboard handler: switch to the
+            // Library category, set the pending album for auto-select,
+            // then trigger the artist's albums load. See
+            // `key_input::mod.rs::navigate_to_album` for the original
+            // sequence.
+            state.track_details = None;
+            if let Some(ak) = album_key {
+                state.search.pending_album_key = Some(ak);
+            }
+            if let Some(at) = album_title {
+                state.library.selected_album_title = at;
+            }
+            state.library.selected_artist_name = artist_name;
+            state.set_view(crate::app::state::View::Browse);
+            state.set_browse_category(crate::app::state::BrowseCategory::Library);
+
+            // Reset the artist nav back to a single root column. If the
+            // user opened "in Library" from a category that hadn't built
+            // the artist root yet (Search, Folders, …), build it now so
+            // the highlighted artist row is visible immediately.
+            if state.artist_nav.columns.is_empty() {
+                let items = state.build_artist_root_items();
+                let title = format!("artists ({})", state.library.artists.len());
+                state.artist_nav.columns.push(BrowseColumn::new(title, items));
+            } else {
+                state.artist_nav.columns.truncate(1);
+            }
+            state.artist_nav.focused_column = 0;
+
+            // Selection lives on the column items, not the raw
+            // library.artists list. The column has pinned rows
+            // (AllArtists, optionally Compilations) prepended and
+            // compilation-only artists filtered out, so the indices
+            // diverge — match by key instead.
+            if let Some(col) = state.artist_nav.columns.first_mut() {
+                if let Some(idx) = col.items.iter().position(|item| {
+                    matches!(item, BrowseItem::Artist { key, .. } if key == &artist_key)
+                }) {
+                    col.selected_index = idx;
+                }
+            }
+
+            // Keep legacy list_state in sync for any non-Miller
+            // consumers that still read it.
+            if let Some(idx) = state.library.artists.iter().position(|a| a.rating_key == artist_key) {
+                state.list_state.artists_index = idx;
+            }
+
+            follow_ups.push(MillerAction::LoadArtistAlbumsForMiller { artist_key }.into());
         }
     }
     Ok(follow_ups)

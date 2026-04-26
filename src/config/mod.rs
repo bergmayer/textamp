@@ -2,7 +2,7 @@
 //!
 //! Handles XDG-compliant paths and TOML configuration loading.
 
-mod settings;
+pub mod settings;
 mod xdg;
 
 pub use settings::{Config, GeneralConfig, LibrariesConfig, LibrarySettings, PlaybackConfig, PlexConfig, UiConfig};

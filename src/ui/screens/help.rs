@@ -39,11 +39,12 @@ COMMANDS
   Shift+Left/Right  Seek ±10 seconds
   Ctrl+Shift+Up/Dn  Volume
 
-  F1 Help  F2 Settings  F3 Switch library  F4 Artist bio  F5 Refresh
-  
+  F1 Help  F2 Settings  F3 Switch library  F4 Artist bio
+  F5 Refresh           F6 Sort
+
   Ctrl+F  Search        Ctrl+M  Similar   Ctrl+R  Related
   Ctrl+J  Jump to album
-  Ctrl+S  Sort          Ctrl+Q  Quit      Ctrl+W  Save playlist
+  Ctrl+S  Save queue as playlist          Ctrl+Q  Quit
   Ctrl+X  Clear queue   Ctrl+Z  Undo
   
   Alt+R  Random Album Radio

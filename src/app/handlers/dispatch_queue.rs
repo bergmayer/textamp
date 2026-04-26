@@ -382,6 +382,13 @@ pub async fn dispatch(
             cache::trigger_prefetch(&audio.track_cache, &upcoming, client, state.transcode_kbps);
         }
         QueueAction::RemoveFromQueue(idx) => {
+            // Promote Radio → Queue before the bounds check — same
+            // reasoning as MoveQueueTrack, otherwise the index lookup
+            // hits an empty `state.queue.tracks` and silently no-ops.
+            if state.playback_mode == PlaybackMode::Radio {
+                let snapshot = state.convert_radio_to_queue("Remove track (from radio)");
+                state.queue.undo_snapshot = Some(snapshot);
+            }
             if idx < state.queue.tracks.len() {
                 state.queue.tracks.remove(idx);
                 // Adjust queue_index if needed
@@ -1009,6 +1016,43 @@ pub async fn dispatch(
                     state.queue.index = Some(idx);
                 }
             }
+        }
+        QueueAction::MoveQueueTrack { from, to } => {
+            // Drag-and-drop reorder. `from` and `to` are absolute queue
+            // indices; `to` is the position the dragged row should occupy
+            // after the move (i.e. `Vec::remove(from)` then
+            // `Vec::insert(adjusted_to, track)`).
+            //
+            // Promote a Radio session to a Queue *before* the bounds
+            // check — in Radio mode `state.queue.tracks` is empty
+            // (tracks live in `state.radio.tracks`) and reading its
+            // length would short-circuit the move.
+            if state.playback_mode == PlaybackMode::Radio {
+                let snapshot = state.convert_radio_to_queue("Reorder track (from radio)");
+                state.queue.undo_snapshot = Some(snapshot);
+            }
+            let len = state.queue.tracks.len();
+            if from >= len || from == to { return Ok(vec![]); }
+            let track = state.queue.tracks.remove(from);
+            let dest = to.min(state.queue.tracks.len());
+            state.queue.tracks.insert(dest, track);
+
+            // Map the currently-playing index through the move.
+            if let Some(qi) = state.queue.index {
+                let new_qi = if qi == from {
+                    dest
+                } else if from < qi && dest >= qi {
+                    qi - 1
+                } else if from > qi && dest <= qi {
+                    qi + 1
+                } else {
+                    qi
+                };
+                state.queue.index = Some(new_qi);
+            }
+
+            // Keep the visual selection on the track that just moved.
+            state.list_state.queue_index = dest;
         }
         QueueAction::RemixBatchReady(inserts) => {
             if inserts.is_empty() {

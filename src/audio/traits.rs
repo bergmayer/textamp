@@ -17,8 +17,10 @@ use std::time::Duration;
 /// Error type for audio operations.
 #[derive(Debug, Clone)]
 pub enum AudioError {
-    /// No audio device available.
-    NoDevice,
+    /// No audio device available. The inner string carries the
+    /// platform-specific reason (cpal/WASAPI/ALSA message) so the user
+    /// sees what actually failed instead of a generic "unavailable".
+    NoDevice(String),
     /// Failed to decode audio data.
     DecodeError(String),
     /// Playback error.
@@ -30,7 +32,8 @@ pub enum AudioError {
 impl std::fmt::Display for AudioError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AudioError::NoDevice => write!(f, "No audio device available"),
+            AudioError::NoDevice(msg) if msg.is_empty() => write!(f, "No audio device available"),
+            AudioError::NoDevice(msg) => write!(f, "No audio device available: {}", msg),
             AudioError::DecodeError(msg) => write!(f, "Decode error: {}", msg),
             AudioError::PlaybackError(msg) => write!(f, "Playback error: {}", msg),
             AudioError::SeekError(msg) => write!(f, "Seek error: {}", msg),

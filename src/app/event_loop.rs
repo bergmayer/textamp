@@ -22,27 +22,9 @@ use tokio::sync::mpsc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-/// Types of data that can be preloaded in the background.
-///
-/// This enum consolidates the 13 different preload operations into a single
-/// type-safe representation. Each variant corresponds to a specific API call
-/// and event result.
-#[derive(Clone, Debug)]
-pub enum PreloadType {
-    Artists,
-    Albums,
-    Playlists,
-    Genres,
-    Moods,
-    ArtistGenres,
-    AlbumGenres,
-    Styles,
-    Stations,
-    /// All tracks in the library (for compilation detection + track-level artist derivation).
-    AllTracks,
-    /// Folders require additional lib_title for display.
-    Folders { lib_title: String },
-}
+// `PreloadType` now lives in `crate::app::handlers::helpers::preload` so
+// both the TUI event loop and the GUI dispatch share it verbatim. See that
+// module for the enum definition.
 
 /// Main event loop.
 pub struct EventLoop {
@@ -111,8 +93,10 @@ impl EventLoop {
         // Restore artwork mode preference
         state.artwork.mode = crate::app::state::ArtworkMode::from_config(&self.config.ui.artwork_mode);
 
-        // Start authentication in background
-        self.start_auth_task(state);
+        // Start authentication in background (same logic as GUI).
+        state.connection = ConnectionState::Authenticating;
+        state.auth_state.step = super::state::AuthStep::Checking;
+        crate::app::dispatch::spawn_auth_task(self.event_tx.clone());
 
         // Clone event_tx for tick handler (avoids borrow conflicts with self in select!)
         let tick_event_tx = self.event_tx.clone();
@@ -297,7 +281,8 @@ impl EventLoop {
     }
 
     /// Start authentication in background task.
-    fn start_auth_task(&self, state: &mut AppState) {
+    #[allow(dead_code)]
+    fn _start_auth_task_old(&self, state: &mut AppState) {
         use super::state::AuthStep;
         state.connection = ConnectionState::Authenticating;
         state.auth_state.step = AuthStep::Checking;

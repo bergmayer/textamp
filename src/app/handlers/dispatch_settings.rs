@@ -28,17 +28,29 @@ pub async fn dispatch(
 
     match action {
         SettingsAction::Logout => {
-            // Clear auth token
+            // Record which account the on-disk cache belongs to so a
+            // future sign-in with the same account (within 30 days)
+            // can skip a full re-fetch. Written BEFORE we delete the
+            // auth token because the token is the source of the
+            // username we want to remember.
+            if let Some(stored) = PlexAuth::load_token() {
+                if let Some(username) = stored.username.as_deref() {
+                    if let Err(e) = PlexAuth::save_account_marker(username) {
+                        tracing::warn!("Failed to save account marker on logout: {}", e);
+                    }
+                }
+            }
+
+            // Clear auth token (signs the user out).
             if let Err(e) = PlexAuth::delete_token() {
                 tracing::warn!("Failed to delete auth token: {}", e);
             }
 
-            // Clear all cached data
-            if let Some(cache) = LibraryCache::new() {
-                if let Err(e) = cache.clear_all() {
-                    tracing::warn!("Failed to clear cache on logout: {}", e);
-                }
-            }
+            // Cache files on disk are intentionally preserved here.
+            // The next sign-in compares the account marker and either
+            // keeps the cache (same user + < 30 days old) or clears
+            // it then. Wiping eagerly here would force a multi-minute
+            // re-fetch on every sign-in / sign-out cycle.
 
             // Reset connection and display state
             state.connection = ConnectionState::Disconnected;
@@ -115,6 +127,14 @@ pub async fn dispatch(
             if let Err(e) = crate::config::save_config(config) {
                 tracing::warn!("Failed to save config after logout: {}", e);
             }
+
+            // Send the user straight to the sign-in form. Without
+            // this they're stranded on whatever view they triggered
+            // logout from (typically a Settings popup that's now
+            // showing "Not signed in") with no obvious way back.
+            state.view = View::Auth;
+            state.auth_state.step = crate::app::state::AuthStep::Login;
+            state.auth_state.error_message = None;
 
             state.set_status("Signed out.".to_string());
         }
@@ -350,15 +370,16 @@ pub async fn dispatch(
                     }
                 }
                 SettingsSection::Textamp => {
-                    let theme_count = crate::ui::theme::ThemeName::all().len();
+                    let theme_count = crate::app::theme::ThemeName::all().len();
                     let artwork_count = crate::app::state::ArtworkMode::all().len();
                     let output_offset = theme_count + artwork_count;
                     let idx = state.settings_state.item_index;
 
                     if idx < theme_count {
                         // Apply selected theme
-                        if let Some(theme_name) = crate::ui::theme::ThemeName::all().get(idx) {
+                        if let Some(theme_name) = crate::app::theme::ThemeName::all().get(idx) {
                             state.theme = *theme_name;
+                            #[cfg(feature = "tui")]
                             crate::ui::theme::set_theme(state.theme);
                             state.set_status(format!("Theme: {}", state.theme.display_name()));
 
@@ -372,24 +393,27 @@ pub async fn dispatch(
                         let mode_idx = idx - theme_count;
                         if let Some(&mode) = crate::app::state::ArtworkMode::all().get(mode_idx) {
                             state.artwork.mode = mode;
-                            crate::ui::screens::now_playing::set_artwork_mode(mode);
-                            crate::ui::artwork::set_grid_artwork_mode(mode);
-                            crate::ui::set_bio_artwork_mode(mode);
+                            #[cfg(feature = "tui")]
+                            {
+                                crate::ui::screens::now_playing::set_artwork_mode(mode);
+                                crate::ui::artwork::set_grid_artwork_mode(mode);
+                                crate::ui::set_bio_artwork_mode(mode);
 
-                            match mode {
-                                crate::app::state::ArtworkMode::Halfblocks => {
-                                    let hb = ratatui_image::picker::ProtocolType::Halfblocks;
-                                    crate::ui::screens::now_playing::set_artwork_protocol_type(hb);
-                                    crate::ui::artwork::set_grid_protocol_type(hb);
-                                    crate::ui::set_bio_artwork_protocol_type(hb);
-                                }
-                                crate::app::state::ArtworkMode::Auto => {
-                                    crate::ui::screens::now_playing::restore_artwork_native_protocol();
-                                    crate::ui::artwork::restore_grid_native_protocol();
-                                    crate::ui::restore_bio_artwork_native_protocol();
-                                }
-                                crate::app::state::ArtworkMode::Braille => {
-                                    // Braille doesn't use picker protocol
+                                match mode {
+                                    crate::app::state::ArtworkMode::Halfblocks => {
+                                        let hb = ratatui_image::picker::ProtocolType::Halfblocks;
+                                        crate::ui::screens::now_playing::set_artwork_protocol_type(hb);
+                                        crate::ui::artwork::set_grid_protocol_type(hb);
+                                        crate::ui::set_bio_artwork_protocol_type(hb);
+                                    }
+                                    crate::app::state::ArtworkMode::Auto => {
+                                        crate::ui::screens::now_playing::restore_artwork_native_protocol();
+                                        crate::ui::artwork::restore_grid_native_protocol();
+                                        crate::ui::restore_bio_artwork_native_protocol();
+                                    }
+                                    crate::app::state::ArtworkMode::Braille => {
+                                        // Braille doesn't use picker protocol
+                                    }
                                 }
                             }
 
@@ -446,6 +470,12 @@ pub async fn dispatch(
                             state.set_status(format!("Streaming: transcode to {}kbps MP3", next));
                         }
                     }
+                }
+                SettingsSection::Cache => {
+                    // GUI renders the Cache section as buttons; the
+                    // shared keyboard handler doesn't have a list to
+                    // index into here. Left intentionally inert so
+                    // the TUI's Enter on this section is a no-op.
                 }
                 SettingsSection::About => {
                     // Display-only section, no selectable items
@@ -899,6 +929,68 @@ pub async fn dispatch(
 
             tracing::info!("Cleared {} subfolder cache entries", count);
             state.set_status(format!("Cleared {} subfolder cache entries", count));
+        }
+        SettingsAction::RefreshCacheStats => {
+            // Two-stage estimate. First, a synchronous in-memory
+            // measurement so the Cache tab has numbers to show
+            // immediately — even right after sign-in when the
+            // on-disk cache file hasn't been written yet. Second, a
+            // background disk read that overrides those numbers
+            // with the precise on-disk figures when (and only when)
+            // a real cache file exists.
+            fn measure<T: serde::Serialize + ?Sized>(v: &T) -> u64 {
+                serde_json::to_string(v).map(|s| s.len() as u64).unwrap_or(0)
+            }
+            let est_breakdown: Vec<(String, u64)> = vec![
+                ("artists".into(),         measure(&state.library.artists)),
+                ("albums".into(),          measure(&state.library.albums)),
+                ("tracks".into(),          measure(&state.library.all_tracks)),
+                ("playlist tracks".into(), measure(&state.playlist_tracks_cache)),
+                ("genres".into(),
+                    measure(&state.library.genres)
+                    + measure(&state.library.artist_genres)
+                    + measure(&state.library.album_genres)
+                    + measure(&state.library.moods)
+                    + measure(&state.library.styles)),
+                ("stations".into(),        measure(&state.stations)),
+                ("folders".into(),         measure(&state.folder_contents_cache)),
+            ];
+            let est_total: u64 = est_breakdown.iter().map(|(_, v)| *v).sum();
+            state.library_cache_stats = Some((est_total, est_breakdown));
+
+            let event_tx = event_tx.clone();
+            let lib_key = state.active_library.clone();
+            tokio::task::spawn_blocking(move || {
+                let cache = crate::plex::ArtworkCache::default();
+                let (count, total_bytes) = cache.stats();
+                let _ = event_tx.blocking_send(crate::app::event::ArtworkEvent::ArtworkCacheStats { count, total_bytes }.into());
+                if let (Some(cache), Some(key)) = (crate::plex::LibraryCache::new(), lib_key) {
+                    let breakdown = cache.library_breakdown(&key);
+                    // Only override the synchronous in-memory
+                    // estimate if a real cache file exists on disk.
+                    // Posting `(0, [])` here would clobber the
+                    // estimate with all-dashes immediately after
+                    // sign-in.
+                    if !breakdown.is_empty() {
+                        let total_bytes = cache.library_size(&key);
+                        let _ = event_tx.blocking_send(crate::app::event::CacheEvent::LibraryCacheStats { total_bytes, breakdown }.into());
+                    }
+                }
+                let wf = crate::plex::WaveformCache::default();
+                let (wf_count, wf_bytes) = wf.stats();
+                let _ = event_tx.blocking_send(crate::app::event::CacheEvent::WaveformCacheStats { count: wf_count, total_bytes: wf_bytes }.into());
+            });
+        }
+        SettingsAction::RefreshAllCache => {
+            // "Refresh all cache" — wipe library + artwork and
+            // trigger a fresh fetch from the server. Subfolder cache
+            // is intentionally left alone (the crawl is opt-in).
+            follow_ups.push(SettingsAction::ClearLibraryCache.into());
+            follow_ups.push(SettingsAction::ClearArtworkCache.into());
+            // Stats refresh after the clears so the table updates
+            // even before the new data finishes loading.
+            follow_ups.push(SettingsAction::RefreshCacheStats.into());
+            state.set_status("Refreshing cache from server\u{2026}".to_string());
         }
         SettingsAction::StartSubfolderCrawl => {
             use crate::app::handlers::helpers::SubfolderPreloadResult;

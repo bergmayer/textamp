@@ -29,7 +29,7 @@ pub use playback::{
     get_upcoming_tracks, insert_tracks_next, play_current_track, play_track, queue_and_play,
     report_playback_progress_to_plex, report_playback_stop_to_plex,
 };
-pub use preload::{maybe_start_subfolder_preload, preload_all_library_data, preload_data, SubfolderPreloadResult};
+pub use preload::{maybe_start_subfolder_preload, preload_all_library_data, preload_data, PreloadType, SubfolderPreloadResult};
 pub use compilations::maybe_detect as maybe_detect_compilations;
 pub use refresh::{
     is_viewing_category, check_staleness_on_view_load, current_view_category,
@@ -173,10 +173,15 @@ pub fn drill_grouped_album(col: &crate::app::state::BrowseColumn, album_idx: usi
         .filter_map(|&i| col.tracks.get(i).cloned())
         .collect();
     let items = BrowseItem::from_tracks(&tracks);
-    let title = col.items.get(album_idx)
+    let album_item = col.items.get(album_idx);
+    let title = album_item
         .map(|item| format!("tracks \u{2014} {}", item.title()))
         .unwrap_or_else(|| "tracks".to_string());
-    Some(BrowseColumn::new_with_tracks(title, items, tracks))
+    let mut new_col = BrowseColumn::new_with_tracks(title, items, tracks);
+    if let Some(item) = album_item {
+        new_col.play_album = Some((item.key().to_string(), item.title().to_string()));
+    }
+    Some(new_col)
 }
 
 /// Generate a sort key for a title, ignoring "The " prefix.

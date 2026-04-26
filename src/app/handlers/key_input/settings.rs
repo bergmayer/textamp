@@ -178,10 +178,11 @@ pub(super) fn handle_settings_keys(key: event::KeyEvent, state: &mut AppState, c
                             }
                             SettingsSection::Textamp => {
                                 // Themes + Artwork modes + Local + remotes + Refresh + Transcode
-                                let theme_count = crate::ui::theme::ThemeName::all().len();
+                                let theme_count = crate::app::theme::ThemeName::all().len();
                                 let artwork_count = crate::app::state::ArtworkMode::all().len();
                                 theme_count + artwork_count + 1 + state.remote.players.len() + 1
                             }
+                            SettingsSection::Cache => 0,
                             SettingsSection::About => 0,
                         };
                         if state.settings_state.item_index < max_index {

@@ -34,6 +34,48 @@ pub fn handle_app_event(
             tracing::info!("PlexClient AFTER update - client_id: {}, server: {:?}",
                 client.client_identifier(), client.server_url());
 
+            // Compare the persistent account marker against the user
+            // we just authenticated as. The cache stays if it's the
+            // same account AND the marker is < 30 days old; otherwise
+            // a different user (or a long-stale cache) gets wiped so
+            // we don't blend two libraries' data together.
+            const CACHE_TTL_SECS: u64 = 30 * 24 * 60 * 60;
+            let now_unix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let marker = PlexAuth::load_account_marker();
+            let same_user = marker.as_ref().map_or(false, |m| m.username == username);
+            let fresh = marker.as_ref().map_or(false, |m| now_unix.saturating_sub(m.last_seen_unix) < CACHE_TTL_SECS);
+            let purge_cache = !same_user || !fresh;
+            if purge_cache {
+                if let Some(cache) = crate::plex::LibraryCache::new() {
+                    match cache.clear_all() {
+                        Ok(n) => {
+                            let reason = if marker.is_none() {
+                                "no prior marker"
+                            } else if !same_user {
+                                "different account"
+                            } else {
+                                "marker > 30 days old"
+                            };
+                            tracing::info!("Cache purged on sign-in ({n} library files, {reason})");
+                        }
+                        Err(e) => tracing::warn!("Failed to clear stale cache on sign-in: {e}"),
+                    }
+                }
+                let artwork_cache = crate::plex::ArtworkCache::default();
+                let _ = artwork_cache.clear_all();
+            } else if let Some(m) = marker.as_ref() {
+                let age_h = now_unix.saturating_sub(m.last_seen_unix) / 3600;
+                tracing::info!("Cache preserved on sign-in (same user '{}' , {age_h}h since last seen)", m.username);
+            }
+            // Refresh the marker so the 30-day window starts from now
+            // for any subsequent sign-in/out cycle.
+            if let Err(e) = PlexAuth::save_account_marker(&username) {
+                tracing::warn!("Failed to save account marker: {e}");
+            }
+
             // Persist server info for future restarts
             // Find the server that owns this URL to get its identifier and name
             if let Some(server) = servers.iter().find(|s| {
@@ -1634,6 +1676,7 @@ pub fn handle_app_event(
             }
             vec![]
         }
+        #[cfg(feature = "tui")]
         Event::Mouse(mouse_event) => {
             super::mouse_input::handle_mouse(mouse_event, state)
         }
@@ -1823,10 +1866,41 @@ pub fn handle_app_event(
         // Playlist tracks loaded (non-blocking)
         Event::Radio(RadioEvent::PlaylistTracksForMillerLoaded { playlist_key, tracks }) => {
             state.playlist_nav.loading = false;
-            let auto_drill = std::mem::take(&mut state.auto_drill_pending);
-            state.playlist_tracks_cache.insert(playlist_key, crate::plex::CachedPlaylistTracks::new(tracks.clone()));
+            // Cache always — even stale results help future hits.
+            state.playlist_tracks_cache.insert(
+                playlist_key.clone(),
+                crate::plex::CachedPlaylistTracks::new(tracks.clone()),
+            );
             state.cache_mgmt.dirty = true;
-            // Get playlist name from the focused column's selected item
+
+            // Race guard: when the user clicks several playlists in
+            // quick succession, multiple `LoadPlaylistTracksForMiller`
+            // tokio tasks fly off in parallel and their replies can
+            // land out-of-order. Without this check, each reply
+            // calls `drill_column → push_column` and the right side
+            // of the Miller stack accumulates "tracks for playlist B
+            // / tracks for playlist C / tracks for playlist A", with
+            // the column 0 highlight no longer matching column 1's
+            // header. Drop the reply if the user has since selected
+            // a different playlist.
+            let selected_key: Option<String> = state.playlist_nav.columns.first()
+                .and_then(|c| c.items.get(c.selected_index))
+                .map(|item| item.key().to_string());
+            if selected_key.as_deref() != Some(playlist_key.as_str()) {
+                tracing::debug!(
+                    "Playlist tracks reply for {} arrived after user navigated to {:?} — discarding",
+                    playlist_key, selected_key,
+                );
+                return vec![];
+            }
+
+            // Always anchor the new tracks column at index 1 of the
+            // playlist nav (root is column 0). Force focus to 0 first
+            // so `push_column`'s `truncate_right` drops any stale
+            // child columns from a previous selection before pushing.
+            state.auto_drill_pending = false;
+            state.playlist_nav.focused_column = 0;
+
             let playlist_name = state.playlist_nav.focused()
                 .and_then(|c| c.selected_item())
                 .map(|item| item.title().to_string())
@@ -1838,7 +1912,7 @@ pub fn handle_app_event(
             };
             let items = crate::app::state::BrowseItem::from_tracks(&tracks);
             let col = crate::app::state::BrowseColumn::new_with_tracks(title, items, tracks);
-            state.playlist_nav.drill_column(col, auto_drill);
+            state.playlist_nav.push_column(col);
             vec![]
         }
         Event::Radio(RadioEvent::PlaylistTracksForMillerFailed { playlist_key: _, error }) => {

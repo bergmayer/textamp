@@ -27,5 +27,5 @@ buffer_size_kb = 1024
 [ui]
 show_album_art = true
 album_art_size = 40
-# Theme: dark, solarized-dark, solarized-light, borland
+# Theme: dark, solarized-dark, solarized-light, borland, platinum
 theme = "dark"

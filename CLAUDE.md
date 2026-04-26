@@ -2,7 +2,13 @@
 
 ## Build Requirements
 
-Always run `cargo build --release` before saying a task is complete. Do not say "done" until the release build succeeds.
+Build only the binaries whose code your change actually affects:
+
+- **Shared core** (`src/app/`, `src/audio/`, `src/plex/`, `src/services/`, `src/config/`, `src/util/`, `src/lib.rs`, `src/miller.rs`, `Cargo.toml`): build BOTH the TUI (`cargo build --release --bin textamp`) and the GUI (`bash dev/win-build.sh` on Windows, or `cargo build --release --bin textamp-gui --features gui` on Linux). The TUI and GUI must stay equivalent in features and functionality, so anything in the shared core has to compile cleanly for both front-ends.
+- **TUI only** (`src/ui/`, `src/bin/textamp_tui.rs`): build just `cargo build --release --bin textamp`.
+- **GUI only** (`src/ui_gui/`, `src/bin/textamp_gui.rs`): build just the GUI for the platform you're iterating on (`bash dev/win-build.sh` for Windows, or `cargo build --release --bin textamp-gui --features gui` for Linux). Do not also build the other platform's GUI unless the user asks.
+
+Do not say "done" until every required build succeeds.
 
 ## UI Consistency
 

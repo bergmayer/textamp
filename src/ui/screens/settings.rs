@@ -79,6 +79,7 @@ fn render_content(frame: &mut Frame, state: &AppState, area: Rect) {
     match state.settings_state.section {
         SettingsSection::Account => render_account_content(frame, state, area, inner),
         SettingsSection::Textamp => render_textamp_content(frame, state, area, inner),
+        SettingsSection::Cache => render_account_content(frame, state, area, inner),
         SettingsSection::About => render_about_content(frame, state, area, inner),
     }
 }

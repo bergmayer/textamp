@@ -7,71 +7,9 @@
 //! - Retro (Norton Commander/Borland style)
 
 use ratatui::style::{Color, Modifier, Style};
-use serde::{Deserialize, Serialize};
 
-/// Available theme names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ThemeName {
-    #[default]
-    SolarizedDark,
-    SolarizedLight,
-    Dark,
-    Borland,
-}
-
-impl ThemeName {
-    /// All available themes.
-    pub fn all() -> &'static [ThemeName] {
-        &[
-            ThemeName::SolarizedDark,
-            ThemeName::SolarizedLight,
-            ThemeName::Dark,
-            ThemeName::Borland,
-        ]
-    }
-
-    /// Display name for the theme.
-    pub fn display_name(&self) -> &'static str {
-        match self {
-            ThemeName::Dark => "dark",
-            ThemeName::SolarizedDark => "solarized dark",
-            ThemeName::SolarizedLight => "solarized light",
-            ThemeName::Borland => "borland",
-        }
-    }
-
-    /// Config string value.
-    pub fn config_name(&self) -> &'static str {
-        match self {
-            ThemeName::Dark => "dark",
-            ThemeName::SolarizedDark => "solarized-dark",
-            ThemeName::SolarizedLight => "solarized-light",
-            ThemeName::Borland => "borland",
-        }
-    }
-
-    /// Parse from config string.
-    pub fn from_config(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "solarized-dark" | "solarizeddark" => ThemeName::SolarizedDark,
-            "solarized-light" | "solarizedlight" => ThemeName::SolarizedLight,
-            "dark" => ThemeName::Dark,
-            "borland" | "retro" | "norton" => ThemeName::Borland,
-            _ => ThemeName::SolarizedDark,
-        }
-    }
-
-    /// Cycle to the next theme.
-    pub fn next(&self) -> Self {
-        match self {
-            ThemeName::SolarizedDark => ThemeName::SolarizedLight,
-            ThemeName::SolarizedLight => ThemeName::Dark,
-            ThemeName::Dark => ThemeName::Borland,
-            ThemeName::Borland => ThemeName::SolarizedDark,
-        }
-    }
-}
+// UI-agnostic theme identifier lives in the app layer.
+pub use crate::app::theme::ThemeName;
 
 /// Color palette with semantic naming.
 #[derive(Debug, Clone, Copy)]
@@ -285,6 +223,84 @@ impl ThemeColors {
         }
     }
 
+    /// Platinum theme — inspired by classic Mac OS 9 "Platinum" UI:
+    /// light gray window chrome, black text, blue highlight.
+    pub fn platinum() -> Self {
+        let bg          = Color::Rgb(221, 221, 221); // platinum gray #DDDDDD
+        let bg_light    = Color::Rgb(238, 238, 238); // #EEEEEE (lighter field)
+        let bg_shadow   = Color::Rgb(170, 170, 170); // #AAAAAA (groove shadow)
+        let text        = Color::Rgb(0, 0, 0);
+        let muted       = Color::Rgb(102, 102, 102); // #666666
+        let blue        = Color::Rgb(59, 120, 255);  // #3B78FF classic highlight
+        let dark_blue   = Color::Rgb(0, 58, 168);    // deeper blue
+        let red         = Color::Rgb(204, 0, 0);
+        let green       = Color::Rgb(0, 128, 0);
+
+        Self {
+            bg_primary: bg,
+            bg_secondary: bg_light,
+            bg_highlight: bg_shadow,
+            bg_selection: blue,
+
+            fg_primary: text,
+            fg_secondary: muted,
+            fg_muted: muted,
+            fg_accent: dark_blue,
+            fg_accent_dim: muted,
+
+            border: bg_shadow,
+            border_focused: blue,
+            title_focused: dark_blue,
+
+            error: red,
+            success: green,
+            warning: Color::Rgb(180, 120, 40),
+
+            selection_bar_bg: blue,
+            selection_bar_fg: Color::Rgb(255, 255, 255),
+            selection_text: Color::Rgb(255, 255, 255),
+            transport_bg: bg_light,
+            shortcut_key: dark_blue,
+            shortcut_text: text,
+        }
+    }
+
+    /// Black and white theme — pure black and pure white, no greys.
+    /// Selection inverts to white-on-black, everything else is one of
+    /// the two extremes. Keeps the look strictly tonal.
+    pub fn black_and_white() -> Self {
+        let white = Color::Rgb(255, 255, 255);
+        let black = Color::Black;
+
+        Self {
+            bg_primary: white,
+            bg_secondary: white,
+            bg_highlight: black,
+            bg_selection: black,
+
+            fg_primary: black,
+            fg_secondary: black,
+            fg_muted: black,
+            fg_accent: black,
+            fg_accent_dim: black,
+
+            border: black,
+            border_focused: black,
+            title_focused: black,
+
+            error: black,
+            success: black,
+            warning: black,
+
+            selection_bar_bg: black,
+            selection_bar_fg: white,
+            selection_text: white,
+            transport_bg: white,
+            shortcut_key: black,
+            shortcut_text: black,
+        }
+    }
+
     /// Get colors for a theme name.
     pub fn for_theme(theme: ThemeName) -> Self {
         match theme {
@@ -292,6 +308,8 @@ impl ThemeColors {
             ThemeName::SolarizedDark => Self::solarized_dark(),
             ThemeName::SolarizedLight => Self::solarized_light(),
             ThemeName::Borland => Self::borland(),
+            ThemeName::Platinum => Self::platinum(),
+            ThemeName::BlackAndWhite => Self::black_and_white(),
         }
     }
 }

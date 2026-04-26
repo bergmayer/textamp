@@ -7,7 +7,7 @@
 use crate::app::event::*;
 use crate::app::{Action, AppState, Event};
 use crate::app::action::{SearchAction, SettingsAction};
-use crate::app::state::{BrowseCategory, SearchFocus, SearchTab, View};
+use crate::app::state::{BrowseCategory, BrowseItem, SearchFocus, SearchTab, View};
 use crate::plex::PlexClient;
 use crate::plex::models::SearchResults;
 
@@ -131,6 +131,20 @@ pub async fn dispatch(
             let follow_up_actions = select_search_result(state);
             follow_ups.extend(follow_up_actions);
         }
+        SearchAction::SetSearchQuery(q) => {
+            state.search.query = q;
+            state.list_state.search_item_index = 0;
+            // Re-run the search on every keystroke. The shared dispatch
+            // path issues local + Plex track searches and updates
+            // state.search.results when complete.
+            follow_ups.push(Action::Search(SearchAction::ExecuteLocalSearch));
+        }
+        SearchAction::SetSearchTab(tab) => {
+            state.search.tab = tab;
+            // Tab switch resets the visible-result cursor so the
+            // first item in the newly-filtered list is highlighted.
+            state.list_state.search_item_index = 0;
+        }
 
         // Inline list filter actions
         SearchAction::ActivateListFilter => {
@@ -211,6 +225,39 @@ pub async fn dispatch(
                 execute_list_filter(event_tx, state).await?;
             } else {
                 state.list_filter.selected = 0;
+                execute_list_filter(event_tx, state).await?;
+            }
+        }
+        SearchAction::SetListFilterQuery(query) => {
+            // Empty query deactivates the filter (same rule as the
+            // char-at-a-time deletion path above).
+            if query.is_empty() {
+                state.list_filter.active = false;
+                state.list_filter.query.clear();
+                state.list_filter.results = None;
+                state.list_filter.loading = false;
+                state.list_filter.selected = 0;
+            } else {
+                // Activating from scratch mirrors ActivateListFilter:
+                // record category and column so rendering can match.
+                if !state.list_filter.active {
+                    state.list_filter.active = true;
+                    state.list_filter.category = state.browse_category;
+                    state.list_filter.column = match state.browse_category {
+                        BrowseCategory::Library => state.artist_nav.focused_column,
+                        BrowseCategory::Playlists => state.playlist_nav.focused_column,
+                        BrowseCategory::Genres => state.genre_nav.focused_column,
+                        BrowseCategory::Folders => state.folder_state
+                            .as_ref()
+                            .map(|fs| fs.focused_column)
+                            .unwrap_or(0),
+                    };
+                }
+                state.list_filter.query = query;
+                state.list_filter.selected = 0;
+                if is_on_filter_column(state) {
+                    super::key_input::truncate_filter_right_columns(state);
+                }
                 execute_list_filter(event_tx, state).await?;
             }
         }
@@ -300,6 +347,38 @@ pub async fn dispatch(
         }
         SearchAction::CloseSortPopup => {
             state.popups.sort = None;
+        }
+        SearchAction::ApplyFocusedSortMode(mode) => {
+            let col_idx = match state.browse_nav() {
+                Some(n) => n.focused_column,
+                None => return Ok(vec![]),
+            };
+            follow_ups.extend(super::key_input::sort_popup::apply_sort_mode(state, col_idx, mode));
+        }
+        SearchAction::ReverseFocusedSortDirection => {
+            let col_idx = match state.browse_nav() {
+                Some(n) => n.focused_column,
+                None => return Ok(vec![]),
+            };
+            follow_ups.extend(super::key_input::sort_popup::toggle_sort_direction(state, col_idx));
+        }
+        SearchAction::ToggleFocusedColumnArtwork => {
+            let col_idx = match state.browse_nav() {
+                Some(n) => n.focused_column,
+                None => return Ok(vec![]),
+            };
+            super::key_input::sort_popup::toggle_artwork(state, col_idx);
+        }
+        SearchAction::ToggleFocusedColumnGrouping => {
+            let col_idx = match state.browse_nav() {
+                Some(n) => n.focused_column,
+                None => return Ok(vec![]),
+            };
+            // Toggling grouping reshapes the column (track list ↔
+            // album list), so any open track-details pane is now
+            // pointing at a row that may no longer exist. Close it.
+            state.track_details = None;
+            follow_ups.extend(super::key_input::sort_popup::toggle_group_by_album(state, col_idx));
         }
         SearchAction::CloseRadioLauncher => {
             state.popups.radio_launcher = None;
@@ -391,9 +470,40 @@ pub async fn dispatch(
                 loading: false,
                 drill: crate::app::state::AdventureDrillLevel::Search,
                 start_track: None,
-                track_count_input: String::new(),
+                end_track: None,
+                track_count_input: "20".to_string(),
                 scroll_pin: None,
-                search_tab: crate::app::state::SearchTab::default(),
+                // Sonic Adventure only ever picks tracks (start /
+                // end), so force the tracks tab — that path makes
+                // `adventure_launcher_select_track` index directly
+                // into `results.tracks` without an artist+album
+                // offset.
+                search_tab: crate::app::state::SearchTab::Tracks,
+            });
+        }
+        SearchAction::OpenAdventureLauncherWithStart { start_track } => {
+            // Pre-select the start track (e.g. from a right-click on a
+            // specific track row) and skip past FindStartTrack — the
+            // user already chose; only the count + end track remain.
+            state.popups.close_all();
+            state.popups.adventure_launcher = Some(crate::app::state::AdventureLauncherState {
+                step: crate::app::state::AdventureStep::EnterTrackCount,
+                query: String::new(),
+                results: None,
+                focus: SearchFocus::Input,
+                item_index: 0,
+                loading: false,
+                drill: crate::app::state::AdventureDrillLevel::Search,
+                start_track: Some(*start_track),
+                end_track: None,
+                track_count_input: "20".to_string(),
+                scroll_pin: None,
+                // Sonic Adventure only ever picks tracks (start /
+                // end), so force the tracks tab — that path makes
+                // `adventure_launcher_select_track` index directly
+                // into `results.tracks` without an artist+album
+                // offset.
+                search_tab: crate::app::state::SearchTab::Tracks,
             });
         }
         SearchAction::CloseAdventureLauncher => {
@@ -458,6 +568,52 @@ pub async fn dispatch(
         }
         SearchAction::AdventureLauncherBack => {
             adventure_launcher_back(state);
+        }
+        SearchAction::AdventureLauncherSetStep(step) => {
+            if let Some(l) = state.popups.adventure_launcher.as_mut() {
+                l.step = step;
+                // Reset the search panel so a fresh query targets the
+                // newly-active field.
+                l.query.clear();
+                l.results = None;
+                l.drill = crate::app::state::AdventureDrillLevel::Search;
+                l.item_index = 0;
+                l.focus = SearchFocus::Input;
+            }
+        }
+        SearchAction::AdventureLauncherReverse => {
+            if let Some(l) = state.popups.adventure_launcher.as_mut() {
+                std::mem::swap(&mut l.start_track, &mut l.end_track);
+            }
+        }
+        SearchAction::AdventureLauncherSetTrackCount(s) => {
+            if let Some(l) = state.popups.adventure_launcher.as_mut() {
+                // Keep only digits, max 3 characters (so users can't
+                // accidentally type a multi-thousand-track adventure).
+                l.track_count_input = s.chars().filter(|c| c.is_ascii_digit()).take(3).collect();
+            }
+        }
+        SearchAction::AdventureLauncherClearStart => {
+            if let Some(l) = state.popups.adventure_launcher.as_mut() {
+                l.start_track = None;
+                l.step = crate::app::state::AdventureStep::FindStartTrack;
+            }
+        }
+        SearchAction::AdventureLauncherClearEnd => {
+            if let Some(l) = state.popups.adventure_launcher.as_mut() {
+                l.end_track = None;
+                l.step = crate::app::state::AdventureStep::FindEndTrack;
+            }
+        }
+        SearchAction::AdventureLauncherGenerate => {
+            follow_ups = adventure_launcher_generate(state, client).await?;
+        }
+        SearchAction::AdventureLauncherSetQuery(q) => {
+            if let Some(l) = state.popups.adventure_launcher.as_mut() {
+                l.query = q;
+            }
+            // Trigger the search with the new query.
+            adventure_launcher_search(event_tx, state, client).await?;
         }
 
         // Multi-artist radio picker actions
@@ -779,10 +935,26 @@ fn select_search_result(state: &mut AppState) -> Vec<Action> {
         }
         SearchTab::Tracks => {
             if let Some(track) = results.tracks.get(local_idx) {
-                let track_owned = track.clone();
+                // Navigate to the track in Library (artist → album).
+                // Mirrors the right-click "Open in Library" action so
+                // Miller columns end up in the same state the user
+                // would have built by drilling through manually.
+                let artist_key = track.grandparent_rating_key.clone();
+                let album_key = track.parent_rating_key.clone();
+                let artist_name = track.artist_name().to_string();
+                let album_title = track.album_name().to_string();
                 state.search.query.clear();
                 state.popups.search_active = false;
-                return vec![crate::app::action::QueueAction::PlayTrack(track_owned).into()];
+                if let Some(akey) = artist_key {
+                    return vec![crate::app::action::BrowseAction::OpenInLibrary {
+                        artist_key: akey,
+                        artist_name,
+                        album_key,
+                        album_title: Some(album_title),
+                    }.into()];
+                }
+                // Track has no artist key — fall back to playing it.
+                return vec![crate::app::action::QueueAction::PlayTrack(track.clone()).into()];
             }
         }
         SearchTab::Playlists => {
@@ -809,21 +981,53 @@ fn select_search_result(state: &mut AppState) -> Vec<Action> {
         SearchTab::Genres => {
             if let Some(genre) = results.genres.get(local_idx) {
                 let genre_key = genre.effective_key().to_string();
+                let genre_title = genre.title.clone();
                 state.search.query.clear();
 
                 state.popups.search_active = false;
                 state.set_browse_category(BrowseCategory::Genres);
                 state.set_view(View::Browse);
+                // Search-results genres come from `state.library.genres`,
+                // which corresponds to the "Library" GenreCategory.
+                state.library.genre_content_type = crate::app::state::GenreContentType::Genres;
 
-                // Find genre in genre_nav and select it
-                if let Some(col) = state.genre_nav.columns.get_mut(0) {
-                    if let Some(pos) = col.items.iter().position(|i| i.key() == genre_key) {
-                        col.selected_index = pos;
-                        state.genre_nav.focused_column = 0;
-                        state.genre_nav.truncate_right();
-                        return vec![crate::app::action::MillerAction::LoadGenreAlbumsForMiller { genre_key }.into()];
-                    }
+                // Build the proper Miller breadcrumb instead of pushing
+                // an albums column straight onto the categories root.
+                // Column 0 = GenreCategory list with "Library" selected.
+                // Column 1 = library genres list with the searched genre
+                //            selected.
+                // Column 2 = albums for the genre (pushed below by the
+                //            LoadGenreAlbumsForMiller dispatch).
+                let categories = vec![
+                    BrowseItem::GenreCategory { key: "genre_cat:all".to_string(), title: "All".to_string() },
+                    BrowseItem::GenreCategory { key: "genre_cat:library".to_string(), title: "Library".to_string() },
+                    BrowseItem::GenreCategory { key: "genre_cat:artist".to_string(), title: "Artist".to_string() },
+                    BrowseItem::GenreCategory { key: "genre_cat:album".to_string(), title: "Album".to_string() },
+                    BrowseItem::GenreCategory { key: "genre_cat:mood".to_string(), title: "Mood".to_string() },
+                    BrowseItem::GenreCategory { key: "genre_cat:style".to_string(), title: "Style".to_string() },
+                ];
+                if state.genre_nav.columns.is_empty()
+                    || state.genre_nav.columns.first().map_or(true, |c| {
+                        c.items.first().map_or(true, |i| !matches!(i, BrowseItem::GenreCategory { .. }))
+                    })
+                {
+                    state.genre_nav.reset("genres", categories);
                 }
+                if let Some(col0) = state.genre_nav.columns.get_mut(0) {
+                    // Index 1 = "Library" in the categories list above.
+                    col0.selected_index = 1;
+                }
+
+                let genre_items = BrowseItem::from_genres(&state.library.genres);
+                let mut col1 = crate::app::state::BrowseColumn::new("library genres", genre_items);
+                if let Some(pos) = col1.items.iter().position(|i| i.key() == genre_key) {
+                    col1.selected_index = pos;
+                }
+                state.genre_nav.columns.truncate(1);
+                state.genre_nav.columns.push(col1);
+                state.genre_nav.focused_column = 1;
+                state.library.selected_album_title = format!("genre: {}", genre_title);
+
                 return vec![crate::app::action::MillerAction::LoadGenreAlbumsForMiller { genre_key }.into()];
             }
         }
@@ -1044,7 +1248,7 @@ async fn adventure_launcher_search(
 async fn adventure_launcher_select_track(
     _event_tx: &mpsc::Sender<Event>,
     state: &mut AppState,
-    client: &mut PlexClient,
+    _client: &mut PlexClient,
 ) -> Result<Vec<Action>> {
     use crate::app::state::{AdventureStep, AdventureDrillLevel};
 
@@ -1094,47 +1298,68 @@ async fn adventure_launcher_select_track(
     match launcher.step {
         AdventureStep::FindStartTrack => {
             launcher.start_track = Some(track);
-            launcher.step = AdventureStep::EnterTrackCount;
-            launcher.track_count_input = "20".to_string();
-            // Clear search state for next step
-            launcher.query.clear();
-            launcher.results = None;
-            launcher.drill = AdventureDrillLevel::Search;
-            launcher.item_index = 0;
-            launcher.focus = SearchFocus::Input;
         }
         AdventureStep::FindEndTrack => {
-            let start = launcher.start_track.clone();
-            let count_str = launcher.track_count_input.clone();
-            let count = count_str.parse::<usize>().unwrap_or(20).clamp(5, 100);
-
-            // Close launcher before starting generation
-            state.popups.adventure_launcher = None;
-
-            if let Some(start_track) = start {
-                state.set_status("Adventure: generating sonic bridge...".to_string());
-
-                // Generate adventure
-                match crate::services::generate_adventure_for_library(client, &start_track, &track, count, state.active_library.as_deref()).await {
-                    Ok(tracks) => {
-                        if tracks.len() <= 2 {
-                            state.set_error("Adventure: no similar tracks found for these songs. Try different tracks with sonic analysis data.".to_string());
-                            return Ok(vec![]);
-                        }
-                        return Ok(vec![SettingsAction::AdventureComplete(tracks).into()]);
-                    }
-                    Err(e) => {
-                        return Ok(vec![SettingsAction::AdventureError(format!("{}", e)).into()]);
-                    }
-                }
-            }
+            launcher.end_track = Some(track);
         }
         AdventureStep::EnterTrackCount => {
-            // Shouldn't happen (track count step doesn't select tracks)
+            // Shouldn't happen (count step doesn't select tracks),
+            // but defensively store as start so a stray click isn't lost.
+            launcher.start_track = Some(track);
         }
     }
+    // Reset the search panel so the user can pick the other field
+    // immediately without manually clearing it.
+    launcher.query.clear();
+    launcher.results = None;
+    launcher.drill = AdventureDrillLevel::Search;
+    launcher.item_index = 0;
+    launcher.focus = SearchFocus::Input;
 
     Ok(vec![])
+}
+
+/// Generate the adventure now that the user has both tracks (and a
+/// count). Mirrors the inline behaviour the old multi-step launcher
+/// triggered on FindEndTrack select, but now fires from an explicit
+/// "Generate" button instead.
+pub async fn adventure_launcher_generate(
+    state: &mut AppState,
+    client: &mut PlexClient,
+) -> Result<Vec<Action>> {
+    let launcher = match state.popups.adventure_launcher.as_ref() {
+        Some(l) => l,
+        None => return Ok(vec![]),
+    };
+    let start = match launcher.start_track.clone() {
+        Some(t) => t,
+        None => {
+            state.set_error("Adventure: pick a start track first.".to_string());
+            return Ok(vec![]);
+        }
+    };
+    let end = match launcher.end_track.clone() {
+        Some(t) => t,
+        None => {
+            state.set_error("Adventure: pick an end track first.".to_string());
+            return Ok(vec![]);
+        }
+    };
+    let count = launcher.track_count_input.parse::<usize>().unwrap_or(20).clamp(5, 100);
+    state.popups.adventure_launcher = None;
+    state.set_status("Adventure: generating sonic bridge...".to_string());
+
+    match crate::services::generate_adventure_for_library(client, &start, &end, count, state.active_library.as_deref()).await {
+        Ok(tracks) => {
+            if tracks.len() <= 2 {
+                state.set_error("Adventure: no similar tracks found for these songs. Try different tracks with sonic analysis data.".to_string());
+                Ok(vec![])
+            } else {
+                Ok(vec![SettingsAction::AdventureComplete(tracks).into()])
+            }
+        }
+        Err(e) => Ok(vec![SettingsAction::AdventureError(format!("{}", e)).into()]),
+    }
 }
 
 /// Adventure launcher: handle back navigation.

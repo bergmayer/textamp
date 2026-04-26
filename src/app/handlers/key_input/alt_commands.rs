@@ -87,26 +87,19 @@ pub fn available_alt_commands(state: &AppState) -> Vec<AltCommand> {
     cmds.push(AltCommand { modifier: CommandModifier::Ctrl, key: 'j', label: "jump to album", display_key: None,
         enabled: album_enabled });
 
-    // Ctrl+W save
+    // Ctrl+S = save queue as playlist (standard Save shortcut). Ctrl+W
+    // is kept as an alias for muscle memory; both are listed as
+    // available so the alt-commands picker accepts either key.
     let save_enabled = (state.view == View::Queue || state.view == View::NowPlaying)
         && (!state.queue.tracks.is_empty() || !state.radio.tracks.is_empty());
+    cmds.push(AltCommand { modifier: CommandModifier::Ctrl, key: 's', label: "save", display_key: None,
+        enabled: save_enabled });
     cmds.push(AltCommand { modifier: CommandModifier::Ctrl, key: 'w', label: "save", display_key: None,
         enabled: save_enabled });
 
     // Ctrl+X clear
     cmds.push(AltCommand { modifier: CommandModifier::Ctrl, key: 'x', label: "clear", display_key: None,
         enabled: save_enabled });
-
-    // Ctrl+S sort
-    let sort_enabled = state.view == View::Browse && state.browse_nav()
-        .and_then(|nav| nav.focused())
-        .map_or(false, |col| {
-            col.items.first().map_or(false, |i| {
-                matches!(i, BrowseItem::Artist { .. } | BrowseItem::Album { .. } | BrowseItem::Track { .. })
-            }) || col.items.iter().take(4).any(|i| matches!(i, BrowseItem::Artist { .. } | BrowseItem::Album { .. }))
-        });
-    cmds.push(AltCommand { modifier: CommandModifier::Ctrl, key: 's', label: "sort", display_key: None,
-        enabled: sort_enabled });
 
     // Alt global commands
     let lib_enabled = state.active_library.is_some();

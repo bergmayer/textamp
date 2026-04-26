@@ -678,6 +678,7 @@ fn alt_bar_item_action(cmd: &crate::app::handlers::key_input::AltCommand, state:
         (CommandModifier::Ctrl, 'm') => super::key_input::get_similar_action(state),
         (CommandModifier::Ctrl, 'j') => super::key_input::navigate_to_album(state),
         (CommandModifier::Ctrl, 'w') => vec![QueueAction::PromptSavePlaylist.into()],
+        (CommandModifier::Ctrl, 's') => vec![QueueAction::PromptSavePlaylist.into()],
         (CommandModifier::Ctrl, 'x') => vec![QueueAction::ClearQueue.into()],
         (CommandModifier::Alt, 'f') => vec![SearchAction::ActivateListFilter.into()],
         (CommandModifier::Alt, 'r') => {
@@ -688,7 +689,6 @@ fn alt_bar_item_action(cmd: &crate::app::handlers::key_input::AltCommand, state:
                 vec![]
             }
         }
-        (CommandModifier::Ctrl, 's') => vec![SearchAction::OpenSortPopup.into()],
         (CommandModifier::Ctrl, 'f') => {
             if state.popups.search_active {
                 vec![SearchAction::CloseSearchPopup.into()]
@@ -2203,6 +2203,10 @@ fn settings_visual_row_to_item(visual_row: usize, state: &AppState) -> Option<us
                     }
                 }
             }
+        }
+        SettingsSection::Cache => {
+            // GUI-only tab; the TUI doesn't expose row hit-testing here.
+            None
         }
         SettingsSection::About => {
             // Display-only section, no selectable items

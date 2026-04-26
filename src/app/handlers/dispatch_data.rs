@@ -36,7 +36,8 @@ pub async fn dispatch(
             tracing::info!("Action::LoadInitialData - loading libraries and artists");
 
             // Load theme from config
-            state.theme = crate::ui::theme::ThemeName::from_config(&config.ui.theme);
+            state.theme = crate::app::theme::ThemeName::from_config(&config.ui.theme);
+            #[cfg(feature = "tui")]
             crate::ui::theme::set_theme(state.theme);
             tracing::info!("Loaded theme: {}", state.theme.display_name());
 

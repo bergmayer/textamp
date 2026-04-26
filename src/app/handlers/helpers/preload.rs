@@ -2,9 +2,33 @@
 
 use crate::app::event::*;
 use crate::app::Event;
-use crate::app::event_loop::PreloadType;
 use crate::plex::PlexClient;
 use tokio::sync::mpsc;
+
+/// Types of data that can be preloaded in the background.
+///
+/// This enum consolidates the 13 different preload operations into a single
+/// type-safe representation. Each variant corresponds to a specific API call
+/// and event result.
+///
+/// Lives in the shared preload helper so both the TUI event loop and the GUI
+/// dispatch call sites can reach it under any feature flag.
+#[derive(Clone, Debug)]
+pub enum PreloadType {
+    Artists,
+    Albums,
+    Playlists,
+    Genres,
+    Moods,
+    ArtistGenres,
+    AlbumGenres,
+    Styles,
+    Stations,
+    /// All tracks in the library (for compilation detection + track-level artist derivation).
+    AllTracks,
+    /// Folders require additional lib_title for display.
+    Folders { lib_title: String },
+}
 
 /// Preload data in background for faster access.
 pub fn preload_data(event_tx: &mpsc::Sender<Event>, preload_type: PreloadType, lib_key: &str, client: &PlexClient) {

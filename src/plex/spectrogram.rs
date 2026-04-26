@@ -12,17 +12,25 @@ use rustfft::num_complex::Complex;
 
 use super::waveform::{decode_to_pcm, WaveformError};
 
-/// FFT window size (number of samples per frame).
+/// FFT window size (number of samples per frame). 2048 samples at 44.1 kHz
+/// ≈ 46 ms — a standard music STFT frame size with frequency resolution
+/// of ~21 Hz, fine enough to resolve musical pitch above ~A1.
 const FFT_SIZE: usize = 2048;
 
-/// Hop size between frames (non-overlapping for speed).
-const HOP_SIZE: usize = 2048;
+/// Hop size between frames. 50% overlap (FFT_SIZE / 2) is the minimum
+/// that gives perfect Hann-window reconstruction (COLA condition) and
+/// ensures every input sample contributes meaningfully to the output —
+/// without overlap, samples at frame edges are zeroed by the window
+/// and effectively lost.
+const HOP_SIZE: usize = FFT_SIZE / 2;
 
 /// Number of frequency bins in output (log-scaled from FFT bins).
-const NUM_BINS: usize = 64;
+const NUM_BINS: usize = 96;
 
 /// Spectrogram data version for cache invalidation.
-pub const SPECTROGRAM_VERSION: u8 = 5;
+/// Bumped to 6 when overlap + windowed normalisation + power averaging
+/// + extended dB range were introduced (v5 caches are not reusable).
+pub const SPECTROGRAM_VERSION: u8 = 6;
 
 /// Computed spectrogram data for a track.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,9 +163,23 @@ fn log_frequency_mapping(fft_size: usize, sample_rate: u32, num_bins: usize) -> 
 }
 
 /// Compute spectrogram from PCM samples.
+///
+/// Implements a standard short-time Fourier transform (STFT):
+/// - 2048-sample Hann-windowed frames
+/// - 50% overlap (HOP_SIZE = FFT_SIZE / 2) for COLA reconstruction
+/// - Window-corrected magnitude normalisation (2 / sum(window)) so a
+///   full-scale sine reads as 0 dBFS regardless of windowing
+/// - Power averaging within each log-spaced output bin (preserves
+///   broadband energy correctly; previous max-magnitude biased toward
+///   isolated tones)
+/// - dB scale with -80 dB floor and 80 dB dynamic range (typical for
+///   music spectrograms; the old 35 dB range clipped the lowest 45 dB
+///   into solid background)
+/// - sqrt visual lift (gamma 0.5) so quieter spectral content is still
+///   visible — gamma > 1.0 (the previous setting) pushed it BELOW the
+///   colour ramp's perceptible threshold.
 fn compute_spectrogram(samples: &[f32], sample_rate: u32) -> SpectrogramData {
-    let frame_count = samples.len() / HOP_SIZE;
-    if frame_count == 0 {
+    if samples.len() < FFT_SIZE {
         return SpectrogramData {
             track_key: String::new(),
             duration_ms: 0,
@@ -170,16 +192,25 @@ fn compute_spectrogram(samples: &[f32], sample_rate: u32) -> SpectrogramData {
             created_at: 0,
         };
     }
+    // With 50% overlap, the last frame must fit a full FFT window.
+    let frame_count = (samples.len() - FFT_SIZE) / HOP_SIZE + 1;
 
     let mut planner = FftPlanner::new();
     let fft = planner.plan_fft_forward(FFT_SIZE);
 
-    // Pre-compute Hann window
+    // Pre-compute periodic Hann window (the standard for STFT — using
+    // FFT_SIZE in the denominator instead of FFT_SIZE-1 gives the
+    // periodic version which is what FFT-based analysis assumes).
     let window: Vec<f32> = (0..FFT_SIZE)
         .map(|i| {
-            0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / (FFT_SIZE - 1) as f32).cos())
+            0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / FFT_SIZE as f32).cos())
         })
         .collect();
+    let window_sum: f32 = window.iter().sum();
+    // 2 / sum(window) recovers the true peak amplitude of a sinusoid
+    // through the FFT (the factor of 2 accounts for the negative-
+    // frequency mirror image we discard).
+    let amp_norm = 2.0 / window_sum;
 
     // Pre-compute log-frequency bin mapping
     let bin_mapping = log_frequency_mapping(FFT_SIZE, sample_rate, NUM_BINS);
@@ -187,47 +218,46 @@ fn compute_spectrogram(samples: &[f32], sample_rate: u32) -> SpectrogramData {
     let mut frames = vec![0u8; frame_count * NUM_BINS];
     let mut fft_buffer = vec![Complex::new(0.0f32, 0.0f32); FFT_SIZE];
 
-    // Gamma > 1.0 pushes quiet bins down for Plexamp-style variation.
-    const GAMMA: f32 = 1.5;
-    // Individual frequency bins in music peak around -15 dBFS (energy spread across
-    // many bins), so range of 35 dB (-50 to -15) makes peaks reach full height.
-    const DB_FLOOR: f32 = -50.0;
-    const DB_RANGE: f32 = 35.0;
+    // Visual contrast curve. < 1.0 LIFTS quiet bins so they're visible
+    // alongside loud peaks; > 1.0 would do the opposite. 0.5 (sqrt)
+    // is a common choice for monochrome spectrograms.
+    const GAMMA: f32 = 0.5;
+    // Wide musical dynamic range: -80 dBFS floor (room noise on a
+    // 16-bit master) up to 0 dBFS (full scale). 80 dB total span.
+    const DB_FLOOR: f32 = -80.0;
+    const DB_RANGE: f32 = 80.0;
 
     for frame_idx in 0..frame_count {
         let offset = frame_idx * HOP_SIZE;
-        let available = samples.len() - offset;
-        let len = available.min(FFT_SIZE);
 
-        // Apply window and fill FFT buffer
+        // Apply window and fill FFT buffer (always exactly FFT_SIZE
+        // samples now, guaranteed by the frame_count formula above).
         for i in 0..FFT_SIZE {
-            if i < len {
-                fft_buffer[i] = Complex::new(samples[offset + i] * window[i], 0.0);
-            } else {
-                fft_buffer[i] = Complex::new(0.0, 0.0);
-            }
+            fft_buffer[i] = Complex::new(samples[offset + i] * window[i], 0.0);
         }
 
         fft.process(&mut fft_buffer);
 
-        // Map FFT bins to log-spaced output bins
-        // Normalization factor: divide by N/2 to get amplitude relative to full scale (0 dBFS)
-        let norm_factor = 2.0 / FFT_SIZE as f32;
+        // Map FFT bins to log-spaced output bins. Sum POWER (magnitude
+        // squared) within each bin range, then convert back to RMS
+        // amplitude — this preserves total energy correctly even when
+        // a single output bin spans many FFT bins (high-frequency end).
         for (bin_idx, &(start, end)) in bin_mapping.iter().enumerate() {
-            let mut max_mag: f32 = 0.0;
+            let mut sum_power: f32 = 0.0;
+            let mut count: u32 = 0;
             for fft_bin in start..end {
                 if fft_bin < fft_buffer.len() {
-                    let mag = fft_buffer[fft_bin].norm() * norm_factor;
-                    max_mag = max_mag.max(mag);
+                    let mag = fft_buffer[fft_bin].norm() * amp_norm;
+                    sum_power += mag * mag;
+                    count += 1;
                 }
             }
-            // Convert normalized magnitude to dBFS (0 dBFS = full scale)
-            let db = if max_mag > 1e-10 {
-                20.0 * max_mag.log10()
+            let rms = if count > 0 { (sum_power / count as f32).sqrt() } else { 0.0 };
+            let db = if rms > 1e-10 {
+                20.0 * rms.log10()
             } else {
                 DB_FLOOR - 1.0
             };
-            // Map dB to 0.0-1.0 range (DB_FLOOR to 0dB), then apply gamma
             let normalized = ((db - DB_FLOOR) / DB_RANGE).clamp(0.0, 1.0);
             let curved = normalized.powf(GAMMA);
             frames[frame_idx * NUM_BINS + bin_idx] = (curved * 255.0).round() as u8;

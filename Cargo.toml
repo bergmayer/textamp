@@ -2,13 +2,40 @@
 name = "textamp"
 version = "1.0.0"
 edition = "2021"
-description = "A keyboard-driven TUI client for Plex Music"
-license = "MIT"
+description = "A keyboard-driven Plex Music client for terminal and desktop"
+license = "Unlicense"
 authors = ["John Bergmayer"]
-keywords = ["plex", "music", "tui", "plexamp"]
-categories = ["command-line-utilities", "multimedia::audio"]
+keywords = ["plex", "music", "tui", "gui", "plexamp"]
+categories = ["command-line-utilities", "multimedia::audio", "gui"]
 
+[features]
+default = ["tui"]
+
+# Terminal UI (`textamp` binary): ratatui renderer.
+#
+# Note: the `crossterm` keyboard/mouse event types are a core always-on
+# dependency because the action-builder helpers (`navigate_to_album`,
+# `get_similar_action`, etc.) are shared between the TUI key input layer
+# and the GUI shortcut layer. They both accept the same `KeyEvent` input.
+tui = ["dep:ratatui", "dep:ratatui-image"]
+
+# Desktop GUI (`textamp-gui` binary): iced renderer.
+gui = ["dep:iced", "dep:raw-window-handle"]
+
+# Native OS menu bars via `muda`:
+# - macOS: global menu bar
+# - Windows: window-attached Win32 HMENU
+# - Linux: window-attached GTK menu (requires system GTK3:
+#   apt `libgtk-3-dev`, pacman `gtk3`, dnf `gtk3-devel`)
+# Environments without GTK can build with `--no-default-features
+# --features tui,gui` for an in-window software menu fallback.
+native-menus = ["gui", "dep:muda"]
+
+# ============================================================================
+# Always-on dependencies (shared by both front-ends).
+# ============================================================================
 [dependencies]
+
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 
@@ -20,16 +47,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 
-# TUI
-ratatui = "0.29"
-crossterm = "0.28"
-
-# Album art (Kitty graphics protocol)
-ratatui-image = { version = "9", default-features = false, features = ["crossterm", "image-defaults"] }
+# Image decoding (album art — used by both UIs)
 image = "0.25"
 base64 = "0.22"
 
-# Audio playback
+# Audio playback (rodio spawns OS threads; compatible with both UIs)
 rodio = { version = "0.21", features = ["symphonia-all"] }
 
 # Audio decoding for waveform generation
@@ -74,6 +96,63 @@ unicode-width = "0.2"
 
 # Open URLs in default browser
 open = "5"
+
+# Crossterm's key/mouse event types are always available — the shared
+# action-builder helpers (`navigate_to_album`, `auto_drill_artist_action`,
+# etc.) accept them and are called by both the TUI key handler and the
+# GUI shortcut translator. The crate is tiny (~200 KB) and cross-platform.
+crossterm = "0.28"
+
+# Cross-platform advisory file locking (process lock so TUI and GUI cannot
+# run simultaneously against the shared cache).
+fs4 = "0.9"
+
+# ============================================================================
+# TUI-only dependencies (feature = "tui").
+# ============================================================================
+
+ratatui = { version = "0.29", optional = true }
+ratatui-image = { version = "9", default-features = false, features = ["crossterm", "image-defaults"], optional = true }
+
+# ============================================================================
+# GUI-only dependencies (feature = "gui").
+# ============================================================================
+
+# Iced 0.13 is the widely-tested stable release at the time of writing.
+# Upgrading to 0.14 requires migration to the `iced::application()` builder;
+# that can be taken as a follow-up.
+iced = { version = "0.13", optional = true, features = ["tokio", "image", "canvas", "advanced", "svg", "lazy"] }
+
+# muda provides native menu bars (macOS global bar, Win32 HMENU, GTK).
+muda = { version = "0.16", optional = true }
+
+# For passing the window handle into muda's `init_for_*` functions.
+raw-window-handle = { version = "0.6", optional = true }
+
+# ============================================================================
+# Binary targets.
+# ============================================================================
+
+[[bin]]
+name = "textamp"
+path = "src/bin/textamp_tui.rs"
+required-features = ["tui"]
+
+[[bin]]
+name = "textamp-gui"
+path = "src/bin/textamp_gui.rs"
+required-features = ["gui"]
+
+# Development helpers (TUI only).
+[[bin]]
+name = "textamp-debug"
+path = "src/bin/debug.rs"
+required-features = ["tui"]
+
+[[bin]]
+name = "textamp-test-tui"
+path = "src/bin/test_tui.rs"
+required-features = ["tui"]
 
 [profile.release]
 lto = true

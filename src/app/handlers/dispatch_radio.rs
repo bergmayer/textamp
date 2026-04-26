@@ -111,13 +111,46 @@ pub async fn dispatch(
             tokio::spawn(async move {
                 let timeout_duration = std::time::Duration::from_secs(STATION_TIMEOUT_SECS);
                 match tokio::time::timeout(timeout_duration, client_clone.create_radio_from_metadata(&rk)).await {
-                    Ok(Ok(tracks)) => {
+                    Ok(Ok(tracks)) if !tracks.is_empty() => {
                         let _ = tx.send(RadioEvent::StationTracksLoaded {
                             station_key: format!("plex_radio:{}", rk),
                             station_title: rt,
                             tracks,
                             time_travel_decades: vec![],
                         }.into()).await;
+                    }
+                    // PlayQueue returned empty — Plex's radio engine
+                    // falls back to "no tracks" when the artist has
+                    // no Sonic Analysis data on the server, even if
+                    // the feature is enabled overall. Build a station
+                    // out of the artist's own tracks (shuffled) so
+                    // the user gets something instead of an error.
+                    Ok(Ok(_)) => {
+                        match client_clone.get_artist_all_tracks(&rk).await {
+                            Ok(mut tracks) if !tracks.is_empty() => {
+                                use rand::seq::SliceRandom;
+                                tracks.shuffle(&mut rand::rng());
+                                tracing::info!(
+                                    "Radio fallback for {}: PlayQueue empty, using {} artist tracks shuffled",
+                                    rk,
+                                    tracks.len(),
+                                );
+                                let _ = tx.send(RadioEvent::StationTracksLoaded {
+                                    station_key: format!("plex_radio:{}", rk),
+                                    station_title: rt,
+                                    tracks,
+                                    time_travel_decades: vec![],
+                                }.into()).await;
+                            }
+                            _ => {
+                                let _ = tx.send(RadioEvent::StationTracksLoaded {
+                                    station_key: format!("plex_radio:{}", rk),
+                                    station_title: rt,
+                                    tracks: vec![],
+                                    time_travel_decades: vec![],
+                                }.into()).await;
+                            }
+                        }
                     }
                     Ok(Err(e)) => {
                         let _ = tx.send(RadioEvent::StationLoadFailed {

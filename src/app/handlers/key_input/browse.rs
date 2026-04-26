@@ -446,6 +446,8 @@ pub(super) fn handle_artist_browse_keys(key: event::KeyEvent, state: &mut AppSta
 
     // Handle common navigation keys
     let is_up_down = matches!(key.code, KeyCode::Up | KeyCode::Down);
+    let is_letter_jump = matches!(key.code, KeyCode::Char(c) if c.is_ascii_alphabetic())
+        && !key.modifiers.contains(KeyModifiers::CONTROL);
     // Left/Backspace at root column → return to category column
     if matches!(key.code, KeyCode::Left | KeyCode::Backspace) && !state.artist_nav.can_go_left() {
         state.focus_category_column();
@@ -453,10 +455,11 @@ pub(super) fn handle_artist_browse_keys(key: event::KeyEvent, state: &mut AppSta
     }
 
     if let Some(mut actions) = handle_browse_nav_keys(key, &mut state.artist_nav) {
-        // Auto-drill on Up/Down: always replace child columns so rightmost
-        // columns stay visible. Non-drillable items keep stale children visible
-        // (better than vanishing columns).
-        if is_up_down {
+        // Auto-drill on selection changes: Up/Down move one row, letter-jump
+        // and Shift+letter jump within the list. All change `selected_index`,
+        // so the rightward columns must re-build against the new selection
+        // (otherwise they'd be left empty by `truncate_right()`).
+        if is_up_down || is_letter_jump {
             if let Some(drill) = auto_drill_artist_action(state) {
                 state.auto_drill_pending = true;
                 actions.push(drill);
@@ -544,8 +547,10 @@ pub(super) fn handle_genre_browse_keys(key: event::KeyEvent, state: &mut AppStat
 
     // Handle common navigation keys
     let is_up_down = matches!(key.code, KeyCode::Up | KeyCode::Down);
+    let is_letter_jump = matches!(key.code, KeyCode::Char(c) if c.is_ascii_alphabetic())
+        && !key.modifiers.contains(KeyModifiers::CONTROL);
     if let Some(mut actions) = handle_browse_nav_keys(key, &mut state.genre_nav) {
-        if is_up_down {
+        if is_up_down || is_letter_jump {
             if let Some(drill) = auto_drill_genre_action(state) {
                 state.auto_drill_pending = true;
                 actions.push(drill);
@@ -611,10 +616,18 @@ pub(super) fn handle_playlist_browse_keys(key: event::KeyEvent, state: &mut AppS
 
     // Handle common navigation keys
     let is_up_down = matches!(key.code, KeyCode::Up | KeyCode::Down);
+    let is_letter_jump = matches!(key.code, KeyCode::Char(c) if c.is_ascii_alphabetic())
+        && !key.modifiers.contains(KeyModifiers::CONTROL);
+    // Capture child-visibility BEFORE `handle_browse_nav_keys` (letter-jump
+    // truncates right inside the shared helper). Without this snapshot,
+    // letter-jump would collapse the right column and `has_child` would
+    // read false on the check below, skipping the rebuild.
+    let had_child_before = state.playlist_nav.columns.len() > state.playlist_nav.focused_column + 1;
     if let Some(mut actions) = handle_browse_nav_keys(key, &mut state.playlist_nav) {
-        // Auto-drill on Up/Down: if child column exists, replace it
-        if is_up_down {
-            let has_child = state.playlist_nav.columns.len() > state.playlist_nav.focused_column + 1;
+        // Auto-drill on Up/Down or letter-jump: if child column existed, replace it
+        if is_up_down || is_letter_jump {
+            let has_child = had_child_before
+                || state.playlist_nav.columns.len() > state.playlist_nav.focused_column + 1;
             if has_child {
                 // Check if focused column is grouped-by-album (sync drill)
                 let did_sync_drill = {

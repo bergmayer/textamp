@@ -1,7 +1,9 @@
-//! textamp - A keyboard-driven TUI client for Plex Music.
+//! textamp — keyboard-driven Plex Music client (terminal front-end).
 //!
-//! A high-performance terminal user interface for Plex Music,
-//! inspired by Plexamp but designed for keyboard-driven workflows.
+//! This binary is the TUI. The GUI sibling (`textamp-gui`) shares everything
+//! except the rendering/input layer. A process lock in the platform state
+//! directory prevents both binaries from running at the same time against
+//! the shared caches.
 
 use anyhow::Result;
 use std::env;
@@ -9,14 +11,31 @@ use textamp::plex::{PlexAuth, PlexClient, PlexClientInfo};
 use textamp::app::{AppState, EventLoop};
 use textamp::audio::AudioPlayer;
 use textamp::config::{self, Config};
-use textamp::util::{restore_terminal, setup_logging, setup_terminal};
-
-// Debug mode: `cargo run --bin debug`
-// Test mode: `cargo run --bin test_tui`
+use textamp::util::{restore_terminal, setup_logging, setup_terminal, LockError, ProcessLock};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let verbose = env::args().any(|a| a == "--verbose" || a == "-v");
+
+    // Acquire the cross-platform process lock before doing anything else.
+    // If another textamp (TUI or GUI) is running, bail out with a clear
+    // message rather than racing it for cache files.
+    let _lock = match ProcessLock::acquire() {
+        Ok(lock) => lock,
+        Err(LockError::AlreadyRunning(path)) => {
+            eprintln!(
+                "textamp is already running (lock held at {}).\n\
+                 Quit the other instance before starting a new one.",
+                path.display()
+            );
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("Failed to acquire process lock: {e}");
+            std::process::exit(1);
+        }
+    };
+
     run_tui_mode(verbose).await
 }
 
@@ -117,7 +136,7 @@ fn display_exit_logo() {
     use std::io::{self, Write};
 
     // Embedded ANSI art logo
-    static LOGO_ANSI: &[u8] = include_bytes!("../textamp.ansi");
+    static LOGO_ANSI: &[u8] = include_bytes!("../../textamp.ansi");
 
     // ANSI color codes (Cubic Player style)
     const BRIGHT_CYAN: &str = "\x1b[38;2;0;187;187m";

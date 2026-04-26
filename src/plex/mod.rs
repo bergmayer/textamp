@@ -44,7 +44,7 @@ mod spectrogram;
 mod waveform;
 
 pub use artwork_cache::ArtworkCache;
-pub use auth::{PlexAuth, PlexClientInfo, ServerInfo, StoredAuth};
+pub use auth::{AccountMarker, PlexAuth, PlexClientInfo, ServerInfo, StoredAuth};
 pub use cache::{CacheData, CachedFolder, CachedPlaylistTracks, LibraryCache};
 pub use client::{PlexClient, test_connection};
 pub use error::ApiError;
