@@ -254,6 +254,7 @@ fn search_panel<'a>(p: &'a AdventureLauncherState) -> Element<'a, GuiMessage> {
 
     let list = scrollable(Column::with_children(rows).spacing(2))
         .direction(crate::ui_gui::widgets::fat_vertical_scrollbar())
+        .style(crate::ui_gui::widgets::chunky_scrollable_style)
         .height(Length::Fixed(280.0));
 
     column![query_input, list].spacing(6).into()

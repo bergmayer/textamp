@@ -78,6 +78,40 @@ pub enum GuiMessage {
     /// to drive the shared `key_input::handle_key` dispatcher.
     KeyPress(KeyEvent),
 
+    /// Live keyboard modifier state, fired by an
+    /// `iced::keyboard::Event::ModifiersChanged` subscription. Mouse
+    /// click events in iced 0.13 don't carry modifier info; the app
+    /// caches the latest value here so a subsequent click handler can
+    /// distinguish plain / shift / cmd clicks for multi-select.
+    ModifiersChanged(iced::keyboard::Modifiers),
+
+    /// "Play Random Album" sidebar / Tools-menu button — picks one
+    /// album at random from the active library and queues it as a
+    /// regular one-shot (clear queue, load tracks, play). Distinct
+    /// from "Random Album Radio" in the stations popup, which is the
+    /// *continuous* station that keeps queuing fresh random albums.
+    /// Implemented in `update()` rather than as a shared `Action` so
+    /// the random selection stays out of the cross-platform core.
+    PlayOneRandomAlbum,
+
+    /// Result of an async `client.get_similar_tracks` fetch fired by
+    /// the Browse track-details pane. The pane shows sonically-
+    /// similar tracks under the metadata; the Tick handler triggers
+    /// the fetch on first sighting of a new track and stores the
+    /// result in `App::track_pane_similar`.
+    TrackPaneSimilarLoaded {
+        track_key: String,
+        tracks: Vec<crate::plex::models::Track>,
+    },
+
+    /// Right-click on a row that carries a full `Track` payload but
+    /// isn't anchored to a Miller column index — currently the
+    /// "Sonically Similar" rows in the Browse track-details pane.
+    /// Opens the standard track context menu (Play / Play next /
+    /// Add to queue / Show Similar / Related / Open in Library / …)
+    /// at the cursor position.
+    OpenStandaloneTrackContextMenu(Box<crate::plex::models::Track>),
+
     /// A single `Action` (from a menu item click, widget callback, etc.).
     Action(Action),
 
@@ -253,11 +287,6 @@ pub enum GuiMessage {
     /// swaps it into the audio player if the device is now available,
     /// dismissing the "Audio unavailable" banner.
     RetryAudio,
-
-    /// Toggle the visualizer panel on the Now Playing (formerly Queue)
-    /// screen. Flips `App::show_queue_visualizer`; when on, the right
-    /// pane splits into queue (top) and visualizer (bottom).
-    ToggleQueueVisualizer,
 
     /// User right-clicked a track row in the Folders Miller column.
     /// `row_index` indexes into the focused `FolderColumn::items`.

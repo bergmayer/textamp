@@ -130,6 +130,7 @@ fn account_section(state: &AppState) -> Element<'_, GuiMessage> {
     let libs_col: Element<'_, GuiMessage> =
         scrollable(Column::with_children(libs).spacing(2))
             .direction(crate::ui_gui::widgets::fat_vertical_scrollbar())
+            .style(crate::ui_gui::widgets::chunky_scrollable_style)
             .height(Length::Fixed(96.0))
             .into();
 
@@ -524,6 +525,7 @@ fn scale_btn<'a>(label: &'a str, msg: GuiMessage, enabled: bool) -> Element<'a, 
 pub fn scrollable_view<'a>(state: &'a AppState, ui_scale: f32) -> Element<'a, GuiMessage> {
     scrollable(view(state, ui_scale))
         .direction(crate::ui_gui::widgets::fat_vertical_scrollbar())
+        .style(crate::ui_gui::widgets::chunky_scrollable_style)
         .height(Length::Fill)
         .into()
 }

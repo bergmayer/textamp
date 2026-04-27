@@ -50,16 +50,24 @@ pub fn load_artists(event_tx: &mpsc::Sender<Event>, state: &mut AppState, client
     }
 }
 
-/// Load playlists in background, filtered by active library.
+/// Load all audio playlists from the server.
+///
+/// Previously this filtered by `state.active_library` (sectionID). Plex
+/// only returns a playlist on a `sectionID=X` query when *every* track
+/// in the playlist belongs to that section — so user-created lists that
+/// span libraries (or were authored against a different one) silently
+/// vanished. Plexamp itself doesn't apply that filter; we mirror its
+/// behaviour and show every audio playlist the server exposes. Smart
+/// playlists with duplicate per-library titles are still de-duped
+/// inside `client.get_playlists`.
 pub fn load_playlists(event_tx: &mpsc::Sender<Event>, state: &mut AppState, client: &PlexClient) {
-    tracing::info!("Loading playlists");
+    tracing::info!("Loading playlists (server-wide, no section filter)");
     state.library.playlists_loading = true;
 
     let event_tx = event_tx.clone();
     let client = client.clone();
-    let section_id = state.active_library.clone();
     tokio::spawn(async move {
-        match client.get_playlists(section_id.as_deref()).await {
+        match client.get_playlists(None).await {
             Ok(playlists) => {
                 tracing::info!("Loaded {} playlists", playlists.len());
                 let _ = event_tx.send(DataEvent::PlaylistsLoaded(playlists).into()).await;

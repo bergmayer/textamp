@@ -158,3 +158,11 @@ required-features = ["tui"]
 lto = true
 strip = true
 opt-level = 3
+
+# Local patch of iced_widget — bumps the hard-coded 2 px minimum
+# scroller height in the scrollable widget up to 40 px so the dragger
+# stays grabbable on tall content (10k+-row libraries, where iced's
+# default would otherwise collapse the dragger to a 2 px sliver).
+# See vendor/iced_widget/src/scrollable.rs around line 1611.
+[patch.crates-io]
+iced_widget = { path = "vendor/iced_widget" }

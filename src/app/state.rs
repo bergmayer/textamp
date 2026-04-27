@@ -652,6 +652,15 @@ pub struct BrowseColumn {
     /// track in `tracks` instead of fetching from the API. Mutually
     /// exclusive with `play_album`.
     pub play_all_label: Option<String>,
+    /// Multi-select set: indices into `items` (and `tracks`) that the
+    /// user has shift- or cmd-clicked. Empty means single-selection
+    /// mode (the regular `selected_index` cursor). Populated by the
+    /// GUI's miller-row click handler; the TUI doesn't currently
+    /// emit multi-clicks but reading the set is harmless.
+    pub selected_set: std::collections::BTreeSet<usize>,
+    /// Anchor for shift+click range select — the row of the last
+    /// non-shift click. `None` until the first click.
+    pub selection_anchor: Option<usize>,
 }
 
 impl BrowseColumn {
@@ -670,6 +679,8 @@ impl BrowseColumn {
             album_groups: None,
             play_album: None,
             play_all_label: None,
+            selected_set: std::collections::BTreeSet::new(),
+            selection_anchor: None,
         }
     }
 
@@ -689,6 +700,8 @@ impl BrowseColumn {
             album_groups: None,
             play_album: None,
             play_all_label: None,
+            selected_set: std::collections::BTreeSet::new(),
+            selection_anchor: None,
         }
     }
 
@@ -1254,6 +1267,14 @@ pub struct ArtworkState {
     pub cache_stats: Option<(usize, u64)>,
     pub default_visible: bool,
     pub mode: ArtworkMode,
+    /// When true, `SystemAction::LoadAlbumArt` returns immediately
+    /// without reading the disk cache or starting fetches. The GUI
+    /// raises this while the user is rapidly navigating (keyboard
+    /// scroll, mouse wheel) so the per-key disk I/O doesn't stall the
+    /// UI. Once motion has been still for ~1 second the GUI clears
+    /// the flag and re-collects the viewport batch. The TUI never
+    /// sets it — its behaviour is unchanged.
+    pub suppress_loads: bool,
 }
 
 impl Default for ArtworkState {
@@ -1267,6 +1288,7 @@ impl Default for ArtworkState {
             cache_stats: None,
             default_visible: false,
             mode: ArtworkMode::default(),
+            suppress_loads: false,
         }
     }
 }

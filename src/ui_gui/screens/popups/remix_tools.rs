@@ -28,6 +28,9 @@ pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
     ]
     .align_y(Alignment::Center);
 
+    // Clear Queue / Save Queue as Playlist were moved out of this
+    // popup and into dedicated Now Playing sidebar buttons — they
+    // aren't remix operations, so grouping them here was misleading.
     let shuffle_active = state.queue.shuffle_undo_queue.is_some();
     let entries: Vec<(&'static str, &'static str, QueueAction)> = vec![
         ("Remix: Gemini",       "Insert similar tracks between queue items",          QueueAction::RemixGemini),
@@ -39,8 +42,6 @@ pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
         } else {
             ("Remix: Shuffle",  "Shuffle the current queue (undoable)",               QueueAction::RemixShuffle)
         },
-        ("Clear Queue",         "Empty the queue",                                    QueueAction::ClearQueue),
-        ("Save Queue as Playlist\u{2026}", "Persist the queue to a new Plex playlist", QueueAction::PromptSavePlaylist),
     ];
 
     let rows: Vec<Element<'_, GuiMessage>> = entries

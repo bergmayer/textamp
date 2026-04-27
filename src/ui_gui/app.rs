@@ -149,13 +149,6 @@ pub struct App {
     settings_popup_open: bool,
 
     /// Whether the visualizer panel is shown in the Now Playing
-    /// (formerly Queue) screen. Toggled by the "Visualizer" button in
-    /// the left side bar. When true, the right side splits into the
-    /// queue list (top) and the visualizer canvas (bottom). GUI-only
-    /// state — the TUI exposes the visualizer as its own dedicated
-    /// view, not a toggle.
-    show_queue_visualizer: bool,
-
     /// "DJ Modes" picker popup — opened from the Now Playing sidebar
     /// button of the same name. GUI-only presentation around the
     /// shared `RadioAction::ToggleDjMode` action.
@@ -171,10 +164,65 @@ pub struct App {
     /// Help → Keyboard Shortcuts modal — replaces the legacy
     /// full-screen Help view.
     keyboard_shortcuts_popup_open: bool,
+
+    /// macOS only: have we installed the muda global main menu yet?
+    /// Winit overwrites `NSApp.mainMenu` from inside its
+    /// `applicationDidFinishLaunching:` hook, so installing the menu
+    /// before iced's run loop starts gets clobbered. We defer until the
+    /// first `update()` tick — which fires on the main thread *after*
+    /// winit's launch hook — and then leak the muda wrapper so its Drop
+    /// doesn't tear down the NSMenu NSApplication now retains.
+    #[cfg(all(target_os = "macos", feature = "native-menus"))]
+    macos_menu_installed: bool,
+
+    /// Timestamp of the last user-driven motion event (keyboard nav,
+    /// mouse-wheel scroll, miller-row click). Used together with
+    /// `state.artwork.suppress_loads` to throttle album-art fetches
+    /// while the user is rapidly navigating: while motion has been
+    /// happening within the last `ART_LOAD_PAUSE_MS`, every
+    /// `LoadAlbumArt` is dropped; once motion settles for that long,
+    /// the next tick clears the flag and dispatches a fresh load
+    /// against the current viewport.
+    last_motion_at: std::time::Instant,
+
+    /// Live keyboard modifier state, updated from a window-level
+    /// `keyboard::Event::ModifiersChanged` subscription. Mouse clicks
+    /// don't carry modifier info in iced 0.13, so we cache it here and
+    /// consult it when a click message arrives — the standard
+    /// shift+click / cmd+click pattern.
+    current_modifiers: iced::keyboard::Modifiers,
+
+    /// "Anchor" row for queue range-select: the last row the user
+    /// single-clicked or cmd-clicked. A subsequent shift-click selects
+    /// the inclusive range between this anchor and the clicked row.
+    /// `None` until the first click.
+    queue_anchor: Option<usize>,
+
+    /// Per-track cache of sonically-similar tracks shown in the
+    /// Browse track-details pane. Populated lazily by an iced
+    /// `Task::perform` from the Tick handler whenever the focused
+    /// Miller track row changes to one we haven't seen yet.
+    track_pane_similar: HashMap<String, Vec<crate::plex::models::Track>>,
+    /// Track keys whose similar fetch is currently in flight — keeps
+    /// the Tick handler from spawning duplicate requests.
+    track_pane_similar_loading: std::collections::HashSet<String>,
 }
 
 /// Entry point called from `src/bin/textamp_gui.rs`.
 pub fn run() -> Result<()> {
+    // Install muda's process-wide menu-event handler before iced spins
+    // up its tokio runtime + winit event loop. The handler forwards
+    // every click into a tokio mpsc; the iced subscription drains that
+    // mpsc. Doing this early means the subscription's first poll
+    // finds the receiver waiting — if we deferred to `App::update` the
+    // subscription would already have exited and re-subscriptions are
+    // dedup'd by ID, so it would never read again.
+    //
+    // The matching `init_for_nsapp` call still has to wait until after
+    // winit's `applicationDidFinishLaunching:` hook (see `App::update`).
+    #[cfg(feature = "native-menus")]
+    super::menu::install_event_forwarder();
+
     // Peek at the saved window size before Iced takes over — fall back to a
     // comfortable default when no config exists or it fails to parse.
     // `App::new` reads the config a second time; that's cheap and keeps the
@@ -350,13 +398,23 @@ impl App {
             audio_retry_ticks_left: 5,
             stations_popup_open: false,
             art_popup_key: None,
+            #[cfg(all(target_os = "macos", feature = "native-menus"))]
+            macos_menu_installed: false,
+            // Initial artwork loads (driven by data-load follow-ups,
+            // not user motion) run normally because `suppress_loads`
+            // defaults to false. The timestamp only matters once the
+            // user starts navigating.
+            last_motion_at: std::time::Instant::now(),
+            current_modifiers: iced::keyboard::Modifiers::empty(),
+            queue_anchor: None,
+            track_pane_similar: HashMap::new(),
+            track_pane_similar_loading: std::collections::HashSet::new(),
             hires_art: HashMap::new(),
             similar_popup_open: false,
             similar_prev_view: None,
             related_popup_open: false,
             related_prev_view: None,
             settings_popup_open: false,
-            show_queue_visualizer: false,
             dj_modes_popup_open: false,
             remix_tools_popup_open: false,
             user_guide_popup_open: false,
@@ -428,6 +486,48 @@ impl App {
     }
 
     fn update(&mut self, message: GuiMessage) -> Task<GuiMessage> {
+        // Lazy-art motion gate. Only rapid-fire navigation gestures
+        // raise `suppress_loads` — the cases where the user is moving
+        // the cursor faster than artwork can load:
+        //   - keyboard arrow / page nav (`KeyPress`)
+        //   - mouse-wheel scroll (`MillerScroll`)
+        //   - alphabet-strip jumps (`AlphabetJump`)
+        //
+        // Mouse clicks on a row (`MillerSelect`) and column-focus
+        // clicks (`FocusMillerColumn`) are *not* gated: those are
+        // intentional "show me this content" gestures, and the user
+        // expects the drilled-in column to populate its artwork
+        // straight away. We even *clear* the flag on those events so
+        // a click immediately after fast scrolling unblocks the
+        // freshly-drilled column.
+        match &message {
+            GuiMessage::KeyPress(_)
+            | GuiMessage::MillerScroll { .. }
+            | GuiMessage::AlphabetJump(_) => {
+                self.last_motion_at = std::time::Instant::now();
+                self.core.state.artwork.suppress_loads = true;
+            }
+            GuiMessage::MillerSelect { .. } | GuiMessage::FocusMillerColumn { .. } => {
+                self.core.state.artwork.suppress_loads = false;
+            }
+            _ => {}
+        }
+
+        // First-tick deferred install of the macOS global menu bar.
+        // Runs on the main thread (iced calls `update` from winit's run
+        // loop), and runs *after* winit's `applicationDidFinishLaunching:`
+        // hook — which would otherwise overwrite the muda menu with its
+        // own bare-bones default. The Menu wrapper is leaked so its Drop
+        // doesn't tear down the NSMenu NSApplication now retains.
+        #[cfg(all(target_os = "macos", feature = "native-menus"))]
+        if !self.macos_menu_installed {
+            tracing::info!("Installing macOS global muda menu (deferred from update)");
+            let menu = super::menu::build();
+            menu.init_for_nsapp();
+            std::mem::forget(menu);
+            self.macos_menu_installed = true;
+        }
+
         match message {
             GuiMessage::Noop => Task::none(),
 
@@ -517,6 +617,10 @@ impl App {
                     for col in nav.columns.iter_mut() {
                         col.artwork_visible = new_visible;
                     }
+                }
+                self.core.config.ui.cover_art_view = new_visible;
+                if let Err(e) = config::save_config(&self.core.config) {
+                    tracing::warn!("Failed to save cover_art_view: {e}");
                 }
                 Task::none()
             }
@@ -684,14 +788,31 @@ impl App {
             }
 
             GuiMessage::Action(action) => {
-                use crate::app::action::SettingsAction;
+                use crate::app::action::{NavigationAction, SettingsAction};
+                tracing::info!("dispatch action from message: {action:?}");
                 // Sign-out is the only action that should also dismiss
                 // every GUI-only popup — otherwise the Settings panel
                 // hovers above the auth screen post-logout, hiding the
                 // sign-in form.
                 let is_logout = matches!(&action, Action::Settings(SettingsAction::Logout));
+                // Any action that re-stacks the Miller columns (category
+                // switch, view change to/from Browse, jump-to-album)
+                // makes our `scroll_state` cache stale: the scrollables
+                // at miller-col-0 / miller-col-1 / … now contain a
+                // different column. Dropping the cache on these
+                // transitions complements the defensive clamp inside
+                // `miller_column::view` so the new column starts at the
+                // top no matter which path got us here.
+                let resets_columns = matches!(
+                    &action,
+                    Action::Navigation(NavigationAction::SetCategory(_))
+                        | Action::Navigation(NavigationAction::SetView(_))
+                );
                 let prev = self.core.state.view;
                 self.dispatch_sync(action);
+                if resets_columns {
+                    self.scroll_state.clear();
+                }
                 if is_logout {
                     self.settings_popup_open = false;
                     self.stations_popup_open = false;
@@ -714,6 +835,59 @@ impl App {
             }
 
             GuiMessage::MillerSelect { column_index, item_index, activate } => {
+                // Shift/cmd-click on a track row builds the column's
+                // multi-selection set and SUPPRESSES the drill/play
+                // actions — so the gesture is purely a selection
+                // change. The set lives on `BrowseColumn::selected_set`;
+                // the context menu reads it for "Play next / Add to
+                // queue" bulk actions. Plain clicks clear the set.
+                let mods = self.current_modifiers;
+                let shift = mods.shift();
+                let toggle_held = if cfg!(target_os = "macos") { mods.logo() } else { mods.control() };
+
+                let multi_gesture = (shift || toggle_held) && {
+                    let nav = self.core.state.browse_nav();
+                    nav.and_then(|n| n.columns.get(column_index))
+                        .map(|c| matches!(c.items.get(item_index), Some(crate::app::state::BrowseItem::Track { .. })))
+                        .unwrap_or(false)
+                };
+
+                if multi_gesture {
+                    if let Some(nav) = self.core.state.browse_nav_mut() {
+                        if let Some(col) = nav.columns.get_mut(column_index) {
+                            if shift {
+                                let anchor = col.selection_anchor.unwrap_or(col.selected_index);
+                                let (lo, hi) = if anchor <= item_index { (anchor, item_index) } else { (item_index, anchor) };
+                                col.selected_set.clear();
+                                for i in lo..=hi {
+                                    col.selected_set.insert(i);
+                                }
+                            } else {
+                                if !col.selected_set.remove(&item_index) {
+                                    col.selected_set.insert(item_index);
+                                }
+                                col.selection_anchor = Some(item_index);
+                            }
+                            col.selected_index = item_index;
+                        }
+                        nav.focused_column = column_index;
+                    }
+                    tracing::info!(
+                        "miller.click multi: col={column_index} idx={item_index} shift={shift} toggle={toggle_held}"
+                    );
+                    return Task::none();
+                }
+
+                // Plain click: clear any prior multi-selection on this
+                // column and fall through to the existing drill/play
+                // path.
+                if let Some(nav) = self.core.state.browse_nav_mut() {
+                    if let Some(col) = nav.columns.get_mut(column_index) {
+                        col.selected_set.clear();
+                        col.selection_anchor = Some(item_index);
+                    }
+                }
+
                 let actions = miller_click_actions(&mut self.core.state, column_index, item_index, activate);
                 let had_drill = !actions.is_empty();
                 for a in actions {
@@ -730,6 +904,14 @@ impl App {
                             nav.focused_column = column_index;
                         }
                     }
+                    // The drill replaces the column at column_index+1
+                    // (and may push deeper). Any cached scroll state for
+                    // those slots is from a previous column at that
+                    // index — leaving it in place makes the virtualizer
+                    // hide the new column's first rows behind a stale
+                    // top spacer. Drop them so the freshly-drilled
+                    // column starts at offset 0.
+                    self.scroll_state.retain(|&k, _| k <= column_index);
                     // Drilling adds a child column and can leave any
                     // ancestor's scroll position out of sync with its
                     // selected row (Iced's scrollable does not always
@@ -758,7 +940,12 @@ impl App {
 
             GuiMessage::Tick => {
                 self.handle_tick();
-                Task::none()
+                // Lazy-fetch sonic similars for the Browse track-pane.
+                // Driven from the tick so a stale focused-row that's
+                // missing its data eventually catches up — same
+                // approach as the visualizer safety-net.
+                let pane_similar_task = self.maybe_fetch_track_pane_similar();
+                pane_similar_task.unwrap_or_else(Task::none)
             }
 
             GuiMessage::SetVisualizerTab(tab) => {
@@ -1148,15 +1335,91 @@ impl App {
                 Task::none()
             }
 
+            GuiMessage::ModifiersChanged(mods) => {
+                self.current_modifiers = mods;
+                Task::none()
+            }
+
+            GuiMessage::TrackPaneSimilarLoaded { track_key, tracks } => {
+                self.track_pane_similar_loading.remove(&track_key);
+                self.track_pane_similar.insert(track_key, tracks);
+                Task::none()
+            }
+
+            GuiMessage::OpenStandaloneTrackContextMenu(track) => {
+                self.context_menu = build_track_context_menu(
+                    &self.core.state,
+                    *track,
+                    self.mouse_pos,
+                );
+                Task::none()
+            }
+
+            GuiMessage::PlayOneRandomAlbum => {
+                use rand::seq::IteratorRandom;
+                use crate::app::action::QueueAction;
+                let pick = self
+                    .core.state.library.albums
+                    .iter()
+                    .choose(&mut rand::thread_rng())
+                    .map(|a| (a.rating_key.clone(), a.title.clone()));
+                if let Some((rating_key, title)) = pick {
+                    self.dispatch_sync(Action::Queue(QueueAction::PlayAlbumNow {
+                        rating_key,
+                        title,
+                    }));
+                } else {
+                    self.core.state.set_error("No albums in library to pick from".to_string());
+                }
+                Task::none()
+            }
+
             GuiMessage::QueueDragStart(idx) => {
-                // Move the keyboard cursor to the clicked row so Delete
-                // (and other queue-key shortcuts) target it. The actual
-                // play/reorder decision is deferred to QueueDragEnd —
-                // a drag is detected by any subsequent `QueueDragOver`
-                // landing on a different row.
-                tracing::info!("queue.drag: start idx={idx}");
-                self.core.state.list_state.queue_index = idx;
-                self.queue_drag = Some((idx, false));
+                // Standard desktop multi-select semantics, applied to
+                // `state.queue.selected` so the existing shared
+                // `RemoveSelectedFromQueue` / `MoveSelectedTracksUp/Down`
+                // handlers fire over the right rows:
+                //
+                //   plain click    → clear selection, move cursor, set anchor
+                //   shift+click    → range from anchor (or cursor) to clicked
+                //   cmd/ctrl+click → toggle this row, set anchor
+                //
+                // The actual play/reorder decision still happens on
+                // QueueDragEnd; a drag is detected by any subsequent
+                // QueueDragOver landing on a different row. We
+                // suppress the drag wiring entirely on shift/cmd
+                // clicks so a multi-select gesture doesn't accidentally
+                // become a reorder.
+                let mods = self.current_modifiers;
+                let shift = mods.shift();
+                let toggle = if cfg!(target_os = "macos") { mods.logo() } else { mods.control() };
+                tracing::info!("queue.click: idx={idx} shift={shift} toggle={toggle}");
+
+                if shift {
+                    let anchor = self
+                        .queue_anchor
+                        .unwrap_or(self.core.state.list_state.queue_index);
+                    let (lo, hi) = if anchor <= idx { (anchor, idx) } else { (idx, anchor) };
+                    self.core.state.queue.selected.clear();
+                    for i in lo..=hi {
+                        self.core.state.queue.selected.insert(i);
+                    }
+                    self.core.state.list_state.queue_index = idx;
+                    // anchor stays put — that's how shift+shift+shift extends.
+                    self.queue_drag = None;
+                } else if toggle {
+                    if !self.core.state.queue.selected.remove(&idx) {
+                        self.core.state.queue.selected.insert(idx);
+                    }
+                    self.core.state.list_state.queue_index = idx;
+                    self.queue_anchor = Some(idx);
+                    self.queue_drag = None;
+                } else {
+                    self.core.state.queue.selected.clear();
+                    self.core.state.list_state.queue_index = idx;
+                    self.queue_anchor = Some(idx);
+                    self.queue_drag = Some((idx, false));
+                }
                 Task::none()
             }
 
@@ -1329,25 +1592,6 @@ impl App {
                 Task::none()
             }
 
-            GuiMessage::ToggleQueueVisualizer => {
-                use crate::app::action::SystemAction;
-                self.show_queue_visualizer = !self.show_queue_visualizer;
-                // When the user reveals the visualizer, kick off a
-                // waveform/spectrogram load for the current track so
-                // the canvas isn't stuck on "Generating…" forever.
-                // The shared loader fans out the right one based on
-                // the current `state.visualizer_tab`.
-                if self.show_queue_visualizer {
-                    use crate::app::state::VisualizerTab;
-                    let action = match self.core.state.visualizer_tab {
-                        VisualizerTab::Waveform => SystemAction::LoadWaveform,
-                        _ => SystemAction::LoadSpectrogram,
-                    };
-                    self.dispatch_sync(Action::System(action));
-                }
-                Task::none()
-            }
-
             GuiMessage::NavigateToArtist { artist_key } => {
                 use crate::app::action::{MillerAction, NavigationAction};
                 use crate::app::state::{BrowseCategory, View};
@@ -1446,12 +1690,12 @@ impl App {
                         Some(s) => (s.offset_y, s.bounds_h),
                         None => (0.0, 0.0),
                     },
+                    &self.track_pane_similar,
                 )
             }
             View::Queue | View::NowPlaying => super::screens::queue::view(
                 &self.core.state,
                 self.queue_drag.map(|(src, _)| src),
-                self.show_queue_visualizer,
                 self.stations_popup_open,
                 self.dj_modes_popup_open,
                 self.remix_tools_popup_open,
@@ -1469,7 +1713,11 @@ impl App {
         // visually noisy on the auth screen. Tabs are inside the
         // transport bar now and only shown when chrome is shown.
         let show_chrome = !matches!(self.core.state.view, View::Auth);
-        let menu_strip: Element<'_, GuiMessage> = if show_chrome {
+        // On macOS with native menus, the global menu bar at the top of
+        // the screen is the menu — there must be no second one attached
+        // to the window. Skip the in-window strip and dropdown entirely.
+        const IN_WINDOW_MENU: bool = !cfg!(all(target_os = "macos", feature = "native-menus"));
+        let menu_strip: Element<'_, GuiMessage> = if show_chrome && IN_WINDOW_MENU {
             menu_bar::bar(self.menu_open, &self.core.state)
         } else {
             iced::widget::Space::with_height(Length::Fixed(0.0)).into()
@@ -1488,7 +1736,7 @@ impl App {
         .into();
 
         // Menu dropdown floats over content without pushing it down.
-        let with_menu: Element<'_, GuiMessage> = if show_chrome {
+        let with_menu: Element<'_, GuiMessage> = if show_chrome && IN_WINDOW_MENU {
             if let Some(dropdown) = menu_bar::dropdown_overlay(self.menu_open, &self.core.state) {
                 iced::widget::stack![base, dropdown].into()
             } else {
@@ -1715,30 +1963,27 @@ impl App {
             }
         });
 
-        // Forward muda menu clicks into Iced messages. Only present when
-        // the `native-menus` feature is enabled.
+        // Forward muda menu clicks into Iced messages. The forwarder
+        // is installed during the first `update()` tick alongside
+        // `init_for_nsapp` — we just drain its tokio receiver here.
         #[cfg(feature = "native-menus")]
-        let menu_events = {
-            let menu_rx_holder = super::menu::take_event_receiver();
-            Subscription::run_with_id(
-                "textamp-menu-events",
-                iced::stream::channel(16, move |mut out| async move {
-                    let Some(rx) = menu_rx_holder else { return };
-                    loop {
-                        match rx.recv() {
-                            Ok(ev) => {
-                                if let Some(msg) = super::menu::menu_event_for_id(ev.id.0.as_str()) {
-                                    if out.send(msg).await.is_err() {
-                                        break;
-                                    }
-                                }
-                            }
-                            Err(_) => break,
-                        }
+        let menu_events = Subscription::run_with_id(
+            "textamp-menu-events",
+            iced::stream::channel(16, move |mut out| async move {
+                // The receiver is taken once: subsequent re-evaluations
+                // of `subscription()` would otherwise steal it from the
+                // already-running task. `take_forwarder_receiver` returns
+                // `None` after the first take, so this branch quietly
+                // exits on dupes.
+                let Some(mut rx) = super::menu::take_forwarder_receiver() else { return };
+                while let Some(msg) = rx.recv().await {
+                    tracing::info!("forwarding menu message to update: {msg:?}");
+                    if out.send(msg).await.is_err() {
+                        break;
                     }
-                }),
-            )
-        };
+                }
+            }),
+        );
 
         // 100 ms tick — drives playback position advancement, visualizer
         // data loading (safety-net in `Event::Tick` handler), marquee /
@@ -1752,17 +1997,24 @@ impl App {
         // release, even ones that land outside a queue row, so the
         // drag state can clear cleanly. Per-row mouse_area on_release
         // wouldn't fire if the drop landed outside the row hitbox.
-        let mouse_release_sub = iced::event::listen_with(|event, _status, _id| match event {
+        //
+        // The same subscription forwards `keyboard::Event::ModifiersChanged`
+        // events into the app — needed for shift/cmd-click multi-select
+        // because iced 0.13's mouse events don't carry modifier state.
+        let mouse_and_mods_sub = iced::event::listen_with(|event, _status, _id| match event {
             iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => {
                 Some(GuiMessage::QueueDragEnd)
+            }
+            iced::Event::Keyboard(iced::keyboard::Event::ModifiersChanged(m)) => {
+                Some(GuiMessage::ModifiersChanged(m))
             }
             _ => None,
         });
 
         #[cfg(feature = "native-menus")]
-        let subs = vec![core_events, keyboard_sub, resize_sub, tick_sub, mouse_release_sub, menu_events];
+        let subs = vec![core_events, keyboard_sub, resize_sub, tick_sub, mouse_and_mods_sub, menu_events];
         #[cfg(not(feature = "native-menus"))]
-        let subs = vec![core_events, keyboard_sub, resize_sub, tick_sub, mouse_release_sub];
+        let subs = vec![core_events, keyboard_sub, resize_sub, tick_sub, mouse_and_mods_sub];
 
         Subscription::batch(subs)
     }
@@ -1972,6 +2224,13 @@ impl App {
             &action,
             Action::Settings(crate::app::action::SettingsAction::ClearArtworkCache)
         );
+        // Snapshot persistable playback state before dispatch so we can
+        // detect changes (volume / mute) and write them to config. The
+        // shared `dispatch_playback` doesn't take `&mut Config`, so the
+        // GUI front-end is responsible for persisting these.
+        let prev_volume = self.core.state.playback.volume;
+        let prev_muted = self.core.state.playback.muted;
+
         let Core { state, client, audio, config, event_tx } = &mut self.core;
         let fut = dispatch::dispatch_action(action, state, client, audio, config, event_tx);
         if let Err(e) = futures::executor::block_on(fut) {
@@ -1979,6 +2238,18 @@ impl App {
         }
         if clears_art {
             super::images::clear_handle_cache();
+        }
+
+        // After block_on the destructured `&mut self.core` borrows end —
+        // safe to access self.core again. Persist any volume / mute
+        // change so it survives a relaunch.
+        let new_volume = self.core.state.playback.volume;
+        let new_muted = self.core.state.playback.muted;
+        if (new_volume - prev_volume).abs() > f32::EPSILON || new_muted != prev_muted {
+            self.core.config.playback.default_volume = new_volume;
+            if let Err(e) = config::save_config(&self.core.config) {
+                tracing::warn!("Failed to save volume: {e}");
+            }
         }
     }
 
@@ -1990,12 +2261,77 @@ impl App {
     ///
     /// Without this, the Now Playing cursor never moves and the visualizer
     /// data never loads when the user is viewing Now Playing.
+    /// If the Browse view's currently-focused Miller row is a Track
+    /// and we haven't yet cached sonic similars for it (and aren't
+    /// currently fetching), kick off `client.get_similar_tracks` as
+    /// an iced `Task::perform`. The resolved future arrives back as
+    /// `GuiMessage::TrackPaneSimilarLoaded`.
+    fn maybe_fetch_track_pane_similar(&mut self) -> Option<Task<GuiMessage>> {
+        use crate::app::state::{BrowseItem, View};
+        if self.core.state.view != View::Browse {
+            return None;
+        }
+        let track = {
+            let nav = self.core.state.browse_nav()?;
+            let col = nav.focused()?;
+            let item = col.items.get(col.selected_index)?;
+            if !matches!(item, BrowseItem::Track { .. }) {
+                return None;
+            }
+            col.tracks.get(col.selected_index)?.clone()
+        };
+        let key = track.rating_key.clone();
+        if self.track_pane_similar.contains_key(&key)
+            || self.track_pane_similar_loading.contains(&key)
+        {
+            return None;
+        }
+        self.track_pane_similar_loading.insert(key.clone());
+        let client = self.core.client.clone();
+        let key_for_task = key.clone();
+        Some(Task::perform(
+            async move {
+                client.get_similar_tracks(&key_for_task, 12)
+                    .await
+                    .unwrap_or_default()
+            },
+            move |tracks| GuiMessage::TrackPaneSimilarLoaded {
+                track_key: key.clone(),
+                tracks,
+            },
+        ))
+    }
+
     fn handle_tick(&mut self) {
         use crate::app::event_core::PlaybackEvent;
         use crate::app::state::{OutputTarget, PlayStatus};
         use std::time::Duration as StdDuration;
 
         const TICK_MS: u64 = 100;
+        /// How long the user must be still before the lazy-art gate
+        /// reopens. Tuned by the user — short enough that the wait
+        /// feels intentional, long enough to absorb a held-down arrow
+        /// key without flapping.
+        const ART_LOAD_PAUSE: StdDuration = StdDuration::from_millis(1000);
+
+        // Lazy-art gate. While motion has been frequent, every
+        // `LoadAlbumArt` returned by the shared dispatcher has been
+        // dropped (see `dispatch_system::SystemAction::LoadAlbumArt`).
+        // Once the cursor has been still for `ART_LOAD_PAUSE`, clear
+        // the flag and re-collect the focused album column's viewport
+        // so its art loads in one batch.
+        if self.core.state.artwork.suppress_loads
+            && self.last_motion_at.elapsed() >= ART_LOAD_PAUSE
+        {
+            self.core.state.artwork.suppress_loads = false;
+            let batch = crate::app::handlers::dispatch_miller::collect_viewport_art(
+                &self.core.state,
+            );
+            if !batch.is_empty() {
+                use crate::app::action::SystemAction;
+                self.dispatch_sync(Action::System(SystemAction::LoadAlbumArt(batch)));
+            }
+        }
 
         // Audio self-heal. Windows can refuse to expose a default
         // output device for several seconds after the previous holder
@@ -2166,22 +2502,60 @@ fn build_miller_context_menu(
                     }),
                 }
             };
+            // Multi-selection: when the right-clicked row is part of
+            // an active selection set on this column, the menu acts on
+            // every selected track rather than the single right-clicked
+            // row. We materialise the Tracks here (the selected_set is
+            // index-based; the parallel `col.tracks` carries the full
+            // payloads). "Play track" is always the singular form
+            // because it sets the cursor / starts playback at one
+            // point, but Add-to-queue and Play-next become bulk.
+            let multi_active = !col.selected_set.is_empty()
+                && col.selected_set.contains(&item_index);
+            let multi_tracks: Vec<crate::plex::models::Track> = if multi_active {
+                col.selected_set.iter()
+                    .filter_map(|&i| col.tracks.get(i).cloned())
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let multi_count = multi_tracks.len();
+
+            // Singular vs plural — when a multi-selection is active,
+            // every label that names the unit-of-action says "tracks"
+            // so it's obvious the menu acts on the whole selection.
+            let unit = if multi_active && multi_count > 1 { "tracks" } else { "track" };
             entries.push(Entry::Entry {
-                label: "Play track".to_string(),
+                label: format!("Play {unit}"),
                 actions: vec![play_action(true)],
             });
             entries.push(Entry::Entry {
-                label: "Play track and following".to_string(),
+                label: format!("Play {unit} and following"),
                 actions: vec![play_action(false)],
             });
-            entries.push(Entry::Entry {
-                label: "Add to end of queue".to_string(),
-                actions: vec![Action::Queue(QueueAction::EnqueueSelection)],
-            });
-            entries.push(Entry::Entry {
-                label: "Play next in queue".to_string(),
-                actions: vec![Action::Queue(QueueAction::EnqueueSelectionNext)],
-            });
+            if multi_active && multi_count > 1 {
+                let bulk_enqueue: Vec<Action> = multi_tracks.iter()
+                    .cloned()
+                    .map(|t| Action::Queue(QueueAction::EnqueueTrack(t)))
+                    .collect();
+                entries.push(Entry::Entry {
+                    label: format!("Add {multi_count} tracks to end of queue"),
+                    actions: bulk_enqueue,
+                });
+                entries.push(Entry::Entry {
+                    label: format!("Play {multi_count} tracks next in queue"),
+                    actions: vec![Action::Queue(QueueAction::EnqueueTracksNext(multi_tracks.clone()))],
+                });
+            } else {
+                entries.push(Entry::Entry {
+                    label: "Add to end of queue".to_string(),
+                    actions: vec![Action::Queue(QueueAction::EnqueueSelection)],
+                });
+                entries.push(Entry::Entry {
+                    label: "Play next in queue".to_string(),
+                    actions: vec![Action::Queue(QueueAction::EnqueueSelectionNext)],
+                });
+            }
             entries.push(Entry::Sep);
 
             if let BrowseItem::Track { key, title, .. } = item {
@@ -2371,7 +2745,7 @@ fn build_queue_context_menu(
     row_index: usize,
     mouse_pos: (f32, f32),
 ) -> Option<super::widgets::context_menu::ContextMenuState> {
-    use crate::app::action::{QueueAction, RadioAction, SearchAction};
+    use crate::app::action::{DataAction, QueueAction, RadioAction, SearchAction};
     use crate::app::state::PlaybackMode;
     use super::widgets::context_menu::{ContextMenuState, Entry};
 
@@ -2406,36 +2780,94 @@ fn build_queue_context_menu(
         });
     }
     entries.push(Entry::Sep);
-    // Move up / down / delete: keyboard-equivalent rearrangement
-    // operations exposed in the menu so users who don't know /
-    // can't manage drag-and-drop still have a way to reorder.
-    // The first row can't move up; the last can't move down.
-    if row_index > 0 {
-        entries.push(Entry::Custom {
-            label: "Move up".to_string(),
-            message: GuiMessage::MoveQueueRowUp(row_index),
-        });
-    }
-    if row_index + 1 < len {
-        entries.push(Entry::Custom {
-            label: "Move down".to_string(),
-            message: GuiMessage::MoveQueueRowDown(row_index),
-        });
-    }
-    entries.push(Entry::Entry {
-        label: "Delete from queue".to_string(),
-        actions: vec![Action::Queue(QueueAction::RemoveFromQueue(row_index))],
-    });
+    // Move up / down / delete: when a multi-selection is active and
+    // the right-clicked row is part of it, the menu operates on the
+    // whole selection (shared `MoveSelectedTracksUp/Down` and
+    // `RemoveSelectedFromQueue` handlers). Otherwise it falls back to
+    // the single-row variants targeting just the right-clicked row.
+    let multi_active = !state.queue.selected.is_empty()
+        && state.queue.selected.contains(&row_index);
+    let multi_count = state.queue.selected.len();
 
-    // "Show Artist Bio" and "Open in Library" — present on every
-    // track context menu regardless of category. Pulls keys + names
-    // off the queue row's stored Track. The Open-in-Library entry
-    // is suppressed when there's no artist key (e.g. radio rows
-    // where Plex doesn't return one) so we don't show a dead entry.
+    if multi_active && multi_count > 1 {
+        entries.push(Entry::Entry {
+            label: format!("Move {multi_count} selected up"),
+            actions: vec![Action::Queue(QueueAction::MoveSelectedTracksUp)],
+        });
+        entries.push(Entry::Entry {
+            label: format!("Move {multi_count} selected down"),
+            actions: vec![Action::Queue(QueueAction::MoveSelectedTracksDown)],
+        });
+        entries.push(Entry::Entry {
+            label: format!("Delete {multi_count} selected from queue"),
+            actions: vec![Action::Queue(QueueAction::RemoveSelectedFromQueue)],
+        });
+    } else {
+        if row_index > 0 {
+            entries.push(Entry::Custom {
+                label: "Move up".to_string(),
+                message: GuiMessage::MoveQueueRowUp(row_index),
+            });
+        }
+        if row_index + 1 < len {
+            entries.push(Entry::Custom {
+                label: "Move down".to_string(),
+                message: GuiMessage::MoveQueueRowDown(row_index),
+            });
+        }
+        entries.push(Entry::Entry {
+            label: "Delete from queue".to_string(),
+            actions: vec![Action::Queue(QueueAction::RemoveFromQueue(row_index))],
+        });
+    }
+
+    // Similar / artist-context entries: every queue track row gets
+    // the same sonic-similarity affordances Browse offers, so the
+    // user never has to round-trip through Library to find them.
+    // "Show Similar Tracks" loads tracks that are sonically similar
+    // (Plex `/similar` endpoint); "Show Similar Albums" pivots to the
+    // parent album. "Show Artist Bio" / "Open in Library" stay at the
+    // bottom as before.
     if let Some(t) = track {
+        let track_key = t.rating_key.clone();
+        let track_label = format!("{} - {}", t.artist_name(), t.title);
+        let album_key = t.parent_rating_key.clone();
+        let album_label = t.album_name().to_string();
+
+        entries.push(Entry::Sep);
+        entries.push(Entry::Custom {
+            label: "Show Similar Tracks".to_string(),
+            message: super::message::GuiMessage::ShowSimilarPopup(vec![
+                Action::Data(DataAction::LoadSimilarTracks {
+                    rating_key: track_key,
+                    title: track_label,
+                }),
+            ]),
+        });
+        if let (Some(ak), false) = (album_key, album_label.is_empty()) {
+            entries.push(Entry::Custom {
+                label: "Show Similar Albums".to_string(),
+                message: super::message::GuiMessage::ShowSimilarPopup(vec![
+                    Action::Data(DataAction::LoadSimilarAlbums {
+                        rating_key: ak,
+                        title: album_label,
+                    }),
+                ]),
+            });
+        }
+
         if let Some(akey) = t.grandparent_rating_key.clone() {
             let aname = t.artist_name().to_string();
             if !aname.is_empty() {
+                entries.push(Entry::Custom {
+                    label: "Related Artists".to_string(),
+                    message: super::message::GuiMessage::ShowRelatedPopup(vec![
+                        Action::Data(DataAction::LoadRelated {
+                            artist_key: akey.clone(),
+                            title: aname.clone(),
+                        }),
+                    ]),
+                });
                 entries.push(Entry::Sep);
                 entries.push(Entry::Entry {
                     label: "Show Artist Bio".to_string(),
@@ -2454,6 +2886,114 @@ fn build_queue_context_menu(
         }
     }
 
+    Some(ContextMenuState {
+        x: mouse_pos.0,
+        y: mouse_pos.1,
+        entries,
+    })
+}
+
+/// Build the right-click context menu for a row that carries a
+/// full `Track` payload but isn't anchored to a Miller column or
+/// queue position — e.g. the "Sonically Similar" rows in the Browse
+/// track-details pane. Mirrors the standard track menu the rest of
+/// the app uses (queue / Miller column track row): Play, Play next /
+/// Add to queue, Show Similar Tracks, Show Similar Albums, Related
+/// Artists, Show Artist Bio, Open in Library, Sonic Adventure.
+fn build_track_context_menu(
+    _state: &AppState,
+    track: crate::plex::models::Track,
+    mouse_pos: (f32, f32),
+) -> Option<super::widgets::context_menu::ContextMenuState> {
+    use crate::app::action::{DataAction, QueueAction, SearchAction};
+    use super::widgets::context_menu::{ContextMenuState, Entry};
+
+    let mut entries: Vec<Entry> = Vec::new();
+    let track_key = track.rating_key.clone();
+    let track_label = format!("{} - {}", track.artist_name(), track.title);
+    let album_key = track.parent_rating_key.clone();
+    let album_label = track.parent_title.clone();
+    let artist_key = track.grandparent_rating_key.clone();
+    let artist_name = track.artist_name().to_string();
+
+    entries.push(Entry::Entry {
+        label: "Play track".to_string(),
+        actions: vec![Action::Queue(QueueAction::PlayTrack(track.clone()))],
+    });
+    entries.push(Entry::Entry {
+        label: "Play next in queue".to_string(),
+        actions: vec![Action::Queue(QueueAction::EnqueueTracksNext(vec![track.clone()]))],
+    });
+    entries.push(Entry::Entry {
+        label: "Add to end of queue".to_string(),
+        actions: vec![Action::Queue(QueueAction::EnqueueTrack(track.clone()))],
+    });
+    entries.push(Entry::Sep);
+
+    entries.push(Entry::Custom {
+        label: "Show Similar Tracks".to_string(),
+        message: super::message::GuiMessage::ShowSimilarPopup(vec![
+            Action::Data(DataAction::LoadSimilarTracks {
+                rating_key: track_key.clone(),
+                title: track_label.clone(),
+            }),
+        ]),
+    });
+    if let (Some(ak), Some(al)) = (album_key.clone(), album_label.clone()) {
+        if !al.is_empty() {
+            entries.push(Entry::Custom {
+                label: "Show Similar Albums".to_string(),
+                message: super::message::GuiMessage::ShowSimilarPopup(vec![
+                    Action::Data(DataAction::LoadSimilarAlbums {
+                        rating_key: ak,
+                        title: al,
+                    }),
+                ]),
+            });
+        }
+    }
+    if let Some(ak) = artist_key.clone() {
+        if !artist_name.is_empty() {
+            entries.push(Entry::Custom {
+                label: "Related Artists".to_string(),
+                message: super::message::GuiMessage::ShowRelatedPopup(vec![
+                    Action::Data(DataAction::LoadRelated {
+                        artist_key: ak,
+                        title: artist_name.clone(),
+                    }),
+                ]),
+            });
+        }
+    }
+    entries.push(Entry::Entry {
+        label: "Sonic Adventure\u{2026}".to_string(),
+        actions: vec![Action::Search(SearchAction::OpenAdventureLauncherWithStart {
+            start_track: Box::new(track.clone()),
+        })],
+    });
+
+    if let Some(ak) = artist_key {
+        if !artist_name.is_empty() {
+            entries.push(Entry::Sep);
+            entries.push(Entry::Entry {
+                label: "Show Artist Bio".to_string(),
+                actions: vec![Action::Search(SearchAction::ShowArtistBio {
+                    artist_key: ak,
+                    artist_name: artist_name.clone(),
+                })],
+            });
+            if let Some(open) = open_in_library_for_track_obj(&track) {
+                entries.push(Entry::Entry {
+                    label: "Open in Library".to_string(),
+                    actions: vec![open],
+                });
+            }
+        }
+    }
+
+    if entries.is_empty() {
+        return None;
+    }
     Some(ContextMenuState {
         x: mouse_pos.0,
         y: mouse_pos.1,

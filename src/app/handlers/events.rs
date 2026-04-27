@@ -646,6 +646,13 @@ pub fn handle_app_event(
         Event::Playback(PlaybackEvent::TrackStarted) => {
             state.playback.status = PlayStatus::Playing;
             state.playback.position_ms = 0;
+            // Successful playback supersedes any prior error banner
+            // ("Playback stopped after multiple consecutive errors",
+            // "Track Not Found", etc). Without this the red banner
+            // sticks around even after the user resumes / the queue
+            // recovers, making the app feel broken when it isn't.
+            state.consecutive_playback_errors = 0;
+            state.clear_error();
             vec![]
         }
         Event::Playback(PlaybackEvent::TrackEnded) => {
@@ -1447,9 +1454,12 @@ pub fn handle_app_event(
             }
 
             // Visualizer data safety net: ensure waveform/spectrogram are generated
-            // when on NowPlaying view. This catches all edge cases (track change,
-            // re-entry, failed downloads) without fragile event-based triggering.
-            if state.view == View::NowPlaying {
+            // when the user is on a view where the visualizer panel is rendered.
+            // The GUI's Queue view now shows the visualizer always-on in its
+            // bottom half, so we trip this on both View::NowPlaying and
+            // View::Queue. Catches all edge cases (track change, re-entry,
+            // failed downloads) without fragile event-based triggering.
+            if matches!(state.view, View::NowPlaying | View::Queue) {
                 if let Some(track) = state.current_track().cloned() {
                     let tk = &track.rating_key;
 

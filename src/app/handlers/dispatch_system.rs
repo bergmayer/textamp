@@ -210,9 +210,21 @@ pub async fn dispatch(
         SystemAction::LoadWaveform => {
             // Only generate waveform if we have a track and don't already have data
             if let Some(track) = state.current_track().cloned() {
+                // Self-correcting track_key sync. Without this the gate
+                // below silently no-ops when the cached `track_key` is
+                // stale (e.g. a previous track), and the only thing
+                // that ever fixes it is the Tick safety-net on
+                // `View::NowPlaying` — which never runs on the Queue
+                // view's visualizer toggle. Resetting here makes
+                // `LoadWaveform` work from any view that dispatches it.
+                if state.waveform.track_key.as_ref() != Some(&track.rating_key) {
+                    state.waveform = crate::app::state::WaveformState::default();
+                    state.waveform.track_key = Some(track.rating_key.clone());
+                    state.spectrogram = crate::app::state::SpectrogramState::default();
+                    state.spectrogram.track_key = Some(track.rating_key.clone());
+                }
                 let needs_generation = state.waveform.data.is_none()
-                    && !state.waveform.generating
-                    && state.waveform.track_key.as_ref() == Some(&track.rating_key);
+                    && !state.waveform.generating;
 
                 if needs_generation {
                     state.waveform.generating = true;
@@ -226,7 +238,34 @@ pub async fn dispatch(
                     let duration_ms = track.duration_ms();
                     let event_tx = event_tx.clone();
 
-                    if let Ok(stream_url) = client.get_stream_url(&track) {
+                    // Get the stream URL synchronously — if it fails
+                    // (no active server, missing token, etc.) we MUST
+                    // emit a Failed event so `generating` clears.
+                    // Without this, the panel is stuck on "Generating…"
+                    // forever and the only fix is a track change.
+                    let stream_url = match client.get_stream_url(&track) {
+                        Ok(url) => url,
+                        Err(e) => {
+                            let err_msg = format!("stream URL unavailable: {}", e);
+                            let track_key_err = track_key.clone();
+                            let event_tx_err = event_tx.clone();
+                            let also_sg = also_generate_spectrogram;
+                            tokio::spawn(async move {
+                                let _ = event_tx_err.send(VisualizerEvent::WaveformFailed {
+                                    track_key: track_key_err.clone(),
+                                    error: err_msg.clone(),
+                                }.into()).await;
+                                if also_sg {
+                                    let _ = event_tx_err.send(VisualizerEvent::SpectrogramFailed {
+                                        track_key: track_key_err,
+                                        error: err_msg,
+                                    }.into()).await;
+                                }
+                            });
+                            return Ok(vec![]);
+                        }
+                    };
+                    {
                         let token = client.token().map(|s| s.to_string());
 
                         tokio::spawn(async move {
@@ -349,9 +388,15 @@ pub async fn dispatch(
             // Generation is normally co-computed with waveform, but if waveform is
             // already loaded (e.g., re-entering NowPlaying), we download independently.
             if let Some(track) = state.current_track().cloned() {
+                // Self-correcting track_key sync (same reasoning as
+                // `LoadWaveform` above — gate must not silently no-op
+                // on stale state when called from a non-NowPlaying view).
+                if state.spectrogram.track_key.as_ref() != Some(&track.rating_key) {
+                    state.spectrogram = crate::app::state::SpectrogramState::default();
+                    state.spectrogram.track_key = Some(track.rating_key.clone());
+                }
                 let needs_generation = state.spectrogram.data.is_none()
-                    && !state.spectrogram.generating
-                    && state.spectrogram.track_key.as_ref() == Some(&track.rating_key);
+                    && !state.spectrogram.generating;
 
                 if needs_generation {
                     // Check cache first
@@ -379,7 +424,27 @@ pub async fn dispatch(
                         let duration_ms = track.duration_ms();
                         let event_tx = event_tx.clone();
 
-                        if let Ok(stream_url) = client.get_stream_url(&track) {
+                        // Same defensive failure path as `LoadWaveform`:
+                        // if get_stream_url fails synchronously we
+                        // MUST emit `SpectrogramFailed`, otherwise
+                        // `generating` stays true and the panel is
+                        // stuck on "Generating spectrogram…".
+                        let stream_url = match client.get_stream_url(&track) {
+                            Ok(url) => url,
+                            Err(e) => {
+                                let err_msg = format!("stream URL unavailable: {}", e);
+                                let track_key_err = track_key.clone();
+                                let event_tx_err = event_tx.clone();
+                                tokio::spawn(async move {
+                                    let _ = event_tx_err.send(VisualizerEvent::SpectrogramFailed {
+                                        track_key: track_key_err,
+                                        error: err_msg,
+                                    }.into()).await;
+                                });
+                                return Ok(vec![]);
+                            }
+                        };
+                        {
                             let token = client.token().map(|s| s.to_string());
 
                             tokio::spawn(async move {
@@ -419,6 +484,13 @@ pub async fn dispatch(
             }
         }
         SystemAction::LoadAlbumArt(batch) => {
+            // Lazy-load gate: while the GUI flags rapid input motion,
+            // skip the synchronous disk-cache reads + spawn so the UI
+            // thread isn't stalled scrolling. The GUI re-fires this
+            // action against the current viewport once motion settles.
+            if state.artwork.suppress_loads {
+                return Ok(vec![]);
+            }
             let artwork_cache = crate::plex::ArtworkCache::default();
             let warm_threshold = crate::plex::constants::CACHE_VERY_STALE_THRESHOLD_SECS;
 

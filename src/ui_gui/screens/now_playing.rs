@@ -103,9 +103,15 @@ pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
         .height(Length::Fill)
         .padding(8)
         .style(|theme: &Theme| {
+            // Canvas bg = `background.base.color` so the bars (drawn
+            // with `background.strong.color` in `waveform_canvas`) keep
+            // their guaranteed-contrasting pair from the theme palette.
+            // Hard-coding BLACK here used to look fine on Solarized
+            // Dark but turned the Black-and-White theme's pure-black
+            // bars invisible against a pure-black canvas.
             let p = theme.extended_palette();
             container::Style {
-                background: Some(Background::Color(Color::BLACK)),
+                background: Some(Background::Color(p.background.base.color)),
                 border: Border {
                     color: p.background.strong.color,
                     width: 1.0,
@@ -179,9 +185,12 @@ pub fn visualizer_panel(state: &AppState) -> Element<'_, GuiMessage> {
         .height(Length::Fill)
         .padding(8)
         .style(|theme: &Theme| {
+            // Same fix as the Now Playing variant above — theme bg
+            // pair instead of hard BLACK so monochrome themes don't
+            // collapse the bars onto an identical-colour canvas.
             let p = theme.extended_palette();
             container::Style {
-                background: Some(Background::Color(Color::BLACK)),
+                background: Some(Background::Color(p.background.base.color)),
                 border: Border {
                     color: p.background.strong.color,
                     width: 1.0,

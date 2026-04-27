@@ -73,6 +73,15 @@ fn iced_to_crossterm_mods(m: keyboard::Modifiers) -> KeyModifiers {
     if m.control() { out |= KeyModifiers::CONTROL; }
     if m.shift()   { out |= KeyModifiers::SHIFT; }
     if m.alt()     { out |= KeyModifiers::ALT; }
+    // Cmd on macOS is the platform-conventional command modifier — map it
+    // onto CONTROL so the shared `key_input::handle_key` (which only
+    // matches CONTROL for things like Ctrl+F / Ctrl+L / Ctrl+P) fires the
+    // same actions for Cmd+F / Cmd+L / Cmd+P. Two Cmd-bound items the
+    // shared handler ALSO matches against SUPER (Cmd+Q quit, Cmd+W close)
+    // are unaffected — both branches are accepted.
+    #[cfg(target_os = "macos")]
+    if m.logo()    { out |= KeyModifiers::CONTROL; }
+    #[cfg(not(target_os = "macos"))]
     if m.logo()    { out |= KeyModifiers::SUPER; }
     out
 }

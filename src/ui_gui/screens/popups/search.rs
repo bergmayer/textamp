@@ -126,6 +126,7 @@ pub fn view<'a>(state: &'a AppState) -> Element<'a, GuiMessage> {
 
     let body = scrollable(Column::with_children(rows).spacing(2))
         .direction(crate::ui_gui::widgets::fat_vertical_scrollbar())
+        .style(crate::ui_gui::widgets::chunky_scrollable_style)
         .height(Length::Fixed(RESULTS_HEIGHT));
 
     container(

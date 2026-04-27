@@ -164,13 +164,13 @@ fn tab_button(tab: Tab, active: bool) -> Element<'static, GuiMessage> {
             // inactive tab without ever collapsing to same-colour
             // text on bg.
             let (bg, fg) = if active {
-                (p.background.strong.color, p.background.strong.text)
+                (p.primary.weak.color, p.primary.weak.text)
             } else {
                 let hover = matches!(status, button::Status::Hovered | button::Status::Pressed);
                 if hover {
                     (p.primary.base.color, p.primary.base.text)
                 } else {
-                    (p.primary.weak.color, p.primary.weak.text)
+                    (p.background.strong.color, p.background.strong.text)
                 }
             };
             button::Style {

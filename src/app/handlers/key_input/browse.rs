@@ -765,20 +765,31 @@ pub fn handle_browse_nav_keys(
         // Shift+letter: jump to first item where first char matches current item's first char
         //               AND second char matches the pressed letter
         KeyCode::Char(c) if c.is_ascii_alphabetic() && !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            // Use the same `sort_key` the list is sorted by — strips
+            // leading "The " etc., so "The Beatles" lives under "b" and
+            // pressing `b` actually finds it. Without this, pressing
+            // `b` searches for raw-title-starts-with-`b` and misses
+            // every "The X" artist that's visually under B.
+            use crate::app::handlers::helpers;
             if let Some(col) = nav.focused_mut() {
                 let letter_lower = c.to_ascii_lowercase();
                 let use_second_char = key.modifiers.contains(KeyModifiers::SHIFT);
+                let sorted_first = |title: &str| -> Option<char> {
+                    helpers::sort_key(title).chars().next()
+                };
 
                 if use_second_char {
-                    // Get the first letter of the currently selected item
+                    // Anchor on the section letter (sort-key-based) of
+                    // the currently selected item, then advance to the
+                    // first item whose second sort-key char matches.
                     let first_letter = col.items.get(col.selected_index)
-                        .and_then(|item| item.title().chars().next())
+                        .and_then(|item| sorted_first(item.title()))
                         .map(|ch| ch.to_ascii_lowercase());
 
                     if let Some(first_letter) = first_letter {
-                        // Find first item starting with that letter AND having pressed letter as second char
                         if let Some(idx) = col.items.iter().position(|item| {
-                            let mut chars = item.title().chars();
+                            let key = helpers::sort_key(item.title());
+                            let mut chars = key.chars();
                             let first = chars.next().map(|ch| ch.to_ascii_lowercase());
                             let second = chars.next().map(|ch| ch.to_ascii_lowercase());
                             first == Some(first_letter) && second == Some(letter_lower)
@@ -787,9 +798,8 @@ pub fn handle_browse_nav_keys(
                         }
                     }
                 } else {
-                    // Normal first-letter jump
                     if let Some(idx) = col.items.iter().position(|item| {
-                        item.title().chars().next()
+                        sorted_first(item.title())
                             .map(|ch| ch.to_ascii_lowercase() == letter_lower)
                             .unwrap_or(false)
                     }) {

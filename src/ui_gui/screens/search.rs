@@ -42,6 +42,7 @@ pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
 
     let body = scrollable(Column::with_children(rows).spacing(2))
         .direction(crate::ui_gui::widgets::fat_vertical_scrollbar())
+        .style(crate::ui_gui::widgets::chunky_scrollable_style)
         .height(Length::Fill);
 
     container(column![text("Search").size(16), query, body].spacing(8).padding(12))

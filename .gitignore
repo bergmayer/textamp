@@ -2,3 +2,10 @@
 
 # dev loop artifacts
 dev/out/
+
+# macOS metadata
+.DS_Store
+**/.DS_Store
+
+# Claude Code per-project workspace (chat transcripts, memory).
+.claude/

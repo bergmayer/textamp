@@ -194,10 +194,16 @@ impl Default for UiConfig {
 }
 
 fn default_ui_scale() -> f32 {
-    // 1.25 reads comfortably on a typical 1080p+ display. Existing
-    // 1.0 saved values are honoured (serde reads them back); only
-    // fresh installs / rest-to-default land on 1.25.
-    1.25
+    // macOS handles HiDPI by rendering at 2× and downsampling, so a
+    // 1.25 logical scale on top of that produces oversized chrome —
+    // 1.0 reads correctly. Other platforms stay on 1.25, which suits
+    // typical 1080p+ Windows/Linux displays. Existing saved values
+    // are honoured (serde reads them back); only fresh installs /
+    // reset-to-default pick this up.
+    #[cfg(target_os = "macos")]
+    { 1.0 }
+    #[cfg(not(target_os = "macos"))]
+    { 1.25 }
 }
 
 /// Clamp bounds for the user-settable UI scale. Keep the UI within

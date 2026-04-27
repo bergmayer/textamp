@@ -9,16 +9,16 @@
 use iced::widget::{button, column as iced_column, container, image, scrollable, text, Column, Row, Space};
 use iced::{Alignment, Background, Border, Color, Element, Length, Theme};
 
-use crate::app::action::{BrowseAction, NavigationAction, QueueAction};
+use crate::app::action::{NavigationAction, QueueAction};
 use crate::app::state::BrowseCategory;
 use crate::app::{Action, AppState};
 use crate::plex::models::{FolderColumn, FolderItem, FolderItemType, Track};
 use crate::ui_gui::message::GuiMessage;
 use crate::ui_gui::widgets::miller_column;
-use crate::ui_gui::widgets::transport_bar::{popout_button_style, primary_action_button};
+use crate::ui_gui::widgets::transport_bar::primary_action_button;
 
 const CATEGORY_COL_WIDTH: f32 = 160.0;
-const TRACK_DETAILS_WIDTH: f32 = 320.0;
+const TRACK_DETAILS_WIDTH: f32 = 380.0;
 const ALPHABET_STRIP_WIDTH: f32 = 30.0;
 const ALPHABET_STRIP_FONT: f32 = 15.0;
 
@@ -32,6 +32,7 @@ pub fn view<'a>(
     state: &'a AppState,
     viewport_width_logical: f32,
     scroll_info: impl Fn(usize) -> (f32, f32) + Copy + 'a,
+    track_pane_similar: &'a std::collections::HashMap<String, Vec<Track>>,
 ) -> Element<'a, GuiMessage> {
     // The alphabet strip is conceptually part of the artists column
     // — it scrolls through the alphabetised artist list. Hidden:
@@ -47,7 +48,14 @@ pub fn view<'a>(
     let artist_descending = artist_col0.map_or(false, |c| !c.sort_ascending);
     let show_strip = matches!(state.browse_category, BrowseCategory::Library) && !artist_shuffled;
     let strip_reserved = if show_strip { ALPHABET_STRIP_WIDTH + 4.0 } else { 0.0 };
-    let details_reserved = if state.track_details.is_some() { TRACK_DETAILS_WIDTH + 4.0 } else { 0.0 };
+    // The track-details pane is purely a function of the currently
+    // focused Miller column: when its highlighted row is a Track, we
+    // show the pane and feed it that track's full data. Navigating to
+    // a non-track column (artists/albums/etc.) hides the pane
+    // automatically — no stale "last clicked track" lingering on the
+    // right while the left columns moved on.
+    let details_track = focused_track(state);
+    let details_reserved = if details_track.is_some() { TRACK_DETAILS_WIDTH + 4.0 } else { 0.0 };
     let content_width = (viewport_width_logical - CATEGORY_COL_WIDTH - strip_reserved - details_reserved - 16.0)
         .max(MIN_MILLER_COL_WIDTH);
     let category_col = category_column(state);
@@ -58,8 +66,8 @@ pub fn view<'a>(
         children.push(alphabet_strip(artist_descending));
     }
     children.push(content);
-    if let Some(track) = state.track_details.as_ref() {
-        children.push(track_details_pane(track, state));
+    if let Some(track) = details_track {
+        children.push(track_details_pane(track, state, track_pane_similar));
     }
 
     let body = Row::with_children(children)
@@ -147,21 +155,88 @@ fn alphabet_strip<'a>(descending: bool) -> Element<'a, GuiMessage> {
 /// Track-details side pane. Shown to the right of the Miller columns
 /// whenever the user clicks a track row. Replaces (does not stack)
 /// on each new track click — single-pane drill, terminal node.
-fn track_details_pane<'a>(track: &'a Track, state: &'a AppState) -> Element<'a, GuiMessage> {
+/// One row in the "Sonically Similar" list. Click → navigate to the
+/// track's album in the Library (artist + album drill via the shared
+/// `BrowseAction::OpenInLibrary`); the user lands at the album view
+/// with the row highlighted. Right-click → standard track context
+/// menu (Play / Add to queue / Show Similar / Open in Library / …).
+fn similar_row<'a>(track: &'a Track) -> Element<'a, GuiMessage> {
+    use crate::app::action::BrowseAction;
+    use iced::widget::{button, mouse_area};
+    let label = format!("{} \u{2014} {}", track.title, track.track_artist());
+    let click_action: Option<GuiMessage> = match (
+        track.grandparent_rating_key.clone(),
+        track.parent_rating_key.clone(),
+    ) {
+        (Some(artist_key), album_key) => Some(GuiMessage::Action(Action::Browse(
+            BrowseAction::OpenInLibrary {
+                artist_key,
+                artist_name: track.artist_name().to_string(),
+                album_key,
+                album_title: track.parent_title.clone(),
+            },
+        ))),
+        _ => None,
+    };
+    let body = button(text(label).size(12))
+        .width(Length::Fill)
+        .padding([3, 8])
+        .on_press_maybe(click_action)
+        .style(|theme: &Theme, status: button::Status| {
+            let p = theme.extended_palette();
+            let (bg, fg) = match status {
+                button::Status::Hovered => (p.background.weak.color, p.background.weak.text),
+                _ => (Color::TRANSPARENT, p.background.base.text),
+            };
+            button::Style {
+                background: Some(Background::Color(bg)),
+                text_color: fg,
+                border: Border::default(),
+                ..button::Style::default()
+            }
+        });
+    // Right-click → standard track context menu (Play / Play next /
+    // Add to queue / Show Similar Tracks / Show Similar Albums /
+    // Related Artists / Sonic Adventure / Show Artist Bio / Open in
+    // Library). Same as the menu Browse miller-column track rows and
+    // queue rows show.
+    mouse_area(body)
+        .on_right_press(GuiMessage::OpenStandaloneTrackContextMenu(Box::new(track.clone())))
+        .into()
+}
+
+/// The track to feed into the details pane: the currently selected row
+/// of the focused Miller column, but only if that row is actually a
+/// `BrowseItem::Track`. Returns `None` for artist/album/genre/playlist
+/// rows, which keeps the pane hidden whenever the user is navigating
+/// in a non-track column.
+fn focused_track(state: &AppState) -> Option<&Track> {
+    use crate::app::state::BrowseItem;
+    let nav = state.browse_nav()?;
+    let col = nav.focused()?;
+    let item = col.items.get(col.selected_index)?;
+    if !matches!(item, BrowseItem::Track { .. }) {
+        return None;
+    }
+    col.tracks.get(col.selected_index)
+}
+
+fn track_details_pane<'a>(
+    track: &'a Track,
+    state: &'a AppState,
+    track_pane_similar: &'a std::collections::HashMap<String, Vec<Track>>,
+) -> Element<'a, GuiMessage> {
     use crate::ui_gui::images::lookup_grid;
 
+    // No "x" close affordance: the pane is now driven entirely by
+    // which column is focused. Clicking out of the track column is
+    // the way to dismiss it.
     let header = container(
         Row::new()
             .spacing(8)
             .align_y(Alignment::Center)
             .push(text(" track ").size(12))
-            .push(Space::with_width(Length::Fill))
-            .push(
-                button(text("x").size(12))
-                    .padding([0, 8])
-                    .on_press(GuiMessage::Action(Action::Browse(BrowseAction::CloseTrackDetails)))
-                    .style(popout_button_style),
-            ),
+            .push(Space::with_width(Length::Fill)),
     )
     .padding([4, 8])
     .width(Length::Fill);
@@ -249,15 +324,38 @@ fn track_details_pane<'a>(track: &'a Track, state: &'a AppState) -> Element<'a, 
         info_col = info_col.push(f);
     }
 
+    // Sonically-similar tracks list, populated lazily by an iced
+    // `Task::perform` from the App's Tick handler. While the cache
+    // is empty for this track, render a placeholder line; clicking a
+    // row navigates to that track's album in the Library.
+    let similar_section: Element<'_, GuiMessage> = {
+        let mut col = Column::new().spacing(4).padding([8, 0]);
+        col = col.push(text("Sonically Similar").size(13));
+        match track_pane_similar.get(&track.rating_key) {
+            Some(list) if list.is_empty() => col
+                .push(text("(no similar tracks found)").size(11))
+                .into(),
+            Some(list) => {
+                for sim in list.iter() {
+                    col = col.push(similar_row(sim));
+                }
+                col.into()
+            }
+            None => col.push(text("Loading\u{2026}").size(11)).into(),
+        }
+    };
+
     let body = scrollable(
         Column::new()
             .spacing(12)
             .padding(12)
             .align_x(Alignment::Center)
             .push(artwork)
-            .push(info_col),
+            .push(info_col)
+            .push(similar_section),
     )
     .direction(crate::ui_gui::widgets::fat_vertical_scrollbar())
+    .style(crate::ui_gui::widgets::chunky_scrollable_style)
     .height(Length::Fill);
 
     container(iced_column![header, body].spacing(0))
@@ -325,6 +423,7 @@ fn category_column(state: &AppState) -> Element<'_, GuiMessage> {
 
     let list = scrollable(Column::with_children(rows).spacing(0))
         .direction(crate::ui_gui::widgets::fat_vertical_scrollbar())
+        .style(crate::ui_gui::widgets::chunky_scrollable_style)
         .height(Length::Fill);
 
     // Container chrome matches `miller_column::wrap_chrome` so the
@@ -520,6 +619,7 @@ fn folder_column_view(column_index: usize, col: &FolderColumn, is_focused: bool)
 
     let body = scrollable(Column::with_children(rows))
         .direction(crate::ui_gui::widgets::fat_vertical_scrollbar())
+        .style(crate::ui_gui::widgets::chunky_scrollable_style)
         .height(Length::Fill);
 
     container(iced_column![header, body].spacing(0))

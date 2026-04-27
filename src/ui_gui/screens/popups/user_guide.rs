@@ -46,6 +46,7 @@ pub fn view<'a>() -> Element<'a, GuiMessage> {
             .padding([8, 28]),
     )
     .direction(crate::ui_gui::widgets::fat_vertical_scrollbar())
+    .style(crate::ui_gui::widgets::chunky_scrollable_style)
     .height(Length::Fill);
 
     container(

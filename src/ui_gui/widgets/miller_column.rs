@@ -215,13 +215,37 @@ pub fn view<'a>(
     let total_h = cum.last().copied().unwrap_or(0.0);
 
     // Visible window. `first`/`last` are indices into `indices`.
-    let view_top = scroll_offset_y.max(0.0);
-    let view_bot = if viewport_h > 0.0 {
-        scroll_offset_y + viewport_h
+    //
+    // INVARIANT (defensive against stale scroll state): the virtualizer
+    // window is always clamped inside the content's actual extent. The
+    // app-level `scroll_state` is keyed by column index — when a column
+    // gets replaced (category switch, drill, push_column, refresh…) the
+    // new column transiently inherits the old column's offset until the
+    // user scrolls. Without clamping, a 19-row playlist column whose
+    // total height is 500 px but whose stale `scroll_offset_y` is 8000
+    // would render a 338 px top-spacer and hide rows 0..12 — exactly
+    // the "blank top, last 6 rows visible" symptom that's recurred
+    // across multiple unrelated upstream paths.
+    //
+    // Anchoring the window against `total_h − viewport_h` makes that
+    // failure mode impossible regardless of where the stale offset
+    // came from. iced's scrollable already does the same internal
+    // clamp on its own offset, so the rendered tree and the actual
+    // visible window stay in sync.
+    let max_off = (total_h - viewport_h).max(0.0);
+    let view_top = if viewport_h > 0.0 {
+        scroll_offset_y.max(0.0).min(max_off)
     } else {
         // No scroll info yet (first render, before `on_scroll` has
-        // fired). Render a generous slice from the top so the initial
-        // paint fills any reasonable viewport without blank gaps.
+        // fired). Render from the top so the initial paint always
+        // shows the column header → first rows.
+        0.0
+    };
+    let view_bot = if viewport_h > 0.0 {
+        view_top + viewport_h
+    } else {
+        // Generous slice; the no-scroll-yet path above already pinned
+        // view_top to 0, so this only sets the bottom edge.
         4000.0
     };
 
@@ -259,6 +283,7 @@ pub fn view<'a>(
             i,
             item,
             i == selected,
+            col.selected_set.contains(&i),
             is_focused,
             show_art,
             grid_cache,
@@ -275,6 +300,7 @@ pub fn view<'a>(
     let body = scrollable(Column::with_children(rendered))
         .id(scroll_id_for(column_index))
         .direction(crate::ui_gui::widgets::fat_vertical_scrollbar())
+        .style(crate::ui_gui::widgets::chunky_scrollable_style)
         .on_scroll(move |v| {
             let off = v.absolute_offset();
             let b = v.bounds();
@@ -326,6 +352,7 @@ fn row_item<'a>(
     row_index: usize,
     item: &'a BrowseItem,
     is_selected: bool,
+    is_multi_selected: bool,
     is_focused_column: bool,
     show_art: bool,
     grid_cache: &'a HashMap<String, Vec<u8>>,
@@ -342,12 +369,17 @@ fn row_item<'a>(
     let label = label_for(item, show_track_artist);
     let activate = is_selected;
 
+    // Multi-selected rows get the same recessed swatch as the cursor
+    // selection but rendered without the focused-column accent — so
+    // the cursor row is still distinguishable inside a range select.
     let row_style = move |theme: &Theme, status: button::Status| -> button::Style {
         let palette = theme.extended_palette();
         let (bg, fg) = if is_selected && is_focused_column {
             (palette.primary.strong.color, palette.primary.strong.text)
         } else if is_selected {
             (palette.background.weak.color, palette.background.base.text)
+        } else if is_multi_selected {
+            (palette.primary.weak.color, palette.primary.weak.text)
         } else {
             match status {
                 button::Status::Hovered => (palette.background.weak.color, palette.background.weak.text),
