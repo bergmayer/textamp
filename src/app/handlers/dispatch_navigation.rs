@@ -107,9 +107,6 @@ pub async fn dispatch(
                     BrowseCategory::Library => {
                         if state.library.artists.is_empty() && !state.library.artists_loading {
                             helpers::load_artists(event_tx, state, client);
-                        } else {
-                            // Build second column synchronously from cached data
-                            follow_ups.extend(super::dispatch_data::auto_drill_from_cache(state));
                         }
                     }
                     BrowseCategory::Playlists => {
@@ -120,8 +117,6 @@ pub async fn dispatch(
                             // (guards against stale/empty nav from preload race conditions)
                             let items = crate::app::state::BrowseItem::from_playlists(&state.library.playlists);
                             state.playlist_nav.reset("playlists", items);
-                            // Build second column synchronously (async fallback for smart playlists)
-                            follow_ups.extend(super::dispatch_data::auto_drill_from_cache(state));
                         }
                     }
                     BrowseCategory::Genres => {

@@ -12,12 +12,12 @@ pub fn view<'a>(p: &'a ArtistRadioPickerState) -> Element<'a, GuiMessage> {
         ArtistRadioPickerStep::EnterCount  => "How many artists to blend?",
         ArtistRadioPickerStep::SelectArtists => "Select artists",
     };
-    let close_btn = button(text("Close").size(12))
+    let close_btn = button(text("Close").size(14))
         .padding([4, 12])
         .on_press(GuiMessage::CloseStatePopup(StatePopupKind::ArtistRadioPicker))
         .style(popout_button_style);
     let header = row![
-        text(title).size(16),
+        text(title).size(18),
         Space::with_width(Length::Fill),
         close_btn,
     ]
@@ -26,8 +26,8 @@ pub fn view<'a>(p: &'a ArtistRadioPickerState) -> Element<'a, GuiMessage> {
     let body: Element<'a, GuiMessage> = match p.step {
         ArtistRadioPickerStep::EnterCount => {
             column![
-                text(format!("Count: {}", p.count_input)).size(14),
-                text("Type a number 1–12 then press Enter.").size(11),
+                text(format!("Count: {}", p.count_input)).size(16),
+                text("Type a number 1–12 then press Enter.").size(13),
             ]
             .spacing(8)
             .into()
@@ -44,7 +44,7 @@ pub fn view<'a>(p: &'a ArtistRadioPickerState) -> Element<'a, GuiMessage> {
                         "\u{2014} Selected ({}/{}) \u{2014}",
                         p.selected_artists.len(),
                         p.max_artists,
-                    )).size(11))
+                    )).size(13))
                     .padding([4, 6])
                     .into()
                 );
@@ -58,7 +58,7 @@ pub fn view<'a>(p: &'a ArtistRadioPickerState) -> Element<'a, GuiMessage> {
             }
 
             rows.push(
-                container(text("\u{2014} Available \u{2014}").size(11))
+                container(text("\u{2014} Available \u{2014}").size(13))
                     .padding([4, 6])
                     .into()
             );
@@ -98,7 +98,7 @@ fn find_toggle_index(p: &ArtistRadioPickerState, key: &str) -> usize {
 }
 
 fn row_button(label: String, idx: usize, is_selected: bool) -> Element<'static, GuiMessage> {
-    button(text(label).size(12))
+    button(text(label).size(14))
         .width(Length::Fill)
         .padding([4, 10])
         .on_press(GuiMessage::ArtistRadioPickerClick(idx))

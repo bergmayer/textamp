@@ -10,11 +10,24 @@ use reqwest::Client;
 use std::time::Duration;
 
 /// Build an HTTP client with the given timeout.
+///
+/// `reqwest::Client::builder().build()` only fails for transport-init
+/// errors (missing TLS root store on a stripped Linux container, etc.)
+/// — vanishingly rare on the platforms we ship to. If it does fail we
+/// log it and fall back to `Client::new()` (which uses sensible
+/// defaults) so the GUI still boots and can surface errors via the
+/// normal "couldn't reach server" toast instead of crashing.
 fn build_http_client(timeout_secs: u64) -> Client {
-    Client::builder()
+    match Client::builder()
         .timeout(Duration::from_secs(timeout_secs))
         .build()
-        .expect("Failed to create HTTP client")
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("reqwest Client::builder() failed: {e}; falling back to default Client");
+            Client::new()
+        }
+    }
 }
 
 /// Plex API client.
@@ -482,10 +495,63 @@ impl PlexClient {
     }
 
     /// Get tracks in a playlist.
-    pub async fn get_playlist_tracks(&self, playlist_key: &str) -> Result<Vec<Track>, ApiError> {
-        let path = format!("{}/{}/items", EP_PLAYLISTS, playlist_key);
+    /// Fetch a single page of a playlist's items. Returns `(tracks,
+    /// total_size)` where `total_size` is the server-reported total
+    /// (independent of `limit`); the GUI uses this to drive
+    /// scroll-triggered "load more" without needing to enumerate
+    /// the entire playlist up front.
+    pub async fn get_playlist_tracks_page(
+        &self,
+        playlist_key: &str,
+        offset: u32,
+        limit: u32,
+    ) -> Result<(Vec<Track>, Option<u32>), ApiError> {
+        let path = format!(
+            "{}/{}/items?{}={}&{}={}",
+            EP_PLAYLISTS, playlist_key,
+            PARAM_CONTAINER_START, offset,
+            PARAM_CONTAINER_SIZE, limit,
+        );
         let response: TracksResponse = self.get(&path).await?;
-        Ok(response.media_container.metadata)
+        let total = response.media_container.total_size;
+        Ok((response.media_container.metadata, total))
+    }
+
+    /// Fetch *every* track of a playlist by looping over
+    /// `get_playlist_tracks_page` until a short page is returned.
+    /// Used by background preload / cache paths and by the test TUI.
+    /// The GUI's interactive path uses `get_playlist_tracks_page`
+    /// directly so it can lazy-load on scroll.
+    ///
+    /// Smart playlists (e.g. "Recently Added") can resolve to many
+    /// thousands of tracks server-side; if a later page fails after
+    /// at least one succeeded we return what we have so callers
+    /// still get a partial list.
+    pub async fn get_playlist_tracks(&self, playlist_key: &str) -> Result<Vec<Track>, ApiError> {
+        const PAGE_SIZE: u32 = 500;
+        let mut all_tracks: Vec<Track> = Vec::new();
+        let mut offset: u32 = 0;
+        loop {
+            match self.get_playlist_tracks_page(playlist_key, offset, PAGE_SIZE).await {
+                Ok((page, total)) => {
+                    let page_len = page.len() as u32;
+                    all_tracks.extend(page);
+                    let done_by_total = total.map_or(false, |t| all_tracks.len() as u32 >= t);
+                    let done_by_short = page_len < PAGE_SIZE;
+                    if done_by_total || done_by_short { break; }
+                    offset += page_len;
+                }
+                Err(e) if !all_tracks.is_empty() => {
+                    tracing::warn!(
+                        "get_playlist_tracks {}: page offset={} failed ({}); returning {} tracks collected so far",
+                        playlist_key, offset, e, all_tracks.len(),
+                    );
+                    break;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(all_tracks)
     }
 
     /// Create a new playlist from track keys.

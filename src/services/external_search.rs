@@ -3,6 +3,7 @@
 //! Generates search URLs for Apple Music, Spotify, and YouTube.
 
 /// Target service for external search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchTarget {
     AppleMusic,
     Spotify,

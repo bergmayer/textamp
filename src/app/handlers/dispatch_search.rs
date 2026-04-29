@@ -255,9 +255,13 @@ pub async fn dispatch(
                 }
                 state.list_filter.query = query;
                 state.list_filter.selected = 0;
-                if is_on_filter_column(state) {
-                    super::key_input::truncate_filter_right_columns(state);
-                }
+                // No truncation: the GUI filter is a pure visual narrowing
+                // applied to every visible Miller column at once
+                // (browse.rs computes per-column matches at render time),
+                // so the right-of-filter columns must stay populated.
+                // Truncating here was what made the album column vanish
+                // when the user typed in the filter box with the artist
+                // column focused.
                 execute_list_filter(event_tx, state).await?;
             }
         }

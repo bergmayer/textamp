@@ -194,8 +194,53 @@ pub fn sort_key(title: &str) -> String {
     }
 }
 
+/// Letters shown on the browse alphabet strip, in the natural sort
+/// order: `%` (non-alphanumeric), `0` (digits), then `a..z`.
+/// Index space is shared between rendering, click hit-testing, and
+/// keyboard nav of the strip itself.
+pub const ALPHABET_STRIP_LETTERS: [char; 28] = [
+    '%', '0',
+    'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm',
+    'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
+];
+
+/// Find the row index in the artist root column whose `sort_key`
+/// starts with the given alphabet-strip letter. `'%'` matches any
+/// non-alphanumeric first character; `'0'` matches digits;
+/// `'a'..='z'` matches that letter.
+pub fn alphabet_target_index(state: &crate::app::state::AppState, ch: char) -> Option<usize> {
+    use crate::app::state::BrowseCategory;
+    if state.browse_category == BrowseCategory::Folders {
+        return None;
+    }
+    let target = ch.to_ascii_lowercase();
+    let pred: Box<dyn Fn(&str) -> bool> = match target {
+        '0' => Box::new(|t: &str| sort_key(t).chars().next().map_or(false, |c| c.is_ascii_digit())),
+        '%' => Box::new(|t: &str| sort_key(t).chars().next().map_or(false, |c| !c.is_ascii_alphanumeric())),
+        c if c.is_ascii_alphabetic() => Box::new(move |t: &str| {
+            sort_key(t).chars().next().map_or(false, |first| first.to_ascii_lowercase() == c)
+        }),
+        _ => return None,
+    };
+    let nav = state.browse_nav()?;
+    let root = nav.columns.first()?;
+    root.items.iter().position(|it| pred(it.title()))
+}
+
+/// Apply an alphabet-strip jump. Pure scroll action: pins the
+/// artist root column's scroll offset to the matched row but does
+/// NOT change the selection or close any drilled-in child columns
+/// — same semantics as the GUI's alphabet jump. Returns the matched
+/// row index, if any.
+pub fn alphabet_jump(state: &mut crate::app::state::AppState, ch: char) -> Option<usize> {
+    let target = alphabet_target_index(state, ch)?;
+    state.scroll.browse = Some((0, target));
+    Some(target)
+}
+
 /// Get artist key and name for the bio popup (F4).
-/// Priority: selected track → selected album → selected artist → now-playing track.
+/// Priority: highlighted Sonically-Similar row in the track pane
+/// → selected track → selected album → selected artist → now-playing track.
 /// For compilation tracks, uses the track artist (original_title) instead of album artist.
 pub fn get_artist_for_bio(state: &crate::app::state::AppState) -> Option<(String, String)> {
     use crate::app::state::{View, BrowseItem, PlaybackMode};
@@ -220,6 +265,25 @@ pub fn get_artist_for_bio(state: &crate::app::state::AppState) -> Option<(String
         }
         None
     };
+
+    // 0. Highlighted Sonically-Similar row inside the track pane
+    //    wins ahead of everything else — when the user has navigated
+    //    into the pane and picked a similar song, "Artist Bio"
+    //    should target THAT artist, not the parent track's.
+    if state.track_pane_focused && state.track_pane_index > 0 {
+        if let Some(parent) = state.focused_track() {
+            let sim_idx = state.track_pane_index - 1;
+            if let Some(sim) = state
+                .track_pane_similar
+                .get(&parent.rating_key)
+                .and_then(|v| v.get(sim_idx))
+            {
+                if let Some(result) = artist_from_track(sim) {
+                    return Some(result);
+                }
+            }
+        }
+    }
 
     // 1. Check selected item (in Browse, Queue, Search, etc.)
     match state.view {

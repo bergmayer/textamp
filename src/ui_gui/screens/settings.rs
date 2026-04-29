@@ -39,14 +39,18 @@ pub fn view<'a>(state: &'a AppState, ui_scale: f32) -> Element<'a, GuiMessage> {
         SettingsSection::About   => account_section(state),
     };
 
+    // Shrink height so the wrapping scrollable's content_h matches
+    // the actual content size — without this the column stretches
+    // to fill the full scrollable area and the scroll bar lets the
+    // user scroll past the last row into empty space.
     container(column![tabs, body].spacing(14).padding([4, 0]))
         .width(Length::Fill)
-        .height(Length::Fill)
+        .height(Length::Shrink)
         .into()
 }
 
 fn tab_button(label: &'static str, active: bool, section: SettingsSection) -> Element<'static, GuiMessage> {
-    button(text(label).size(13))
+    button(text(label).size(15))
         .padding([4, 14])
         .on_press(GuiMessage::SetSettingsSection(section))
         .style(move |theme: &Theme, status: button::Status| {
@@ -91,13 +95,13 @@ fn account_section(state: &AppState) -> Element<'_, GuiMessage> {
     };
 
     let mut libs: Vec<Element<'_, GuiMessage>> = Vec::new();
-    libs.push(text(format!("Music libraries ({}):", state.libraries.len())).size(13).into());
+    libs.push(text(format!("Music libraries ({}):", state.libraries.len())).size(15).into());
     for lib in &state.libraries {
         let is_active = state.active_library.as_ref() == Some(&lib.key);
         let label = format!("{}{}", if is_active { "* " } else { "  " }, lib.title);
         let key = lib.key.clone();
         libs.push(
-            button(text(label).size(12))
+            button(text(label).size(14))
                 .width(Length::Fill)
                 .padding([3, 10])
                 .on_press(GuiMessage::Action(Action::Settings(SettingsAction::SelectLibrary(key))))
@@ -137,8 +141,8 @@ fn account_section(state: &AppState) -> Element<'_, GuiMessage> {
     let sign_out = action_btn("Sign out", Action::Settings(SettingsAction::Logout));
 
     let content = column![
-        text(connection_line).size(13),
-        text(server_line).size(12),
+        text(connection_line).size(15),
+        text(server_line).size(14),
         Space::with_height(Length::Fixed(4.0)),
         libs_col,
         Space::with_height(Length::Fixed(8.0)),
@@ -165,7 +169,7 @@ fn cache_section(state: &AppState) -> Element<'_, GuiMessage> {
     // refresh + clears. Bottom row: subfolder controls (clear and
     // start/stop crawl), which are tied to the folder feature.
     let mk_btn = |label: &str, msg: GuiMessage| -> Element<'_, GuiMessage> {
-        button(text(label.to_string()).size(12))
+        button(text(label.to_string()).size(14))
             .padding([4, 12])
             .on_press(msg)
             .style(popout_button_style)
@@ -189,7 +193,7 @@ fn cache_section(state: &AppState) -> Element<'_, GuiMessage> {
     let folder_help = text(
         "Plex does not provide folders via the API the same way as it does \
          the Library. A manual crawl is necessary."
-    ).size(12);
+    ).size(14);
 
     let content = column![
         cache_info,
@@ -211,7 +215,7 @@ fn cache_section(state: &AppState) -> Element<'_, GuiMessage> {
 fn cache_info_block(state: &AppState) -> Element<'_, GuiMessage> {
     let connected = matches!(state.connection, ConnectionState::Connected { .. });
     if !connected || state.active_library.is_none() {
-        return text("Cache: (signed out)").size(12).into();
+        return text("Cache: (signed out)").size(14).into();
     }
 
     let now_ts = std::time::SystemTime::now()
@@ -244,7 +248,7 @@ fn cache_info_block(state: &AppState) -> Element<'_, GuiMessage> {
     ];
 
     let header_cell = |s: &str, w: f32, accent: bool| -> Element<'_, GuiMessage> {
-        let t = text(s.to_string()).size(11);
+        let t = text(s.to_string()).size(13);
         let styled: Element<'_, GuiMessage> = if accent {
             container(t)
                 .padding([2, 6])
@@ -279,13 +283,13 @@ fn cache_info_block(state: &AppState) -> Element<'_, GuiMessage> {
 
     let mk_row = |label: String, count_str: String, age_str: String, size_str: String| -> Row<'_, GuiMessage> {
         Row::new()
-            .push(container(text(label).size(11))
+            .push(container(text(label).size(13))
                 .padding([1, 6]).width(Length::Fixed(col_w_label)))
-            .push(container(text(count_str).size(11))
+            .push(container(text(count_str).size(13))
                 .padding([1, 6]).width(Length::Fixed(col_w_count)))
-            .push(container(text(age_str).size(11))
+            .push(container(text(age_str).size(13))
                 .padding([1, 6]).width(Length::Fixed(col_w_age)))
-            .push(container(text(size_str).size(11))
+            .push(container(text(size_str).size(13))
                 .padding([1, 6]).width(Length::Fixed(col_w_size)))
     };
 
@@ -361,14 +365,14 @@ fn cache_info_block(state: &AppState) -> Element<'_, GuiMessage> {
     if let Some((lib_bytes, _)) = &state.library_cache_stats { total_bytes += *lib_bytes; }
     if let Some((_, wf_bytes)) = state.waveform_cache_stats { total_bytes += wf_bytes; }
     let totals_row: Element<'_, GuiMessage> = if total_bytes > 0 {
-        container(text(format!("Total on disk: {}", format_bytes(total_bytes))).size(11))
+        container(text(format!("Total on disk: {}", format_bytes(total_bytes))).size(13))
             .padding([2, 6])
             .into()
     } else {
-        container(text("").size(11)).padding([2, 6]).into()
+        container(text("").size(13)).padding([2, 6]).into()
     };
 
-    column![text("Cache").size(13), rows_col, totals_row]
+    column![text("Cache").size(15), rows_col, totals_row]
         .spacing(4)
         .into()
 }
@@ -417,7 +421,7 @@ fn textamp_section<'a>(state: &'a AppState, ui_scale: f32) -> Element<'a, GuiMes
     let current_theme = state.theme;
     let theme_rows: Vec<Element<'a, GuiMessage>> = ThemeName::all().iter().map(|&t| {
         let active = t == current_theme;
-        button(text(t.display_name()).size(12))
+        button(text(t.display_name()).size(14))
             .width(Length::Fixed(160.0))
             .padding([3, 10])
             .on_press(GuiMessage::SetTheme(t))
@@ -442,7 +446,7 @@ fn textamp_section<'a>(state: &'a AppState, ui_scale: f32) -> Element<'a, GuiMes
     }).collect();
 
     let theme_section = column![
-        text("Theme").size(14),
+        text("Theme").size(16),
         Column::with_children(theme_rows).spacing(4),
     ]
     .spacing(6);
@@ -451,14 +455,14 @@ fn textamp_section<'a>(state: &'a AppState, ui_scale: f32) -> Element<'a, GuiMes
     let plus_enabled = ui_scale < UI_SCALE_MAX - f32::EPSILON;
     let minus = scale_btn("-", GuiMessage::AdjustUiScale(-UI_SCALE_STEP), minus_enabled);
     let plus = scale_btn("+", GuiMessage::AdjustUiScale(UI_SCALE_STEP), plus_enabled);
-    let reset = button(text("Reset").size(12))
+    let reset = button(text("Reset").size(14))
         .padding([4, 12])
         .on_press(GuiMessage::AdjustUiScale(1.0 - ui_scale))
         .style(popout_button_style);
     let scale_row = iced_row![
-        text("UI scale").size(13),
+        text("UI scale").size(15),
         minus,
-        text(format!("{:.2}x", ui_scale)).size(13),
+        text(format!("{:.2}x", ui_scale)).size(15),
         plus,
         reset,
     ]
@@ -479,10 +483,10 @@ fn textamp_section<'a>(state: &'a AppState, ui_scale: f32) -> Element<'a, GuiMes
     .step(0.01_f32)
     .width(Length::Fixed(220.0));
     let vol_row = iced_row![
-        text("Volume").size(13),
+        text("Volume").size(15),
         vol_slider,
-        text(format!("{vol_pct}%")).size(12),
-        button(text("Mute / Unmute").size(12))
+        text(format!("{vol_pct}%")).size(14),
+        button(text("Mute / Unmute").size(14))
             .padding([4, 12])
             .on_press(GuiMessage::Action(Action::Playback(PlaybackAction::ToggleMute)))
             .style(popout_button_style),
@@ -490,15 +494,47 @@ fn textamp_section<'a>(state: &'a AppState, ui_scale: f32) -> Element<'a, GuiMes
     .spacing(10)
     .align_y(Alignment::Center);
 
+    use crate::services::external_search::SearchTarget;
+    use iced::widget::checkbox;
+    let ext = state.external_search;
+    // Custom row: iced's default `Checkbox` puts the label after the
+    // square but theme + container text colour interact poorly here
+    // (label rendered same shade as the popup background, looking
+    // like an empty box). Render the label as a sibling `text` so it
+    // always paints with the popup body's foreground colour.
+    let cb = |label: &'static str, on: bool, target: SearchTarget| -> Element<'static, GuiMessage> {
+        let toggle = move |_| GuiMessage::Action(Action::Settings(
+            SettingsAction::ToggleExternalSearchService(target),
+        ));
+        iced_row![
+            checkbox("", on)
+                .size(16)
+                .on_toggle(toggle),
+            text(label).size(15),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into()
+    };
+    let ext_section = column![
+        text("Search in external services").size(16),
+        cb("Apple Music", ext.apple_music, SearchTarget::AppleMusic),
+        cb("Spotify",     ext.spotify,     SearchTarget::Spotify),
+        cb("YouTube",     ext.youtube,     SearchTarget::YouTube),
+    ]
+    .spacing(6);
+
     container(
         column![
             theme_section,
             Space::with_height(Length::Fixed(10.0)),
-            text("View Options").size(14),
+            text("View Options").size(16),
             scale_row,
             Space::with_height(Length::Fixed(10.0)),
-            text("Playback").size(14),
+            text("Playback").size(16),
             vol_row,
+            Space::with_height(Length::Fixed(10.0)),
+            ext_section,
         ]
         .spacing(8),
     )
@@ -507,7 +543,7 @@ fn textamp_section<'a>(state: &'a AppState, ui_scale: f32) -> Element<'a, GuiMes
 }
 
 fn action_btn(label: &'static str, action: Action) -> Element<'static, GuiMessage> {
-    button(text(label).size(12))
+    button(text(label).size(14))
         .padding([4, 12])
         .on_press(GuiMessage::Action(action))
         .style(popout_button_style)
@@ -515,7 +551,7 @@ fn action_btn(label: &'static str, action: Action) -> Element<'static, GuiMessag
 }
 
 fn scale_btn<'a>(label: &'a str, msg: GuiMessage, enabled: bool) -> Element<'a, GuiMessage> {
-    let btn = button(text(label).size(14)).padding([2, 12]).style(popout_button_style);
+    let btn = button(text(label).size(16)).padding([2, 12]).style(popout_button_style);
     if enabled { btn.on_press(msg).into() } else { btn.into() }
 }
 

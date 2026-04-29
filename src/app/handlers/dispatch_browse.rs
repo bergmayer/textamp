@@ -247,15 +247,8 @@ pub async fn dispatch(
                 // Column 0 doesn't have categories yet — reset
                 state.genre_nav.reset("genres", categories);
             }
-            // If already showing categories with a selection, auto-drill into the selected one
-            if state.genre_nav.focused_column == 0 {
-                if let Some(item) = state.genre_nav.selected_item().cloned() {
-                    if let BrowseItem::GenreCategory { key, .. } = item {
-                        state.auto_drill_pending = true;
-                        follow_ups.push(BrowseAction::DrillGenreCategory { category_key: key }.into());
-                    }
-                }
-            }
+            // Selection-only model: do not auto-drill into the selected
+            // category. Child columns only open on explicit Enter/Right.
         }
         BrowseAction::CycleGenreTab => {
             state.genre_tab = state.genre_tab.next();
@@ -370,7 +363,33 @@ pub async fn dispatch(
             }
         }
         BrowseAction::OpenTrackDetails(track) => {
+            // Treat the pane as the rightmost column: opening it
+            // moves keyboard / visual focus into the pane so no
+            // miller column also paints as focused (single-focus
+            // rule). Reset to row 0 so Up/Down inside the pane
+            // starts from the Play button.
+            //
+            // Always load the track's album art into the grid
+            // cache, regardless of whether the parent column has
+            // artwork toggled on. The track-details pane shows the
+            // cover art unconditionally — without this dispatch the
+            // pane reads `(no cover)` for any track whose album
+            // hasn't been loaded into the cache by some other path
+            // (e.g. user grouped a playlist by album with artwork
+            // OFF, then drilled into a track).
+            if let Some(album_key) = track.parent_rating_key.clone() {
+                if !state.artwork.grid_cache.contains_key(&album_key)
+                    && !state.artwork.grid_pending.contains(&album_key)
+                {
+                    if let Some(thumb) = track.parent_thumb.clone() {
+                        follow_ups.push(SystemAction::LoadAlbumArt(vec![(album_key, thumb)]).into());
+                    }
+                }
+            }
             state.track_details = Some(track);
+            state.track_pane_focused = true;
+            state.track_pane_index = 0;
+            state.category_column_focused = false;
         }
         BrowseAction::CloseTrackDetails => {
             state.track_details = None;

@@ -249,44 +249,62 @@ fn render_account_content(frame: &mut Frame, state: &AppState, outer: Rect, area
 
         let alias_count: usize = state.library.artist_aliases.values().map(|s| s.len()).sum();
 
-        // Each row: (label, count, is_loading, refresh_category for age lookup)
-        let rows: Vec<(&str, usize, bool, Option<RefreshCategory>)> = vec![
-            ("Artists", state.library.artists.len(), false, Some(RefreshCategory::Artists)),
-            ("Albums", state.library.albums.len(), false, Some(RefreshCategory::Albums)),
-            ("Tracks", state.library.all_tracks.len(), state.library.all_tracks.is_empty(), Some(RefreshCategory::AllTracks)),
-            ("Playlists", state.library.playlists.len(), false, Some(RefreshCategory::Playlists)),
-            ("Genres", state.library.genres.len(), false, Some(RefreshCategory::Genres)),
-            ("Moods", state.library.moods.len(), false, Some(RefreshCategory::Moods)),
-            ("Styles", state.library.styles.len(), false, Some(RefreshCategory::Styles)),
-            ("Stations", state.stations.len(), false, Some(RefreshCategory::Stations)),
-            ("Aliases", alias_count, false, None),
+        // Mirror the GUI Cache table 1:1 — same columns (Category /
+        // Count / Age / Size), same rows (Artists, Albums, Tracks,
+        // Playlists, Genres, Moods, Styles, Stations, Aliases,
+        // Folders, Artwork, Waveforms), same total. The fifth tuple
+        // slot is the breakdown field name in `library_cache_stats`
+        // for the Size column lookup; `None` means "no size shown".
+        let library_size = |field: &str| -> Option<u64> {
+            state
+                .library_cache_stats
+                .as_ref()
+                .and_then(|(_, breakdown)| breakdown.iter().find(|(k, _)| k == field).map(|(_, v)| *v))
+        };
+
+        let row_specs: &[(&str, usize, bool, Option<RefreshCategory>, Option<&str>)] = &[
+            ("Artists",   state.library.artists.len(),    false, Some(RefreshCategory::Artists),   Some("artists")),
+            ("Albums",    state.library.albums.len(),     false, Some(RefreshCategory::Albums),    Some("albums")),
+            ("Tracks",    state.library.all_tracks.len(), state.library.all_tracks.is_empty(), Some(RefreshCategory::AllTracks), Some("tracks")),
+            ("Playlists", state.library.playlists.len(),  false, Some(RefreshCategory::Playlists), Some("playlist tracks")),
+            ("Genres",    state.library.genres.len(),     false, Some(RefreshCategory::Genres),    Some("genres")),
+            ("Moods",     state.library.moods.len(),      false, Some(RefreshCategory::Moods),     None),
+            ("Styles",    state.library.styles.len(),     false, Some(RefreshCategory::Styles),    None),
+            ("Stations",  state.stations.len(),           false, Some(RefreshCategory::Stations),  Some("stations")),
+            ("Aliases",   alias_count,                    false, None,                              None),
         ];
 
-        for (label, count, is_loading, cat) in &rows {
-            if *count == 0 && !is_loading {
+        // Header row.
+        lines.push(Line::from(Span::styled(
+            format!("  {:11}{:>9}  {:8}{:>10}", "Category", "Count", "Age", "Size"),
+            Style::default().fg(t.colors.fg_secondary),
+        )));
+
+        for (label, count, is_loading, cat, breakdown_field) in row_specs {
+            if *count == 0 && !*is_loading {
                 continue;
             }
-            let count_str = if *is_loading {
-                "loading".to_string()
-            } else {
-                format_count(*count)
-            };
+            let count_str = if *is_loading { "loading".to_string() } else { format_count(*count) };
             let age_str = cat
                 .and_then(|c| state.cache_mgmt.category_timestamps.get(&c))
                 .map(|&ts| {
                     let age = std::time::Duration::from_secs(now_ts.saturating_sub(ts));
-                    format!("  {} ago", format_duration(age))
+                    format_duration(age)
                 })
                 .unwrap_or_default();
             let refreshing = cat.map_or(false, |c| state.cache_mgmt.background_refresh.contains(&c));
-            let suffix = if refreshing { "  refreshing..." } else { "" };
+            let age_display = if refreshing { format!("{age_str}*") } else { age_str };
+            let size_str = breakdown_field
+                .and_then(|f| library_size(f))
+                .map(format_bytes)
+                .unwrap_or_else(|| "-".to_string());
             lines.push(Line::from(Span::styled(
-                format!("  {:12}{:>8}{}{}", label, count_str, age_str, suffix),
-                if refreshing { Style::default().fg(t.colors.fg_accent) } else { Style::default().fg(t.colors.fg_muted) },
+                format!("  {:11}{:>9}  {:8}{:>10}", label, count_str, age_display, size_str),
+                Style::default().fg(t.colors.fg_muted),
             )));
         }
 
-        // Folder info
+        // Folders row — count is "{cached}/{total_root}", size from breakdown.
         let root_folder_count = state.folder_state.as_ref()
             .and_then(|fs| fs.columns.first())
             .map(|col| col.items.iter()
@@ -295,32 +313,43 @@ fn render_account_content(frame: &mut Frame, state: &AppState, outer: Rect, area
             .unwrap_or(0);
         let cached_listings = state.folder_contents_cache.len();
         if root_folder_count > 0 || cached_listings > 0 {
-            let folder_text = if state.subfolder_preload_active {
-                format!("  {} root folders, {} folder listings (crawling...)", root_folder_count, cached_listings)
-            } else if cached_listings > 0 {
-                format!("  {} root folders, {} folder listings", root_folder_count, cached_listings)
+            let count_str = if cached_listings > 0 {
+                format!("{}/{}", cached_listings, root_folder_count)
             } else {
-                format!("  {} root folders", root_folder_count)
+                format_count(root_folder_count)
             };
-            lines.push(Line::from(Span::styled(folder_text, Style::default().fg(t.colors.fg_muted))));
+            let age_str = if state.subfolder_preload_active { "crawl*" } else { "" };
+            let size_str = library_size("folders").map(format_bytes).unwrap_or_else(|| "-".to_string());
+            lines.push(Line::from(Span::styled(
+                format!("  {:11}{:>9}  {:8}{:>10}", "Folders", count_str, age_str, size_str),
+                Style::default().fg(t.colors.fg_muted),
+            )));
         }
 
-        // Total cache size (artwork + library + waveforms)
-        let mut total_bytes = 0u64;
-        if let Some((_, art_bytes)) = state.artwork.cache_stats {
-            total_bytes += art_bytes;
-        }
-        if let Some((lib_bytes, _)) = state.library_cache_stats {
-            total_bytes += lib_bytes;
-        }
-        if let Some((_, wf_bytes)) = state.waveform_cache_stats {
-            total_bytes += wf_bytes;
-        }
-        if total_bytes > 0 {
-            let mb = total_bytes as f64 / (1024.0 * 1024.0);
+        // Artwork + Waveforms rows.
+        if let Some((art_count, art_bytes)) = state.artwork.cache_stats {
             lines.push(Line::from(Span::styled(
-                format!("  cache: {:.1} MB", mb),
+                format!("  {:11}{:>9}  {:8}{:>10}", "Artwork", format_count(art_count), "", format_bytes(art_bytes)),
                 Style::default().fg(t.colors.fg_muted),
+            )));
+        }
+        if let Some((wf_count, wf_bytes)) = state.waveform_cache_stats {
+            lines.push(Line::from(Span::styled(
+                format!("  {:11}{:>9}  {:8}{:>10}", "Waveforms", format_count(wf_count), "", format_bytes(wf_bytes)),
+                Style::default().fg(t.colors.fg_muted),
+            )));
+        }
+
+        // Total on disk: library + artwork + waveforms.
+        let mut total_bytes: u64 = 0;
+        if let Some((lib_bytes, _)) = state.library_cache_stats { total_bytes += lib_bytes; }
+        if let Some((_, art_bytes)) = state.artwork.cache_stats { total_bytes += art_bytes; }
+        if let Some((_, wf_bytes)) = state.waveform_cache_stats { total_bytes += wf_bytes; }
+        if total_bytes > 0 {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                format!("  Total on disk: {}", format_bytes(total_bytes)),
+                Style::default().fg(t.colors.fg_secondary),
             )));
         }
     } else {
@@ -614,6 +643,37 @@ fn render_textamp_content(frame: &mut Frame, state: &AppState, outer: Rect, area
         style,
     )));
 
+    // External-services toggles. Three rows, indexed at
+    // (transcode_offset + 1) + 0..=2. Each row toggles whether the
+    // matching "Search ⟨service⟩" entry appears in the palette and
+    // right-click context menus.
+    let ext_base = transcode_offset + 1;
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "search in external services:",
+        Style::default().fg(t.colors.fg_accent),
+    )));
+    let ext_entries: [(&str, bool); 3] = [
+        ("Apple Music", state.external_search.apple_music),
+        ("Spotify",     state.external_search.spotify),
+        ("YouTube",     state.external_search.youtube),
+    ];
+    for (i, (label, on)) in ext_entries.iter().enumerate() {
+        let item_idx = ext_base + i;
+        let is_selected = is_focused && item_idx == state.settings_state.item_index;
+        if is_selected { selected_line = Some(lines.len()); }
+        let mark = if *on { "[x]" } else { "[ ]" };
+        let style = if is_selected {
+            Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
+        } else {
+            Style::default().fg(t.colors.fg_primary)
+        };
+        lines.push(Line::from(Span::styled(
+            format!("  {} {}", mark, label),
+            style,
+        )));
+    }
+
     // Help text
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
@@ -641,6 +701,24 @@ fn render_textamp_content(frame: &mut Frame, state: &AppState, outer: Rect, area
     }
 }
 
+
+/// Format a byte count as a human-readable string (matches the GUI's
+/// settings table). KB/MB/GB use 1024 multiples like macOS Finder.
+fn format_bytes(b: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = 1024.0 * 1024.0;
+    const GB: f64 = 1024.0 * 1024.0 * 1024.0;
+    let bf = b as f64;
+    if bf >= GB {
+        format!("{:.1} GB", bf / GB)
+    } else if bf >= MB {
+        format!("{:.1} MB", bf / MB)
+    } else if bf >= KB {
+        format!("{:.1} KB", bf / KB)
+    } else {
+        format!("{} B", b)
+    }
+}
 
 /// Format a count with comma separators (e.g. 12345 → "12,345").
 fn format_count(n: usize) -> String {

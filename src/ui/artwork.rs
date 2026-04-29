@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use image::DynamicImage;
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
-use ratatui_image::{picker::Picker, protocol::StatefulProtocol, StatefulImage};
+use ratatui_image::{picker::Picker, protocol::StatefulProtocol, Resize, StatefulImage};
 
 use crate::app::state::ArtworkMode;
 
@@ -158,6 +158,13 @@ impl ArtworkRenderer {
     }
 
     /// Render the artwork to a frame area.
+    ///
+    /// Uses `Resize::Crop` so a square cover image fills the entire
+    /// box even when the box's cell dimensions don't perfectly
+    /// match the terminal's actual cell aspect ratio. The cropped
+    /// portion is centered (default Crop behaviour) so a square
+    /// album cover loses at most 1-2 pixel rows / cols off the
+    /// edges — invisible on most album art.
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
         if self.mode == ArtworkMode::Braille {
             if let Some(ref img) = self.braille_image {
@@ -166,7 +173,7 @@ impl ArtworkRenderer {
             return;
         }
         if let Some(ref mut protocol) = self.protocol {
-            let image = StatefulImage::new();
+            let image = StatefulImage::new().resize(Resize::Crop(None));
             frame.render_stateful_widget(image, area, protocol);
         }
     }
@@ -403,7 +410,9 @@ pub fn render_grid_image(frame: &mut Frame, area: Rect, key: &str, data: &[u8]) 
     GRID_PROTOCOLS.with(|protos| {
         let mut map = protos.borrow_mut();
         if let Some(protocol) = map.get_mut(key) {
-            let image = StatefulImage::new();
+            // Crop-fill so square album thumbs fill non-square cells
+            // (terminal cell aspect varies) without leaving gaps.
+            let image = StatefulImage::new().resize(Resize::Crop(None));
             frame.render_stateful_widget(image, area, protocol);
             true
         } else {

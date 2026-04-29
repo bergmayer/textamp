@@ -401,12 +401,11 @@ impl FolderNavigationState {
         self.columns.len()
     }
 
-    /// Ensure at least 2 columns exist by adding an empty placeholder if needed.
-    /// Called after truncation leaves only the root column so the folder view
-    /// always renders two side-by-side columns (matching Library/Genre/Playlist).
-    pub fn ensure_placeholder(&mut self) {
-        if self.columns.len() == 1 {
-            self.inner.columns.push(FolderColumn::new(None, String::new(), vec![]));
-        }
-    }
+    /// No-op kept for backward compatibility. Previously this padded
+    /// the folder nav with a synthetic empty column so the view
+    /// always rendered two cols, but the cat col now fills that
+    /// "second slot" naturally. Adding the padding column made the
+    /// browse view render three panes (cat + root + empty) on first
+    /// click into Folders.
+    pub fn ensure_placeholder(&mut self) {}
 }

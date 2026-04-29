@@ -70,19 +70,27 @@ fn iced_to_crossterm_code(key: &keyboard::Key) -> Option<KeyCode> {
 
 fn iced_to_crossterm_mods(m: keyboard::Modifiers) -> KeyModifiers {
     let mut out = KeyModifiers::NONE;
-    if m.control() { out |= KeyModifiers::CONTROL; }
-    if m.shift()   { out |= KeyModifiers::SHIFT; }
-    if m.alt()     { out |= KeyModifiers::ALT; }
-    // Cmd on macOS is the platform-conventional command modifier — map it
-    // onto CONTROL so the shared `key_input::handle_key` (which only
-    // matches CONTROL for things like Ctrl+F / Ctrl+L / Ctrl+P) fires the
-    // same actions for Cmd+F / Cmd+L / Cmd+P. Two Cmd-bound items the
-    // shared handler ALSO matches against SUPER (Cmd+Q quit, Cmd+W close)
-    // are unaffected — both branches are accepted.
+    if m.shift() { out |= KeyModifiers::SHIFT; }
+    if m.alt()   { out |= KeyModifiers::ALT; }
+    // Mac GUI: Cmd is the platform shortcut modifier and Ctrl must
+    // NOT trigger CONTROL-bound shortcuts. We map Cmd onto CONTROL
+    // (so the shared `key_input::handle_key` fires Cmd+F / Cmd+L /
+    // Cmd+P / Cmd+W / Cmd+Q just like the TUI's Ctrl+… equivalents)
+    // and route a real Ctrl press to SUPER instead — no shared
+    // handler matches SUPER for those bindings, so Ctrl+anything is
+    // effectively inert in the Mac GUI. This lines up with macOS
+    // platform conventions where Ctrl is reserved for emacs-style
+    // text edit shortcuts.
     #[cfg(target_os = "macos")]
-    if m.logo()    { out |= KeyModifiers::CONTROL; }
+    {
+        if m.control() { out |= KeyModifiers::SUPER; }
+        if m.logo()    { out |= KeyModifiers::CONTROL; }
+    }
     #[cfg(not(target_os = "macos"))]
-    if m.logo()    { out |= KeyModifiers::SUPER; }
+    {
+        if m.control() { out |= KeyModifiers::CONTROL; }
+        if m.logo()    { out |= KeyModifiers::SUPER; }
+    }
     out
 }
 

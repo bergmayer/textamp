@@ -65,10 +65,11 @@ impl Tab {
 
     fn is_active(self, state: &AppState) -> bool {
         match self {
-            Tab::Library => {
-                state.view == View::Browse
-                    && matches!(state.browse_category, BrowseCategory::Library)
-            }
+            // Any Browse-style view counts as "Library" — the user
+            // sees Library / Genres / Folders / Playlists as facets
+            // of the same library tab, so drilling into a playlist
+            // shouldn't visually disown the Library tab.
+            Tab::Library => state.view == View::Browse,
             Tab::NowPlaying => matches!(state.view, View::Queue | View::NowPlaying),
         }
     }
@@ -92,7 +93,7 @@ pub fn inline_view(state: &AppState) -> Element<'_, GuiMessage> {
     let input = text_input(placeholder, &filter_value)
         .on_input(GuiMessage::FilterChanged)
         .on_submit(submit_filter_msg(&filter_value))
-        .size(12)
+        .size(14)
         .padding(4)
         .width(Length::Fixed(180.0));
     let mut filter_row = row![input].spacing(4).align_y(Alignment::Center);
@@ -101,7 +102,7 @@ pub fn inline_view(state: &AppState) -> Element<'_, GuiMessage> {
         // Standard "clear search" affordance — a round badge with
         // an X glyph, drawn against the same neutral palette as
         // the input chrome so it reads as part of the input.
-        let clear_btn = button(text("x").size(11))
+        let clear_btn = button(text("x").size(13))
             .padding([0, 6])
             .height(Length::Fixed(20.0))
             .on_press(GuiMessage::Action(Action::Search(SearchAction::DeactivateListFilter)))
@@ -138,7 +139,7 @@ pub fn inline_view(state: &AppState) -> Element<'_, GuiMessage> {
 }
 
 fn tab_button(tab: Tab, active: bool) -> Element<'static, GuiMessage> {
-    let label = text(tab.label()).size(14);
+    let label = text(tab.label()).size(16);
     let inner = container(label)
         .center_y(Length::Fixed(STRIP_HEIGHT as f32 - 2.0))
         .center_x(Length::Fixed(TAB_WIDTH))
@@ -159,16 +160,28 @@ fn tab_button(tab: Tab, active: bool) -> Element<'static, GuiMessage> {
         .style(move |theme: &Theme, status: button::Status| {
             let p = theme.extended_palette();
             // Pair-consistent (bg, fg) — `Pair::text` is guaranteed
-            // readable on `Pair::color` so each theme (incl. strict
-            // black-and-white) renders both an active and an
-            // inactive tab without ever collapsing to same-colour
-            // text on bg.
+            // readable on `Pair::color` so each theme renders both an
+            // active and an inactive tab without ever collapsing to
+            // same-colour text on bg.
+            //
+            // The Black & White theme's `primary.weak` is white bg /
+            // black text, which makes the active tab vanish into the
+            // body (also white). Flip the active/inactive swatches in
+            // that one theme so the active tab is the black-on-white
+            // chip and inactive tabs read as raised white plates.
+            let is_bw = crate::ui_gui::theme::is_monochrome(theme);
             let (bg, fg) = if active {
-                (p.primary.weak.color, p.primary.weak.text)
+                if is_bw {
+                    (p.background.strong.color, p.background.strong.text)
+                } else {
+                    (p.primary.weak.color, p.primary.weak.text)
+                }
             } else {
                 let hover = matches!(status, button::Status::Hovered | button::Status::Pressed);
                 if hover {
                     (p.primary.base.color, p.primary.base.text)
+                } else if is_bw {
+                    (p.primary.weak.color, p.primary.weak.text)
                 } else {
                     (p.background.strong.color, p.background.strong.text)
                 }

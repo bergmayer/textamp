@@ -37,10 +37,49 @@ const ART_THUMB_SIZE: f32 = 128.0;
 /// `on_scroll` and the next re-render.
 const BUFFER_ROWS: usize = 6;
 
+/// Maximum simultaneously-rendered Miller columns we cache scroll IDs
+/// for. Realistic upper bound on visible columns at any reasonable
+/// window size; index_for() gracefully clamps if we ever exceed this.
+const MAX_MILLER_COLS: usize = 12;
+
+/// Cached column scroll IDs. iced's `scrollable::Id` is internally an
+/// `Arc<str>`; cloning it is a refcount bump, building one with
+/// `format!()` allocates twice. This array is built once and cloned
+/// per render call.
+fn miller_col_ids() -> &'static [scrollable::Id; MAX_MILLER_COLS] {
+    use std::sync::OnceLock;
+    static IDS: OnceLock<[scrollable::Id; MAX_MILLER_COLS]> = OnceLock::new();
+    IDS.get_or_init(|| {
+        std::array::from_fn(|i| scrollable::Id::new(format!("miller-col-{i}")))
+    })
+}
+
 /// Stable per-column scroll `Id` so `App::update` can snap the scrollable
 /// viewport to keep the selected row visible on arrow-key navigation.
 pub fn scroll_id_for(column_index: usize) -> scrollable::Id {
-    scrollable::Id::new(format!("miller-col-{}", column_index))
+    miller_col_ids()[column_index.min(MAX_MILLER_COLS - 1)].clone()
+}
+
+/// Mac-Finder-style middle truncation: collapse the middle of the
+/// string with `…` so the start and end remain visible. `max_chars`
+/// is the budget for the visible characters of the result (the
+/// ellipsis itself counts as one character).
+fn middle_truncate(s: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max_chars {
+        return s.to_string();
+    }
+    // Split the budget so the prefix is slightly longer than the
+    // suffix on odd splits — matches Finder's bias toward keeping
+    // the disambiguating start of the name.
+    let body = max_chars.saturating_sub(1);
+    let prefix_len = (body + 1) / 2;
+    let suffix_len = body - prefix_len;
+    let mut out = String::with_capacity(s.len().min(max_chars * 4));
+    out.extend(chars[..prefix_len].iter());
+    out.push('\u{2026}');
+    out.extend(chars[chars.len() - suffix_len..].iter());
+    out
 }
 
 /// Compute a `RelativeOffset` that keeps `selected_index` in view.
@@ -98,26 +137,24 @@ pub fn view<'a>(
     col: &'a BrowseColumn,
     is_focused: bool,
     grid_cache: &'a HashMap<String, Vec<u8>>,
-    filter_matched: Option<&'a [usize]>,
+    filter_matched: Option<Vec<usize>>,
     scroll_offset_y: f32,
     viewport_h: f32,
+    // Available pixel width for this column. Used to budget the
+    // header title's character count so it middle-truncates to
+    // roughly fit alongside the action button.
+    col_width_px: f32,
     on_row_click: impl Fn(RowClick) -> GuiMessage + 'a + Clone,
 ) -> Element<'a, GuiMessage> {
-    // Header row shows the column title (e.g. "artists", "albums - R.E.M.")
-    // along with any column-level action buttons. Both Artist Radio
-    // (album column) and Play Album (tracks column) live in the
-    // header — that way both buttons sit at the same fixed offset
-    // below their title row, so they read as a row of aligned actions
-    // when the columns are displayed side-by-side.
-    // Title row doubles as a click target — clicking it focuses
-    // this column without changing selection or drill state.
-    let title_row: Element<'_, GuiMessage> = mouse_area(
-        container(text(sanitize(&col.title)).size(12))
-            .padding([4, 8])
-            .width(Length::Fill),
-    )
-    .on_press(GuiMessage::FocusMillerColumn { column_index })
-    .into();
+    // Header row shows the column title (e.g. "artists", "Europe '90'")
+    // along with any column-level action buttons. For tracks columns
+    // we strip the "tracks — " prefix that the dispatcher prepends
+    // (it's redundant once the row of action buttons makes the
+    // context obvious) and inline the Play Album / Play All button
+    // on the same row as the title — clicking the title still acts
+    // as the column-focus target.
+    use crate::app::action::QueueAction;
+    use crate::ui_gui::widgets::transport_bar::primary_action_button;
 
     // Find an `ArtistRadio` row inside the items list, if present.
     // We hoist it into the header as a button (matching Play Album)
@@ -126,57 +163,106 @@ pub fn view<'a>(
         matches!(it, BrowseItem::ArtistRadio { .. })
     });
 
-    let mut header_col = Column::new().spacing(2).push(title_row);
-    if let Some(ar_idx) = artist_radio_idx {
-        if let Some(BrowseItem::ArtistRadio { artist_name, .. }) = col.items.get(ar_idx) {
-            use crate::ui_gui::widgets::transport_bar::primary_action_button;
-            let label = format!("Artist Radio - {}", sanitize(artist_name));
-            let click = RowClick { column_index, item_index: ar_idx, activate: true };
-            let on_click_for_btn = on_row_click.clone();
-            let btn = primary_action_button(label, on_click_for_btn(click));
-            header_col = header_col.push(
-                container(btn)
-                    .center_x(Length::Fill)
-                    .padding([2, 8]),
-            );
-        }
-    }
-    if let Some((album_key, album_title)) = col.play_album.as_ref() {
-        use crate::app::action::QueueAction;
-        use crate::ui_gui::widgets::transport_bar::primary_action_button;
+    // Decide what action button (if any) to lay alongside the title.
+    let header_action: Option<Element<'_, GuiMessage>> = if let Some((album_key, album_title)) = col.play_album.as_ref() {
         let key = album_key.clone();
         let title = album_title.clone();
-        let action_btn = primary_action_button(
+        Some(primary_action_button(
             "Play Album",
             GuiMessage::Action(crate::app::Action::Queue(
                 QueueAction::PlayAlbumNow { rating_key: key, title }
             )),
-        );
-        header_col = header_col.push(
-            container(action_btn)
-                .center_x(Length::Fill)
-                .padding([2, 8]),
-        );
+        ).into())
     } else if let Some(label) = col.play_all_label.as_ref() {
         // Virtual "all tracks" columns (artist all-tracks, library
         // all-tracks, compilation tracks) don't have a single album
         // key — queue the column's `tracks` directly.
-        use crate::app::action::QueueAction;
-        use crate::ui_gui::widgets::transport_bar::primary_action_button;
         let tracks = col.tracks.clone();
-        let action_btn = primary_action_button(
+        Some(primary_action_button(
             label.clone(),
             GuiMessage::Action(crate::app::Action::Queue(
                 QueueAction::PlayTracksNow(tracks)
             )),
-        );
-        header_col = header_col.push(
-            container(action_btn)
-                .center_x(Length::Fill)
-                .padding([2, 8]),
-        );
-    }
-    let header: Element<'_, _> = container(header_col)
+        ).into())
+    } else if let Some(ar_idx) = artist_radio_idx {
+        // Album column hoists its Artist Radio row into the header.
+        // The artist's name is already obvious from the column title
+        // / parent column selection, so the button just says "Artist
+        // Radio" — long names like "(Penny) Candy Shop (Coopertunes
+        // remix of 50 Cent's song)_146358800" no longer crush the
+        // column header into a multi-line wrap.
+        if col.items.get(ar_idx).map_or(false, |it| matches!(it, BrowseItem::ArtistRadio { .. })) {
+            let click = RowClick { column_index, item_index: ar_idx, activate: true };
+            let on_click_for_btn = on_row_click.clone();
+            Some(primary_action_button("Artist Radio", on_click_for_btn(click)).into())
+        } else { None }
+    } else {
+        None
+    };
+
+    // For album-tracks columns the dispatcher labels the column
+    // "tracks — {album title}". Drop that prefix so the column
+    // header is just the album name (the Play Album button to its
+    // right is what tells the user it's a tracks column).
+    let raw_title = sanitize(&col.title);
+    let display_title: String = if col.play_album.is_some() {
+        raw_title.strip_prefix("tracks \u{2014} ")
+            .map(|s| s.to_string())
+            .unwrap_or(raw_title)
+    } else {
+        raw_title
+    };
+
+    // Mac-style middle truncation: "Lorem ipsum dolor sit amet" →
+    // "Lorem ip…sit amet". Pixel-perfect Mac truncation needs the
+    // shaped width; we approximate with a character budget derived
+    // from the column's pixel width minus the action button slot.
+    // Off by ~1 character at narrow widths but always single-line.
+    let action_reserve_px = if header_action.is_some() { 140.0 } else { 0.0 };
+    let title_budget_px = (col_width_px - action_reserve_px - 24.0).max(80.0);
+    // SF Pro at size 14 averages ~7 px per glyph for Latin text.
+    let max_chars = ((title_budget_px / 7.0) as usize).max(8);
+    let display_title = middle_truncate(&display_title, max_chars);
+    let title_text = container(text(display_title).size(14).wrapping(text::Wrapping::None))
+        .padding([4, 8])
+        .width(Length::Fill)
+        .clip(true);
+    let close_btn = close_x_button(GuiMessage::CloseMillerColumn {
+        column_index: Some(column_index),
+    });
+    // Wrap title in a Fill-width container so `mouse_area` doesn't
+    // collapse to its content's intrinsic width — without the wrapper
+    // the row puts title + buttons right against each other and the
+    // close-x is invisibly clipped behind the column's right edge.
+    let title_clickable: Element<'_, GuiMessage> = container(
+        mouse_area(title_text)
+            .on_press(GuiMessage::FocusMillerColumn { column_index }),
+    )
+    .width(Length::Fill)
+    .into();
+    let title_row: Element<'_, GuiMessage> = if let Some(btn) = header_action {
+        // Title + action + close-x. The title takes the remaining
+        // width (Fill) and clips overflow; the action button is
+        // shrink-to-fit; the close-x sits at the right edge.
+        let inner = row![
+            title_clickable,
+            container(btn).padding([2, 4]),
+            container(close_btn).padding([2, 6]),
+        ]
+        .align_y(Alignment::Center)
+        .width(Length::Fill);
+        container(inner).width(Length::Fill).into()
+    } else {
+        let inner = row![
+            title_clickable,
+            container(close_btn).padding([2, 6]),
+        ]
+        .align_y(Alignment::Center)
+        .width(Length::Fill);
+        container(inner).width(Length::Fill).into()
+    };
+
+    let header: Element<'_, _> = container(title_row)
         .width(Length::Fill)
         .into();
 
@@ -184,15 +270,12 @@ pub fn view<'a>(
     // An active filter hides non-matching rows; otherwise every item
     // is a candidate. The hoisted Artist Radio row is dropped here so
     // the scrollable doesn't draw it a second time below the header.
+    let filter_active_no_matches = matches!(&filter_matched, Some(m) if m.is_empty());
     let indices: Vec<usize> = match filter_matched {
-        Some(matched) if matched.is_empty() => {
-            // Filter active with no matches — single informative row,
-            // no virtualization needed.
-            let body = container(text("no matches").size(12))
-                .padding([6, 10]);
-            return wrap_chrome(column_index, header, body.into(), is_focused);
-        }
-        Some(matched) => matched.iter().copied().collect(),
+        // An empty match list keeps the column visible — rendered as
+        // a single "no results" row inserted below the header so the
+        // user sees the column is alive but empty under their filter.
+        Some(matched) => matched,
         None => (0..col.items.len()).collect(),
     };
     let indices: Vec<usize> = if let Some(ar_idx) = artist_radio_idx {
@@ -261,6 +344,14 @@ pub fn view<'a>(
     let bot_spacer_h = (total_h - cum.get(last).copied().unwrap_or(total_h)).max(0.0);
 
     let mut rendered: Vec<Element<'a, GuiMessage>> = Vec::with_capacity(last.saturating_sub(first) + 2);
+    if filter_active_no_matches {
+        rendered.push(
+            container(text("no results").size(15))
+                .padding([6, 12])
+                .width(Length::Fill)
+                .into()
+        );
+    }
     if top_spacer_h > 0.0 {
         rendered.push(Space::with_height(Length::Fixed(top_spacer_h)).into());
     }
@@ -414,7 +505,7 @@ fn row_item<'a>(
             None => Space::with_width(Length::Fixed(ART_THUMB_SIZE)).into(),
         };
 
-        let label_btn = button(text(label).size(13))
+        let label_btn = button(text(label).size(15).wrapping(text::Wrapping::None))
             .width(Length::Fill)
             .height(Length::Fill)
             .padding([4, 8])
@@ -435,9 +526,10 @@ fn row_item<'a>(
         )
         .height(Length::Fixed(row_h))
         .width(Length::Fill)
+        .clip(true)
         .into()
     } else {
-        let btn = button(text(label).size(13))
+        let btn = button(text(label).size(15).wrapping(text::Wrapping::None))
             .width(Length::Fill)
             .height(Length::Fill)
             .padding([4, 8])
@@ -453,6 +545,7 @@ fn row_item<'a>(
         )
         .height(Length::Fixed(row_h))
         .width(Length::Fill)
+        .clip(true)
         .into()
     }
 }
@@ -499,22 +592,44 @@ fn action_label_for(item: &BrowseItem) -> String {
 /// Strip characters that typically don't render in the default GUI font
 /// (emoji + other supplementary-plane glyphs) from user-sourced titles.
 /// Without this, playlist names like "🎵 Tracks" print as tofu/boxes.
+/// Trim and strip codepoints that confuse cosmic-text shaping (variation
+/// selectors, ZWJ, tag chars). Preserves dingbats/symbols themselves so
+/// fonts like ZapfDingbats can render U+2764 ❤ as a monochrome outline
+/// instead of dropping to LastResort tofu.
 fn sanitize(s: &str) -> String {
-    s.chars()
-        .filter(|c| (*c as u32) < 0x10000 && !is_symbol_emoji(*c))
-        .collect::<String>()
-        .trim()
-        .to_string()
+    super::safe_text(s).trim().to_string()
 }
 
-fn is_symbol_emoji(c: char) -> bool {
-    let cp = c as u32;
-    // Misc Symbols, Dingbats, Misc Symbols & Pictographs (BMP ranges
-    // that `Segoe UI` doesn't cover but appear in playlist titles).
-    (0x2600..=0x26FF).contains(&cp)
-        || (0x2700..=0x27BF).contains(&cp)
-        || (0x2B00..=0x2BFF).contains(&cp)
-        || (0xFE00..=0xFE0F).contains(&cp) // Variation Selectors
+/// Small × button shared by Miller column headers and the
+/// track-details pane. Clicking it dispatches the supplied
+/// `GuiMessage`, which the app routes through the same close logic
+/// as Cmd+W (focus the targeted column, then call
+/// `close_focused_browse_column`).
+///
+/// Uses U+00D7 (multiplication sign) — universally available in
+/// system fonts on every desktop platform, unlike U+2715 ✕ which
+/// some font configurations fall back to a notdef glyph for.
+pub fn close_x_button<'a>(on_press: GuiMessage) -> iced::widget::Button<'a, GuiMessage> {
+    button(text("\u{00d7}").size(18))
+        .padding([0, 8])
+        .on_press(on_press)
+        .style(|theme: &Theme, status: button::Status| {
+            let p = theme.extended_palette();
+            let (bg, fg) = match status {
+                button::Status::Hovered =>
+                    (p.danger.base.color, p.danger.base.text),
+                _ =>
+                    (Color::TRANSPARENT, p.background.base.text),
+            };
+            button::Style {
+                background: Some(Background::Color(bg)),
+                text_color: fg,
+                border: Border {
+                    color: Color::TRANSPARENT, width: 0.0, radius: 4.0.into(),
+                },
+                ..button::Style::default()
+            }
+        })
 }
 
 fn art_handle_for<'a>(
@@ -561,28 +676,39 @@ fn label_for(item: &BrowseItem, show_track_artist: bool) -> String {
             }
         }
         BrowseItem::Track { title, artist_name, track_number, duration_ms, .. } => {
-            let n = track_number.map(|n| format!("{:02}. ", n)).unwrap_or_default();
             let m = duration_ms / 60_000;
             let s = (duration_ms / 1000) % 60;
-            // In multi-artist columns (playlist tracks, compilation
-            // tracks, all-tracks-by-X), prefix with the track artist
-            // so the user can tell rows apart at a glance. Single-
-            // album columns suppress the prefix because the artist
-            // is implied by the parent column.
             let title_str = sanitize(title);
-            let body = match (show_track_artist, artist_name.as_deref()) {
-                (true, Some(a)) if !a.is_empty() => format!("{} - {}", sanitize(a), title_str),
-                _ => title_str,
+            // Multi-artist columns (playlist tracks, compilation
+            // tracks, all-tracks-by-X) prefix the artist and DROP
+            // the track number — the number comes from the
+            // underlying album so it's misleading in this context
+            // (e.g. "01. Ween - Old Queen Cole" when Old Queen Cole
+            // is track 14 on the album the playlist pulled it from).
+            // Single-album track columns keep the number because
+            // there it actually identifies the track within the
+            // album.
+            let (artist_part, show_number) = match (show_track_artist, artist_name.as_deref()) {
+                (true, Some(a)) if !a.is_empty() => (Some(sanitize(a)), false),
+                _ => (None, true),
             };
-            format!("{}{}  {:>2}:{:02}", n, body, m, s)
+            let n = if show_number {
+                track_number.map(|n| format!("{:02}. ", n)).unwrap_or_default()
+            } else {
+                String::new()
+            };
+            let body = match artist_part {
+                Some(a) => format!("{a} - {title_str}"),
+                None => title_str,
+            };
+            format!("{n}{body}  {m:>2}:{s:02}")
         }
         BrowseItem::Genre { title, .. } => sanitize(title),
         BrowseItem::GenreCategory { title, .. } => sanitize(title),
-        BrowseItem::Playlist { title, track_count, .. } => {
-            let t = sanitize(title);
-            track_count
-                .map(|n| format!("{}  ({} tracks)", t, n))
-                .unwrap_or(t)
+        BrowseItem::Playlist { title, .. } => {
+            // No "(N tracks)" suffix — the count is shown in the
+            // header of the playlist's tracks column when it opens.
+            sanitize(title)
         }
         BrowseItem::AllTracks { artist_name, .. } => format!("All Tracks - {}", sanitize(artist_name)),
         BrowseItem::AllArtists => "All Artists".to_string(),

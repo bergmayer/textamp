@@ -23,12 +23,12 @@ pub fn view<'a>(state: &'a AppState) -> Element<'a, GuiMessage> {
     let selected_idx = state.list_state.search_item_index;
     let active_tab = state.search.tab;
 
-    let close_btn = button(text("Close").size(12))
+    let close_btn = button(text("Close").size(14))
         .padding([4, 12])
         .on_press(GuiMessage::CloseStatePopup(StatePopupKind::Search))
         .style(popout_button_style);
     let header = row![
-        text("Search").size(16),
+        text("Search").size(18),
         Space::with_width(Length::Fill),
         close_btn,
     ]
@@ -40,7 +40,7 @@ pub fn view<'a>(state: &'a AppState) -> Element<'a, GuiMessage> {
     let query_input = text_input("Search artists, albums, tracks\u{2026}", &state.search.query)
         .on_input(|s| GuiMessage::Action(Action::Search(SearchAction::SetSearchQuery(s))))
         .on_submit(GuiMessage::Action(Action::Search(SearchAction::ExecuteLocalSearch)))
-        .size(13)
+        .size(15)
         .padding(6)
         .width(Length::Fill);
 
@@ -116,12 +116,12 @@ pub fn view<'a>(state: &'a AppState) -> Element<'a, GuiMessage> {
             }
         }
         if rows.is_empty() {
-            rows.push(text("No results in this category.").size(12).into());
+            rows.push(text("No results in this category.").size(14).into());
         }
     } else if state.search.query.is_empty() {
-        rows.push(text("Type to search\u{2026}").size(12).into());
+        rows.push(text("Type to search\u{2026}").size(14).into());
     } else {
-        rows.push(text("Searching\u{2026} (Enter to retry)").size(12).into());
+        rows.push(text("Searching\u{2026} (Enter to retry)").size(14).into());
     }
 
     let body = scrollable(Column::with_children(rows).spacing(2))
@@ -147,7 +147,7 @@ pub fn view<'a>(state: &'a AppState) -> Element<'a, GuiMessage> {
 }
 
 fn tab_btn<'a>(label: &'static str, active: bool, tab: SearchTab) -> Element<'a, GuiMessage> {
-    button(text(label).size(12))
+    button(text(label).size(14))
         .padding([4, 12])
         .on_press(GuiMessage::Action(Action::Search(SearchAction::SetSearchTab(tab))))
         .style(move |theme: &Theme, status: button::Status| {
@@ -171,13 +171,13 @@ fn tab_btn<'a>(label: &'static str, active: bool, tab: SearchTab) -> Element<'a,
 }
 
 fn section_header(label: &'static str) -> Element<'static, GuiMessage> {
-    container(text(format!("\u{2014} {} \u{2014}", label)).size(11))
+    container(text(format!("\u{2014} {} \u{2014}", label)).size(13))
         .padding([4, 6])
         .into()
 }
 
 fn result_row(label: String, idx: usize, is_selected: bool) -> Element<'static, GuiMessage> {
-    button(text(label).size(12))
+    button(text(label).size(14))
         .width(Length::Fill)
         .padding([4, 10])
         .on_press(GuiMessage::SearchPopupClick(idx))

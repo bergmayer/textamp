@@ -177,10 +177,12 @@ pub(super) fn handle_settings_keys(key: event::KeyEvent, state: &mut AppState, c
                                 }
                             }
                             SettingsSection::Textamp => {
-                                // Themes + Artwork modes + Local + remotes + Refresh + Transcode
+                                // Themes + Artwork modes + Local + remotes
+                                // + Refresh + Transcode + 3 external-search
+                                // toggles (Apple Music / Spotify / YouTube).
                                 let theme_count = crate::app::theme::ThemeName::all().len();
                                 let artwork_count = crate::app::state::ArtworkMode::all().len();
-                                theme_count + artwork_count + 1 + state.remote.players.len() + 1
+                                theme_count + artwork_count + 1 + state.remote.players.len() + 1 + 3
                             }
                             SettingsSection::Cache => 0,
                             SettingsSection::About => 0,

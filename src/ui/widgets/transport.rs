@@ -20,13 +20,19 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     let t = theme();
     let bg_style = Style::default().bg(t.colors.transport_bg);
 
-    // Fill background
-    let bg = Paragraph::new("").style(bg_style);
-    frame.render_widget(bg, area);
+    // Fill background across both rows.
+    frame.render_widget(Paragraph::new("").style(bg_style), area);
 
-    // Special case: Inline list filter mode shows filter box
+    // Top row: playback controls + track info + volume.
+    // Bottom row: Library / Now Playing tab strip + ":" hint.
+    let top = Rect { x: area.x, y: area.y, width: area.width, height: 1 };
+    let bottom = Rect { x: area.x, y: area.y + 1, width: area.width, height: area.height.saturating_sub(1) };
+
+    // Special case: Inline list filter mode shows filter box across the
+    // top row; the tab strip still renders on the bottom row.
     if state.list_filter.active {
-        render_with_filter(frame, state, area);
+        render_with_filter(frame, state, top);
+        render_tab_strip(frame, state, bottom);
         return;
     }
 
@@ -46,6 +52,10 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     let right_content = build_right_content(state);
     let right_text = &right_content.text;
 
+    // The transport content renders only on the top row; the bottom
+    // row is the tab strip (rendered separately at the end).
+    let area = top;
+
     // Calculate widths using display columns (emoji are 2 cells wide)
     let right_width = UnicodeWidthStr::width(right_text.as_str()) as u16;
     let available_width = area.width.saturating_sub(2); // Leave some padding
@@ -64,17 +74,11 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     //                        ^3  ^5  1  ^20            1 ^5  1^1 2^1  ^5
     {
         let right_start_x = area.x + left_width as u16 + padding;
-        // Find speaker icon position within right_text using display width
-        let speaker_offset = right_text.find('🔊').or_else(|| right_text.find('🔇'))
-            .map(|byte_pos| UnicodeWidthStr::width(&right_text[..byte_pos]) as u16)
-            .unwrap_or(0);
-        let speaker_x = right_start_x + speaker_offset;
+        // The right side is now just the `/ filter` affordance — the
+        // volume widget and its slider hit region are gone, so the
+        // search-icon area covers the entire right_text width.
         let search_x = right_start_x;
-
-        // Volume slider hit region (inline, if present)
-        let volume_slider = right_content.slider_bar.map(|(offset, width)| {
-            Rect { x: right_start_x + offset as u16, y: area.y, width: width as u16, height: 1 }
-        });
+        let search_w = right_width;
 
         // Compute left-side positions from known structure widths
         let status_w: u16 = 3;    // " ⏸ "
@@ -94,9 +98,9 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
             prev_track: Rect { x: prev_x.saturating_sub(1), y: area.y, width: 3, height: 1 },
             next_track: Rect { x: next_x.saturating_sub(1), y: area.y, width: 3, height: 1 },
             track_info: Some(Rect { x: track_info_x, y: area.y, width: search_x.saturating_sub(track_info_x), height: 1 }),
-            search_icon: Some(Rect { x: search_x, y: area.y, width: speaker_offset, height: 1 }),
-            speaker_icon: Some(Rect { x: speaker_x, y: area.y, width: right_width.saturating_sub(speaker_offset), height: 1 }),
-            volume_slider,
+            search_icon: Some(Rect { x: search_x, y: area.y, width: search_w, height: 1 }),
+            speaker_icon: None,
+            volume_slider: None,
         });
     }
 
@@ -104,6 +108,88 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         .style(Style::default().fg(t.colors.fg_primary).bg(t.colors.transport_bg));
 
     frame.render_widget(paragraph, area);
+
+    render_tab_strip(frame, state, bottom);
+}
+
+/// Bottom-row tab strip — Library / Now Playing — mirroring the
+/// GUI's transport-bar tab strip. Active tab uses the selection
+/// background. Hit regions are registered so a future click handler
+/// can dispatch SetView; the `:` palette hint sits on the right.
+fn render_tab_strip(frame: &mut Frame, state: &AppState, area: Rect) {
+    use crate::app::state::View;
+    let t = theme();
+
+    if area.height == 0 {
+        return;
+    }
+
+    // Library = any Browse view; Now Playing = Queue / NowPlaying.
+    let library_active = state.view == View::Browse;
+    let now_active = matches!(state.view, View::Queue | View::NowPlaying);
+
+    // Lower-case labels matching the visualizer tab strip
+    // (`waveform` / `spectrum` / `spectrogram`). Active tab uses
+    // accent fg + bold; inactive is muted. A `│` divider sits
+    // between the two so the strip visually mirrors the
+    // visualizer's tab style.
+    let lib_label = " library ";
+    let divider = "│";
+    let np_label = " now playing ";
+    // Four-key cheat sheet: `:` = command palette, `/` = filter
+    // overlay, `?` = help, `⇥` = Tab toggles Library ↔ Now Playing.
+    // Mirrors classic vim chrome — same row as the Library / Now
+    // Playing tabs, on the right edge.
+    let palette_hint = " :  /  ?  \u{21e5} ";
+
+    let active_style = Style::default()
+        .fg(t.colors.fg_accent)
+        .bg(t.colors.transport_bg)
+        .add_modifier(Modifier::BOLD);
+    let inactive_style = Style::default()
+        .fg(t.colors.fg_muted)
+        .bg(t.colors.transport_bg);
+    let divider_style = Style::default()
+        .fg(t.colors.fg_muted)
+        .bg(t.colors.transport_bg);
+
+    let lib_w = UnicodeWidthStr::width(lib_label) as u16;
+    let div_w = UnicodeWidthStr::width(divider) as u16;
+    let np_w = UnicodeWidthStr::width(np_label) as u16;
+    let hint_w = UnicodeWidthStr::width(palette_hint) as u16;
+
+    let lib_x = area.x;
+    let div_x = lib_x + lib_w;
+    let np_x = div_x + div_w;
+    let hint_x = area.x + area.width.saturating_sub(hint_w);
+
+    frame.render_widget(
+        Paragraph::new(lib_label).style(if library_active { active_style } else { inactive_style }),
+        Rect { x: lib_x, y: area.y, width: lib_w, height: 1 },
+    );
+    frame.render_widget(
+        Paragraph::new(divider).style(divider_style),
+        Rect { x: div_x, y: area.y, width: div_w, height: 1 },
+    );
+    frame.render_widget(
+        Paragraph::new(np_label).style(if now_active { active_style } else { inactive_style }),
+        Rect { x: np_x, y: area.y, width: np_w, height: 1 },
+    );
+    frame.render_widget(
+        Paragraph::new(palette_hint).style(Style::default().fg(t.colors.fg_muted).bg(t.colors.transport_bg)),
+        Rect { x: hint_x, y: area.y, width: hint_w, height: 1 },
+    );
+
+    // Register click hit regions. The shared tab_bar_action handler
+    // expects index 0 = Library (Browse) and index 2 = Now Playing.
+    let lib_rect = Rect { x: lib_x, y: area.y, width: lib_w, height: 1 };
+    let np_rect = Rect { x: np_x, y: area.y, width: np_w, height: 1 };
+    let mut hr = state.hit_regions.borrow_mut();
+    hr.tab_bar = Some(crate::ui::hit_regions::TabBarRegions {
+        library_label: None,
+        quit_button: None,
+        tabs: vec![(lib_rect, 0), (np_rect, 2)],
+    });
 }
 
 /// Build adventure mode text for the transport bar.
@@ -180,50 +266,30 @@ struct RightContent {
     slider_bar: Option<(usize, usize)>,
 }
 
-/// Build the right side of the transport bar (search + notification/volume + indicators).
+/// Build the right side of the transport bar.
+///
+/// Matches the GUI's transport: just a `/` filter affordance and any
+/// active notification. The volume widget that used to live here is
+/// gone — volume is configured in Settings (and the OS volume keys
+/// still work).
 fn build_right_content(state: &AppState) -> RightContent {
     let mut right = String::new();
-    let mut slider_bar = None;
+    let slider_bar = None;
 
-    // Remote output indicator
+    // Remote output indicator (rare).
     if let crate::app::state::OutputTarget::Remote { ref player_name, .. } = state.remote.output_target {
         right.push_str(&format!("-> {} ", truncate_str(player_name, 15)));
     }
 
-    // Search/filter emoji first (left of volume, clickable to activate filter)
-    right.push_str("🔍 ");
-
-    // Check for active notification
+    // Notifications use the right side; otherwise it's empty —
+    // the keybind cheat-sheet (`: / ?`) lives on the bottom row of
+    // the transport bar instead of competing for space here.
     if let Some(notification) = state.current_notification() {
-        // Show notification instead of volume
         let icon = match notification.notification_type {
             NotificationType::Ongoing => "⟳",
             NotificationType::Toast => "ℹ",
         };
-        right.push_str(&format!("{} {}", icon, notification.message));
-    } else {
-        // Inline volume slider when active
-        let slider_active = state.volume_slider_until
-            .map_or(false, |deadline| deadline > std::time::Instant::now());
-        if slider_active {
-            let vol = if state.playback.muted { 0.0 } else { state.playback.volume };
-            let bar_width = 20usize;
-            let bar_offset = UnicodeWidthStr::width(right.as_str());
-            let bar = build_progress_bar(vol, bar_width);
-            right.push_str(&bar);
-            right.push(' ');
-            slider_bar = Some((bar_offset, bar_width));
-        }
-
-        // Speaker icon + percentage (or no-audio indicator)
-        if !state.audio_available {
-            right.push_str("🔇 no audio");
-        } else if state.playback.muted {
-            right.push_str("🔇 muted");
-        } else {
-            let vol_pct = (state.playback.volume * 100.0) as u8;
-            right.push_str(&format!("🔊 {}%", vol_pct));
-        }
+        right.push_str(&format!("{} {} ", icon, notification.message));
     }
 
     RightContent { text: right, slider_bar }

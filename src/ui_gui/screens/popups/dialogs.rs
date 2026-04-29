@@ -14,16 +14,16 @@ use crate::app::state::{ConfirmDialog, InputDialog};
 use crate::ui_gui::message::GuiMessage;
 
 pub fn confirm<'a>(d: &'a ConfirmDialog) -> Element<'a, GuiMessage> {
-    let yes = button(text("Yes").size(13))
+    let yes = button(text("Yes").size(15))
         .on_press(GuiMessage::ConfirmDialogYes)
         .padding([4, 14]);
-    let no = button(text("No").size(13))
+    let no = button(text("No").size(15))
         .on_press(GuiMessage::ConfirmDialogNo)
         .padding([4, 14]);
     dialog_frame(
         column![
-            text(&d.title).size(16),
-            text(&d.message).size(13),
+            text(&d.title).size(18),
+            text(&d.message).size(15),
             row![yes, no].spacing(10).align_y(Alignment::Center),
         ]
         .spacing(12)
@@ -37,15 +37,15 @@ pub fn input<'a>(d: &'a InputDialog) -> Element<'a, GuiMessage> {
         .on_submit(GuiMessage::InputDialogSubmit)
         .padding(8)
         .width(Length::Fixed(320.0));
-    let submit = button(text("OK").size(13))
+    let submit = button(text("OK").size(15))
         .on_press(GuiMessage::InputDialogSubmit)
         .padding([4, 14]);
-    let cancel = button(text("Cancel").size(13))
+    let cancel = button(text("Cancel").size(15))
         .on_press(GuiMessage::InputDialogCancel)
         .padding([4, 14]);
     dialog_frame(
         column![
-            text(&d.title).size(16),
+            text(&d.title).size(18),
             field,
             row![submit, cancel].spacing(10).align_y(Alignment::Center),
         ]

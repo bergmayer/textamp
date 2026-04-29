@@ -8,17 +8,24 @@ use crate::ui_gui::message::{GuiMessage, StatePopupKind};
 use crate::ui_gui::widgets::transport_bar::popout_button_style;
 
 pub fn view<'a>(p: &'a SortPopupState) -> Element<'a, GuiMessage> {
-    use crate::app::state::SortPopupOption;
+    use crate::app::state::{ColumnSortMode, SortPopupOption};
     let rows = p.options.iter().enumerate().map(|(i, o)| {
         let is_selected = i == p.selected_index;
         let mark = if is_selected { "> " } else { "  " };
         let label = match o {
-            SortPopupOption::SortMode(m)    => format!("{:?}", m),
+            SortPopupOption::SortMode(m)    => match m {
+                ColumnSortMode::Default     => "Default".to_string(),
+                ColumnSortMode::ByArtist    => "By artist".to_string(),
+                ColumnSortMode::ByAlbum     => "By album".to_string(),
+                ColumnSortMode::ByTitle     => "By title".to_string(),
+                ColumnSortMode::ByDuration  => "By duration".to_string(),
+                ColumnSortMode::Shuffled    => "Shuffled".to_string(),
+            },
             SortPopupOption::Direction      => "Reverse direction".to_string(),
-            SortPopupOption::Artwork        => "Toggle artwork".to_string(),
+            SortPopupOption::Artwork        => "Show album artwork".to_string(),
             SortPopupOption::GroupByAlbum   => "Group by album".to_string(),
         };
-        button(text(format!("{mark}{label}")).size(13))
+        button(text(format!("{mark}{label}")).size(15))
             .width(Length::Fill)
             .padding([4, 8])
             .on_press(GuiMessage::SortPopupClick(i))
@@ -42,15 +49,23 @@ pub fn view<'a>(p: &'a SortPopupState) -> Element<'a, GuiMessage> {
             .into()
     }).collect::<Vec<Element<'a, GuiMessage>>>();
 
-    let close_btn = button(text("Close").size(12))
-        .padding([4, 12])
-        .on_press(GuiMessage::CloseStatePopup(StatePopupKind::Sort))
-        .style(popout_button_style);
+    // Pin a fixed shrink-disabled width on the close button so a long
+    // title can't squeeze it into a wrapped "Cl / os / e" stack —
+    // also fix the title at "View Options" (the column name was just
+    // visual noise that varied wildly in length).
+    let close_btn = container(
+        button(text("Close").size(14).wrapping(text::Wrapping::None))
+            .padding([4, 12])
+            .on_press(GuiMessage::CloseStatePopup(StatePopupKind::Sort))
+            .style(popout_button_style),
+    )
+    .width(Length::Shrink);
     let header = row![
-        text(format!("Sort \u{2014} {}", p.column_title)).size(16),
+        text("View Options").size(18),
         Space::with_width(Length::Fill),
         close_btn,
     ]
+    .spacing(8)
     .align_y(Alignment::Center);
 
     container(

@@ -83,12 +83,36 @@ pub mod ids {
     pub const Q_CLEAR:        u32 = 4003;
     pub const Q_SHUFFLE:      u32 = 4004;
 
+    // ── Queue → DJ Modes ──────────────────────────────────────────────
+    pub const Q_DJ_STRETCH:  u32 = 4100;
+    pub const Q_DJ_GEMINI:   u32 = 4101;
+    pub const Q_DJ_FREEZE:   u32 = 4102;
+    pub const Q_DJ_TWOFER:   u32 = 4103;
+    pub const Q_DJ_CONTEMPO: u32 = 4104;
+    pub const Q_DJ_GROUPIE:  u32 = 4105;
+
+    // ── Queue → Remix tools ───────────────────────────────────────────
+    pub const Q_REMIX_GEMINI:        u32 = 4200;
+    pub const Q_REMIX_TWOFER:        u32 = 4201;
+    pub const Q_REMIX_STRETCH:       u32 = 4202;
+    pub const Q_REMIX_DOPPELGANGER:  u32 = 4203;
+    pub const Q_REMIX_SHUFFLE:       u32 = 4204;
+    pub const Q_REMIX_UNDO_SHUFFLE:  u32 = 4205;
+
+    // ── Radio (top-level menu) ────────────────────────────────────────
+    pub const RADIO_ARTIST:       u32 = 7000;
+    pub const RADIO_ADVENTURE:    u32 = 7001;
+    pub const RADIO_STATIONS:     u32 = 7003;
+
     // ── Tools ──────────────────────────────────────────────────────────
-    pub const TOOLS_SEARCH:       u32 = 5000;
-    pub const TOOLS_ADVENTURE:    u32 = 5001;
-    pub const TOOLS_ARTIST_RADIO: u32 = 5002;
-    pub const TOOLS_RANDOM_ALBUM: u32 = 5003;
-    pub const TOOLS_REFRESH:      u32 = 5004;
+    pub const TOOLS_SEARCH:           u32 = 5000;
+    pub const TOOLS_ADVENTURE:        u32 = 5001;
+    pub const TOOLS_ARTIST_RADIO:     u32 = 5002;
+    pub const TOOLS_RANDOM_ALBUM:     u32 = 5003;
+    pub const TOOLS_REFRESH:          u32 = 5004;
+    pub const TOOLS_SEARCH_APPLE:     u32 = 5005;
+    pub const TOOLS_SEARCH_SPOTIFY:   u32 = 5006;
+    pub const TOOLS_SEARCH_YOUTUBE:   u32 = 5007;
 
     // ── Help ───────────────────────────────────────────────────────────
     pub const HELP_USER_GUIDE: u32 = 6000;
@@ -214,19 +238,60 @@ pub fn build() -> muda::Menu {
         &MenuItem::with_id(ids::Q_SAVE,         "Save queue as playlist\u{2026}", true, accel(cmd_or_ctrl(), Code::KeyS)),
         &MenuItem::with_id(ids::Q_CLEAR,        "Clear Queue",                    true, accel(cmd_or_ctrl(), Code::KeyX)),
         &MenuItem::with_id(ids::Q_SHUFFLE,      "Shuffle",                        true, None),
+        &PredefinedMenuItem::separator(),
+        // ── DJ Modes ──
+        &MenuItem::with_id(ids::Q_DJ_STRETCH,   "DJ Stretch",   true, None),
+        &MenuItem::with_id(ids::Q_DJ_GEMINI,    "DJ Gemini",    true, None),
+        &MenuItem::with_id(ids::Q_DJ_FREEZE,    "DJ Freeze",    true, None),
+        &MenuItem::with_id(ids::Q_DJ_TWOFER,    "DJ Twofer",    true, None),
+        &MenuItem::with_id(ids::Q_DJ_CONTEMPO,  "DJ Contempo",  true, None),
+        &MenuItem::with_id(ids::Q_DJ_GROUPIE,   "DJ Groupie",   true, None),
+        &PredefinedMenuItem::separator(),
+        // ── Remix tools ──
+        &MenuItem::with_id(ids::Q_REMIX_GEMINI,       "Remix: Gemini",        true, None),
+        &MenuItem::with_id(ids::Q_REMIX_TWOFER,       "Remix: Twofer",        true, None),
+        &MenuItem::with_id(ids::Q_REMIX_STRETCH,      "Remix: Stretch",       true, None),
+        &MenuItem::with_id(ids::Q_REMIX_DOPPELGANGER, "Remix: Doppelganger",  true, None),
+        &MenuItem::with_id(ids::Q_REMIX_SHUFFLE,      "Remix: Shuffle",       true, None),
+        &MenuItem::with_id(ids::Q_REMIX_UNDO_SHUFFLE, "Remix: Undo Shuffle",  true, None),
     ]).ok();
     menu.append(&queue).ok();
 
+    // ── Radio ──────────────────────────────────────────────────────────
+    // Top-level menu separate from Queue: starting a radio is a
+    // playback-source switch, not queue-management. The "Stations…"
+    // entry opens the existing Stations popup which lists every Plex
+    // station and drills into per-mood/style/decade categories —
+    // that's the practical equivalent of a Stations submenu without
+    // muda's submenu requiring static at-build-time content (Plex
+    // stations are dynamic per library).
+    let radio = Submenu::new("&Radio", true);
+    radio.append_items(&[
+        &MenuItem::with_id(ids::RADIO_ARTIST,    "Artist Radio\u{2026}",    true, None),
+        &MenuItem::with_id(ids::RADIO_ADVENTURE, "Adventure\u{2026}",       true, None),
+        &PredefinedMenuItem::separator(),
+        &MenuItem::with_id(ids::RADIO_STATIONS,  "Stations\u{2026}",        true, None),
+    ]).ok();
+    menu.append(&radio).ok();
+
     // ── Tools ──────────────────────────────────────────────────────────
+    // Tools is for "everything else". Adventure / Artist Radio /
+    // Stations live in Radio (they all spin up a streaming queue);
+    // Random Album lives here because it's a one-off "play a random
+    // album" command, not a radio source.
     let tools = Submenu::new("&Tools", true);
     tools.append_items(&[
-        &MenuItem::with_id(ids::TOOLS_SEARCH,       "Search\u{2026}",       true, accel(cmd_or_ctrl(), Code::KeyF)),
+        &MenuItem::with_id(ids::TOOLS_SEARCH,        "Search\u{2026}",   true, accel(cmd_or_ctrl(), Code::KeyF)),
+        &MenuItem::with_id(ids::TOOLS_RANDOM_ALBUM,  "Random Album",      true, accel(Modifiers::ALT, Code::KeyR)),
         &PredefinedMenuItem::separator(),
-        &MenuItem::with_id(ids::TOOLS_ADVENTURE,    "Adventure\u{2026}",    true, None),
-        &MenuItem::with_id(ids::TOOLS_ARTIST_RADIO, "Artist Radio\u{2026}", true, None),
-        &MenuItem::with_id(ids::TOOLS_RANDOM_ALBUM, "Random Album",         true, accel(Modifiers::ALT, Code::KeyR)),
+        // Web-search shortcuts: pull up the current selection (or
+        // now-playing track) on a third-party service. No keyboard
+        // accelerator — these are mouse/menu-driven only.
+        &MenuItem::with_id(ids::TOOLS_SEARCH_APPLE,   "Search Apple Music\u{2026}",        true, None),
+        &MenuItem::with_id(ids::TOOLS_SEARCH_SPOTIFY, "Search Spotify\u{2026}",            true, None),
+        &MenuItem::with_id(ids::TOOLS_SEARCH_YOUTUBE, "Search YouTube\u{2026}",            true, None),
         &PredefinedMenuItem::separator(),
-        &MenuItem::with_id(ids::TOOLS_REFRESH,      "Refresh",              true, accel(Modifiers::empty(), Code::F5)),
+        &MenuItem::with_id(ids::TOOLS_REFRESH,        "Refresh",                           true, accel(Modifiers::empty(), Code::F5)),
     ]).ok();
     menu.append(&tools).ok();
 
@@ -300,12 +365,36 @@ pub fn menu_event_for_id(id: &str) -> Option<GuiMessage> {
         ids::Q_CLEAR        => GuiMessage::Action(Action::Queue(QueueAction::ClearQueue)),
         ids::Q_SHUFFLE      => GuiMessage::Action(Action::Queue(QueueAction::ToggleQueueShuffle)),
 
+        // ── Queue → DJ Modes ────────────────────────────────────────────
+        ids::Q_DJ_STRETCH   => GuiMessage::Action(Action::Radio(crate::app::action::RadioAction::ToggleDjMode(crate::app::state::DjMode::Stretch))),
+        ids::Q_DJ_GEMINI    => GuiMessage::Action(Action::Radio(crate::app::action::RadioAction::ToggleDjMode(crate::app::state::DjMode::Gemini))),
+        ids::Q_DJ_FREEZE    => GuiMessage::Action(Action::Radio(crate::app::action::RadioAction::ToggleDjMode(crate::app::state::DjMode::Freeze))),
+        ids::Q_DJ_TWOFER    => GuiMessage::Action(Action::Radio(crate::app::action::RadioAction::ToggleDjMode(crate::app::state::DjMode::Twofer))),
+        ids::Q_DJ_CONTEMPO  => GuiMessage::Action(Action::Radio(crate::app::action::RadioAction::ToggleDjMode(crate::app::state::DjMode::Contempo))),
+        ids::Q_DJ_GROUPIE   => GuiMessage::Action(Action::Radio(crate::app::action::RadioAction::ToggleDjMode(crate::app::state::DjMode::Groupie))),
+
+        // ── Queue → Remix tools ─────────────────────────────────────────
+        ids::Q_REMIX_GEMINI       => GuiMessage::Action(Action::Queue(QueueAction::RemixGemini)),
+        ids::Q_REMIX_TWOFER       => GuiMessage::Action(Action::Queue(QueueAction::RemixTwofer)),
+        ids::Q_REMIX_STRETCH      => GuiMessage::Action(Action::Queue(QueueAction::RemixStretch)),
+        ids::Q_REMIX_DOPPELGANGER => GuiMessage::Action(Action::Queue(QueueAction::RemixDoppelganger)),
+        ids::Q_REMIX_SHUFFLE      => GuiMessage::Action(Action::Queue(QueueAction::RemixShuffle)),
+        ids::Q_REMIX_UNDO_SHUFFLE => GuiMessage::Action(Action::Queue(QueueAction::RemixUndoShuffle)),
+
+        // ── Radio (top-level) ───────────────────────────────────────────
+        ids::RADIO_ARTIST       => GuiMessage::Action(Action::Search(SearchAction::OpenArtistRadioPicker)),
+        ids::RADIO_ADVENTURE    => GuiMessage::Action(Action::Search(SearchAction::OpenAdventureLauncher)),
+        ids::RADIO_STATIONS     => GuiMessage::OpenStationsPopup,
+
         // ── Tools ───────────────────────────────────────────────────────
-        ids::TOOLS_SEARCH       => GuiMessage::Action(Action::Search(SearchAction::OpenSearchPopup)),
-        ids::TOOLS_ADVENTURE    => GuiMessage::Action(Action::Search(SearchAction::OpenAdventureLauncher)),
-        ids::TOOLS_ARTIST_RADIO => GuiMessage::Action(Action::Search(SearchAction::OpenArtistRadioPicker)),
-        ids::TOOLS_RANDOM_ALBUM => GuiMessage::MenuKeyClick(alt_char_key('r')),
-        ids::TOOLS_REFRESH      => GuiMessage::MenuKeyClick(function_key(5)),
+        ids::TOOLS_SEARCH         => GuiMessage::Action(Action::Search(SearchAction::OpenSearchPopup)),
+        ids::TOOLS_ADVENTURE      => GuiMessage::Action(Action::Search(SearchAction::OpenAdventureLauncher)),
+        ids::TOOLS_ARTIST_RADIO   => GuiMessage::Action(Action::Search(SearchAction::OpenArtistRadioPicker)),
+        ids::TOOLS_RANDOM_ALBUM   => GuiMessage::MenuKeyClick(alt_char_key('r')),
+        ids::TOOLS_SEARCH_APPLE   => GuiMessage::Action(Action::System(SystemAction::OpenExternalSearch { target: crate::services::external_search::SearchTarget::AppleMusic, query: None })),
+        ids::TOOLS_SEARCH_SPOTIFY => GuiMessage::Action(Action::System(SystemAction::OpenExternalSearch { target: crate::services::external_search::SearchTarget::Spotify,    query: None })),
+        ids::TOOLS_SEARCH_YOUTUBE => GuiMessage::Action(Action::System(SystemAction::OpenExternalSearch { target: crate::services::external_search::SearchTarget::YouTube,    query: None })),
+        ids::TOOLS_REFRESH        => GuiMessage::MenuKeyClick(function_key(5)),
 
         // ── Help ────────────────────────────────────────────────────────
         ids::HELP_USER_GUIDE => GuiMessage::OpenUserGuide,

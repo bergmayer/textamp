@@ -45,6 +45,9 @@ pub enum DataEvent {
     AllAlbumsForMillerLoaded(Vec<Album>),
     SimilarAlbumsLoaded(Vec<Album>),
     SimilarTracksLoaded(Vec<Track>),
+    /// Result of a `LoadTrackPaneSimilar` request — stored in the
+    /// per-track HashMap, not the popup-shared `state.similar`.
+    TrackPaneSimilarLoaded { rating_key: String, tracks: Vec<Track> },
     SimilarArtistsLoaded(Vec<Artist>),
     RelatedDataLoaded { groups: Vec<crate::app::state::RelatedArtistGroup> },
     SearchCompleted(SearchResults),
@@ -147,6 +150,13 @@ pub enum RadioEvent {
     RadioTracksLoaded { tracks: Vec<Track>, time_travel_index: Option<usize> },
     PlaylistTracksForMillerLoaded { playlist_key: String, tracks: Vec<Track> },
     PlaylistTracksForMillerFailed { playlist_key: String, error: String },
+    /// First page of a lazy-loaded playlist column. `total` is the
+    /// server-reported total — once the column has that many tracks
+    /// the GUI stops asking for more.
+    PlaylistFirstPageLoaded { playlist_key: String, tracks: Vec<Track>, total: Option<u32> },
+    /// Subsequent page appended to an already-built playlist column.
+    PlaylistMorePageLoaded { playlist_key: String, tracks: Vec<Track>, total: Option<u32> },
+    PlaylistMorePageFailed { playlist_key: String, error: String },
 }
 
 #[derive(Debug, Clone)]

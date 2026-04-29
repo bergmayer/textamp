@@ -47,7 +47,7 @@ pub fn view<'a>(state: &'a ContextMenuState, viewport_w: f32, viewport_h: f32) -
         .entries
         .iter()
         .map(|e| match e {
-            Entry::Sep => container(text(" ").size(1))
+            Entry::Sep => container(text(" ").size(3))
                 .width(Length::Fill)
                 .height(Length::Fixed(1.0))
                 .style(|theme: &Theme| {
@@ -60,7 +60,7 @@ pub fn view<'a>(state: &'a ContextMenuState, viewport_w: f32, viewport_h: f32) -
                 .into(),
             Entry::Entry { label, actions } => {
                 let actions = actions.clone();
-                button(text(label.clone()).size(13))
+                button(text(label.clone()).size(15))
                     .width(Length::Fill)
                     .padding([4, 10])
                     .on_press_with(move || GuiMessage::ContextMenuClick(actions.clone()))
@@ -69,7 +69,7 @@ pub fn view<'a>(state: &'a ContextMenuState, viewport_w: f32, viewport_h: f32) -
             }
             Entry::Custom { label, message } => {
                 let msg = message.clone();
-                button(text(label.clone()).size(13))
+                button(text(label.clone()).size(15))
                     .width(Length::Fill)
                     .padding([4, 10])
                     .on_press_with(move || {

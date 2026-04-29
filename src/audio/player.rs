@@ -83,14 +83,19 @@ impl AudioPlayer {
 
     /// Create an audio player without a backend (no audio output).
     /// The app runs normally but playback operations are no-ops.
-    pub fn new_without_audio() -> Result<Self> {
-        Ok(Self {
+    /// Construct a player with no audio backend attached. This is
+    /// infallible — the returned player is a stub that reports
+    /// `has_audio() == false` and silently no-ops every play/seek call.
+    /// Used by the GUI's audio-init retry loop when no output device
+    /// is available, and by the test TUI binary that runs headless.
+    pub fn new_without_audio() -> Self {
+        Self {
             backend: None,
             _stream_buffer: None,
             pending_playback: Arc::new(Mutex::new(None)),
             track_cache: Arc::new(TrackAudioCache::new()),
             playback_generation: Arc::new(AtomicU64::new(0)),
-        })
+        }
     }
 
     /// Play audio from a URL (non-blocking).
@@ -172,6 +177,13 @@ impl AudioPlayer {
     /// Whether audio output is available.
     pub fn has_audio(&self) -> bool {
         self.backend.is_some()
+    }
+
+    /// Clone of the rodio sample tap, if a backend is attached. Used
+    /// by the vectorscope visualizer (TUI + GUI) to read recent
+    /// stereo samples on each tick.
+    pub fn sample_tap(&self) -> Option<super::rodio_backend::SampleTap> {
+        self.backend.as_ref().map(|b| b.sample_tap())
     }
 
     /// Try to (re)attach a live audio backend. Used to recover from a

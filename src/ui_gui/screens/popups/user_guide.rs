@@ -26,13 +26,13 @@ const H3_SIZE: u16 = 17;
 const BULLET_INDENT: f32 = 18.0;
 
 pub fn view<'a>() -> Element<'a, GuiMessage> {
-    let close_btn = button(text("Close").size(13))
+    let close_btn = button(text("Close").size(15))
         .padding([5, 16])
         .on_press(GuiMessage::CloseUserGuide)
         .style(popout_button_style);
 
     let header = row![
-        text("User Guide").size(22),
+        text("User Guide").size(24),
         Space::with_width(Length::Fill),
         close_btn,
     ]

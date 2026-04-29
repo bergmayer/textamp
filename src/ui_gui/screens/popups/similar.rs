@@ -8,7 +8,7 @@
 use iced::widget::{button, column, container, scrollable, text, Column, Space};
 use iced::{Alignment, Background, Border, Color, Element, Length, Theme};
 
-use crate::app::action::QueueAction;
+use crate::app::action::BrowseAction;
 use crate::app::state::SimilarMode;
 use crate::app::{Action, AppState};
 use crate::ui_gui::message::GuiMessage;
@@ -24,9 +24,9 @@ pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
         "{mode_label} \u{2014} {}",
         if state.similar.source_title.is_empty() { "(no source)" } else { state.similar.source_title.as_str() }
     ))
-    .size(18);
+    .size(20);
 
-    let close_btn = button(text("Close").size(12))
+    let close_btn = button(text("Close").size(14))
         .padding([4, 12])
         .on_press(GuiMessage::CloseSimilarPopup)
         .style(popout_button_style);
@@ -40,7 +40,7 @@ pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
     .align_y(Alignment::Center);
 
     let list: Element<'_, GuiMessage> = if state.similar.loading {
-        container(text("Loading similar\u{2026}").size(14))
+        container(text("Loading similar\u{2026}").size(16))
             .padding(24)
             .center_x(Length::Fill)
             .into()
@@ -57,14 +57,19 @@ pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
                             a.title,
                             a.parent_title.as_deref().unwrap_or(""),
                         );
-                        // Click plays the album — mirrors the TUI's
-                        // Enter-on-similar-album path. Closes the popup
-                        // first via the multi-action bundle.
-                        let rating_key = a.rating_key.clone();
-                        let title = a.title.clone();
-                        rows.push(click_row(label, vec![
-                            Action::Queue(QueueAction::PlayAlbumNow { rating_key, title }),
-                        ]));
+                        // Click navigates to the album in the Library
+                        // (artist + album drill) — does NOT auto-play.
+                        // Right-clicking a row in Library to play /
+                        // queue is the explicit add-to-queue path.
+                        let actions: Option<Vec<Action>> = a.parent_rating_key
+                            .clone()
+                            .map(|artist_key| vec![Action::Browse(BrowseAction::OpenInLibrary {
+                                artist_key,
+                                artist_name: a.parent_title.clone().unwrap_or_default(),
+                                album_key: Some(a.rating_key.clone()),
+                                album_title: Some(a.title.clone()),
+                            })]);
+                        rows.push(click_row(label, actions.unwrap_or_default()));
                     }
                 }
             }
@@ -74,10 +79,20 @@ pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
                 } else {
                     for t in &state.similar.tracks {
                         let label = format!("{}  \u{2014} {}", t.title, t.track_artist());
-                        let track = t.clone();
-                        rows.push(click_row(label, vec![
-                            Action::Queue(QueueAction::PlayTracksNow(vec![track])),
-                        ]));
+                        // Same "navigate, don't play" rule as Albums:
+                        // click drills the user into the track's album
+                        // page so they see context. To play it, they
+                        // can right-click → Play track in the library
+                        // pane (or the track-details pane's Play Track).
+                        let actions: Option<Vec<Action>> = t.grandparent_rating_key
+                            .clone()
+                            .map(|artist_key| vec![Action::Browse(BrowseAction::OpenInLibrary {
+                                artist_key,
+                                artist_name: t.artist_name().to_string(),
+                                album_key: t.parent_rating_key.clone(),
+                                album_title: t.parent_title.clone(),
+                            })]);
+                        rows.push(click_row(label, actions.unwrap_or_default()));
                     }
                 }
             }
@@ -93,7 +108,7 @@ pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
                         // takes you to them, not to yet another similar
                         // list). Closes the popup.
                         rows.push(
-                            button(text(label).size(13))
+                            button(text(label).size(15))
                                 .width(Length::Fill)
                                 .padding([6, 12])
                                 .on_press(GuiMessage::NavigateToArtist { artist_key })
@@ -135,7 +150,7 @@ pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
 /// the popup (the shared `TabClick` handler in `App::update` clears
 /// the `similar_popup_open` flag before dispatching).
 fn click_row(label: String, actions: Vec<Action>) -> Element<'static, GuiMessage> {
-    button(text(label).size(13))
+    button(text(label).size(15))
         .width(Length::Fill)
         .padding([6, 12])
         .on_press_with(move || GuiMessage::TabClick(actions.clone()))
@@ -144,7 +159,7 @@ fn click_row(label: String, actions: Vec<Action>) -> Element<'static, GuiMessage
 }
 
 fn empty_row(msg: &'static str) -> Element<'static, GuiMessage> {
-    container(text(msg).size(13))
+    container(text(msg).size(15))
         .padding(24)
         .center_x(Length::Fill)
         .into()

@@ -21,7 +21,7 @@ pub fn view<'a>(state: &'a AppState) -> Element<'a, GuiMessage> {
         // the popup — matching the keyboard path (`Enter` runs the same
         // two actions).
         rows.push(
-            button(text(label).size(13))
+            button(text(label).size(15))
                 .width(Length::Fill)
                 .padding([4, 8])
                 .on_press_with(move || {
@@ -52,11 +52,11 @@ pub fn view<'a>(state: &'a AppState) -> Element<'a, GuiMessage> {
         );
     }
     if rows.is_empty() {
-        rows.push(text("No libraries discovered yet.").size(12).into());
+        rows.push(text("No libraries discovered yet.").size(14).into());
     }
     container(
         column![
-            text("Switch library").size(16),
+            text("Switch library").size(18),
             Column::with_children(rows).spacing(2),
         ]
         .spacing(10)

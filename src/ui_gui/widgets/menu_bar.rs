@@ -15,9 +15,9 @@ use iced::widget::{button, column, container, mouse_area, row, text, Space};
 use iced::{Alignment, Background, Border, Color, Element, Length, Padding, Theme};
 
 use crate::app::action::{
-    NavigationAction, PlaybackAction, QueueAction, SearchAction, SettingsAction, SystemAction,
+    NavigationAction, PlaybackAction, QueueAction, RadioAction, SearchAction, SettingsAction, SystemAction,
 };
-use crate::app::state::{BrowseCategory, View};
+use crate::app::state::{BrowseCategory, DjMode, View};
 use crate::app::{Action, AppState};
 use crate::ui_gui::message::GuiMessage;
 
@@ -28,16 +28,18 @@ pub enum TopMenu {
     View,
     Playback,
     Queue,
+    Radio,
     Tools,
     Help,
 }
 
 impl TopMenu {
-    pub const ALL: [TopMenu; 6] = [
+    pub const ALL: [TopMenu; 7] = [
         TopMenu::File,
         TopMenu::View,
         TopMenu::Playback,
         TopMenu::Queue,
+        TopMenu::Radio,
         TopMenu::Tools,
         TopMenu::Help,
     ];
@@ -48,6 +50,7 @@ impl TopMenu {
             TopMenu::View => "View",
             TopMenu::Playback => "Playback",
             TopMenu::Queue => "Queue",
+            TopMenu::Radio => "Radio",
             TopMenu::Tools => "Tools",
             TopMenu::Help => "Help",
         }
@@ -68,6 +71,7 @@ impl TopMenu {
             TopMenu::View     => 48.0,
             TopMenu::Playback => 72.0,
             TopMenu::Queue    => 56.0,
+            TopMenu::Radio    => 52.0,
             TopMenu::Tools    => 52.0,
             TopMenu::Help     => 46.0,
         }
@@ -118,6 +122,16 @@ enum Item {
     UserGuide,
     /// Opens the Keyboard Shortcuts modal (Help → Keyboard Shortcuts).
     KeyboardShortcuts,
+    /// Generic GUI-only menu entry that dispatches a `GuiMessage`
+    /// directly (rather than an `Action`). Used for things like
+    /// "Stations…" → OpenStationsPopup that don't have a clean
+    /// `Action` representation.
+    Custom {
+        label: String,
+        shortcut: &'static str,
+        message: GuiMessage,
+        enabled: bool,
+    },
 }
 
 fn entry(label: &'static str, shortcut: &'static str, action: Action) -> Item {
@@ -267,21 +281,79 @@ fn items_for(menu: TopMenu, state: &AppState) -> Vec<Item> {
             entry("Volume Down",      "Ctrl+Shift+\u{2193}", Action::Playback(PlaybackAction::VolumeDown)),
             entry("Mute / Unmute",    "",      Action::Playback(PlaybackAction::ToggleMute)),
         ],
-        TopMenu::Queue => vec![
-            entry_with("Add to end of queue",    "Ctrl+E",       Action::Queue(QueueAction::EnqueueSelection),     can_enqueue),
-            entry_with("Play next in queue",     "Ctrl+Shift+E", Action::Queue(QueueAction::EnqueueSelectionNext), can_enqueue),
-            Item::Sep,
-            entry_with("Save queue as playlist\u{2026}", "Ctrl+S", Action::Queue(QueueAction::PromptSavePlaylist), any_playable),
-            entry_with("Clear Queue",            "Ctrl+X",       Action::Queue(QueueAction::ClearQueue),           any_playable),
-            entry_with("Shuffle",                "",             Action::Queue(QueueAction::ToggleQueueShuffle),   any_playable),
-        ],
-        TopMenu::Tools => {
+        TopMenu::Queue => {
+            // DJ modes operate on the live playback queue. Greyed
+            // out when the queue is empty (or radio mode is active
+            // — the modes only manipulate the user-built queue).
+            let dj_enabled = queue_has_tracks;
+            // Remix tools rewrite or shuffle the existing queue, so
+            // they too need a non-empty queue.
+            let remix_enabled = queue_has_tracks;
+            // "Undo Shuffle" is the only Remix entry that needs the
+            // shuffle-undo stash to actually be populated.
+            let undo_enabled = remix_enabled && state.queue.shuffle_undo_queue.is_some();
             vec![
-            entry_with("Search\u{2026}",       "Ctrl+F", Action::Search(SearchAction::OpenSearchPopup),         connected),
+            entry_with("Add to end of queue",    "Cmd+E",       Action::Queue(QueueAction::EnqueueSelection),     can_enqueue),
+            entry_with("Play next in queue",     "Cmd+Shift+E", Action::Queue(QueueAction::EnqueueSelectionNext), can_enqueue),
             Item::Sep,
-            entry_with("Adventure\u{2026}",    "",       Action::Search(SearchAction::OpenAdventureLauncher),   has_active_library),
-            entry_with("Artist Radio\u{2026}", "",       Action::Search(SearchAction::OpenArtistRadioPicker),   has_active_library),
+            entry_with("Save queue as playlist\u{2026}", "Cmd+S", Action::Queue(QueueAction::PromptSavePlaylist), any_playable),
+            entry_with("Clear Queue",            "Cmd+X",       Action::Queue(QueueAction::ClearQueue),           any_playable),
+            entry_with("Shuffle",                "",             Action::Queue(QueueAction::ToggleQueueShuffle),   any_playable),
+            Item::Sep,
+            // ── DJ Modes ──
+            // Modes are listed flat (no submenu primitive yet) but
+            // visually grouped between separators. Each toggles
+            // continuous insertion of one extra track per
+            // transition. Greyed when no queue.
+            entry_with(DjMode::Stretch.name(),  "", Action::Radio(RadioAction::ToggleDjMode(DjMode::Stretch)),  dj_enabled),
+            entry_with(DjMode::Gemini.name(),   "", Action::Radio(RadioAction::ToggleDjMode(DjMode::Gemini)),   dj_enabled),
+            entry_with(DjMode::Freeze.name(),   "", Action::Radio(RadioAction::ToggleDjMode(DjMode::Freeze)),   dj_enabled),
+            entry_with(DjMode::Twofer.name(),   "", Action::Radio(RadioAction::ToggleDjMode(DjMode::Twofer)),   dj_enabled),
+            entry_with(DjMode::Contempo.name(), "", Action::Radio(RadioAction::ToggleDjMode(DjMode::Contempo)), dj_enabled),
+            entry_with(DjMode::Groupie.name(),  "", Action::Radio(RadioAction::ToggleDjMode(DjMode::Groupie)),  dj_enabled),
+            Item::Sep,
+            // ── Remix tools ──
+            entry_with("Remix: Gemini",        "", Action::Queue(QueueAction::RemixGemini),       remix_enabled),
+            entry_with("Remix: Twofer",        "", Action::Queue(QueueAction::RemixTwofer),       remix_enabled),
+            entry_with("Remix: Stretch",       "", Action::Queue(QueueAction::RemixStretch),      remix_enabled),
+            entry_with("Remix: Doppelganger",  "", Action::Queue(QueueAction::RemixDoppelganger), remix_enabled),
+            entry_with("Remix: Shuffle",       "", Action::Queue(QueueAction::RemixShuffle),      remix_enabled),
+            entry_with("Remix: Undo Shuffle",  "", Action::Queue(QueueAction::RemixUndoShuffle),  undo_enabled),
+        ]
+        }
+        TopMenu::Radio => {
+            // Adventure + Artist Radio live here (both spin up a
+            // streaming queue, so they're radio sources, not Tools).
+            // Random Album moved to Tools — it just plays a random
+            // album from the library, no streaming/radio behaviour.
+            // "Stations…" opens the full stations popup which lists
+            // every Plex station with category drill-down (the
+            // dropdown can't host the full list cleanly without
+            // submenu chrome we don't have, and the popup already
+            // exists and handles it well).
+            vec![
+                entry_with("Artist Radio\u{2026}", "", Action::Search(SearchAction::OpenArtistRadioPicker), has_active_library),
+                entry_with("Adventure\u{2026}",    "", Action::Search(SearchAction::OpenAdventureLauncher), has_active_library),
+                Item::Sep,
+                Item::Custom {
+                    label: "Stations\u{2026}".to_string(),
+                    shortcut: "",
+                    message: GuiMessage::OpenStationsPopup,
+                    enabled: has_active_library,
+                },
+            ]
+        }
+        TopMenu::Tools => {
+            use crate::services::external_search::SearchTarget;
+            vec![
+            entry_with("Search\u{2026}",       "Cmd+F", Action::Search(SearchAction::OpenSearchPopup),         connected),
             key_entry_with("Random Album",     "Alt+R",  KeyModifiers::ALT, KeyCode::Char('r'), has_active_library),
+            Item::Sep,
+            // Web-search shortcuts — menu-driven only, no keyboard
+            // accelerators on any of the three.
+            entry_with("Search Apple Music\u{2026}", "", Action::System(SystemAction::OpenExternalSearch { target: SearchTarget::AppleMusic, query: None }), connected),
+            entry_with("Search Spotify\u{2026}",     "", Action::System(SystemAction::OpenExternalSearch { target: SearchTarget::Spotify,    query: None }), connected),
+            entry_with("Search YouTube\u{2026}",     "", Action::System(SystemAction::OpenExternalSearch { target: SearchTarget::YouTube,    query: None }), connected),
             Item::Sep,
             key_entry_with("Refresh",          "F5",     KeyModifiers::NONE, KeyCode::F(5),     connected),
         ]
@@ -380,7 +452,7 @@ pub fn bar(open: Option<TopMenu>, _state: &AppState) -> Element<'static, GuiMess
 fn top_button(menu: TopMenu, active: bool, any_open: bool) -> Element<'static, GuiMessage> {
     let click_msg = if active { GuiMessage::MenuClose } else { GuiMessage::MenuOpen(menu) };
     let btn = button(
-        container(text(menu.label()).size(12))
+        container(text(menu.label()).size(14))
             .center_y(Length::Fixed(BAR_HEIGHT as f32))
             .center_x(Length::Fill)
             .padding(Padding::from([0, 6])),
@@ -427,21 +499,42 @@ pub fn dropdown_overlay(open: Option<TopMenu>, state: &AppState) -> Option<Eleme
     let items = items_for(menu, state);
     let entry_count = items.iter()
         .filter(|i| matches!(i,
-            Item::Entry { .. } | Item::KeyEntry { .. }
+            Item::Entry { .. } | Item::KeyEntry { .. } | Item::Custom { .. }
             | Item::About | Item::CoverArtToggle
             | Item::UserGuide | Item::KeyboardShortcuts))
         .count() as u16;
     let sep_count = items.iter().filter(|i| matches!(i, Item::Sep)).count() as u16;
-    let panel_height = entry_count * ITEM_HEIGHT + sep_count * 7 + 8;
+    let natural_height = entry_count * ITEM_HEIGHT + sep_count * 7 + 8;
+    // Cap the dropdown so it can't grow taller than the viewport. The
+    // Radio menu in particular grows with the number of Plex
+    // stations a library exposes — without this cap, anything past
+    // the bottom of the window would be invisible (no scroll). Using
+    // a fixed pixel cap keeps the math simple without threading a
+    // viewport-height dependency through the menu API; iced's
+    // scrollable handles the overflow.
+    const DROPDOWN_MAX_HEIGHT: f32 = 560.0;
+    let scrollable_panel = natural_height as f32 > DROPDOWN_MAX_HEIGHT;
+    let panel_height = if scrollable_panel { DROPDOWN_MAX_HEIGHT } else { natural_height as f32 };
 
     let mut col = column![].spacing(0).padding(4);
     for it in items {
         col = col.push(render_item(it));
     }
 
-    let panel = container(col)
+    let inner: Element<'static, GuiMessage> = if scrollable_panel {
+        iced::widget::scrollable(col)
+            .direction(crate::ui_gui::widgets::fat_vertical_scrollbar())
+            .style(crate::ui_gui::widgets::chunky_scrollable_style)
+            .height(Length::Fill)
+            .width(Length::Fill)
+            .into()
+    } else {
+        col.into()
+    };
+
+    let panel = container(inner)
         .width(Length::Fixed(DROPDOWN_WIDTH))
-        .height(Length::Fixed(panel_height as f32))
+        .height(Length::Fixed(panel_height))
         .style(|theme: &Theme| {
             let palette = theme.extended_palette();
             container::Style {
@@ -510,13 +603,14 @@ fn render_item(item: Item) -> Element<'static, GuiMessage> {
         Item::CoverArtToggle => render_row("Toggle Cover Art".to_string(), "", GuiMessage::ToggleCoverArt, true),
         Item::UserGuide => render_row("User Guide\u{2026}".to_string(), "F1", GuiMessage::OpenUserGuide, true),
         Item::KeyboardShortcuts => render_row("Keyboard Shortcuts\u{2026}".to_string(), "", GuiMessage::OpenKeyboardShortcuts, true),
+        Item::Custom { label, shortcut, message, enabled } => render_row(label, shortcut, message, enabled),
     }
 }
 
 fn render_row(label: String, shortcut: &'static str, msg: GuiMessage, enabled: bool) -> Element<'static, GuiMessage> {
     let row_content = row![
-        text(label).size(13).width(Length::Fill),
-        text(shortcut).size(12),
+        text(label).size(15).width(Length::Fill),
+        text(shortcut).size(14),
     ]
     .spacing(12)
     .align_y(Alignment::Center)

@@ -37,7 +37,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         });
     }
 
-    let title = format!(" sort: {} ", popup.column_title);
+    let title = format!(" view: {} ", popup.column_title);
     let block = Block::default()
         .title(title)
         .title_style(Style::default().fg(t.colors.fg_accent))

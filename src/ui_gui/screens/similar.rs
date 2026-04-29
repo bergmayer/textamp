@@ -8,18 +8,18 @@ use crate::app::state::SimilarMode;
 use crate::ui_gui::message::GuiMessage;
 
 pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
-    let header = text(format!("Similar \u{2014} {:?}", state.similar.mode)).size(14);
+    let header = text(format!("Similar \u{2014} {:?}", state.similar.mode)).size(16);
 
     let rows: Vec<Element<'_, GuiMessage>> = match state.similar.mode {
         SimilarMode::Albums => state.similar.albums.iter().map(|a| {
             let label = format!("{}  \u{2014} {}", a.title, a.parent_title.as_deref().unwrap_or(""));
-            text(label).size(13).into()
+            text(label).size(15).into()
         }).collect(),
         SimilarMode::Tracks => state.similar.tracks.iter().map(|t| {
-            text(format!("{}  \u{2014} {}", t.title, t.track_artist())).size(13).into()
+            text(format!("{}  \u{2014} {}", t.title, t.track_artist())).size(15).into()
         }).collect(),
         SimilarMode::Artists => state.similar.artists.iter().map(|a| {
-            text(a.title.clone()).size(13).into()
+            text(a.title.clone()).size(15).into()
         }).collect(),
     };
 

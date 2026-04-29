@@ -58,6 +58,37 @@ struct Core {
 /// exactly once.
 type EventRxHolder = Arc<Mutex<Option<mpsc::Receiver<Event>>>>;
 
+/// Mutually-exclusive primary popup. At most one of these can be open
+/// at any moment — opening a different one closes the previous one
+/// automatically by virtue of the field assignment.
+///
+/// `art_popup_key`, `menu_open`, and `context_menu` are kept as
+/// separate fields on `App` because they layer over a primary popup
+/// (e.g. right-click while Similar is open) rather than replacing it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PrimaryPopup {
+    #[default]
+    None,
+    About,
+    Stations,
+    DjModes,
+    RemixTools,
+    UserGuide,
+    KeyboardShortcuts,
+    Settings,
+    Similar,
+    Related,
+}
+
+impl PrimaryPopup {
+    /// True iff a primary popup is currently shown. Useful for any
+    /// render path that needs "is anything modal up right now?".
+    #[allow(dead_code)]
+    pub fn is_open(self) -> bool {
+        !matches!(self, Self::None)
+    }
+}
+
 /// Cached scroll state for a single Miller column scrollable. Updated
 /// from the scrollable's `on_scroll` callback and read when computing a
 /// natural scroll snap on keyboard navigation.
@@ -75,9 +106,16 @@ pub struct App {
     viewport: Viewport,
     /// Which top-level menu (if any) is currently open.
     menu_open: Option<TopMenu>,
-    /// Whether the About popup is shown. GUI-only state — kept out of
-    /// `AppState` so the shared dispatch layer stays unaware of it.
-    about_open: bool,
+    /// At most one mutually-exclusive primary popup is open at a
+    /// time — this enum encodes which (if any). The render path
+    /// matches on it to layer the popup over the main view; the ESC
+    /// handler dismisses it via `PrimaryPopup::dismiss`.
+    ///
+    /// `art_popup_key`, `menu_open`, and `context_menu` are kept
+    /// separate because they're transient overlays that *compose*
+    /// over the primary popup (right-click while the Similar popup
+    /// is open, etc.), not alternatives to it.
+    primary_popup: PrimaryPopup,
     /// Per-column scroll state reported by each Miller column's scrollable
     /// `on_scroll`. Enables natural "only scroll when selection would go
     /// off-screen" behaviour on arrow-key navigation.
@@ -115,11 +153,6 @@ pub struct App {
     /// retry we reset to ~2 s to avoid hammering WASAPI.
     audio_retry_ticks_left: u32,
 
-    /// Whether the Radio station-picker popup is open. GUI-only state,
-    /// kept out of the shared `AppState` because the popup is a
-    /// presentation affordance over the existing `state.station_nav`.
-    stations_popup_open: bool,
-
     /// Full-size album art popup. Holds the rating key of the album
     /// whose cover is currently being displayed; `None` when no popup.
     art_popup_key: Option<String>,
@@ -130,40 +163,11 @@ pub struct App {
     /// GUI app rather than `AppState` so the TUI doesn't pay for it.
     hires_art: HashMap<String, Vec<u8>>,
 
-    /// Whether the "Similar" popup overlay is open. The shared
-    /// `DataAction::LoadSimilar*` handlers flip `state.view` to
-    /// `View::Similar`; we capture the previous view here so Close
-    /// can restore it. GUI-only — the TUI still renders Similar as a
-    /// full view.
-    similar_popup_open: bool,
+    /// Captured view to restore when Similar / Related popup closes.
+    /// Set when the popup opens (variant of `PrimaryPopup`); read by
+    /// the dismiss handler.
     similar_prev_view: Option<crate::app::state::View>,
-
-    /// Related-artists popup — mirrors `similar_popup_open` but
-    /// backed by `state.related`.
-    related_popup_open: bool,
     related_prev_view: Option<crate::app::state::View>,
-
-    /// Whether the Settings popup overlay is open. The GUI renders
-    /// settings as a popup rather than a full-screen view so users
-    /// don't get lost navigating away from what they were doing.
-    settings_popup_open: bool,
-
-    /// Whether the visualizer panel is shown in the Now Playing
-    /// "DJ Modes" picker popup — opened from the Now Playing sidebar
-    /// button of the same name. GUI-only presentation around the
-    /// shared `RadioAction::ToggleDjMode` action.
-    dj_modes_popup_open: bool,
-
-    /// "Remix Tools" popup — same pattern as `dj_modes_popup_open`,
-    /// hosts the queue-mutating remix actions plus Clear / Save.
-    remix_tools_popup_open: bool,
-
-    /// Help → User Guide modal — renders `README-GUI.md`.
-    user_guide_popup_open: bool,
-
-    /// Help → Keyboard Shortcuts modal — replaces the legacy
-    /// full-screen Help view.
-    keyboard_shortcuts_popup_open: bool,
 
     /// macOS only: have we installed the muda global main menu yet?
     /// Winit overwrites `NSApp.mainMenu` from inside its
@@ -206,6 +210,16 @@ pub struct App {
     /// Track keys whose similar fetch is currently in flight — keeps
     /// the Tick handler from spawning duplicate requests.
     track_pane_similar_loading: std::collections::HashSet<String>,
+
+    /// Persistent vectorscope state. Drained from the audio sample
+    /// tap on each Tick when Now Playing → vectorscope is the active
+    /// visualizer; canvas reads a clone of `samples` to draw the
+    /// rolling Lissajous trace.
+    vectorscope: super::widgets::vectorscope_canvas::Vectorscope,
+    /// Clone of the rodio `SampleTap` (live-sample ring shared with
+    /// the audio thread). `None` when no audio backend is available.
+    vectorscope_tap: Option<crate::audio::SampleTap>,
+
 }
 
 /// Entry point called from `src/bin/textamp_gui.rs`.
@@ -242,14 +256,15 @@ pub fn run() -> Result<()> {
         decorations: true,
         ..iced::window::Settings::default()
     };
-    // Default font — on Windows this is "Segoe UI" which has broad
-    // CJK + Latin coverage; cosmic-text will fall back to other
-    // installed fonts (including Segoe UI Emoji) for glyphs outside
-    // the base. Elsewhere "sans-serif" lets cosmic-text pick the
-    // system default.
+    // Default font — match the platform's native system font so the
+    // app looks like a first-class citizen, not a generic toolkit
+    // window. Cosmic-text falls back through other installed fonts
+    // for glyphs outside the base family (CJK / emoji / symbols).
     #[cfg(target_os = "windows")]
     let default_font = iced::Font::with_name("Segoe UI");
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    let default_font = iced::Font::with_name("SF Pro");
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     let default_font = iced::Font::with_name("sans-serif");
 
     let app_builder = iced::application(App::title, App::update, App::view)
@@ -283,7 +298,41 @@ pub fn run() -> Result<()> {
         for path in FALLBACK_FONTS {
             match std::fs::read(path) {
                 Ok(bytes) => {
-                    tracing::debug!("Loaded fallback font: {path}");
+                    tracing::info!("Loaded fallback font: {path}");
+                    b = b.font(bytes);
+                }
+                Err(e) => tracing::debug!("Skipping fallback font {path}: {e}"),
+            }
+        }
+        b
+    };
+
+    // macOS analogue: SF Pro is Latin/Cyrillic/Greek-only, so without
+    // these preloads cosmic-text renders boxes for emoji, dingbats,
+    // and CJK glyphs (the user's "Fresh ❤" / "❤️ Tracks" report —
+    // playlist names that came back as "Fresh [box]" instead).
+    //
+    // Apple Color Emoji is a CBDT-style colour bitmap font that iced
+    // 0.13 / cosmic-text 0.12 will pick up for codepoints in the
+    // emoji ranges; it just needs to be in the in-memory font db.
+    #[cfg(target_os = "macos")]
+    let app_builder = {
+        const FALLBACK_FONTS: &[&str] = &[
+            "/System/Library/Fonts/Apple Color Emoji.ttc",      // emoji (colour bitmap)
+            "/System/Library/Fonts/Apple Symbols.ttf",          // misc symbols
+            "/System/Library/Fonts/Symbol.ttf",                 // math / Greek
+            "/System/Library/Fonts/ZapfDingbats.ttf",           // ✓ ✗ ❤ ★ etc.
+            "/System/Library/Fonts/CJKSymbolsFallback.ttc",     // CJK punctuation
+            "/System/Library/Fonts/Hiragino Sans GB.ttc",       // Simplified Chinese
+            "/System/Library/Fonts/AppleSDGothicNeo.ttc",       // Korean Hangul
+            "/System/Library/Fonts/ヒラギノ角ゴシック W4.ttc",  // Japanese kana + kanji
+            "/System/Library/Fonts/GeezaPro.ttc",               // Arabic
+        ];
+        let mut b = app_builder;
+        for path in FALLBACK_FONTS {
+            match std::fs::read(path) {
+                Ok(bytes) => {
+                    tracing::info!("Loaded fallback font: {path}");
                     b = b.font(bytes);
                 }
                 Err(e) => tracing::debug!("Skipping fallback font {path}: {e}"),
@@ -298,6 +347,53 @@ pub fn run() -> Result<()> {
 }
 
 impl App {
+    /// Open / close helpers for the primary popup. Doing the
+    /// `primary_popup = ...` assignment via a method keeps every
+    /// flip readable and lets `close_*` early-return if the popup
+    /// wasn't the one currently open (avoids accidentally clobbering
+    /// a different popup that opened in the meantime).
+    fn open_about(&mut self)             { self.primary_popup = PrimaryPopup::About; }
+    fn close_about(&mut self)            { self.close_if(PrimaryPopup::About); }
+    fn is_about_open(&self) -> bool      { self.primary_popup == PrimaryPopup::About }
+
+    fn open_stations(&mut self)          { self.primary_popup = PrimaryPopup::Stations; }
+    fn close_stations(&mut self)         { self.close_if(PrimaryPopup::Stations); }
+    fn is_stations_open(&self) -> bool   { self.primary_popup == PrimaryPopup::Stations }
+
+    fn open_dj_modes(&mut self)          { self.primary_popup = PrimaryPopup::DjModes; }
+    fn close_dj_modes(&mut self)         { self.close_if(PrimaryPopup::DjModes); }
+    fn is_dj_modes_open(&self) -> bool   { self.primary_popup == PrimaryPopup::DjModes }
+
+    fn open_remix_tools(&mut self)       { self.primary_popup = PrimaryPopup::RemixTools; }
+    fn close_remix_tools(&mut self)      { self.close_if(PrimaryPopup::RemixTools); }
+    fn is_remix_tools_open(&self) -> bool{ self.primary_popup == PrimaryPopup::RemixTools }
+
+    fn open_user_guide(&mut self)        { self.primary_popup = PrimaryPopup::UserGuide; }
+    fn close_user_guide(&mut self)       { self.close_if(PrimaryPopup::UserGuide); }
+    fn is_user_guide_open(&self) -> bool { self.primary_popup == PrimaryPopup::UserGuide }
+
+    fn open_keyboard_shortcuts(&mut self){ self.primary_popup = PrimaryPopup::KeyboardShortcuts; }
+    fn close_keyboard_shortcuts(&mut self){ self.close_if(PrimaryPopup::KeyboardShortcuts); }
+    fn is_keyboard_shortcuts_open(&self) -> bool { self.primary_popup == PrimaryPopup::KeyboardShortcuts }
+
+    fn open_settings(&mut self)          { self.primary_popup = PrimaryPopup::Settings; }
+    fn close_settings(&mut self)         { self.close_if(PrimaryPopup::Settings); }
+    fn is_settings_open(&self) -> bool   { self.primary_popup == PrimaryPopup::Settings }
+
+    fn open_similar(&mut self)           { self.primary_popup = PrimaryPopup::Similar; }
+    fn close_similar(&mut self)          { self.close_if(PrimaryPopup::Similar); }
+    fn is_similar_open(&self) -> bool    { self.primary_popup == PrimaryPopup::Similar }
+
+    fn open_related(&mut self)           { self.primary_popup = PrimaryPopup::Related; }
+    fn close_related(&mut self)          { self.close_if(PrimaryPopup::Related); }
+    fn is_related_open(&self) -> bool    { self.primary_popup == PrimaryPopup::Related }
+
+    fn close_if(&mut self, which: PrimaryPopup) {
+        if self.primary_popup == which {
+            self.primary_popup = PrimaryPopup::None;
+        }
+    }
+
     fn new() -> (Self, Task<GuiMessage>) {
         // Load configuration from the shared XDG path (same file the TUI uses).
         let config = match config::load_config() {
@@ -353,10 +449,7 @@ impl App {
                         last_err.as_deref().unwrap_or("no default output device")
                     );
                     tracing::error!("{msg}");
-                    (
-                        AudioPlayer::new_without_audio().expect("failed to create silent audio player"),
-                        Some(msg),
-                    )
+                    (AudioPlayer::new_without_audio(), Some(msg))
                 }
             }
         };
@@ -384,7 +477,7 @@ impl App {
             event_rx: Arc::new(Mutex::new(Some(event_rx))),
             viewport: Viewport::default(),
             menu_open: None,
-            about_open: false,
+            primary_popup: PrimaryPopup::None,
             scroll_state: HashMap::new(),
             last_saved_window: initial_window,
             mouse_pos: (0.0, 0.0),
@@ -396,7 +489,6 @@ impl App {
             // initialized; the first retry waits 5 ticks because of the
             // saturating_sub at the top of the tick branch.
             audio_retry_ticks_left: 5,
-            stations_popup_open: false,
             art_popup_key: None,
             #[cfg(all(target_os = "macos", feature = "native-menus"))]
             macos_menu_installed: false,
@@ -410,16 +502,14 @@ impl App {
             track_pane_similar: HashMap::new(),
             track_pane_similar_loading: std::collections::HashSet::new(),
             hires_art: HashMap::new(),
-            similar_popup_open: false,
             similar_prev_view: None,
-            related_popup_open: false,
             related_prev_view: None,
-            settings_popup_open: false,
-            dj_modes_popup_open: false,
-            remix_tools_popup_open: false,
-            user_guide_popup_open: false,
-            keyboard_shortcuts_popup_open: false,
+            vectorscope: super::widgets::vectorscope_canvas::Vectorscope::default(),
+            vectorscope_tap: None,
         };
+        // Capture the rodio sample tap if the backend came up. Re-fetched
+        // after `try_attach_backend` recoveries elsewhere.
+        app.vectorscope_tap = app.core.audio.sample_tap();
 
         // Kick off authentication via the shared spawn_auth_task (same as
         // the TUI). It runs on iced's tokio executor and posts AuthEvent
@@ -528,7 +618,7 @@ impl App {
             self.macos_menu_installed = true;
         }
 
-        match message {
+        let task = match message {
             GuiMessage::Noop => Task::none(),
 
             GuiMessage::WindowResized { width, height } => {
@@ -575,14 +665,14 @@ impl App {
                 // TabClick is the generic "dismiss whatever dropdown or
                 // popup launched me, then run these actions" path.
                 self.menu_open = None;
-                if self.similar_popup_open {
-                    self.similar_popup_open = false;
+                if self.is_similar_open() {
+                    self.close_similar();
                     if let Some(v) = self.similar_prev_view.take() {
                         self.core.state.view = v;
                     }
                 }
-                if self.related_popup_open {
-                    self.related_popup_open = false;
+                if self.is_related_open() {
+                    self.close_related();
                     if let Some(v) = self.related_prev_view.take() {
                         self.core.state.view = v;
                     }
@@ -597,12 +687,12 @@ impl App {
 
             GuiMessage::ShowAbout => {
                 self.menu_open = None;
-                self.about_open = true;
+                self.open_about();
                 Task::none()
             }
 
             GuiMessage::HideAbout => {
-                self.about_open = false;
+                self.close_about();
                 Task::none()
             }
 
@@ -630,6 +720,67 @@ impl App {
                     column_index,
                     ColumnScroll { offset_y, bounds_h, content_h },
                 );
+                // Lazy-load: as soon as the user scrolls past the
+                // first viewport, queue the next page (and chain the
+                // following pages until the playlist is fully loaded).
+                // The previous "5 viewports from the bottom" heuristic
+                // was too eager — for a 5991-row playlist that's a
+                // hard-to-hit threshold and the rest of the list
+                // appeared empty when grouping/artwork was on.
+                let mut load_more: Option<(String, u32)> = None;
+                if let Some(nav) = self.core.state.browse_nav() {
+                    if let Some(col) = nav.columns.get(column_index) {
+                        if let Some(lazy) = col.lazy.as_ref() {
+                            let already = col.tracks.len() as u32;
+                            let total = lazy.total.unwrap_or(u32::MAX);
+                            let needs_more = already < total;
+                            // Trigger when within two viewports of
+                            // the bottom of the currently-loaded
+                            // content; pages chain so we'll keep up.
+                            let near_bottom = bounds_h > 0.0 && content_h > 0.0
+                                && (offset_y + bounds_h) >= (content_h - bounds_h.max(400.0) * 2.0);
+                            if needs_more && near_bottom && !lazy.loading {
+                                load_more = Some((lazy.key.clone(), already));
+                            }
+                        }
+                    }
+                }
+                if let Some((pk, off)) = load_more {
+                    use crate::app::action::MillerAction;
+                    self.dispatch_sync(Action::Miller(
+                        MillerAction::LoadMorePlaylistTracks { playlist_key: pk, offset: off },
+                    ));
+                }
+
+                // Also kick another art batch for the scrolled column
+                // — the existing `collect_art_to_load` only windows
+                // around `selected_index`, so as the user scrolls
+                // away from it the new rows would otherwise stay
+                // blank. `collect_all_art_to_load` is dedup-safe
+                // (skips cached + pending) so calling it on every
+                // scroll is cheap.
+                let art_batch = if let Some(nav) = self.core.state.browse_nav() {
+                    if let Some(col) = nav.columns.get(column_index) {
+                        if col.artwork_visible {
+                            crate::app::handlers::dispatch_miller::collect_all_art_to_load(
+                                Some(col),
+                                &self.core.state.artwork.grid_cache,
+                                &self.core.state.artwork.grid_pending,
+                            )
+                        } else {
+                            Vec::new()
+                        }
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    Vec::new()
+                };
+                if !art_batch.is_empty() {
+                    self.dispatch_sync(Action::System(
+                        crate::app::action::SystemAction::LoadAlbumArt(art_batch),
+                    ));
+                }
                 Task::none()
             }
 
@@ -643,149 +794,7 @@ impl App {
                 Task::none()
             }
 
-            GuiMessage::KeyPress(key_event) => {
-                use crossterm::event::KeyCode;
-                // Escape dismisses GUI-only overlays first (About, dropdown).
-                // Only after both are closed does Esc flow through to the
-                // shared key_input — matching the usual "modal first" UX.
-                if matches!(key_event.code, KeyCode::Esc) {
-                    if self.art_popup_key.is_some() {
-                        self.art_popup_key = None;
-                        return Task::none();
-                    }
-                    if self.similar_popup_open {
-                        self.similar_popup_open = false;
-                        if let Some(v) = self.similar_prev_view.take() {
-                            self.core.state.view = v;
-                        }
-                        return Task::none();
-                    }
-                    if self.about_open {
-                        self.about_open = false;
-                        return Task::none();
-                    }
-                    if self.stations_popup_open {
-                        self.stations_popup_open = false;
-                        return Task::none();
-                    }
-                    if self.dj_modes_popup_open {
-                        self.dj_modes_popup_open = false;
-                        return Task::none();
-                    }
-                    if self.remix_tools_popup_open {
-                        self.remix_tools_popup_open = false;
-                        return Task::none();
-                    }
-                    if self.user_guide_popup_open {
-                        self.user_guide_popup_open = false;
-                        return Task::none();
-                    }
-                    if self.keyboard_shortcuts_popup_open {
-                        self.keyboard_shortcuts_popup_open = false;
-                        return Task::none();
-                    }
-                    if self.context_menu.is_some() {
-                        self.context_menu = None;
-                        return Task::none();
-                    }
-                    if self.menu_open.is_some() {
-                        self.menu_open = None;
-                        return Task::none();
-                    }
-                }
-
-                // Swallow Ctrl+S — the shared key_input opens a modal
-                // sort popup that the GUI doesn't use. Sort options live
-                // in the Tools menu instead. (The TUI still opens the
-                // popup via its own event loop.)
-                if matches!(key_event.code, KeyCode::Char('s'))
-                    && key_event.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
-                {
-                    return Task::none();
-                }
-
-                // F2 opens the Settings popup instead of navigating to
-                // a full-screen Settings view (the shared key_input's
-                // default behaviour). Consistent with Similar / Related.
-                if matches!(key_event.code, KeyCode::F(2)) {
-                    use crate::app::action::SettingsAction;
-                    self.settings_popup_open = true;
-                    self.dispatch_sync(Action::Settings(SettingsAction::RefreshCacheStats));
-                    return Task::none();
-                }
-
-                // F1 opens the main User Guide modal (Help → User
-                // Guide). Keyboard Shortcuts has its own Help menu
-                // entry; users who want the cheat sheet click it
-                // there.
-                if matches!(key_event.code, KeyCode::F(1)) {
-                    self.user_guide_popup_open = true;
-                    return Task::none();
-                }
-
-                // Letter keys in the root browse column → behave like
-                // a click on the alphabet strip: ONLY scroll the
-                // viewport, do NOT change selection or close drilled
-                // child columns. The TUI keeps its select-on-jump
-                // semantics (no alphabet strip there); this branch
-                // only kicks in when a browse_nav is active and the
-                // user has no modifier other than shift held.
-                let is_plain_letter = matches!(key_event.code, KeyCode::Char(c) if c.is_ascii_alphabetic())
-                    && (key_event.modifiers.is_empty()
-                        || key_event.modifiers == crossterm::event::KeyModifiers::SHIFT);
-                if is_plain_letter
-                    && self.core.state.view == crate::app::state::View::Browse
-                    && self.core.state.browse_nav().is_some()
-                    && !self.core.state.popups.search_active
-                    && !self.core.state.popups.library_picker_active
-                    && self.core.state.popups.confirm_dialog.is_none()
-                    && self.core.state.popups.input_dialog.is_none()
-                    && !self.core.state.list_filter.active
-                {
-                    if let KeyCode::Char(c) = key_event.code {
-                        let lc = c.to_ascii_lowercase();
-                        return Task::done(GuiMessage::AlphabetJump(lc));
-                    }
-                }
-
-                // UI scale shortcuts. Browser-style:
-                //   Ctrl++ / Ctrl+= → zoom in
-                //   Ctrl+-          → zoom out
-                //   Ctrl+0          → reset to 1.0
-                // Handled here (not in shared key_input) because UI
-                // scale is a GUI-only concern.
-                if key_event.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
-                    use crate::config::settings::UI_SCALE_STEP;
-                    let scale_msg = match key_event.code {
-                        KeyCode::Char('+') | KeyCode::Char('=') => Some(GuiMessage::AdjustUiScale(UI_SCALE_STEP)),
-                        KeyCode::Char('-') | KeyCode::Char('_') => Some(GuiMessage::AdjustUiScale(-UI_SCALE_STEP)),
-                        KeyCode::Char('0') => {
-                            let cur = self.core.config.ui.ui_scale;
-                            Some(GuiMessage::AdjustUiScale(1.0 - cur))
-                        }
-                        _ => None,
-                    };
-                    if let Some(msg) = scale_msg {
-                        return Task::done(msg);
-                    }
-                }
-                // Shared dispatcher: same handler the TUI uses to turn a
-                // keyboard event into a list of Actions.
-                self.core.state.cache_mgmt.last_input_time = std::time::Instant::now();
-                let prev_view = self.core.state.view;
-                let actions = crate::app::handlers::key_input::handle_key(
-                    key_event,
-                    &mut self.core.state,
-                    &self.core.config,
-                );
-                for a in actions {
-                    self.dispatch_sync(a);
-                }
-                self.lift_view_to_popup(prev_view);
-                // Arrow-key / letter-jump navigation changes `selected_index`
-                // — snap the scrollable to keep the selected row visible.
-                self.snap_focused_column_into_view()
-            }
+            GuiMessage::KeyPress(key_event) => self.handle_key_press(key_event),
 
             GuiMessage::Action(action) => {
                 use crate::app::action::{NavigationAction, SettingsAction};
@@ -814,15 +823,9 @@ impl App {
                     self.scroll_state.clear();
                 }
                 if is_logout {
-                    self.settings_popup_open = false;
-                    self.stations_popup_open = false;
-                    self.dj_modes_popup_open = false;
-                    self.remix_tools_popup_open = false;
-                    self.user_guide_popup_open = false;
-                    self.keyboard_shortcuts_popup_open = false;
-                    self.similar_popup_open = false;
-                    self.related_popup_open = false;
-                    self.about_open = false;
+                    // Logout dismisses every primary popup so the
+                    // sign-in form isn't covered by stale chrome.
+                    self.primary_popup = PrimaryPopup::None;
                 }
                 self.lift_view_to_popup(prev);
                 // Some actions (Open in Library, Jump to Album, …)
@@ -835,6 +838,13 @@ impl App {
             }
 
             GuiMessage::MillerSelect { column_index, item_index, activate } => {
+                // Click on a Miller row claims focus from any other
+                // surface (cat col, track-details pane). Single-focus
+                // rule: only the column the user just clicked paints
+                // as focused after this.
+                self.core.state.category_column_focused = false;
+                self.core.state.track_pane_focused = false;
+
                 // Shift/cmd-click on a track row builds the column's
                 // multi-selection set and SUPPRESSES the drill/play
                 // actions — so the gesture is purely a selection
@@ -890,15 +900,37 @@ impl App {
 
                 let actions = miller_click_actions(&mut self.core.state, column_index, item_index, activate);
                 let had_drill = !actions.is_empty();
+                // Snapshot focused_column BEFORE dispatching drill
+                // actions so we can detect whether a synchronous
+                // push_column inside `miller_click_actions` (e.g. the
+                // local grouped-album drill that returns an empty
+                // actions vec) advanced focus to the new child.
+                let pre_dispatch_focus = self
+                    .core
+                    .state
+                    .browse_nav()
+                    .map(|n| n.focused_column);
                 for a in actions {
                     self.dispatch_sync(a);
                 }
-                // Drilling via `push_column` advances the Miller focus to
-                // the newly-added child column. The user expects focus
-                // to follow the mouse instead, so the column they
-                // clicked stays highlighted as the focused one. Snap it
-                // back after the drill dispatch.
-                if had_drill {
+                let post_dispatch_focus = self
+                    .core
+                    .state
+                    .browse_nav()
+                    .map(|n| n.focused_column);
+                let focus_advanced = pre_dispatch_focus != post_dispatch_focus
+                    && post_dispatch_focus.map_or(false, |i| i > column_index);
+
+                // Drilling via `push_column` advances the Miller focus
+                // to the newly-added child column. The user expects
+                // focus to follow the mouse instead, so the column
+                // they clicked stays highlighted as the focused one.
+                // Snap it back whenever we drilled — either via an
+                // async action (`had_drill`) or synchronously (the
+                // grouped-album path that does push_column locally
+                // and returns an empty actions vec, detected via
+                // `focus_advanced`).
+                if had_drill || focus_advanced {
                     if let Some(nav) = self.core.state.browse_nav_mut() {
                         if column_index < nav.columns.len() {
                             nav.focused_column = column_index;
@@ -944,21 +976,26 @@ impl App {
                 // Driven from the tick so a stale focused-row that's
                 // missing its data eventually catches up — same
                 // approach as the visualizer safety-net.
-                let pane_similar_task = self.maybe_fetch_track_pane_similar();
-                pane_similar_task.unwrap_or_else(Task::none)
+                self.maybe_fetch_track_pane_similar().unwrap_or_else(Task::none)
             }
 
             GuiMessage::SetVisualizerTab(tab) => {
                 use crate::app::action::SystemAction;
                 self.core.state.visualizer_tab = tab;
-                // Make sure the data for the selected tab is on its way:
-                // waveform loader also co-generates the spectrogram, so the
-                // same action covers both spectrum and spectrogram tabs.
+                // Kick off the matching data load. Waveform's loader
+                // co-computes the spectrogram, so spectrum / spectrogram
+                // are covered too. Vectorscope is live-audio, no bins
+                // to pre-compute, so it skips the dispatch entirely.
+                use crate::app::state::VisualizerTab;
                 let load = match tab {
-                    crate::app::state::VisualizerTab::Waveform => SystemAction::LoadWaveform,
-                    _ => SystemAction::LoadSpectrogram,
+                    VisualizerTab::Waveform => Some(SystemAction::LoadWaveform),
+                    VisualizerTab::Spectrum | VisualizerTab::Spectrogram =>
+                        Some(SystemAction::LoadSpectrogram),
+                    VisualizerTab::Vectorscope => None,
                 };
-                self.dispatch_sync(Action::System(load));
+                if let Some(action) = load {
+                    self.dispatch_sync(Action::System(action));
+                }
                 Task::none()
             }
 
@@ -998,6 +1035,79 @@ impl App {
                     }
                 }
                 self.core.state.category_column_focused = false;
+                self.core.state.track_pane_focused = false;
+                Task::none()
+            }
+
+            GuiMessage::FocusTrackPane => {
+                self.core.state.track_pane_focused = true;
+                self.core.state.category_column_focused = false;
+                Task::none()
+            }
+
+            GuiMessage::SimilarRowClick { pane_index } => {
+                use crate::app::action::BrowseAction;
+                let was_selected = self.core.state.track_pane_focused
+                    && self.core.state.track_pane_index == pane_index;
+                self.core.state.track_pane_focused = true;
+                self.core.state.track_pane_index = pane_index;
+                self.core.state.category_column_focused = false;
+                if was_selected {
+                    // Already highlighted → drill into Library.
+                    let parent = self.core.state.focused_track().cloned();
+                    let sim_idx = pane_index.saturating_sub(1);
+                    let sim = parent.as_ref().and_then(|t| {
+                        self.track_pane_similar
+                            .get(&t.rating_key)
+                            .and_then(|v| v.get(sim_idx))
+                            .cloned()
+                    });
+                    if let Some(sim) = sim {
+                        if let Some(artist_key) = sim.grandparent_rating_key.clone() {
+                            self.core.state.track_pane_focused = false;
+                            self.core.state.track_pane_index = 0;
+                            self.dispatch_sync(Action::Browse(BrowseAction::OpenInLibrary {
+                                artist_key,
+                                artist_name: sim.track_artist().to_string(),
+                                album_key: sim.parent_rating_key.clone(),
+                                album_title: sim.parent_title.clone(),
+                            }));
+                        }
+                    }
+                }
+                Task::none()
+            }
+
+            GuiMessage::CloseMillerColumn { column_index } => {
+                // Track-details pane "x": just clear the pane. The
+                // close helper would otherwise also pop a column when
+                // the pane was already absent, which the user did NOT
+                // ask for from a click on the pane's own X.
+                if column_index.is_none() {
+                    self.core.state.track_details = None;
+                    self.core.state.track_pane_focused = false;
+                    self.core.state.track_pane_index = 0;
+                    return Task::none();
+                }
+                // Miller column "x": focus the clicked column first so
+                // the shared close helper drops the matching one.
+                if let Some(idx) = column_index {
+                    if state_browse_category_is_folders(&self.core.state) {
+                        if let Some(fs) = self.core.state.folder_state.as_mut() {
+                            if idx < fs.columns.len() {
+                                fs.focused_column = idx;
+                            }
+                        }
+                    } else if let Some(nav) = self.core.state.browse_nav_mut() {
+                        if idx < nav.columns.len() {
+                            nav.focused_column = idx;
+                        }
+                    }
+                    self.core.state.category_column_focused = false;
+                }
+                crate::app::handlers::key_input::close_focused_browse_column(
+                    &mut self.core.state,
+                );
                 Task::none()
             }
 
@@ -1118,17 +1228,17 @@ impl App {
             }
 
             GuiMessage::OpenStationsPopup => {
-                self.stations_popup_open = true;
+                self.open_stations();
                 Task::none()
             }
 
             GuiMessage::CloseStationsPopup => {
-                self.stations_popup_open = false;
+                self.close_stations();
                 Task::none()
             }
 
             GuiMessage::PlayStationAndClose(actions) => {
-                self.stations_popup_open = false;
+                self.close_stations();
                 for a in actions {
                     self.dispatch_sync(a);
                 }
@@ -1136,50 +1246,50 @@ impl App {
             }
 
             GuiMessage::OpenDjModesPopup => {
-                self.dj_modes_popup_open = true;
+                self.open_dj_modes();
                 Task::none()
             }
 
             GuiMessage::CloseDjModesPopup => {
-                self.dj_modes_popup_open = false;
+                self.close_dj_modes();
                 Task::none()
             }
 
             GuiMessage::OpenRemixToolsPopup => {
-                self.remix_tools_popup_open = true;
+                self.open_remix_tools();
                 Task::none()
             }
 
             GuiMessage::CloseRemixToolsPopup => {
-                self.remix_tools_popup_open = false;
+                self.close_remix_tools();
                 Task::none()
             }
 
             GuiMessage::RemixToolClick(action) => {
-                self.remix_tools_popup_open = false;
+                self.close_remix_tools();
                 self.dispatch_sync(action);
                 Task::none()
             }
 
             GuiMessage::OpenUserGuide => {
-                self.user_guide_popup_open = true;
+                self.open_user_guide();
                 self.menu_open = None;
                 Task::none()
             }
 
             GuiMessage::CloseUserGuide => {
-                self.user_guide_popup_open = false;
+                self.close_user_guide();
                 Task::none()
             }
 
             GuiMessage::OpenKeyboardShortcuts => {
-                self.keyboard_shortcuts_popup_open = true;
+                self.open_keyboard_shortcuts();
                 self.menu_open = None;
                 Task::none()
             }
 
             GuiMessage::CloseKeyboardShortcuts => {
-                self.keyboard_shortcuts_popup_open = false;
+                self.close_keyboard_shortcuts();
                 Task::none()
             }
 
@@ -1235,7 +1345,7 @@ impl App {
                     Some(prev)
                 };
                 self.core.state.view = prev; // snap back so the popup overlays the old view
-                self.similar_popup_open = true;
+                self.open_similar();
                 // Close any context menu that launched us; the
                 // context_menu widget's Custom branch doesn't auto-close.
                 self.context_menu = None;
@@ -1243,7 +1353,7 @@ impl App {
             }
 
             GuiMessage::CloseSimilarPopup => {
-                self.similar_popup_open = false;
+                self.close_similar();
                 if let Some(v) = self.similar_prev_view.take() {
                     self.core.state.view = v;
                 }
@@ -1353,6 +1463,35 @@ impl App {
                     self.mouse_pos,
                 );
                 Task::none()
+            }
+
+            GuiMessage::OpenPlaylistFromCategory { playlist_key, title } => {
+                use crate::app::action::{MillerAction, NavigationAction};
+                use crate::app::state::BrowseCategory;
+                // Switch to the Playlists nav, snap the root column's
+                // selection to the clicked playlist, then drill into
+                // its tracks. Mirrors the behaviour the user would get
+                // by clicking the row inside the Playlists category
+                // column — but skipping the "first click on Playlists,
+                // second click on the row" two-step.
+                self.dispatch_sync(Action::Navigation(NavigationAction::SetCategory(
+                    BrowseCategory::Playlists,
+                )));
+                if let Some(col) = self.core.state.playlist_nav.columns.get_mut(0) {
+                    if let Some(idx) = col.items.iter()
+                        .position(|i| i.key() == playlist_key.as_str())
+                    {
+                        col.selected_index = idx;
+                    }
+                }
+                self.core.state.playlist_nav.focused_column = 0;
+                self.core.state.playlist_nav.truncate_right();
+                self.core.state.library.selected_album_title = title;
+                self.dispatch_sync(Action::Miller(
+                    MillerAction::LoadPlaylistTracksForMiller { playlist_key },
+                ));
+                self.scroll_state.clear();
+                self.center_all_columns_into_view()
             }
 
             GuiMessage::PlayOneRandomAlbum => {
@@ -1527,13 +1666,13 @@ impl App {
                     Some(prev)
                 };
                 self.core.state.view = prev;
-                self.related_popup_open = true;
+                self.open_related();
                 self.context_menu = None;
                 Task::none()
             }
 
             GuiMessage::CloseRelatedPopup => {
-                self.related_popup_open = false;
+                self.close_related();
                 if let Some(v) = self.related_prev_view.take() {
                     self.core.state.view = v;
                 }
@@ -1542,7 +1681,7 @@ impl App {
 
             GuiMessage::OpenSettingsPopup => {
                 use crate::app::action::SettingsAction;
-                self.settings_popup_open = true;
+                self.open_settings();
                 // Re-poll on-disk cache sizes so the Settings → Cache
                 // table shows fresh numbers the moment the popup
                 // opens. Without this the Size column reads "—"
@@ -1553,13 +1692,22 @@ impl App {
             }
 
             GuiMessage::CloseSettingsPopup => {
-                self.settings_popup_open = false;
+                self.close_settings();
                 Task::none()
             }
 
             GuiMessage::SetSettingsSection(sec) => {
+                use crate::app::action::SettingsAction;
                 self.core.state.settings_state.section = sec;
                 self.core.state.settings_state.item_index = 0;
+                // Refresh on-disk cache figures whenever the user
+                // lands on the Cache tab — covers the case where
+                // `OpenSettingsPopup` fired before the library
+                // finished loading, so the estimate measured an
+                // empty in-memory state.
+                if matches!(sec, crate::app::state::SettingsSection::Cache) {
+                    self.dispatch_sync(Action::Settings(SettingsAction::RefreshCacheStats));
+                }
                 Task::none()
             }
 
@@ -1597,9 +1745,9 @@ impl App {
                 use crate::app::state::{BrowseCategory, View};
                 // Close any popup overlays so the user lands on the
                 // library-drilled view, not behind a dimmer.
-                self.similar_popup_open = false;
+                self.close_similar();
                 self.similar_prev_view = None;
-                self.related_popup_open = false;
+                self.close_related();
                 self.related_prev_view = None;
                 // Category column should not claim focus — the drill
                 // target is the albums column we're about to create.
@@ -1664,7 +1812,18 @@ impl App {
                 }
                 Task::none()
             }
+        };
+
+        // Honour the shared core's quit signal. Anything that flips
+        // `state.should_quit` (Cmd+Q in the muda menu, File→Quit,
+        // Ctrl+Q on Linux, Confirm-Dialog "yes" on quit, …) lands
+        // here; we chain `iced::exit()` after the dispatched task so
+        // the close still has a chance to run any pending side
+        // effects (cache save, Plex stop report, etc.) first.
+        if self.core.state.should_quit {
+            return Task::batch([task, iced::exit()]);
         }
+        task
     }
 
     fn view(&self) -> Element<'_, GuiMessage> {
@@ -1696,9 +1855,10 @@ impl App {
             View::Queue | View::NowPlaying => super::screens::queue::view(
                 &self.core.state,
                 self.queue_drag.map(|(src, _)| src),
-                self.stations_popup_open,
-                self.dj_modes_popup_open,
-                self.remix_tools_popup_open,
+                self.is_stations_open(),
+                self.is_dj_modes_open(),
+                self.is_remix_tools_open(),
+                &self.vectorscope,
             ),
             View::Similar => super::screens::similar::view(&self.core.state),
             View::Related => super::screens::related::view(&self.core.state),
@@ -1748,7 +1908,7 @@ impl App {
 
         let with_popups = super::screens::popups::overlay(&self.core.state, with_menu);
 
-        let with_about: Element<'_, GuiMessage> = if self.about_open {
+        let with_about: Element<'_, GuiMessage> = if self.is_about_open() {
             iced::widget::stack![with_popups, super::screens::popups::about::view()].into()
         } else {
             with_popups
@@ -1766,7 +1926,7 @@ impl App {
                     .height(Length::Fill)
                     .content_fit(iced::ContentFit::Contain)
                     .into(),
-                None => iced::widget::text("Loading art\u{2026}").size(14).into(),
+                None => iced::widget::text("Loading art\u{2026}").size(16).into(),
             };
             let frame = iced::widget::container(img)
                 .width(Length::Fixed(viewport_w_logical.min(900.0)))
@@ -1791,7 +1951,7 @@ impl App {
 
         // Stations/Radio popup — modal on top of the queue view when
         // opened via the "Radio…" button in the queue sidebar.
-        let with_stations: Element<'_, GuiMessage> = if self.stations_popup_open {
+        let with_stations: Element<'_, GuiMessage> = if self.is_stations_open() {
             iced::widget::stack![
                 with_art_popup,
                 modal_overlay(
@@ -1807,7 +1967,7 @@ impl App {
         // Similar popup — overlays on top of the current view when the
         // user picks "Show Similar …" from a context menu. Renders
         // `state.similar` which the LoadSimilar* dispatchers populate.
-        let with_similar: Element<'_, GuiMessage> = if self.similar_popup_open {
+        let with_similar: Element<'_, GuiMessage> = if self.is_similar_open() {
             iced::widget::stack![
                 with_stations,
                 modal_overlay(
@@ -1821,7 +1981,7 @@ impl App {
         };
 
         // Related-artists popup — same pattern as Similar.
-        let with_related: Element<'_, GuiMessage> = if self.related_popup_open {
+        let with_related: Element<'_, GuiMessage> = if self.is_related_open() {
             iced::widget::stack![
                 with_similar,
                 modal_overlay(
@@ -1835,7 +1995,7 @@ impl App {
         };
 
         // DJ Modes popup — sidebar button on the Now Playing screen.
-        let with_dj_modes: Element<'_, GuiMessage> = if self.dj_modes_popup_open {
+        let with_dj_modes: Element<'_, GuiMessage> = if self.is_dj_modes_open() {
             iced::widget::stack![
                 with_related,
                 modal_overlay(
@@ -1849,7 +2009,7 @@ impl App {
         };
 
         // Remix Tools popup — sibling of DJ Modes.
-        let with_remix_tools: Element<'_, GuiMessage> = if self.remix_tools_popup_open {
+        let with_remix_tools: Element<'_, GuiMessage> = if self.is_remix_tools_open() {
             iced::widget::stack![
                 with_dj_modes,
                 modal_overlay(
@@ -1863,7 +2023,7 @@ impl App {
         };
 
         // Settings popup — modal wrapper around the Settings screen.
-        let with_settings: Element<'_, GuiMessage> = if self.settings_popup_open {
+        let with_settings: Element<'_, GuiMessage> = if self.is_settings_open() {
             iced::widget::stack![
                 with_remix_tools,
                 modal_overlay(
@@ -1880,7 +2040,7 @@ impl App {
         };
 
         // User Guide popup — Help → User Guide.
-        let with_user_guide: Element<'_, GuiMessage> = if self.user_guide_popup_open {
+        let with_user_guide: Element<'_, GuiMessage> = if self.is_user_guide_open() {
             iced::widget::stack![
                 with_settings,
                 modal_overlay(
@@ -1894,7 +2054,7 @@ impl App {
         };
 
         // Keyboard Shortcuts popup — Help → Keyboard Shortcuts.
-        let with_keyboard_shortcuts: Element<'_, GuiMessage> = if self.keyboard_shortcuts_popup_open {
+        let with_keyboard_shortcuts: Element<'_, GuiMessage> = if self.is_keyboard_shortcuts_open() {
             iced::widget::stack![
                 with_user_guide,
                 modal_overlay(
@@ -2190,19 +2350,19 @@ impl App {
     fn lift_view_to_popup(&mut self, prev_view: crate::app::state::View) {
         use crate::app::state::View;
         match self.core.state.view {
-            View::Similar if !self.similar_popup_open => {
+            View::Similar if !self.is_similar_open() => {
                 self.similar_prev_view = (prev_view != View::Similar).then_some(prev_view);
                 self.core.state.view = prev_view;
-                self.similar_popup_open = true;
+                self.open_similar();
             }
-            View::Related if !self.related_popup_open => {
+            View::Related if !self.is_related_open() => {
                 self.related_prev_view = (prev_view != View::Related).then_some(prev_view);
                 self.core.state.view = prev_view;
-                self.related_popup_open = true;
+                self.open_related();
             }
-            View::Settings if !self.settings_popup_open => {
+            View::Settings if !self.is_settings_open() => {
                 self.core.state.view = prev_view;
-                self.settings_popup_open = true;
+                self.open_settings();
             }
             _ => {}
         }
@@ -2302,6 +2462,111 @@ impl App {
         ))
     }
 
+    /// Handle a keyboard event from the iced subscription. Pulled out
+    /// of `update` (which was 1200+ lines) so the dispatcher reads as
+    /// a flat table of one-line arms.
+    fn handle_key_press(&mut self, key_event: crossterm::event::KeyEvent) -> Task<GuiMessage> {
+        use crossterm::event::KeyCode;
+        // Escape dismisses GUI-only overlays first (About, dropdown).
+        // Only after both are closed does Esc flow through to the
+        // shared key_input — matching the usual "modal first" UX.
+        if matches!(key_event.code, KeyCode::Esc) {
+            if self.art_popup_key.is_some() {
+                self.art_popup_key = None;
+                return Task::none();
+            }
+            // Single-popup model: ESC dismisses the active primary
+            // popup (if any). The Similar variant additionally
+            // restores the captured prev_view.
+            if self.primary_popup.is_open() {
+                if matches!(self.primary_popup, PrimaryPopup::Similar) {
+                    if let Some(v) = self.similar_prev_view.take() {
+                        self.core.state.view = v;
+                    }
+                }
+                self.primary_popup = PrimaryPopup::None;
+                return Task::none();
+            }
+            if self.context_menu.is_some() {
+                self.context_menu = None;
+                return Task::none();
+            }
+            if self.menu_open.is_some() {
+                self.menu_open = None;
+                return Task::none();
+            }
+            // After every overlay is dismissed, ESC clears the
+            // transport-bar filter input if it has any text. Mirrors
+            // the standard search-box convention.
+            if !self.core.state.list_filter.query.is_empty() {
+                use crate::app::action::SearchAction;
+                self.dispatch_sync(Action::Search(SearchAction::DeactivateListFilter));
+                return Task::none();
+            }
+        }
+
+        // Swallow Ctrl+S — the shared key_input opens a modal sort
+        // popup that the GUI doesn't use. Sort options live in the
+        // Tools menu instead. (The TUI still opens the popup via its
+        // own event loop.)
+        if matches!(key_event.code, KeyCode::Char('s'))
+            && key_event.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+        {
+            return Task::none();
+        }
+
+        // F2 opens the Settings popup instead of navigating to a
+        // full-screen Settings view.
+        if matches!(key_event.code, KeyCode::F(2)) {
+            use crate::app::action::SettingsAction;
+            self.open_settings();
+            self.dispatch_sync(Action::Settings(SettingsAction::RefreshCacheStats));
+            return Task::none();
+        }
+
+        // F1 opens the User Guide modal.
+        if matches!(key_event.code, KeyCode::F(1)) {
+            self.open_user_guide();
+            return Task::none();
+        }
+
+        // UI scale shortcuts (Ctrl++ / Ctrl+- / Ctrl+0). Handled here
+        // (not in shared key_input) because UI scale is a GUI-only
+        // concern.
+        if key_event.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+            use crate::config::settings::UI_SCALE_STEP;
+            let scale_msg = match key_event.code {
+                KeyCode::Char('+') | KeyCode::Char('=') => Some(GuiMessage::AdjustUiScale(UI_SCALE_STEP)),
+                KeyCode::Char('-') | KeyCode::Char('_') => Some(GuiMessage::AdjustUiScale(-UI_SCALE_STEP)),
+                KeyCode::Char('0') => {
+                    let cur = self.core.config.ui.ui_scale;
+                    Some(GuiMessage::AdjustUiScale(1.0 - cur))
+                }
+                _ => None,
+            };
+            if let Some(msg) = scale_msg {
+                return Task::done(msg);
+            }
+        }
+
+        // Shared dispatcher: same handler the TUI uses to turn a
+        // keyboard event into a list of Actions.
+        self.core.state.cache_mgmt.last_input_time = std::time::Instant::now();
+        let prev_view = self.core.state.view;
+        let actions = crate::app::handlers::key_input::handle_key(
+            key_event,
+            &mut self.core.state,
+            &self.core.config,
+        );
+        for a in actions {
+            self.dispatch_sync(a);
+        }
+        self.lift_view_to_popup(prev_view);
+        // Arrow-key / letter-jump navigation changes `selected_index`
+        // — snap the scrollable to keep the selected row visible.
+        self.snap_focused_column_into_view()
+    }
+
     fn handle_tick(&mut self) {
         use crate::app::event_core::PlaybackEvent;
         use crate::app::state::{OutputTarget, PlayStatus};
@@ -2356,6 +2621,26 @@ impl App {
                         // Keep retrying ~every 2 seconds.
                         self.audio_retry_ticks_left = 20;
                     }
+                }
+            }
+            // Re-grab the tap if a backend just attached.
+            if self.vectorscope_tap.is_none() {
+                self.vectorscope_tap = self.core.audio.sample_tap();
+            }
+        }
+
+        // Pull fresh stereo samples from the rodio tap into the
+        // vectorscope buffer. We always drain (whether or not the
+        // vectorscope tab is visible) so re-opening the tab shows
+        // current audio rather than a stale frame, and so the buffer
+        // stays bounded — TapSource is allowed to fill SAMPLE_TAP_CAP
+        // samples between drains. The cost is a brief Mutex lock
+        // every 100 ms; the lock is held for ~µs.
+        if let Some(tap) = self.vectorscope_tap.as_ref() {
+            if let Ok(mut buf) = tap.lock() {
+                if !buf.is_empty() {
+                    let pairs: Vec<(f32, f32)> = buf.drain(..).collect();
+                    self.vectorscope.push_samples(&pairs);
                 }
             }
         }
@@ -2460,6 +2745,55 @@ fn modal_overlay<'a>(
         .center_y(Length::Fill)
         .into();
     stack![dismisser, centered_popup].into()
+}
+
+fn state_browse_category_is_folders(state: &AppState) -> bool {
+    matches!(state.browse_category, crate::app::state::BrowseCategory::Folders)
+}
+
+/// Build the search query for an external-music-service search of the
+/// right-clicked row. Mirrors the formats produced by
+/// `build_external_search_query` (palette path) — "Artist - Album"
+/// for tracks/albums, just the artist name for artist rows — but
+/// targets the right-clicked item directly rather than focused state.
+/// Returns `None` for non-music rows (genres, group headers, etc.) so
+/// the caller can suppress the entries entirely.
+fn external_search_query_for_item(
+    item: &crate::app::state::BrowseItem,
+    col: &crate::app::state::BrowseColumn,
+    item_index: usize,
+) -> Option<String> {
+    use crate::app::state::BrowseItem;
+    match item {
+        BrowseItem::Track { artist_name, album_name, title, .. } => {
+            // Prefer the parallel `tracks` array (full Track has
+            // resolved metadata) over the BrowseItem's optional fields.
+            if let Some(t) = col.tracks.get(item_index) {
+                let artist = t.artist_name();
+                let album = t.album_name();
+                if !artist.is_empty() && !album.is_empty() {
+                    return Some(format!("{} - {}", artist, album));
+                }
+            }
+            match (artist_name.as_deref(), album_name.as_deref()) {
+                (Some(a), Some(b)) if !a.is_empty() && !b.is_empty() =>
+                    Some(format!("{} - {}", a, b)),
+                _ => Some(title.clone()),
+            }
+        }
+        BrowseItem::Album { title, artist, .. } => {
+            if !artist.is_empty() {
+                Some(format!("{} - {}", artist, title))
+            } else {
+                Some(title.clone())
+            }
+        }
+        BrowseItem::Artist { title, .. } => Some(title.clone()),
+        BrowseItem::Playlist { title, .. } => Some(title.clone()),
+        BrowseItem::AllTracks { artist_name, .. } if !artist_name.is_empty() =>
+            Some(artist_name.clone()),
+        _ => None,
+    }
 }
 
 /// Build the right-click context-menu entries for a Miller-column row.
@@ -2725,6 +3059,48 @@ fn build_miller_context_menu(
             // single-action items already (handled by left click) or group
             // headers.
             return None;
+        }
+    }
+
+    // External search: parity with the command palette. The query is
+    // computed from the right-clicked row directly (NOT from focused
+    // state — right-click does not move focus) so the URL targets the
+    // row the user actually clicked. Each entry is gated by the
+    // matching "Search ⟨service⟩" toggle in Settings; disabled
+    // services are hidden entirely.
+    if let Some(query) = external_search_query_for_item(item, col, item_index) {
+        let any_enabled = state.external_search.apple_music
+            || state.external_search.spotify
+            || state.external_search.youtube;
+        if any_enabled {
+            entries.push(Entry::Sep);
+        }
+        if state.external_search.apple_music {
+            entries.push(Entry::Entry {
+                label: format!("Search Apple Music for \u{201c}{}\u{201d}", query),
+                actions: vec![Action::System(SystemAction::OpenExternalSearch {
+                    target: crate::services::external_search::SearchTarget::AppleMusic,
+                    query: Some(query.clone()),
+                })],
+            });
+        }
+        if state.external_search.spotify {
+            entries.push(Entry::Entry {
+                label: format!("Search Spotify for \u{201c}{}\u{201d}", query),
+                actions: vec![Action::System(SystemAction::OpenExternalSearch {
+                    target: crate::services::external_search::SearchTarget::Spotify,
+                    query: Some(query.clone()),
+                })],
+            });
+        }
+        if state.external_search.youtube {
+            entries.push(Entry::Entry {
+                label: format!("Search YouTube for \u{201c}{}\u{201d}", query),
+                actions: vec![Action::System(SystemAction::OpenExternalSearch {
+                    target: crate::services::external_search::SearchTarget::YouTube,
+                    query: Some(query),
+                })],
+            });
         }
     }
 
@@ -3208,14 +3584,33 @@ fn miller_click_actions(
 
     // Move selection + focus, then clone the item (and any siblings
     // we'll need) so the rest of the function can re-borrow `state`
-    // without conflicting.
-    let (item, track_obj, grouped_album_col) = {
+    // without conflicting. Plain clicks select only — they don't
+    // drill. Drill happens on `activate` (double-click) or via the
+    // shared `Enter` / `Right` keyboard handlers. The `prev_focus`
+    // guard below preserves the same behaviour when the click is
+    // also moving focus to a new column.
+    // Snapshot whether anything is open rightward of the clicked
+    // column BEFORE we mutate nav. `track_details` is set by an
+    // explicit Enter/double-click on a Track and counts as a
+    // rightward open thing for the auto-drill rule.
+    let pane_open = state.track_details.is_some();
+    let (item, track_obj, grouped_album_col, auto_drill) = {
         let Some(nav) = state.browse_nav_mut() else { return Vec::new() };
+        let had_child = column_index + 1 < nav.columns.len() || pane_open;
         let Some(col) = nav.columns.get_mut(column_index) else { return Vec::new() };
         col.selected_index = item_index;
-        let prev_focus = nav.focused_column;
         nav.focused_column = column_index;
-        if (prev_focus != column_index || category_was_focused) && !activate {
+        // Plain click anywhere is selection-only by default. Stale
+        // child cols are truncated. EXCEPTION: when something
+        // rightward is already open, clicking a sibling re-fills
+        // the rightward child from the new selection — the user
+        // has already committed to the drill.
+        let auto_drill = !activate && had_child;
+        if !activate {
+            nav.columns.truncate(column_index + 1);
+        }
+        let _ = category_was_focused;
+        if !activate && !auto_drill {
             return Vec::new();
         }
         let item = nav.columns.get(column_index)
@@ -3232,9 +3627,21 @@ fn miller_click_actions(
         } else {
             None
         };
-        (item, track_obj, grouped_album_col)
+        (item, track_obj, grouped_album_col, auto_drill)
     };
     let Some(item) = item else { return Vec::new() };
+
+    // Auto-drill on a non-Track item swaps the rightward column to
+    // that item's child — but the track-details pane has no logical
+    // re-target (the new column doesn't pick out a single track),
+    // so close it. The Track match arm below will re-set
+    // `track_details` via OpenTrackDetails.
+    if auto_drill && !matches!(item, BrowseItem::Track { .. }) {
+        state.track_details = None;
+        state.track_pane_focused = false;
+        state.track_pane_index = 0;
+    }
+    let _ = auto_drill;
 
     let mut arm_drill = true;
     let actions: Vec<Action> = match &item {

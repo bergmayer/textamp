@@ -15,9 +15,10 @@ use crate::app::AppState;
 use crate::ui_gui::images::lookup_grid;
 use crate::ui_gui::message::GuiMessage;
 use crate::ui_gui::widgets::transport_bar::fmt_ms;
+use crate::ui_gui::widgets::vectorscope_canvas::Vectorscope;
 use crate::ui_gui::widgets::{spectrogram_canvas, spectrum_canvas, waveform_canvas};
 
-pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
+pub fn view<'a>(state: &'a AppState, vectorscope: &'a Vectorscope) -> Element<'a, GuiMessage> {
     let track = state.current_track();
 
     // Album artwork — prefer current_data (now-playing thumb), fall back
@@ -48,10 +49,10 @@ pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
     let duration = fmt_ms(state.playback.duration_ms);
 
     let metadata = column![
-        text(title).size(24),
-        text(artist).size(14),
-        text(format!("{album}  {year}")).size(13),
-        text(format!("{position} / {duration}")).size(12),
+        text(title).size(26),
+        text(artist).size(16),
+        text(format!("{album}  {year}")).size(15),
+        text(format!("{position} / {duration}")).size(14),
     ]
     .spacing(6);
 
@@ -63,7 +64,7 @@ pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
     // load (waveform or spectrogram).
     let tab_btn = |label: &'static str, tab: VisualizerTab| -> Element<'_, GuiMessage> {
         let active = state.visualizer_tab == tab;
-        let inner = container(text(label).size(12))
+        let inner = container(text(label).size(14))
             .center_y(Length::Fixed(22.0))
             .center_x(Length::Fixed(100.0))
             .padding([0, 8]);
@@ -92,13 +93,14 @@ pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
     };
 
     let viz_tabs = row![
-        tab_btn("waveform",    VisualizerTab::Waveform),
-        tab_btn("spectrum",    VisualizerTab::Spectrum),
-        tab_btn("spectrogram", VisualizerTab::Spectrogram),
+        tab_btn("waveform",     VisualizerTab::Waveform),
+        tab_btn("spectrum",     VisualizerTab::Spectrum),
+        tab_btn("spectrogram",  VisualizerTab::Spectrogram),
+        tab_btn("vectorscope", VisualizerTab::Vectorscope),
     ]
     .spacing(0);
 
-    let viz_body = container(viz_canvas(state))
+    let viz_body = container(viz_canvas(state, vectorscope))
         .width(Length::Fill)
         .height(Length::Fill)
         .padding(8)
@@ -142,10 +144,10 @@ pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
 /// the standalone Now Playing view uses. Exposed so the unified Now
 /// Playing / Queue screen can host the visualizer in its bottom half
 /// without duplicating the canvas wiring.
-pub fn visualizer_panel(state: &AppState) -> Element<'_, GuiMessage> {
+pub fn visualizer_panel<'a>(state: &'a AppState, vectorscope: &'a Vectorscope) -> Element<'a, GuiMessage> {
     let tab_btn = |label: &'static str, tab: VisualizerTab| -> Element<'_, GuiMessage> {
         let active = state.visualizer_tab == tab;
-        let inner = container(text(label).size(12))
+        let inner = container(text(label).size(14))
             .center_y(Length::Fixed(22.0))
             .center_x(Length::Fixed(100.0))
             .padding([0, 8]);
@@ -174,13 +176,14 @@ pub fn visualizer_panel(state: &AppState) -> Element<'_, GuiMessage> {
     };
 
     let tabs = row![
-        tab_btn("waveform",    VisualizerTab::Waveform),
-        tab_btn("spectrum",    VisualizerTab::Spectrum),
-        tab_btn("spectrogram", VisualizerTab::Spectrogram),
+        tab_btn("waveform",     VisualizerTab::Waveform),
+        tab_btn("spectrum",     VisualizerTab::Spectrum),
+        tab_btn("spectrogram",  VisualizerTab::Spectrogram),
+        tab_btn("vectorscope", VisualizerTab::Vectorscope),
     ]
     .spacing(0);
 
-    let body = container(viz_canvas(state))
+    let body = container(viz_canvas(state, vectorscope))
         .width(Length::Fill)
         .height(Length::Fill)
         .padding(8)
@@ -210,7 +213,7 @@ pub fn visualizer_panel(state: &AppState) -> Element<'_, GuiMessage> {
 /// Resolve the active visualizer tab to a live `Canvas` widget, or a
 /// centered "Generating…/No data" message when the underlying data
 /// hasn't been computed yet.
-fn viz_canvas(state: &AppState) -> Element<'_, GuiMessage> {
+fn viz_canvas<'a>(state: &'a AppState, vectorscope: &'a Vectorscope) -> Element<'a, GuiMessage> {
     // With no current track the visualizer has nothing to be paused
     // against — even if `waveform.data` still holds the last track's
     // bins from cache, showing them would be misleading.
@@ -270,11 +273,21 @@ fn viz_canvas(state: &AppState) -> Element<'_, GuiMessage> {
                 .height(Length::Fill)
                 .into()
         }
+        VisualizerTab::Vectorscope => {
+            // Live stereo Lissajous (right→X, left→Y). The rolling
+            // sample buffer is fed by the audio sample tap inside
+            // `App::handle_tick`; we clone it here because Canvas
+            // takes its `Program` by value.
+            Canvas::new(vectorscope.clone())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        }
     }
 }
 
 fn viz_placeholder<'a>(msg: &'a str) -> Element<'a, GuiMessage> {
-    container(text(msg).size(13))
+    container(text(msg).size(15))
         .width(Length::Fill)
         .height(Length::Fill)
         .center_x(Length::Fill)
@@ -290,7 +303,7 @@ fn viz_placeholder<'a>(msg: &'a str) -> Element<'a, GuiMessage> {
 }
 
 fn placeholder_artwork<'a>() -> Element<'a, GuiMessage> {
-    container(text("no cover").size(13))
+    container(text("no cover").size(15))
         .width(Length::Fixed(260.0))
         .height(Length::Fixed(260.0))
         .center_x(Length::Fixed(260.0))

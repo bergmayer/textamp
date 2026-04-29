@@ -86,6 +86,43 @@ pub fn collect_viewport_art(state: &AppState) -> Vec<(String, String)> {
     collect_art_to_load(Some(col), &state.artwork.grid_cache, &state.artwork.grid_pending)
 }
 
+/// Collect art for EVERY row of `col`, ignoring the
+/// `ART_BATCH_LIMIT` viewport window. Used when the user explicitly
+/// enables artwork on a long column (a 5,000-track playlist's
+/// album-grouping view should fill in cover art across the whole
+/// list, not just rows near the cursor). The result still respects
+/// the `cache` / `pending` dedup so already-loaded keys aren't
+/// requested again.
+pub(crate) fn collect_all_art_to_load(
+    col: Option<&BrowseColumn>,
+    cache: &std::collections::HashMap<String, Vec<u8>>,
+    pending: &std::collections::HashSet<String>,
+) -> Vec<(String, String)> {
+    let Some(col) = col else { return vec![] };
+    let mut to_load = Vec::with_capacity(col.items.len());
+    for item in &col.items {
+        match item {
+            BrowseItem::Album { key, thumb: Some(thumb), .. } => {
+                if !cache.contains_key(key) && !pending.contains(key) {
+                    to_load.push((key.clone(), thumb.clone()));
+                }
+            }
+            BrowseItem::Artist { key, thumb: Some(thumb), .. } => {
+                if !cache.contains_key(key) && !pending.contains(key) {
+                    to_load.push((key.clone(), thumb.clone()));
+                }
+            }
+            BrowseItem::AllTracks { artist_key, thumb: Some(thumb), .. } => {
+                if !cache.contains_key(artist_key) && !pending.contains(artist_key) {
+                    to_load.push((artist_key.clone(), thumb.clone()));
+                }
+            }
+            _ => {}
+        }
+    }
+    to_load
+}
+
 /// Dispatch Miller column actions. Returns follow-up actions.
 pub async fn dispatch(
     event_tx: &mpsc::Sender<Event>,
@@ -135,27 +172,21 @@ pub async fn dispatch(
 
             match albums_result {
                 Ok(albums) => {
-                    // Create special entries
-                    let artist_thumb = state.library.artists.iter()
-                        .find(|a| a.rating_key == artist_key)
-                        .or_else(|| state.library.track_artists.iter().find(|a| a.rating_key == artist_key))
-                        .and_then(|a| a.thumb.clone());
+                    // Pinned action rows ahead of the actual albums.
+                    // Order: ArtistRadio → AllTracks → CompilationTracks
+                    // → Albums. None of the action rows carry a thumb;
+                    // they're plain text rows since they aren't albums.
                     let artist_radio = BrowseItem::ArtistRadio {
                         artist_key: artist_key.clone(),
                         artist_name: state.library.selected_artist_name.clone(),
-                        thumb: None, // No artwork for ArtistRadio
+                        thumb: None,
                     };
                     let all_tracks = BrowseItem::AllTracks {
                         artist_key: artist_key.clone(),
                         artist_name: state.library.selected_artist_name.clone(),
-                        thumb: artist_thumb, // Artist artwork on AllTracks
+                        thumb: None,
                     };
-                    // Order: AllTracks → ArtistRadio → CompilationTracks → Albums.
-                    // Mirrors the artists column (AllArtists → Compilations
-                    // button), so the action button (Artist Radio) lines
-                    // up vertically with the Compilations button across
-                    // columns.
-                    let mut items = vec![all_tracks, artist_radio];
+                    let mut items = vec![artist_radio, all_tracks];
 
                     if state.library.compilations.detected
                         && state.library.compilations.artist_map.contains_key(&artist_key)
@@ -473,10 +504,13 @@ pub async fn dispatch(
         // ================================================================
 
         MillerAction::LoadPlaylistTracksForMiller { playlist_key } => {
-            // Always fetch fresh from API (playlist contents may change, e.g. smart playlists)
-            // Only show loading indicator if no child column exists yet.
-            // When replacing an existing tracks column (navigating between playlists),
-            // the old column stays visible until the new one arrives.
+            // Fetch only the first page; the GUI then triggers
+            // `LoadMorePlaylistTracks` as the user scrolls. This keeps
+            // the initial open of giant smart playlists ("Recently
+            // Added" can be 70k+ tracks) responsive — without it
+            // Plex drops the connection mid-stream and the playlist
+            // never appears at all.
+            const FIRST_PAGE: u32 = 500;
             if state.playlist_nav.columns.len() <= state.playlist_nav.focused_column + 1 {
                 state.playlist_nav.loading = true;
             }
@@ -487,10 +521,10 @@ pub async fn dispatch(
                 let backoff = [1u64, 2, 4];
                 let mut last_err = String::new();
                 for attempt in 0..3u32 {
-                    match client_clone.get_playlist_tracks(&pk).await {
-                        Ok(tracks) => {
-                            let _ = tx.send(RadioEvent::PlaylistTracksForMillerLoaded {
-                                playlist_key: pk, tracks,
+                    match client_clone.get_playlist_tracks_page(&pk, 0, FIRST_PAGE).await {
+                        Ok((tracks, total)) => {
+                            let _ = tx.send(RadioEvent::PlaylistFirstPageLoaded {
+                                playlist_key: pk, tracks, total,
                             }.into()).await;
                             return;
                         }
@@ -507,6 +541,35 @@ pub async fn dispatch(
                 let _ = tx.send(RadioEvent::PlaylistTracksForMillerFailed {
                     playlist_key: pk, error: last_err,
                 }.into()).await;
+            });
+        }
+
+        MillerAction::LoadMorePlaylistTracks { playlist_key, offset } => {
+            const PAGE: u32 = 500;
+            // Mark the column as loading so the scroll handler doesn't
+            // fire a duplicate request while this one's in flight.
+            if let Some(lazy) = state.playlist_nav.columns.iter_mut()
+                .filter_map(|c| c.lazy.as_mut())
+                .find(|l| l.key == *playlist_key)
+            {
+                lazy.loading = true;
+            }
+            let tx = event_tx.clone();
+            let client_clone = client.clone();
+            let pk = playlist_key.clone();
+            tokio::spawn(async move {
+                match client_clone.get_playlist_tracks_page(&pk, offset, PAGE).await {
+                    Ok((tracks, total)) => {
+                        let _ = tx.send(RadioEvent::PlaylistMorePageLoaded {
+                            playlist_key: pk, tracks, total,
+                        }.into()).await;
+                    }
+                    Err(e) => {
+                        let _ = tx.send(RadioEvent::PlaylistMorePageFailed {
+                            playlist_key: pk, error: format!("{}", e),
+                        }.into()).await;
+                    }
+                }
             });
         }
 

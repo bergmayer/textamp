@@ -26,13 +26,13 @@ pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
         DjMode::Groupie,
     ];
 
-    let close_btn = button(text("Close").size(12))
+    let close_btn = button(text("Close").size(14))
         .padding([4, 12])
         .on_press(GuiMessage::CloseDjModesPopup)
         .style(popout_button_style);
 
     let header = row![
-        text("DJ Modes").size(18),
+        text("DJ Modes").size(20),
         Space::with_width(Length::Fill),
         close_btn,
     ]
@@ -44,8 +44,8 @@ pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
         let label = format!("{prefix}{}", m.name());
         let descr = m.description().to_string();
         let body = column![
-            text(label).size(13),
-            text(descr).size(11),
+            text(label).size(15),
+            text(descr).size(13),
         ]
         .spacing(2);
         button(body)

@@ -19,10 +19,6 @@ mod settings;
 
 // Re-export public items used by other handler modules.
 pub use browse::{update_filter_column_selection, get_filter_drilldown_actions, truncate_filter_right_columns};
-pub(crate) use browse::{auto_drill_artist_action, auto_drill_genre_action, auto_drill_playlist_action};
-// `auto_drill_folder` is consumed only by the TUI mouse handler.
-#[cfg(feature = "tui")]
-pub(crate) use browse::auto_drill_folder;
 pub use self::alt_commands::{AltCommand, CommandModifier, available_alt_commands};
 
 mod alt_commands;
@@ -198,27 +194,60 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
     //   - Ctrl+Q       (Linux/Windows/TUI standard)
     //   - Cmd+Q        (Mac standard — `SUPER` is the cross-platform
     //                   crossterm name for the OS Logo / Cmd / Win key)
-    //   - Cmd+W        (Mac single-window app convention — closes the
-    //                   only window so the app is effectively quit)
     //   - Alt+F4       (Windows standard)
+    //
+    // Cmd+W on Mac GUI is rebound to Ctrl+W upstream (close current
+    // Miller column), so it does NOT quit. The single-window-app
+    // convention loses to the column-close affordance which is far more
+    // frequently useful.
     let is_quit_keypress = match (key.modifiers, key.code) {
         (KeyModifiers::CONTROL, KeyCode::Char('q')) => true,
         (KeyModifiers::SUPER,   KeyCode::Char('q')) => true,
-        (KeyModifiers::SUPER,   KeyCode::Char('w')) => true,
         (KeyModifiers::ALT,     KeyCode::F(4))      => true,
         _ => false,
     };
     match (key.modifiers, key.code) {
         _ if is_quit_keypress => {
-            use crate::app::state::{ConfirmDialog, ConfirmAction};
+            // Quit immediately. The previous confirmation dialog was
+            // muscle-memory hostile — every Cmd+Q / Ctrl+Q press needed
+            // a second confirmation, and the platform conventions are
+            // already destructive ("close window") so users expect them
+            // to act without a prompt.
             state.popups.close_all();
-            state.popups.confirm_dialog = Some(ConfirmDialog {
-                title: "Quit".to_string(),
-                message: "Are you sure you want to quit?".to_string(),
-                on_confirm: ConfirmAction::Quit.into(),
-                selected_yes: false,
-            });
-            return vec![];
+            return vec![SystemAction::Quit.into()];
+        }
+
+        // Cmd+A / Ctrl+A — select all rows in the currently focused
+        // list. Works on the queue (when Now Playing / Queue view is
+        // up) and on the focused Miller track column. The shared
+        // dispatchers (RemoveSelectedFromQueue, MoveSelectedTracksUp/
+        // Down, the GUI's bulk-enqueue context-menu items) already
+        // read these `selected_set` collections.
+        (KeyModifiers::CONTROL, KeyCode::Char('a')) => {
+            match state.view {
+                View::Queue | View::NowPlaying => {
+                    let n = state.queue.tracks.len();
+                    state.queue.selected = (0..n).collect();
+                    return vec![];
+                }
+                View::Browse => {
+                    if let Some(nav) = state.browse_nav_mut() {
+                        if let Some(col) = nav.focused_mut() {
+                            // Only meaningful for track columns. For
+                            // artist/album columns the multi-select
+                            // wouldn't drive any current action.
+                            let is_track_col = col.items.first()
+                                .map(|it| matches!(it, BrowseItem::Track { .. }))
+                                .unwrap_or(false);
+                            if is_track_col {
+                                col.selected_set = (0..col.items.len()).collect();
+                            }
+                        }
+                    }
+                    return vec![];
+                }
+                _ => return vec![],
+            }
         }
 
         // Global navigation shortcuts
@@ -261,15 +290,7 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
             if state.library.artists.is_empty() {
                 return vec![DataAction::LoadArtists.into(), NavigationAction::SetView(View::Browse).into(), SystemAction::CheckStaleness(tier1).into()];
             }
-            // Auto-drill if only root column exists
-            let mut actions = vec![NavigationAction::SetView(View::Browse).into(), SystemAction::CheckStaleness(tier1).into()];
-            if state.artist_nav.columns.len() == 1 && !state.artist_nav.is_empty() {
-                if let Some(drill) = browse::auto_drill_artist_action(state) {
-                    state.auto_drill_pending = true;
-                    actions.push(drill);
-                }
-            }
-            return actions;
+            return vec![NavigationAction::SetView(View::Browse).into(), SystemAction::CheckStaleness(tier1).into()];
         }
         (KeyModifiers::CONTROL, KeyCode::Char('p')) => {
             // Ctrl+P = Playlists category
@@ -284,13 +305,6 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
             } else {
                 let items = crate::app::state::BrowseItem::from_playlists(&state.library.playlists);
                 state.playlist_nav.reset("playlists", items);
-                // Auto-drill if only root column exists
-                if state.playlist_nav.columns.len() == 1 && !state.playlist_nav.is_empty() {
-                    if let Some(drill) = browse::auto_drill_playlist_action(state) {
-                        state.auto_drill_pending = true;
-                        actions.push(drill);
-                    }
-                }
             }
             actions.push(SystemAction::CheckStaleness(crate::app::state::RefreshCategory::Playlists).into());
             return actions;
@@ -334,9 +348,44 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
             // F5 = Refresh current view
             return helpers::refresh_current_view(state);
         }
-        // Playback controls
-        (_, KeyCode::Char(' ')) if state.view != View::Search && !state.list_filter.active && !state.popups.search_active && state.popups.radio_launcher.is_none() && state.popups.adventure_launcher.is_none() && state.popups.artist_radio_picker.is_none() => {
+        // Space: multi-select on track lists (queue or focused
+        // Miller track column), play/pause everywhere else. Plain
+        // Space toggles select mode and clears prior selection on
+        // entry; Ctrl+Space, Alt+Space, or Shift+Space activates
+        // the mode WITHOUT clearing so multiple ranges can be
+        // combined. We accept all three because terminals vary in
+        // which modifier+Space combos they actually disambiguate
+        // — Ctrl+Space is the most reliably distinct (most
+        // terminals send it as Ctrl+Char(' ') or KeyCode::Null).
+        (mods, KeyCode::Char(' '))
+            if state.view != View::Search && !state.list_filter.active
+                && !state.popups.search_active
+                && state.popups.radio_launcher.is_none()
+                && state.popups.adventure_launcher.is_none()
+                && state.popups.artist_radio_picker.is_none() =>
+        {
+            let add_to_selection = mods.contains(KeyModifiers::SHIFT)
+                || mods.contains(KeyModifiers::ALT)
+                || mods.contains(KeyModifiers::CONTROL);
+            if toggle_select_mode_on_focused_list(state, add_to_selection) {
+                return vec![];
+            }
             return vec![PlaybackAction::TogglePlayPause.into()];
+        }
+        // Some terminals (xterm, Terminal.app) send Ctrl+Space as
+        // KeyCode::Null instead of Char(' ') with the CTRL flag.
+        // Treat it as the "add to selection" trigger.
+        (_, KeyCode::Null)
+            if state.view != View::Search && !state.list_filter.active
+                && !state.popups.search_active
+                && state.popups.radio_launcher.is_none()
+                && state.popups.adventure_launcher.is_none()
+                && state.popups.artist_radio_picker.is_none() =>
+        {
+            if toggle_select_mode_on_focused_list(state, true) {
+                return vec![];
+            }
+            return vec![];
         }
         // < and > for prev/next track (crossterm reports these with NONE modifiers, not SHIFT)
         (_, KeyCode::Char('<')) if state.view != View::Search && !state.list_filter.active && !state.popups.search_active && state.popups.radio_launcher.is_none() && state.popups.adventure_launcher.is_none() => {
@@ -404,13 +453,22 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
             return navigate_to_album(state);
         }
         // Ctrl+S = Save queue as playlist (standard Save shortcut).
-        // The previous Ctrl+W was non-standard; left in place as an
-        // alias so existing muscle memory still works.
         (KeyModifiers::CONTROL, KeyCode::Char('s')) if alt_commands::is_action_command_available(state, 's') => {
             return vec![QueueAction::PromptSavePlaylist.into()];
         }
-        (KeyModifiers::CONTROL, KeyCode::Char('w')) if alt_commands::is_action_command_available(state, 'w') => {
-            return vec![QueueAction::PromptSavePlaylist.into()];
+        // Ctrl+V = View options popup (sort modes, direction,
+        // group-by-album, cover-art toggle) for the focused column.
+        (KeyModifiers::CONTROL, KeyCode::Char('v')) => {
+            return vec![SearchAction::OpenSortPopup.into()];
+        }
+        // Ctrl+W = Close current Miller column. Drops the focused
+        // column + any cols to its right and moves focus one left.
+        // At the root (or the hidden Playlists col-offset prefix),
+        // falls back to focusing the cat col so the user can pivot
+        // to another category.
+        (KeyModifiers::CONTROL, KeyCode::Char('w')) if state.view == View::Browse => {
+            close_focused_browse_column(state);
+            return vec![];
         }
         (KeyModifiers::CONTROL, KeyCode::Char('x')) if alt_commands::is_action_command_available(state, 'x') => {
             return vec![QueueAction::ClearQueue.into()];
@@ -442,34 +500,9 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
             return vec![SearchAction::OpenSortPopup.into()];
         }
 
-        // External service search: Ctrl+Alt+A/S/Y
-        (mods, KeyCode::Char('a')) if mods == KeyModifiers::CONTROL | KeyModifiers::ALT => {
-            let query = build_external_search_query(state);
-            if !query.is_empty() {
-                let url = crate::services::external_search::generate_search_url(
-                    crate::services::external_search::SearchTarget::AppleMusic, &query);
-                let _ = open::that(&url);
-            }
-            return vec![];
-        }
-        (mods, KeyCode::Char('s')) if mods == KeyModifiers::CONTROL | KeyModifiers::ALT => {
-            let query = build_external_search_query(state);
-            if !query.is_empty() {
-                let url = crate::services::external_search::generate_search_url(
-                    crate::services::external_search::SearchTarget::Spotify, &query);
-                let _ = open::that(&url);
-            }
-            return vec![];
-        }
-        (mods, KeyCode::Char('y')) if mods == KeyModifiers::CONTROL | KeyModifiers::ALT => {
-            let query = build_external_search_query(state);
-            if !query.is_empty() {
-                let url = crate::services::external_search::generate_search_url(
-                    crate::services::external_search::SearchTarget::YouTube, &query);
-                let _ = open::that(&url);
-            }
-            return vec![];
-        }
+        // External-search keyboard shortcuts have all been retired —
+        // Apple Music / Spotify / YouTube search are palette- and
+        // menu-driven only.
 
         _ => {}
     }
@@ -509,8 +542,20 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
         return handle_library_picker_keys(key, state);
     }
 
+    // Global inline filter handler — once `/` activates the filter,
+    // every printable key goes to the query, Backspace deletes,
+    // Esc cancels, Enter promotes to the global Search popup. This
+    // runs BEFORE the view-specific dispatch so filtering works
+    // on Queue / Now Playing / Similar / etc., not just Browse.
+    if state.list_filter.active {
+        if let Some(actions) = handle_filter_input(key, state) {
+            return actions;
+        }
+        // Fall through for keys we don't handle here (Tab, etc.).
+    }
+
     // View-specific handling
-    match state.view {
+    let actions = match state.view {
         View::Auth => handle_auth_keys(key, state),
         View::Browse => browse::handle_browse_keys(key, state),
         View::Queue => now_playing::handle_queue_keys(key, state),
@@ -520,6 +565,156 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
         View::Related => related::handle_related_keys(key, state),
         View::Help => settings::handle_help_keys(key, state),
         View::Settings => settings::handle_settings_keys(key, state, config),
+    };
+
+    // Select-mode lifecycle:
+    //   - Plain Up / Down (no modifiers) extends the selection.
+    //   - Any other key exits select mode, including PgUp/Down,
+    //     Home/End, Left/Right (e.g. moving to another column),
+    //     letter jumps, etc. The selection itself persists so the
+    //     user can act on it from outside the mode.
+    //   - Space variants are handled in the global match above and
+    //     return before reaching this block, so they don't trigger
+    //     this exit path.
+    let plain_up_down = matches!(key.code, KeyCode::Up | KeyCode::Down)
+        && !key.modifiers.contains(KeyModifiers::SHIFT)
+        && !key.modifiers.contains(KeyModifiers::CONTROL)
+        && !key.modifiers.contains(KeyModifiers::ALT);
+    if state.select_mode {
+        if plain_up_down {
+            extend_selection_after_move(state);
+        } else {
+            state.select_mode = false;
+        }
+    }
+
+    actions
+}
+
+/// Extend the active list's selection set to include the current
+/// cursor position. Used by `select_mode` after Up/Down keys.
+fn extend_selection_after_move(state: &mut AppState) {
+    match state.view {
+        View::Queue | View::NowPlaying => {
+            let idx = state.list_state.queue_index;
+            if idx < state.queue.tracks.len() {
+                state.queue.selected.insert(idx);
+            }
+        }
+        View::Browse => {
+            if let Some(nav) = state.browse_nav_mut() {
+                if let Some(col) = nav.focused_mut() {
+                    col.selected_set.insert(col.selected_index);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Whether the currently-focused list supports multi-select (a
+/// queue track list or a Miller column whose first item is a
+/// `BrowseItem::Track`).
+fn focused_list_is_track_list(state: &AppState) -> bool {
+    match state.view {
+        View::Queue | View::NowPlaying => !state.queue.tracks.is_empty(),
+        View::Browse => state
+            .browse_nav()
+            .and_then(|n| n.columns.get(n.focused_column))
+            .and_then(|c| c.items.first())
+            .map(|it| matches!(it, BrowseItem::Track { .. }))
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+/// Toggle / activate `select_mode` on the focused track list, if
+/// any. Returns `true` if the action was consumed (Space should
+/// not fall through to play/pause).
+///
+///   - Plain Space, mode off → clear selection, enter mode, mark current item
+///   - Plain Space, mode on  → exit mode (selection persists)
+///   - Shift+Space          → enter mode without clearing; mark current item
+fn toggle_select_mode_on_focused_list(state: &mut AppState, shift: bool) -> bool {
+    if !focused_list_is_track_list(state) {
+        return false;
+    }
+    if shift {
+        state.select_mode = true;
+        match state.view {
+            View::Queue | View::NowPlaying => {
+                let idx = state.list_state.queue_index;
+                if idx < state.queue.tracks.len() {
+                    state.queue.selected.insert(idx);
+                }
+            }
+            View::Browse => {
+                if let Some(nav) = state.browse_nav_mut() {
+                    if let Some(col) = nav.focused_mut() {
+                        col.selected_set.insert(col.selected_index);
+                    }
+                }
+            }
+            _ => {}
+        }
+        return true;
+    }
+    if state.select_mode {
+        // Exit mode, keep selection so the user can act on it.
+        state.select_mode = false;
+    } else {
+        // Enter mode: clear any prior selection first, then mark
+        // the current item.
+        state.select_mode = true;
+        match state.view {
+            View::Queue | View::NowPlaying => {
+                state.queue.selected.clear();
+                let idx = state.list_state.queue_index;
+                if idx < state.queue.tracks.len() {
+                    state.queue.selected.insert(idx);
+                }
+            }
+            View::Browse => {
+                if let Some(nav) = state.browse_nav_mut() {
+                    if let Some(col) = nav.focused_mut() {
+                        col.selected_set.clear();
+                        col.selected_set.insert(col.selected_index);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    true
+}
+
+/// Process a key while the inline filter is active. Returns `Some`
+/// when the key was consumed, `None` to fall through to the view's
+/// own handler (e.g. Tab to switch panes, F-keys, etc.).
+fn handle_filter_input(key: event::KeyEvent, state: &mut AppState) -> Option<Vec<Action>> {
+    use crate::app::action::SearchAction;
+    if key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::ALT) {
+        return None;
+    }
+    match key.code {
+        KeyCode::Esc => Some(vec![SearchAction::DeactivateListFilter.into()]),
+        KeyCode::Backspace => Some(vec![SearchAction::DeleteListFilterChar.into()]),
+        KeyCode::Enter => {
+            let q = state.list_filter.query.trim().to_string();
+            if q.is_empty() {
+                Some(vec![])
+            } else {
+                Some(vec![
+                    SearchAction::OpenSearchPopup.into(),
+                    SearchAction::SetSearchQuery(q).into(),
+                ])
+            }
+        }
+        KeyCode::Char(c) => Some(vec![SearchAction::AppendListFilterChar(c).into()]),
+        // Up/Down/Left/Right/Tab fall through to the view's handler
+        // so the user can keep navigating the filtered list while
+        // continuing to type.
+        _ => None,
     }
 }
 
@@ -1127,8 +1322,108 @@ fn get_selected_album(state: &AppState) -> Option<(String, String)> {
 /// Build a search query for external services based on current context.
 ///
 /// Priority: selected artist → selected album → selected track → now-playing track.
-/// Returns an empty string if nothing is available.
-fn build_external_search_query(state: &AppState) -> String {
+/// Close the focused content column. The cat ("section") column is
+/// the only un-closable surface — every Miller column, the Folders
+/// root, and the track-details pane are closable. The pane closes
+/// first if visible (so two Ctrl+W presses tear it down then drop
+/// the next column rather than skipping straight to the column
+/// underneath). When the last content column closes, focus falls
+/// back to the cat col.
+pub fn close_focused_browse_column(state: &mut AppState) {
+    use crate::app::state::BrowseCategory;
+
+    // Pane visible? Close ONLY the pane.
+    if state.pane_track().is_some() {
+        state.track_details = None;
+        state.track_pane_focused = false;
+        state.track_pane_index = 0;
+        return;
+    }
+
+    // Stale pane-focus flag with no pane visible: clear it instead
+    // of popping a Miller column the user wasn't aiming at.
+    if state.track_pane_focused {
+        state.track_pane_focused = false;
+        state.track_pane_index = 0;
+        return;
+    }
+
+    // Folders use their own nav state. Drop the focused folder col
+    // and everything to its right; if that was the root col, the
+    // whole folder_state goes — focus falls back to the cat col.
+    if state.browse_category == BrowseCategory::Folders {
+        let drop_state = state
+            .folder_state
+            .as_mut()
+            .map(|fs| {
+                if fs.can_go_left() {
+                    fs.focus_left();
+                    fs.truncate_right_columns();
+                    false
+                } else {
+                    true
+                }
+            })
+            .unwrap_or(true);
+        if drop_state {
+            state.folder_state = None;
+            state.focus_category_column();
+        }
+        return;
+    }
+
+    // Library / Genres / Playlists. The Playlists nav has a hidden
+    // root col (column_offset=1) that mirrors the cat col list — we
+    // never let the user "close" past column_offset (would put focus
+    // on a column they can't see). For Library/Genres column_offset=0,
+    // so closing col 0 drops the entire content nav and falls back
+    // to the cat col.
+    let column_offset: usize = match state.browse_category {
+        BrowseCategory::Playlists => 1,
+        _ => 0,
+    };
+
+    let drop_nav = if let Some(nav) = state.browse_nav_mut() {
+        if nav.focused_column > column_offset {
+            nav.focus_left();
+            nav.truncate_right();
+            false
+        } else {
+            // Focused col IS the leftmost closable col. Truncate
+            // everything (including it) so only the hidden prefix
+            // remains. For non-Playlists categories that means an
+            // empty `columns` Vec — the cat col is now the only
+            // visible surface.
+            nav.columns.truncate(column_offset);
+            nav.focused_column = column_offset.saturating_sub(1);
+            true
+        }
+    } else {
+        true
+    };
+
+    if drop_nav {
+        state.focus_category_column();
+    }
+}
+
+pub fn build_external_search_query(state: &AppState) -> String {
+    // 0. Highlighted Sonically-Similar row inside the track pane —
+    //    when the user has picked a similar song, third-party
+    //    search should target THAT track's artist+album, not the
+    //    parent miller row's.
+    if state.track_pane_focused && state.track_pane_index > 0 {
+        if let Some(parent) = state.focused_track() {
+            let sim_idx = state.track_pane_index - 1;
+            if let Some(sim) = state
+                .track_pane_similar
+                .get(&parent.rating_key)
+                .and_then(|v| v.get(sim_idx))
+            {
+                return format!("{} - {}", sim.artist_name(), sim.album_name());
+            }
+        }
+    }
     // 1. Selected artist in browse nav
     if state.view == View::Browse {
         if let Some(nav) = state.browse_nav() {

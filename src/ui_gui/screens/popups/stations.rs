@@ -36,7 +36,7 @@ pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
     };
 
     let back_btn: Element<'_, GuiMessage> = if nav.focused_column > 0 {
-        button(text("\u{2190} Back").size(12))
+        button(text("\u{2190} Back").size(14))
             .padding([4, 12])
             .on_press(GuiMessage::Action(Action::Radio(RadioAction::NavigateStationsBack)))
             .style(popout_button_style)
@@ -44,7 +44,7 @@ pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
     } else {
         Space::with_width(Length::Fixed(0.0)).into()
     };
-    let close_btn = button(text("Close").size(12))
+    let close_btn = button(text("Close").size(14))
         .padding([4, 12])
         .on_press(GuiMessage::CloseStationsPopup)
         .style(popout_button_style);
@@ -52,7 +52,7 @@ pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
     let toolbar = iced_row![
         back_btn,
         Space::with_width(Length::Fill),
-        text(breadcrumb_str).size(12),
+        text(breadcrumb_str).size(14),
         Space::with_width(Length::Fill),
         close_btn,
     ]
@@ -74,7 +74,7 @@ pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
             })
             .collect();
         if radio_stations.is_empty() {
-            rows.push(text("(no stations)").size(12).into());
+            rows.push(text("(no stations)").size(14).into());
         } else {
             let active_key = state.radio.active_station.as_ref().map(|s| s.key.as_str());
             for (i, station) in radio_stations.iter().map(|(idx, s)| (*idx, *s)) {
@@ -105,7 +105,7 @@ pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
                 };
 
                 rows.push(
-                    button(text(label).size(13))
+                    button(text(label).size(15))
                         .width(Length::Fill)
                         .padding([6, 12])
                         .on_press(msg)
@@ -133,14 +133,14 @@ pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
             }
         }
     } else {
-        rows.push(text("Stations still loading\u{2026}").size(12).into());
+        rows.push(text("Stations still loading\u{2026}").size(14).into());
     }
 
     let list = scrollable(Column::with_children(rows).spacing(0)).height(Length::Fill);
 
     container(
         column![
-            text("Radio").size(18),
+            text("Radio").size(20),
             toolbar,
             container(list)
                 .width(Length::Fill)

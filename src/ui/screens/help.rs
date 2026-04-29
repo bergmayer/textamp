@@ -28,14 +28,40 @@ COMMANDS
   / or Alt+F        Inline filter (type to narrow list, stays on column)
 
   Enter             Navigate to item (drill down)
-                    On tracks: play track + all following (replaces queue)
+                    On tracks: open the right-side track-details
+                    pane and focus its Play Track button (a second
+                    Enter plays). Up/Down inside the pane walks
+                    between Play and the Sonically-Similar list;
+                    Enter on a similar row drills into that track's
+                    album in Library; Left/Esc returns to the
+                    track list.
   Double-click      Play immediately (replaces queue):
                     Album → play album, Playlist → play playlist,
                     Folder → play folder
   Ctrl+E            Add to end of queue (track + following, or album)
   Ctrl+Shift+E      Insert next in queue (after current track)
 
-  Space             Play / Pause
+MULTI-SELECT (track lists — queue or focused track Miller column)
+  Space             Enter select mode (clears prior selection;
+                    marks current item). Press Space again to exit
+                    — the selection persists so you can then act on
+                    it (Del, Ctrl+E, palette, …).
+  Up / Down         While in select mode, expand the selection in
+                    the direction you move.
+  Any other key     Exits select mode (selection persists). This
+                    includes PgUp/Dn, Home/End, Left/Right (which
+                    leaves the column), letter jumps, mouse clicks
+                    — anything that isn't plain Up or Down ends the
+                    expand-as-you-move session.
+  Ctrl+Space        Re-enter select mode WITHOUT clearing; lets you
+                    build a multi-region selection by moving to a
+                    new spot and adding more rows with Up/Down.
+                    Alt+Space and Shift+Space work the same way
+                    (whichever your terminal disambiguates from
+                    plain Space).
+  Esc               Clear the multi-selection.
+  When no track list has focus, Space is Play / Pause as usual.
+
   Shift+Left/Right  Seek ±10 seconds
   Ctrl+Shift+Up/Dn  Volume
 
@@ -49,13 +75,18 @@ COMMANDS
   
   Alt+R  Random Album Radio
   
-  Search streaming services for selected or now-playing album or artist:
-  Ctrl+Alt+A  Apple Music  Ctrl+Alt+S  Spotify  Ctrl+Alt+Y  YouTube
+  Search streaming services for selected or now-playing album / artist:
+  Open the command palette (`:`) and pick "Search Apple Music",
+  "Search Spotify", or "Search YouTube" — no keyboard shortcuts.
 
 QUEUE (Ctrl+U)
   Del               Remove track(s) from queue
   Shift+Up/Dn       Reorder selected track(s)
-  Ctrl+Shift+Up/Dn  Multi-select (toggle items while navigating)
+  Space             Enter / exit multi-select mode (see MULTI-SELECT)
+  Ctrl+Space        Add to existing multi-select without clearing
+                    (Alt+Space / Shift+Space also work)
+  Ctrl+Shift+Up/Dn  Multi-select (toggle items while navigating —
+                    legacy shortcut; same effect as Space mode)
   Ctrl+Z            Undo last remix/edit
   Esc               Clear multi-selection
 

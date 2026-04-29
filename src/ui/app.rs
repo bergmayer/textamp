@@ -69,8 +69,8 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     match state.view {
         View::Auth => render_auth(frame, state),
         View::Browse => render_browse(frame, state),
-        View::Queue => render_queue(frame, state),
-        View::NowPlaying => render_now_playing(frame, state),
+        View::Queue => render_queue_and_visualizer(frame, state),
+        View::NowPlaying => render_queue_and_visualizer(frame, state),
         View::Search => render_search(frame, state),
         View::Similar => render_similar(frame, state),
         View::Related => render_related(frame, state),
@@ -132,6 +132,12 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     if let Some(ref toast) = state.notifications.toast_message {
         render_toast(frame, toast, frame.area());
     }
+
+    // Command-palette overlay rides ABOVE every other layer so the
+    // user can summon it from any view (including over a popup).
+    if state.palette.open {
+        crate::ui::command_palette::render(frame, state, frame.area());
+    }
 }
 
 fn render_auth(frame: &mut Frame, state: &AppState) {
@@ -151,13 +157,16 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
         height: layout.left_panel.height,
     };
 
-    // Column width: always divide into 3 equal slots (the minimum visible)
-    // Columns never get narrower than this; they slide off the left edge instead.
-    let col_width = full_area.width / 3;
-
-    // Virtual column model:
+    // Virtual column model — visible-only space:
     //   virtual 0 = category selector column
-    //   virtual 1..N = content columns from the active category's nav state
+    //   virtual 1..N = meaningful content columns (skips the
+    //   `column_offset` prefix that's hidden by contract, e.g.
+    //   Playlists hides nav col 0 because the playlists are
+    //   already in the cat col).
+    let column_offset_for_focus: usize = match state.browse_category {
+        BrowseCategory::Playlists => 1,
+        _ => 0,
+    };
     let content_focused = if state.category_column_focused {
         0
     } else {
@@ -166,42 +175,62 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
             _ => state.browse_nav().map_or(0, |nav| nav.focused_column),
         }
     };
-
-    let virtual_focus = if state.category_column_focused { 0 } else { 1 + content_focused };
-
-    // Total virtual columns: 1 (category) + content columns
-    let content_column_count = match state.browse_category {
-        BrowseCategory::Folders => state.folder_state.as_ref().map_or(0, |fs| fs.columns.len()),
-        _ => state.browse_nav().map_or(0, |nav| nav.columns.len()),
-    };
-    let total_virtual = 1 + content_column_count;
-
-    // Sliding window: show 3 columns at a time.
-    // The window only slides right when columns extend beyond what's visible.
-    // It slides based on the DEEPEST column with content, not the focused column —
-    // this prevents jumps when clicking between already-visible columns.
-    // The focused column is guaranteed visible by clamping.
-    let visible_count: usize = 3;
-
-    // The rightmost column we want visible: the deepest column with content,
-    // or at minimum the focused column.
-    let rightmost = total_virtual.saturating_sub(1).max(virtual_focus);
-
-    // Slide window right only as far as needed to show the rightmost column
-    let virtual_start = if rightmost + 1 > visible_count {
-        rightmost + 1 - visible_count
-    } else {
+    // Project raw nav.focused_column into visible space by
+    // subtracting the hidden prefix. Without this, focusing a
+    // Playlist tracks column (raw idx 1, visible idx 0) would
+    // make the sliding window think the focus is one slot
+    // further right than it really is, sliding the cat col off
+    // the screen.
+    let virtual_focus = if state.category_column_focused {
         0
+    } else {
+        1 + content_focused.saturating_sub(column_offset_for_focus)
     };
 
-    // But also ensure the focused column is visible (clamp left if needed)
-    let virtual_start = virtual_start.min(virtual_focus);
+    // Equal-width column layout. Every visible miller-related
+    // column (cat col + each meaningful content miller col) gets
+    // the same width: 2 cols → 50/50, 3 → 1/3 each, 4 → quarters,
+    // etc. Strip + pane stay as fixed-width chrome that doesn't
+    // count toward the column slots. When cols would shrink below
+    // MIN_COL_WIDTH the window slides right (focus-anchored),
+    // shedding the leftmost slots.
+    const MIN_COL_WIDTH: u16 = 18;
 
     let t = theme();
-    let category_items = BrowseCategory::all();
+    let category_rows = state.category_rows();
 
-    // Determine if category column is visible
-    let cat_col_visible = virtual_start == 0;
+    let n_meaningful_miller = count_meaningful_miller_cols(state);
+
+    // Track-details pane: counted as a "column slot" so it gets
+    // the same width as everything else. Visible whenever the
+    // focused Miller row is a Track AND the pane hasn't been
+    // hidden via Ctrl+W for that specific track.
+    let pane_track: Option<crate::plex::models::Track> = state.pane_track().cloned();
+    let n_pane: usize = if pane_track.is_some() { 1 } else { 0 };
+
+    let total_cols_wanted = 1 + n_meaningful_miller + n_pane;
+
+    // Cat col is ALWAYS pinned to the left — minimum 2-col layout
+    // (cat + at least one content col) is the rule. When more miller
+    // cols + pane exist than fit, the LEFTMOST miller cols slide off
+    // (focus-anchored) while the cat stays put. Total wanted slots
+    // is at least 2 so even an empty / loading content area still
+    // reserves a meaningful col next to cat.
+    let strip_wants_to_show = state.alphabet_strip_visible();
+    let cat_col_visible = true;
+    let resolve_layout = |strip_w: u16| -> usize {
+        let usable = full_area.width.saturating_sub(strip_w);
+        let max_fit = ((usable / MIN_COL_WIDTH) as usize).max(2);
+        total_cols_wanted.max(2).min(max_fit)
+    };
+    let strip_width: u16 = if strip_wants_to_show { 3 } else { 0 };
+    let visible_count = resolve_layout(strip_width);
+    let _virtual_start: usize = 0;
+    let _ = virtual_focus;
+    let usable_width = full_area.width.saturating_sub(strip_width);
+    let col_width = (usable_width / visible_count as u16).max(MIN_COL_WIDTH);
+
+    let show_alphabet_strip = strip_width > 0;
 
     // Render the category column if visible
     if cat_col_visible {
@@ -229,45 +258,121 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
             hr.category_column = Some(crate::ui::hit_regions::CategoryColumnRegion {
                 area: col_area,
                 inner,
-                item_count: category_items.len(),
+                item_count: category_rows.len(),
             });
         }
 
-        for (i, cat) in category_items.iter().enumerate() {
-            if i as u16 >= inner.height { break; }
+        // Layout: top categories (Library/Genres/Folders), one blank
+        // separator row, then playlists. The visual y-offset of each
+        // row is therefore index + (1 if past the separator).
+        let top_count = crate::app::state::BrowseCategory::top_rows().len();
+        for (i, row) in category_rows.iter().enumerate() {
+            // Add a 1-row gap between the top categories and the
+            // playlists list so the boundary reads at a glance.
+            let y_offset = i as u16 + if i >= top_count { 1 } else { 0 };
+            if y_offset >= inner.height { break; }
+
+            let (label, is_active) = match row {
+                crate::app::state::CategoryRow::Category(cat) => {
+                    let label = match cat {
+                        BrowseCategory::Library => "Library",
+                        BrowseCategory::Genres => "Genres",
+                        BrowseCategory::Folders => "Folders",
+                        BrowseCategory::Playlists => "Playlists", // unreachable in top_rows
+                    };
+                    let active = state.browse_category == *cat;
+                    (label.to_string(), active)
+                }
+                crate::app::state::CategoryRow::Playlist(idx) => {
+                    let p = match state.library.playlists.get(*idx) {
+                        Some(p) => p,
+                        None => continue,
+                    };
+                    let active = state.browse_category == BrowseCategory::Playlists
+                        && state.playlist_nav.columns.first()
+                            .and_then(|c| c.items.get(c.selected_index))
+                            .map(|it| it.key() == p.rating_key.as_str())
+                            .unwrap_or(false);
+                    (p.title.clone(), active)
+                }
+            };
+
             let is_selected = i == state.category_column_index;
-            let style = if is_selected && is_focused {
+            // Only one row can carry a highlight bg at a time:
+            //   - When the cat col is focused: the cursor row wins
+            //     (selection bg). The active-category row stays plain
+            //     so the user doesn't see two simultaneous highlights.
+            //   - When the cat col is NOT focused: nothing is "the
+            //     cursor" yet, so the active-category row paints with
+            //     the dimmer highlight bg as a "you are here" hint.
+            let show_cursor = is_focused && is_selected;
+            let show_active = !is_focused && is_active;
+            let style = if show_cursor {
                 Style::default().fg(t.colors.fg_primary).bg(t.colors.bg_selection)
-            } else if is_selected {
+            } else if show_active {
                 Style::default().fg(t.colors.fg_primary).bg(t.colors.bg_highlight)
             } else {
                 Style::default().fg(t.colors.fg_primary)
             };
 
-            let label = match cat {
-                BrowseCategory::Library => "Library",
-                BrowseCategory::Playlists => "Playlists",
-                BrowseCategory::Genres => "Genres",
-                BrowseCategory::Folders => "Folders",
-            };
-            let indicator = if is_selected { "\u{25b8} " } else { "  " };
+            let indicator = if show_cursor { "\u{25b8} " } else { "  " };
             let text = format!("{}{}", indicator, label);
-            let line_area = Rect { x: inner.x, y: inner.y + i as u16, width: inner.width, height: 1 };
+            let line_area = Rect { x: inner.x, y: inner.y + y_offset, width: inner.width, height: 1 };
             frame.render_widget(Paragraph::new(text).style(style), line_area);
+        }
+
+        // Draw the separator: a horizontal rule between the top
+        // categories and the playlists. Use a faint border colour so
+        // it reads as chrome rather than content.
+        if !state.library.playlists.is_empty() && (top_count as u16) < inner.height {
+            let sep_y = inner.y + top_count as u16;
+            let sep = "─".repeat(inner.width as usize);
+            frame.render_widget(
+                Paragraph::new(sep).style(Style::default().fg(t.colors.border)),
+                Rect { x: inner.x, y: sep_y, width: inner.width, height: 1 },
+            );
         }
     }
 
-    // Compute content area (to the right of the category column, or full width if cat col scrolled off)
-    let content_area = if cat_col_visible {
-        Rect {
+    // Render the alphabet strip in the gap between cat col and content.
+    if show_alphabet_strip {
+        let strip_area = Rect {
             x: full_area.x + col_width,
             y: full_area.y,
-            width: full_area.width.saturating_sub(col_width),
+            width: strip_width,
             height: full_area.height,
-        }
-    } else {
-        full_area
+        };
+        render_alphabet_strip(frame, state, strip_area);
+    }
+
+    // Equal-width column layout. Cat col, miller cols and the
+    // track pane are all sized to `col_width`. Strip is fixed
+    // chrome between cat and the miller cols. No spacer columns.
+    let cat_w = if cat_col_visible { col_width } else { 0 };
+    let pane_w = if n_pane > 0 { col_width } else { 0 };
+    let n_visible_miller = visible_count
+        .saturating_sub(if cat_col_visible { 1 } else { 0 })
+        .saturating_sub(n_pane);
+    let miller_w = (n_visible_miller as u16) * col_width;
+
+    let content_area = Rect {
+        x: full_area.x + cat_w + strip_width,
+        y: full_area.y,
+        width: miller_w,
+        height: full_area.height,
     };
+
+    let pane_area = if pane_w > 0 {
+        Some(Rect {
+            x: content_area.x + miller_w,
+            y: full_area.y,
+            width: pane_w,
+            height: full_area.height,
+        })
+    } else {
+        None
+    };
+
 
     // Pass content area to existing category renderers.
     // They compute their own internal column layout from the given area.
@@ -290,10 +395,14 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
                 frame, state, &state.artist_nav, "artists", current_track_key,
                 filter_results, filter_column, false,
                 content_area, Rect { x: 0, y: 0, width: 0, height: 0 },
-                Some(col_width), content_focus_override,
+                Some(col_width), content_focus_override, 0,
             );
         }
         BrowseCategory::Playlists => {
+            // Skip column 0 of playlist_nav — the playlists are
+            // already enumerated in the leftmost browse column, so a
+            // second "playlists" list right next to it is redundant.
+            // Same fix the GUI got in `content_columns`.
             let (filter_results, filter_column) = if state.list_filter.active
                 && state.list_filter.category == BrowseCategory::Playlists {
                 (state.list_filter.results.as_ref(), Some(state.list_filter.column))
@@ -302,7 +411,7 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
                 frame, state, &state.playlist_nav, "playlists", current_track_key,
                 filter_results, filter_column, true,
                 content_area, Rect { x: 0, y: 0, width: 0, height: 0 },
-                Some(col_width), content_focus_override,
+                Some(col_width), content_focus_override, 1,
             );
         }
         BrowseCategory::Genres => {
@@ -314,7 +423,7 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
                 frame, state, &state.genre_nav, "genres", current_track_key,
                 filter_results, filter_column, false,
                 content_area, Rect { x: 0, y: 0, width: 0, height: 0 },
-                Some(col_width), content_focus_override,
+                Some(col_width), content_focus_override, 0,
             );
         }
         BrowseCategory::Folders => {
@@ -328,27 +437,41 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
         }
     }
 
+    // Track details pane (when focused row is a Track).
+    if let (Some(area), Some(track)) = (pane_area, pane_track.as_ref()) {
+        render_track_details_pane(frame, state, area, track);
+    }
+
     // Chrome: tab bar, transport, command bar
     render_transport(frame, state, layout.transport);
-    render_commands(frame, state, layout.commands);
 }
 
-fn render_queue(frame: &mut Frame, state: &AppState) {
+/// Combined Queue / Now Playing — matches the GUI's layout where the
+/// queue list and the visualizer share one screen. Top half is the
+/// existing queue-mode renderer (artwork + stations + track list);
+/// bottom half is the visualizer panel (waveform / spectrum /
+/// spectrogram). View::Queue and View::NowPlaying both render this
+/// same screen so users don't have to flip between two screens to
+/// see what's playing AND what's coming up.
+fn render_queue_and_visualizer(frame: &mut Frame, state: &AppState) {
+    use ratatui::layout::{Constraint, Direction, Layout};
+
     let layout = FullScreenLayout::new(frame.area());
+    let area = layout.content;
 
-    screens::now_playing::render_queue_mode(frame, state, layout.content);
+    // 50/50 vertical split: queue/sidebar/artwork on top, visualizer
+    // on the bottom. The artwork inside the top section is sized so
+    // its box is square in pixels (width = 2 × height in cells) —
+    // and `render_artwork` uses `Resize::Crop` so the cover image
+    // fills the box even if the cell aspect doesn't quite match.
+    let split = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+
+    screens::now_playing::render_queue_mode(frame, state, split[0]);
+    screens::now_playing::render_visualizer_panel(frame, state, split[1]);
     render_transport(frame, state, layout.transport);
-    render_commands(frame, state, layout.commands);
-}
-
-/// Compute the queue right panel (track list) area for popup centering.
-/// Replicates the layout calculation from render_queue_mode.
-fn render_now_playing(frame: &mut Frame, state: &AppState) {
-    let layout = FullScreenLayout::new(frame.area());
-
-    screens::now_playing::render_visualizer_mode(frame, state, layout.content);
-    render_transport(frame, state, layout.transport);
-    render_commands(frame, state, layout.commands);
 }
 
 fn render_search(frame: &mut Frame, state: &AppState) {
@@ -357,15 +480,14 @@ fn render_search(frame: &mut Frame, state: &AppState) {
     // Unified search/filter screen handles all tabs including Global (with 3-column layout)
     screens::filter::render(frame, state, layout.content);
     render_transport(frame, state, layout.transport);
-    render_commands(frame, state, layout.commands);
 }
 
 fn render_similar(frame: &mut Frame, state: &AppState) {
     // Render the previous view behind the popup
     let prev = state.previous_view.unwrap_or(View::Browse);
     match prev {
-        View::Queue => render_queue(frame, state),
-        View::NowPlaying => render_now_playing(frame, state),
+        View::Queue => render_queue_and_visualizer(frame, state),
+        View::NowPlaying => render_queue_and_visualizer(frame, state),
         View::Browse => render_browse(frame, state),
         _ => render_browse(frame, state),
     }
@@ -378,8 +500,8 @@ fn render_related(frame: &mut Frame, state: &AppState) {
     // Render the previous view behind the popup
     let prev = state.previous_view.unwrap_or(View::Browse);
     match prev {
-        View::Queue => render_queue(frame, state),
-        View::NowPlaying => render_now_playing(frame, state),
+        View::Queue => render_queue_and_visualizer(frame, state),
+        View::NowPlaying => render_queue_and_visualizer(frame, state),
         View::Browse => render_browse(frame, state),
         _ => render_browse(frame, state),
     }
@@ -393,7 +515,6 @@ fn render_help(frame: &mut Frame, state: &AppState) {
 
     screens::help::render(frame, state, layout.content);
     render_transport(frame, state, layout.transport);
-    render_commands(frame, state, layout.commands);
 }
 
 fn render_settings(frame: &mut Frame, state: &AppState) {
@@ -401,7 +522,6 @@ fn render_settings(frame: &mut Frame, state: &AppState) {
 
     screens::settings::render(frame, state, layout.content);
     render_transport(frame, state, layout.transport);
-    render_commands(frame, state, layout.commands);
 }
 
 /// Render folder browsing view (Miller columns style) with lazy/windowed rendering.
@@ -653,7 +773,9 @@ fn render_folder_view(
                             } else if is_selected && is_focused {
                                 Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
                             } else if is_selected {
-                                Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
+                                // Selected row in a non-focused folder
+                                // col: dim highlight, not the cursor.
+                                Style::default().fg(t.colors.fg_primary).bg(t.colors.bg_highlight)
                             } else {
                                 Style::default().fg(t.colors.fg_primary)
                             };
@@ -749,6 +871,559 @@ fn is_two_row_column(
 /// Render a BrowseNavigationState as dynamic Miller columns.
 /// Used for Artists, Playlists, and Genres views.
 /// When filter_results is Some, only show items at the matched indices in the filter_column.
+/// Count the meaningful miller columns for the active browse
+/// category (mirrors the `last_meaningful` logic inside
+/// `render_browse_miller_columns`). Returns 0 for Folders.
+///
+/// When the active nav is *loading* and there's no visible miller
+/// col yet (typical state right after the user pressed Enter on a
+/// playlist row but before the dispatcher pushed the tracks col),
+/// returns 1 so the layout reserves a slot for the animated
+/// "Loading..." placeholder. Without this, the equal-width math
+/// would slide the cat col off and leave just an empty placeholder.
+fn count_meaningful_miller_cols(state: &AppState) -> usize {
+    use crate::app::state::BrowseCategory;
+
+    // Folders have their own state shape — count `folder_state.columns`
+    // so the equal-width layout includes them as miller slots and the
+    // cat col stays anchored to the left.
+    if state.browse_category == BrowseCategory::Folders {
+        let Some(fs) = state.folder_state.as_ref() else {
+            return 1;
+        };
+        if fs.loading || fs.columns.is_empty() {
+            return 1;
+        }
+        let last_meaningful = (0..fs.columns.len())
+            .rev()
+            .find(|&i| !fs.columns[i].items.is_empty() || i <= fs.focused_column)
+            .unwrap_or(0);
+        return last_meaningful + 1;
+    }
+
+    let column_offset = match state.browse_category {
+        BrowseCategory::Playlists => 1,
+        _ => 0,
+    };
+    let Some(nav) = state.browse_nav() else {
+        return 0;
+    };
+    let num_columns = nav.columns.len();
+    if num_columns <= column_offset {
+        return if nav.loading { 1 } else { 0 };
+    }
+    let last_meaningful = (column_offset..num_columns)
+        .rev()
+        .find(|&i| !nav.columns[i].items.is_empty() || i <= nav.focused_column)
+        .unwrap_or(column_offset);
+    let effective_columns = last_meaningful + 1;
+    let n = effective_columns.saturating_sub(column_offset);
+    if n == 0 && nav.loading { 1 } else { n }
+}
+
+/// Render greyed-out spacer columns (dot-filled) into `area`. Used
+/// for the slots at the far-right of the screen when the
+/// track-details pane has consumed the slots that would otherwise
+/// hold real miller columns.
+fn render_spacer_columns(frame: &mut Frame, area: Rect, col_width: u16) {
+    let t = theme();
+    if area.width == 0 || area.height == 0 || col_width == 0 {
+        return;
+    }
+    let muted_border = Style::default().fg(t.colors.fg_muted);
+    let muted_bg = Style::default().bg(t.colors.bg_primary).fg(t.colors.fg_muted);
+
+    // Fit at least one slot; the last slot may be wider than
+    // `col_width` if there's leftover space (rounding from the
+    // `(full - strip - pane) / 3` divide).
+    let n_slots = ((area.width / col_width).max(1)) as u16;
+    for i in 0..n_slots {
+        let is_last = i == n_slots - 1;
+        let slot_x = area.x + i * col_width;
+        let slot_w = if is_last {
+            area.width.saturating_sub(i * col_width)
+        } else {
+            col_width
+        };
+        let slot_area = Rect {
+            x: slot_x,
+            y: area.y,
+            width: slot_w,
+            height: area.height,
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(muted_border)
+            .style(muted_bg);
+        let inner = block.inner(slot_area);
+        frame.render_widget(block, slot_area);
+
+        if inner.width > 0 && inner.height > 0 {
+            let dot_row: String = (0..inner.width)
+                .map(|x| if x % 2 == 0 { '\u{00b7}' } else { ' ' })
+                .collect();
+            for dy in 0..inner.height {
+                if dy % 2 != 0 { continue; }
+                let row_rect = Rect {
+                    x: inner.x,
+                    y: inner.y + dy,
+                    width: inner.width,
+                    height: 1,
+                };
+                frame.render_widget(
+                    Paragraph::new(dot_row.clone())
+                        .style(Style::default().fg(t.colors.fg_muted)),
+                    row_rect,
+                );
+            }
+        }
+    }
+}
+
+/// Render the vertical alphabet jump strip.
+///
+/// 28 letters (`%`, `0`, `a..z`) split into **4 groups of 7**:
+/// `% 0 a b c d e | f g h i j k l | m n o p q r s | t u v w x y z`.
+/// Within a group the letters are tightly packed (one per row); the
+/// 3 inter-group gaps absorb whatever extra height the strip has
+/// beyond `28 + 3 = 31` rows so the four groups stay visually even
+/// while filling the available height.
+///
+/// When the strip is shorter than 31 rows we subsample one letter
+/// per row. Hit regions cover every row so a click in a gap still
+/// resolves to the nearest letter.
+fn render_alphabet_strip(frame: &mut Frame, state: &AppState, area: Rect) {
+    use crate::app::handlers::helpers::ALPHABET_STRIP_LETTERS;
+    let t = theme();
+
+    // Full borders match the other browse boxes (cat col, miller cols)
+    // so the strip reads as a peer column rather than a hairline.
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(t.colors.border))
+        .style(Style::default().bg(t.colors.bg_primary));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    // Sort-descending puts Z-named artists at the top of the list,
+    // so the strip mirrors that order: Z…A, then 9…0, then % at the
+    // bottom (the last sort key in the natural ordering).
+    let descending = state
+        .artist_nav
+        .columns
+        .first()
+        .map_or(false, |c| !c.sort_ascending);
+
+    let n = ALPHABET_STRIP_LETTERS.len();
+    let h = inner.height as usize;
+    let pad_left = inner.width.saturating_sub(1) / 2;
+
+    let glyph_for = |letter_idx: usize| -> String {
+        let ch = ALPHABET_STRIP_LETTERS[letter_idx];
+        match ch {
+            '0' => "0".to_string(),
+            '%' => "%".to_string(),
+            c => c.to_ascii_uppercase().to_string(),
+        }
+    };
+    let style_for = |letter_idx: usize| -> Style {
+        let is_selected = state.alphabet_strip_focused && state.alphabet_strip_index == letter_idx;
+        if is_selected {
+            Style::default()
+                .fg(t.colors.selection_text)
+                .bg(t.colors.bg_selection)
+        } else {
+            Style::default().fg(t.colors.fg_muted)
+        }
+    };
+
+    const N_GROUPS: usize = 4;
+    const GROUP_SIZE: usize = 7; // 4 * 7 == 28 == ALPHABET_STRIP_LETTERS.len()
+    const N_GAPS: usize = N_GROUPS - 1;
+    const MIN_HEIGHT: usize = N_GROUPS * GROUP_SIZE + N_GAPS; // 31
+
+    // Compute the row for each visual letter index. Returns a
+    // `Vec<usize>` of length `n` mapping visual_idx → row when there
+    // is room for the 4-group layout.
+    let letter_rows: Option<Vec<usize>> = if h >= MIN_HEIGHT {
+        let extra = h - MIN_HEIGHT;
+        // Distribute extra rows: half to inter-group gaps (so the
+        // groups visibly separate on tall strips), half to top/bottom
+        // padding (so the strip doesn't pin to top + bottom edges
+        // on very tall windows). When the extra is small, every
+        // available row goes to the gaps first.
+        let cap_gap_extra = extra.min(extra / 2 + (extra % 2));
+        let pad_total = extra - cap_gap_extra;
+        let pad_top = pad_total / 2;
+
+        let gap_avg = 1 + cap_gap_extra / N_GAPS;
+        let gap_extra = cap_gap_extra % N_GAPS;
+
+        let mut rows = Vec::with_capacity(n);
+        let mut row = pad_top;
+        for group in 0..N_GROUPS {
+            for _ in 0..GROUP_SIZE {
+                rows.push(row);
+                row += 1;
+            }
+            if group < N_GAPS {
+                row += gap_avg + (if group < gap_extra { 1 } else { 0 });
+            }
+        }
+        Some(rows)
+    } else {
+        None
+    };
+
+    let mut letters_hit: Vec<(Rect, usize)> = Vec::with_capacity(h);
+
+    if let Some(rows) = letter_rows {
+        // Render each letter at its target row.
+        for visual_idx in 0..n {
+            let letter_idx = if descending { n - 1 - visual_idx } else { visual_idx };
+            let row = rows[visual_idx];
+            if row < h {
+                let cell = Rect {
+                    x: inner.x,
+                    y: inner.y + row as u16,
+                    width: inner.width,
+                    height: 1,
+                };
+                let line = format!("{}{}", " ".repeat(pad_left as usize), glyph_for(letter_idx));
+                frame.render_widget(Paragraph::new(line).style(style_for(letter_idx)), cell);
+            }
+        }
+
+        // Build hit regions for every row by snapping each row to the
+        // nearest letter row. Avoids a binary search by walking
+        // forward through `rows` (which is monotonic).
+        let mut next_idx = 0usize;
+        for row in 0..h {
+            // Advance `next_idx` while the next letter is closer to
+            // `row` than the current one.
+            while next_idx + 1 < n {
+                let cur = rows[next_idx];
+                let nxt = rows[next_idx + 1];
+                let cur_dist = if row >= cur { row - cur } else { cur - row };
+                let nxt_dist = if row >= nxt { row - nxt } else { nxt - row };
+                if nxt_dist < cur_dist {
+                    next_idx += 1;
+                } else {
+                    break;
+                }
+            }
+            let visual_idx = next_idx;
+            let letter_idx = if descending { n - 1 - visual_idx } else { visual_idx };
+            letters_hit.push((
+                Rect {
+                    x: inner.x,
+                    y: inner.y + row as u16,
+                    width: inner.width,
+                    height: 1,
+                },
+                letter_idx,
+            ));
+        }
+    } else {
+        // Strip is shorter than the 4-group minimum — subsample one
+        // letter per row. Each row both renders a glyph and is its
+        // own hit region.
+        for row in 0..h {
+            let visual_idx = (row * n) / h;
+            let letter_idx = if descending { n - 1 - visual_idx } else { visual_idx };
+            let cell = Rect {
+                x: inner.x,
+                y: inner.y + row as u16,
+                width: inner.width,
+                height: 1,
+            };
+            let line = format!("{}{}", " ".repeat(pad_left as usize), glyph_for(letter_idx));
+            frame.render_widget(Paragraph::new(line).style(style_for(letter_idx)), cell);
+            letters_hit.push((cell, letter_idx));
+        }
+    }
+
+    let mut hr = state.hit_regions.borrow_mut();
+    hr.alphabet_strip = Some(crate::ui::hit_regions::AlphabetStripRegions {
+        area,
+        letters: letters_hit,
+    });
+}
+
+/// Right-side track details pane. Mirrors the GUI's
+/// `track_details_pane`: header with " track " label, a clickable
+/// Play Track button, square album artwork (or placeholder), then
+/// track metadata — title, artist, album + year, duration, track #,
+/// file basename — and a Sonically-Similar list at the bottom.
+/// Renders focus highlights (Play button or similar row) when the
+/// pane has keyboard focus.
+fn render_track_details_pane(
+    frame: &mut Frame,
+    state: &AppState,
+    area: Rect,
+    track: &crate::plex::models::Track,
+) {
+    use crate::util::{format_duration, truncate_middle};
+    let t = theme();
+
+    let pane_focused = state.track_pane_focused;
+    let pane_idx = state.track_pane_index;
+
+    let block = Block::default()
+        .title(" track ")
+        .title_style(Style::default().fg(if pane_focused {
+            t.colors.title_focused
+        } else {
+            t.colors.fg_accent
+        }))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(if pane_focused {
+            t.colors.title_focused
+        } else {
+            t.colors.border
+        }))
+        .style(Style::default().bg(t.colors.bg_primary));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    // Top row: clickable Play Track button. Highlighted when the
+    // pane has keyboard focus and `track_pane_index == 0`. Anchored
+    // to the right side of the row so it lines up with the GUI's
+    // primary-action button on its track-details pane.
+    let play_label = " ▶  Play Track ";
+    let play_w = (play_label.chars().count() as u16).min(inner.width);
+    let play_x = inner.x + inner.width.saturating_sub(play_w);
+    let play_area = Rect {
+        x: play_x,
+        y: inner.y,
+        width: play_w,
+        height: 1,
+    };
+    let play_focused = pane_focused && pane_idx == 0;
+    let play_style = if play_focused {
+        Style::default()
+            .fg(t.colors.selection_text)
+            .bg(t.colors.bg_selection)
+            .add_modifier(ratatui::style::Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(t.colors.fg_accent)
+            .add_modifier(ratatui::style::Modifier::BOLD)
+    };
+    frame.render_widget(
+        Paragraph::new(play_label).style(play_style),
+        play_area,
+    );
+
+    // Artwork box: square in visual cells (terminal cells are ~2:1
+    // height:width, so width = 2 * height for a square look).
+    let art_max_w = inner.width;
+    let art_max_h = inner.height.saturating_sub(8);
+    let art_w = art_max_w.min(art_max_h.saturating_mul(2)).max(8);
+    let art_h = (art_w / 2).max(4).min(art_max_h);
+    let art_x = inner.x + inner.width.saturating_sub(art_w) / 2;
+    let art_y = inner.y + 2;
+    let art_area = Rect {
+        x: art_x,
+        y: art_y,
+        width: art_w,
+        height: art_h,
+    };
+
+    let mut rendered = false;
+    if let Some(album_key) = track.parent_rating_key.as_deref() {
+        if let Some(data) = state.artwork.grid_cache.get(album_key) {
+            rendered = super::artwork::render_grid_image(frame, art_area, album_key, data);
+        }
+    }
+    if !rendered {
+        // Centred "(no cover)" placeholder.
+        let label = "(no cover)";
+        let lw = label.chars().count() as u16;
+        let cx = art_area.x + art_area.width.saturating_sub(lw) / 2;
+        let cy = art_area.y + art_area.height / 2;
+        frame.render_widget(
+            Paragraph::new(label).style(Style::default().fg(t.colors.fg_muted)),
+            Rect { x: cx, y: cy, width: lw, height: 1 },
+        );
+    }
+
+    // Metadata block below artwork. One row per field; each field
+    // middle-truncated to the inner width so long titles don't bleed
+    // past the pane's edge.
+    let info_y = art_area.y + art_area.height + 1;
+    let max_w = inner.width as usize;
+    let mut lines: Vec<(Style, String)> = Vec::new();
+
+    // Title (bold/accent).
+    lines.push((
+        Style::default()
+            .fg(t.colors.fg_primary)
+            .add_modifier(ratatui::style::Modifier::BOLD),
+        truncate_middle(&track.title, max_w),
+    ));
+
+    // Track artist.
+    lines.push((
+        Style::default().fg(t.colors.fg_primary),
+        truncate_middle(track.track_artist(), max_w),
+    ));
+
+    // Album + (year).
+    let album_year = match (track.parent_title.as_deref(), track.year) {
+        (Some(a), Some(y)) => format!("{}  ({})", a, y),
+        (Some(a), None)    => a.to_string(),
+        (None, Some(y))    => y.to_string(),
+        (None, None)       => String::new(),
+    };
+    if !album_year.is_empty() {
+        lines.push((
+            Style::default().fg(t.colors.fg_muted),
+            truncate_middle(&album_year, max_w),
+        ));
+    }
+
+    // Blank spacer.
+    lines.push((Style::default(), String::new()));
+
+    // Duration.
+    let dur = track.duration_ms();
+    if dur > 0 {
+        lines.push((
+            Style::default().fg(t.colors.fg_muted),
+            format!("Duration: {}", format_duration(dur)),
+        ));
+    }
+
+    // Track number.
+    if let Some(n) = track.index {
+        lines.push((
+            Style::default().fg(t.colors.fg_muted),
+            format!("Track #{}", n),
+        ));
+    }
+
+    // File basename.
+    if let Some(fname) = track.file_name() {
+        lines.push((
+            Style::default().fg(t.colors.fg_muted),
+            truncate_middle(&format!("File: {}", fname), max_w),
+        ));
+    }
+
+    let info_max_lines = lines.len() as u16;
+    for (i, (style, text)) in lines.iter().enumerate() {
+        let row = info_y + i as u16;
+        if row >= inner.y + inner.height { break; }
+        let line_area = Rect {
+            x: inner.x,
+            y: row,
+            width: inner.width,
+            height: 1,
+        };
+        frame.render_widget(
+            Paragraph::new(text.as_str()).style(*style),
+            line_area,
+        );
+    }
+
+    // Sonically Similar list — populated lazily by the Tick handler
+    // via `DataAction::LoadTrackPaneSimilar`. While the cache is
+    // empty for this track, render a "Loading…" placeholder; once
+    // populated, list each similar track on its own row. Rows are
+    // clickable + keyboard-navigable when the pane has focus
+    // (track_pane_index 1..=N highlights the matching row).
+    let mut similar_rows: Vec<(Rect, usize)> = Vec::new();
+    let similar_y = info_y + info_max_lines + 1;
+    if similar_y < inner.y + inner.height {
+        let header_area = Rect {
+            x: inner.x,
+            y: similar_y,
+            width: inner.width,
+            height: 1,
+        };
+        frame.render_widget(
+            Paragraph::new("Sonically Similar").style(
+                Style::default()
+                    .fg(t.colors.fg_accent)
+                    .add_modifier(ratatui::style::Modifier::BOLD),
+            ),
+            header_area,
+        );
+
+        let list_y = similar_y + 1;
+        let list_max_rows = (inner.y + inner.height).saturating_sub(list_y);
+
+        match state.track_pane_similar.get(&track.rating_key) {
+            Some(list) if list.is_empty() => {
+                if list_max_rows > 0 {
+                    frame.render_widget(
+                        Paragraph::new("(no similar tracks found)")
+                            .style(Style::default().fg(t.colors.fg_muted)),
+                        Rect { x: inner.x, y: list_y, width: inner.width, height: 1 },
+                    );
+                }
+            }
+            Some(list) => {
+                for (i, sim) in list.iter().take(list_max_rows as usize).enumerate() {
+                    let row = list_y + i as u16;
+                    let label = format!(
+                        "\u{2022} {} \u{2014} {}",
+                        sim.title,
+                        sim.track_artist(),
+                    );
+                    let truncated = truncate_middle(&label, max_w);
+                    let row_focused = pane_focused && pane_idx == i + 1;
+                    let style = if row_focused {
+                        Style::default()
+                            .fg(t.colors.selection_text)
+                            .bg(t.colors.bg_selection)
+                    } else {
+                        Style::default().fg(t.colors.fg_primary)
+                    };
+                    let row_area = Rect {
+                        x: inner.x,
+                        y: row,
+                        width: inner.width,
+                        height: 1,
+                    };
+                    frame.render_widget(
+                        Paragraph::new(truncated).style(style),
+                        row_area,
+                    );
+                    similar_rows.push((row_area, i));
+                }
+            }
+            None => {
+                if list_max_rows > 0 {
+                    frame.render_widget(
+                        Paragraph::new("Loading\u{2026}")
+                            .style(Style::default().fg(t.colors.fg_muted)),
+                        Rect { x: inner.x, y: list_y, width: inner.width, height: 1 },
+                    );
+                }
+            }
+        }
+    }
+
+    // Register click regions so the mouse handler can dispatch
+    // Play / drill-into-similar.
+    let mut hr = state.hit_regions.borrow_mut();
+    hr.track_pane = Some(crate::ui::hit_regions::TrackPaneRegions {
+        outer: area,
+        play_button: play_area,
+        similar_rows,
+    });
+}
+
 fn render_browse_miller_columns(
     frame: &mut Frame,
     state: &AppState,
@@ -762,6 +1437,11 @@ fn render_browse_miller_columns(
     right_area: Rect,
     fixed_col_width: Option<u16>,
     focus_override: Option<usize>,
+    // Number of leading columns to hide. Used by the Playlists
+    // category to suppress the redundant root "playlists" column —
+    // the playlists are already enumerated in the leftmost browse
+    // column, so showing them again next door is duplicate chrome.
+    column_offset: usize,
 ) {
     use crate::app::state::BrowseItem;
     use crate::util::truncate_middle;
@@ -793,8 +1473,11 @@ fn render_browse_miller_columns(
     }
 
     let num_columns = nav.columns.len();
-    if num_columns == 0 {
-        // Empty state - show single column with message
+    // After hiding the leading `column_offset` columns, do we have
+    // anything left to show? If not, render a placeholder so the
+    // user sees "their click registered, but there's nothing here
+    // until you pick a playlist".
+    if num_columns <= column_offset {
         let block = Block::default()
             .title(format!(" {} ", root_title))
             .title_style(Style::default().fg(t.colors.fg_accent))
@@ -803,17 +1486,24 @@ fn render_browse_miller_columns(
             .style(Style::default().bg(t.colors.bg_primary));
         let inner = block.inner(area);
         frame.render_widget(block, area);
-        let msg = Paragraph::new("No items")
-            .style(Style::default().fg(t.colors.fg_muted));
-        frame.render_widget(msg, inner);
+        let msg = if column_offset > 0 {
+            "Pick a playlist on the left."
+        } else {
+            "No items"
+        };
+        frame.render_widget(
+            Paragraph::new(msg).style(Style::default().fg(t.colors.fg_muted)),
+            inner,
+        );
         return;
     }
 
-    // Find last non-empty column (or focused column, whichever is greater)
-    let last_meaningful = (0..num_columns)
+    // Find last non-empty column (or focused column, whichever is
+    // greater), restricted to the visible range [column_offset, len).
+    let last_meaningful = (column_offset..num_columns)
         .rev()
         .find(|&i| !nav.columns[i].items.is_empty() || i <= nav.focused_column)
-        .unwrap_or(0);
+        .unwrap_or(column_offset);
     let effective_columns = last_meaningful + 1;
     // When loading with existing columns, reserve space for a loading indicator column
     let layout_columns = if nav.loading { effective_columns + 1 } else { effective_columns };
@@ -829,19 +1519,14 @@ fn render_browse_miller_columns(
         (max_vis, area.width / max_vis as u16)
     };
 
-    // Determine which columns to show.
-    // Slide based on the deepest column with content, not focus — prevents jumps
-    // when clicking between already-visible columns.
-    // When focus_override is provided (e.g. category column is focused), use that
-    // instead of nav.focused_column so the viewport stays anchored to the left.
-    let viewport_focus = focus_override.unwrap_or(nav.focused_column);
-    let rightmost_col = effective_columns.saturating_sub(1).max(viewport_focus);
-    let start_col = if rightmost_col + 1 > max_visible {
-        let s = rightmost_col + 1 - max_visible;
-        s.min(viewport_focus) // ensure focused column stays visible
-    } else {
-        0
-    };
+    // Spatial-coherence sliding: window anchors to the focused
+    // column. The focused column sits at the right edge of the
+    // window unless that would push the start past column_offset.
+    // Drilling deeper slides one column right; backing out left
+    // slides one column left so parents return to view. Columns
+    // deeper than focus stay loaded but scroll off the right edge.
+    let viewport_focus = focus_override.unwrap_or(nav.focused_column).max(column_offset);
+    let start_col = (viewport_focus + 1).saturating_sub(max_visible).max(column_offset);
 
     // Register Miller column regions for hit-testing
     {
@@ -878,7 +1563,14 @@ fn render_browse_miller_columns(
 
     for (vis_idx, col_idx) in (start_col..effective_columns.min(start_col + max_visible)).enumerate() {
         let col = &nav.columns[col_idx];
-        let is_focused = focus_override.is_none() && col_idx == nav.focused_column;
+        // Track-details pane is treated as the rightmost column for
+        // focus purposes: when it's focused, no miller column should
+        // also paint as focused, otherwise the user sees two
+        // simultaneously highlighted "selected" rows (the pane on the
+        // right and the track row in the tracks column behind it).
+        let is_focused = focus_override.is_none()
+            && col_idx == nav.focused_column
+            && !state.track_pane_focused;
         let is_root = col_idx == 0;
 
         let col_area = Rect {
@@ -911,6 +1603,22 @@ fn render_browse_miller_columns(
         } else {
             String::new()
         };
+        // Block titles overflow past the column edge when they're
+        // longer than the column is wide — Mac-style middle-truncate
+        // so both ends stay readable. Reserve 4 cells for the corner
+        // border characters and a leading/trailing space.
+        let title = if !title.is_empty() {
+            let max_title_w = (col_area.width as usize).saturating_sub(4);
+            if title.chars().count() > max_title_w {
+                let inner = title.trim();
+                let inner_max = max_title_w.saturating_sub(2);
+                format!(" {} ", truncate_middle(inner, inner_max))
+            } else {
+                title
+            }
+        } else {
+            title
+        };
 
         let mut block = Block::default()
             .borders(Borders::ALL)
@@ -934,11 +1642,45 @@ fn render_browse_miller_columns(
             continue;
         }
 
-        // Check if this column has artwork_visible enabled
+        // Quick-filter (transport-bar text input) narrows EVERY
+        // visible Miller column on-the-fly — same behaviour as the
+        // GUI. The original `filter_results` precomputed for ONE
+        // column is ignored for rendering; we run
+        // `filter_with_priority` against this column's items
+        // inline instead.
+        let live_query: Option<&str> = if state.list_filter.active
+            && state.list_filter.category == state.browse_category
+            && !state.list_filter.query.trim().is_empty()
+        {
+            Some(state.list_filter.query.trim())
+        } else {
+            None
+        };
+        let per_col_matches: Option<Vec<usize>> = live_query.map(|q| {
+            use crate::services::{filter_with_priority, DEFAULT_MAX_RESULTS};
+            filter_with_priority(&col.items, q, |it| it.title(), DEFAULT_MAX_RESULTS).matched_indices
+        });
+        // For the historic single-column filter (used by FilteredList*
+        // selection actions in the dispatcher), only the column the
+        // user is anchored on gets keyboard-driven selection helpers.
         let is_filter_column = filter_column == Some(col_idx);
+
         if col.artwork_visible {
-            let col_filter = if is_filter_column { filter_results } else { None };
-            render_album_art_grid(frame, state, col, is_focused, inner, col_area, col_idx, col_filter);
+            // Album-art grids still need filter results; for live
+            // multi-column filtering we synthesize a fake
+            // ListFilterResults so the grid path keeps working.
+            let synth = per_col_matches.as_ref().map(|m| crate::app::state::ListFilterResults {
+                matched_indices: m.clone(),
+                total_matches: m.len(),
+                has_more: false,
+            });
+            let col_filter_owned = synth.or_else(|| {
+                if is_filter_column { filter_results.cloned() } else { None }
+            });
+            render_album_art_grid(
+                frame, state, col, is_focused, inner, col_area, col_idx,
+                col_filter_owned.as_ref(),
+            );
             continue;
         }
 
@@ -954,9 +1696,22 @@ fn render_browse_miller_columns(
             let rows_per_item = if is_two_row { 2 } else { 1 };
             let visible_item_count = visible_height / rows_per_item;
 
-            // When filter is active on this column, only show filtered items
+            // Pick which row indices to show. Per-column live filter
+            // first (every column), then the legacy single-column
+            // filter_results as a fallback for anything that still
+            // expects it.
             let (items_to_show, total_display_items, filter_active_on_col): (Vec<(usize, &BrowseItem)>, usize, bool) =
-                if let Some(results) = filter_results.filter(|_| is_filter_column) {
+                if let Some(matched) = per_col_matches.as_ref() {
+                    if matched.is_empty() {
+                        (vec![], 0, true)
+                    } else {
+                        let items: Vec<_> = matched.iter()
+                            .filter_map(|&idx| col.items.get(idx).map(|item| (idx, item)))
+                            .collect();
+                        let len = items.len();
+                        (items, len, true)
+                    }
+                } else if let Some(results) = filter_results.filter(|_| is_filter_column) {
                     if results.matched_indices.is_empty() {
                         (vec![], 0, true)
                     } else {
@@ -977,8 +1732,14 @@ fn render_browse_miller_columns(
                     .style(Style::default().fg(t.colors.fg_muted));
                 frame.render_widget(empty, inner);
             } else {
-                // Calculate scroll offset based on display items
-                let display_selected_idx = if let Some(results) = filter_results.filter(|_| filter_active_on_col) {
+                // Calculate scroll offset based on display items.
+                // When per-column live filter is active, map the
+                // real selected_index into the filtered display
+                // index; otherwise fall back to the historic single-
+                // column results / unfiltered position.
+                let display_selected_idx = if let Some(matched) = per_col_matches.as_ref() {
+                    matched.iter().position(|&idx| idx == selected_idx).unwrap_or(0)
+                } else if let Some(results) = filter_results.filter(|_| filter_active_on_col) {
                     results.matched_indices.iter()
                         .position(|&idx| idx == selected_idx)
                         .unwrap_or(0)
@@ -995,6 +1756,10 @@ fn render_browse_miller_columns(
                     .take(visible_item_count)
                     .map(|(orig_idx, item)| {
                         let is_selected = orig_idx == selected_idx;
+                        // Multi-select: row is in `col.selected_set`.
+                        // Drives a visual "●" prefix and an accent
+                        // tint, mirroring the queue track-list style.
+                        let is_multi_selected = col.selected_set.contains(&orig_idx);
 
                         // Check if this is the currently playing track
                         let is_now_playing = matches!(item, BrowseItem::Track { key, .. } if current_track_key == Some(key.as_str()));
@@ -1006,8 +1771,16 @@ fn render_browse_miller_columns(
                             BrowseItem::CompilationTracks { .. }
                         );
                         let prefix = match item {
+                            BrowseItem::Track { .. } if is_now_playing && is_multi_selected => "♪●",
                             BrowseItem::Track { .. } if is_now_playing => "♪ ",
+                            BrowseItem::Track { .. } if is_multi_selected => "● ",
                             BrowseItem::Track { .. } => "  ",
+                            // Artist Radio plays on Enter / click —
+                            // mark it with a play glyph rather than
+                            // the usual blank, so the affordance is
+                            // legible.
+                            BrowseItem::ArtistRadio { .. } => "▶ ",
+                            _ if is_multi_selected => "● ",
                             _ if is_pinned => "  ", // No arrow for pinned items
                             _ => "▸ ", // Drillable items get arrow
                         };
@@ -1122,17 +1895,34 @@ fn render_browse_miller_columns(
                                     truncate_middle(&subtitle_content, subtitle_width)
                                 };
 
-                                let (line1_fg, line2_fg, item_bg) = if is_now_playing {
-                                    (
-                                        Style::default().fg(t.colors.fg_accent).add_modifier(ratatui::style::Modifier::BOLD),
-                                        Style::default().fg(t.colors.fg_accent),
-                                        Style::default(),
-                                    )
-                                } else if is_selected {
+                                let (line1_fg, line2_fg, item_bg) = if is_selected && is_focused {
                                     (
                                         Style::default().fg(t.colors.selection_text),
                                         Style::default().fg(t.colors.selection_text),
                                         Style::default().bg(t.colors.selection_bar_bg),
+                                    )
+                                } else if is_selected {
+                                    // Selected row in a non-focused col:
+                                    // dim "you were here" mark instead of
+                                    // the strong cursor highlight, so the
+                                    // user can tell at a glance which col
+                                    // is actually accepting input.
+                                    (
+                                        Style::default().fg(t.colors.fg_primary),
+                                        Style::default().fg(t.colors.fg_muted),
+                                        Style::default().bg(t.colors.bg_highlight),
+                                    )
+                                } else if is_multi_selected {
+                                    (
+                                        Style::default().fg(t.colors.fg_accent),
+                                        Style::default().fg(t.colors.fg_accent),
+                                        Style::default().bg(t.colors.bg_secondary),
+                                    )
+                                } else if is_now_playing {
+                                    (
+                                        Style::default().fg(t.colors.fg_accent).add_modifier(ratatui::style::Modifier::BOLD),
+                                        Style::default().fg(t.colors.fg_accent),
+                                        Style::default(),
                                     )
                                 } else {
                                     (
@@ -1161,8 +1951,12 @@ fn render_browse_miller_columns(
                                 ListItem::new(text).style(item_bg)
                             } else {
                                 // Non-track/album item in a two-row column (handle gracefully)
-                                let style = if is_selected {
+                                let style = if is_selected && is_focused {
                                     Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
+                                } else if is_selected {
+                                    Style::default().fg(t.colors.fg_primary).bg(t.colors.bg_highlight)
+                                } else if is_multi_selected {
+                                    Style::default().fg(t.colors.fg_accent).bg(t.colors.bg_secondary)
                                 } else if is_pinned {
                                     Style::default().fg(t.colors.fg_accent)
                                 } else {
@@ -1171,10 +1965,19 @@ fn render_browse_miller_columns(
                                 ListItem::new(format!("{}{}", prefix, display_text)).style(style)
                             }
                         } else {
-                            let style = if is_now_playing {
-                                Style::default().fg(t.colors.fg_accent).add_modifier(ratatui::style::Modifier::BOLD)
-                            } else if is_selected {
+                            let style = if is_selected && is_focused {
+                                // Cursor selection always wins so the
+                                // user can see where the highlight is
+                                // while expanding a multi-selection.
                                 Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
+                            } else if is_selected {
+                                // Same row in an unfocused col: dim
+                                // "you were here" mark.
+                                Style::default().fg(t.colors.fg_primary).bg(t.colors.bg_highlight)
+                            } else if is_multi_selected {
+                                Style::default().fg(t.colors.fg_accent).bg(t.colors.bg_secondary)
+                            } else if is_now_playing {
+                                Style::default().fg(t.colors.fg_accent).add_modifier(ratatui::style::Modifier::BOLD)
                             } else if is_pinned {
                                 Style::default().fg(t.colors.fg_accent)
                             } else {
@@ -1224,27 +2027,87 @@ fn render_browse_miller_columns(
         }
     }
 
-    // Render placeholder columns when fewer real columns than max_visible
-    // (loading indicator or empty column to maintain 2-column minimum)
+    // Equal-width layout: the outer `render_browse` already sized
+    // `area` to fit exactly the meaningful columns at `col_width`,
+    // so there are no spacer slots to fill. Loading placeholder
+    // sits on the next-empty slot when nav is loading — animated
+    // dot pattern in the background + "Loading..." text whose
+    // trailing dots animate via `state.loading_tick`.
     let real_rendered = effective_columns.min(start_col + max_visible).saturating_sub(start_col);
-    if real_rendered < max_visible {
+    if nav.loading && real_rendered < max_visible {
         let vis_idx = real_rendered;
         let placeholder_area = Rect {
             x: area.x + (vis_idx as u16 * col_width),
             y: area.y,
-            width: area.width - (vis_idx as u16 * col_width),
+            width: col_width.min(area.width.saturating_sub(vis_idx as u16 * col_width)),
             height: area.height,
         };
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(t.colors.border))
-            .style(Style::default().bg(t.colors.bg_primary));
-        let placeholder_inner = block.inner(placeholder_area);
-        frame.render_widget(block, placeholder_area);
-        if nav.loading {
-            let loading = Paragraph::new("Loading...")
-                .style(Style::default().fg(t.colors.fg_muted));
-            frame.render_widget(loading, placeholder_inner);
+        render_loading_column(frame, placeholder_area, state.loading_tick);
+    }
+}
+
+/// Render an animated "Loading…" placeholder filling the given
+/// area. Sparse dot pattern in the background; centred "Loading"
+/// text with trailing dots driven by `loading_tick % 4`.
+fn render_loading_column(frame: &mut Frame, area: Rect, loading_tick: u32) {
+    let t = theme();
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let muted_border = Style::default().fg(t.colors.fg_muted);
+    let muted_bg = Style::default().bg(t.colors.bg_primary).fg(t.colors.fg_muted);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(muted_border)
+        .style(muted_bg);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    // Sparse dot fill so the col reads as "intentionally empty
+    // pending data" rather than "broken render". One dot every
+    // two cells horizontally, every two rows vertically.
+    let dot_row: String = (0..inner.width)
+        .map(|x| if x % 2 == 0 { '\u{00b7}' } else { ' ' })
+        .collect();
+    for dy in 0..inner.height {
+        if dy % 2 != 0 { continue; }
+        let row_rect = Rect {
+            x: inner.x,
+            y: inner.y + dy,
+            width: inner.width,
+            height: 1,
+        };
+        frame.render_widget(
+            Paragraph::new(dot_row.clone())
+                .style(Style::default().fg(t.colors.fg_muted)),
+            row_rect,
+        );
+    }
+
+    // Animated "Loading…" text — 4 frames (no dots, 1, 2, 3 dots).
+    // Centred horizontally and vertically on the placeholder.
+    let phase = (loading_tick as usize) % 4;
+    let dots = match phase {
+        0 => "",
+        1 => ".",
+        2 => "..",
+        _ => "...",
+    };
+    let label = format!("Loading{:.<3}", dots);
+    let label_w = label.chars().count() as u16;
+    if label_w <= inner.width {
+        let lx = inner.x + inner.width.saturating_sub(label_w) / 2;
+        let ly = inner.y + inner.height / 2;
+        if ly < inner.y + inner.height {
+            frame.render_widget(
+                Paragraph::new(label)
+                    .style(Style::default().fg(t.colors.fg_accent)),
+                Rect { x: lx, y: ly, width: label_w, height: 1 },
+            );
         }
     }
 }
@@ -1289,6 +2152,7 @@ fn render_album_art_grid(
     fn is_one_row(item: &BrowseItem) -> bool {
         matches!(item,
             BrowseItem::ArtistRadio { .. } |
+            BrowseItem::AllTracks { .. } |
             BrowseItem::CompilationTracks { .. } |
             BrowseItem::Compilations
         )
@@ -1527,248 +2391,6 @@ fn render_transport(frame: &mut Frame, state: &AppState, area: Rect) {
 /// Render the command bar (3 rows: top info/tabs + spacer + contextual commands).
 ///
 /// Top row layout: [library name] [^Q quit] ... [F-keys] [^L library] [^U queue] [^N now playing]
-fn render_commands(frame: &mut Frame, state: &AppState, area: Rect) {
-    let t = theme();
-
-    // Fill background
-    let bg = Paragraph::new("").style(Style::default().bg(t.colors.bg_secondary));
-    frame.render_widget(bg, area);
-
-    // Split into 3 rows: top (info + F-keys + tabs), spacer, bottom (contextual)
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Length(1), Constraint::Length(1)])
-        .split(area);
-
-    // === Top row: all items evenly spaced and centered ===
-    //
-    // Items: [lib name] [^Q quit] [^L library] [^U queue] [^N now playing] [F1 help] [F2 settings] ...
-    //        ╰──────────────────────── evenly spaced across full width ─────────────────────────────╯
-    let top_row = rows[0];
-    let mut top_items: Vec<(Rect, String)> = Vec::new();
-    let mut tab_bar_regions = crate::ui::hit_regions::TabBarRegions {
-        library_label: None,
-        quit_button: None,
-        tabs: Vec::new(),
-    };
-
-    if state.view != View::Auth {
-        #[derive(Clone, Copy, PartialEq)]
-        enum ItemKind { LibLabel, Quit, ViewTab(usize), FKey }
-        struct BarItem { key: String, label: String, active: bool, kind: ItemKind }
-
-        let mut all_items: Vec<BarItem> = Vec::new();
-
-        // Library name
-        let lib_label = state.active_library.as_ref()
-            .and_then(|key| state.libraries.iter().find(|l| &l.key == key))
-            .map(|lib_name| {
-                if state.has_multiple_servers() {
-                    state.active_server_name()
-                        .map(|sn| format!("{} ({})", lib_name.title, sn))
-                        .unwrap_or_else(|| lib_name.title.clone())
-                } else {
-                    lib_name.title.clone()
-                }
-            });
-        if let Some(ref name) = lib_label {
-            all_items.push(BarItem { key: String::new(), label: format!(" {}", name), active: false, kind: ItemKind::LibLabel });
-        }
-
-        // Quit
-        all_items.push(BarItem { key: "^Q".into(), label: "quit".into(), active: false, kind: ItemKind::Quit });
-
-        // View tabs
-        let view_tabs: [(&str, &str, bool); 3] = [
-            ("^L", "library", state.view == View::Browse),
-            ("^U", "queue", state.view == View::Queue),
-            ("^N", "now playing", state.view == View::NowPlaying),
-        ];
-        for (i, (key, label, is_active)) in view_tabs.iter().enumerate() {
-            all_items.push(BarItem { key: key.to_string(), label: label.to_string(), active: *is_active, kind: ItemKind::ViewTab(i) });
-        }
-
-        // F-keys (always show all; highlight active state)
-        let f_active = |label: &str| -> bool {
-            match label {
-                "help" => state.view == View::Help,
-                "settings" => state.view == View::Settings,
-                _ => false,
-            }
-        };
-        let alt_cmds = crate::app::available_alt_commands(state);
-        for cmd in alt_cmds.iter().filter(|c| c.display_key.is_some()) {
-            let dk = cmd.display_key.unwrap();
-            all_items.push(BarItem { key: dk.to_string(), label: cmd.label.to_string(), active: f_active(cmd.label), kind: ItemKind::FKey });
-        }
-
-        // Calculate natural width of each item: " key label " with padding
-        let item_widths: Vec<u16> = all_items.iter().map(|item| {
-            let k = if item.key.is_empty() { 0 } else { item.key.len() as u16 + 2 }; // " key "
-            let l = item.label.len() as u16 + 1; // "label "
-            k + l
-        }).collect();
-        let content_width: u16 = item_widths.iter().sum();
-        let n = all_items.len() as u16;
-
-        // Distribute items evenly across the row
-        let total_gap = top_row.width.saturating_sub(content_width);
-        let gap = if n > 1 { total_gap / (n - 1) } else { 0 };
-        let extra = if n > 1 { (total_gap % (n - 1)) as usize } else { 0 };
-        // Center the whole block
-        let block_width = content_width + gap * (n.saturating_sub(1)) + extra as u16;
-        let start_x = top_row.x + top_row.width.saturating_sub(block_width) / 2;
-
-        let mut cx = start_x;
-        for (i, item) in all_items.iter().enumerate() {
-            // Add gap before items (except the first)
-            if i > 0 {
-                let g = gap + if i <= extra { 1 } else { 0 };
-                cx += g;
-            }
-
-            let has_key = !item.key.is_empty();
-            let key_text = if has_key { format!(" {} ", item.key) } else { String::new() };
-            let label_text = format!("{} ", item.label);
-            let kw = key_text.len() as u16;
-            let lw = label_text.len() as u16;
-
-            if cx + kw + lw > top_row.x + top_row.width { break; }
-
-            let (key_style, label_style) = if item.active {
-                (
-                    Style::default().fg(t.colors.fg_accent).bg(t.colors.bg_primary).add_modifier(ratatui::style::Modifier::BOLD),
-                    Style::default().fg(t.colors.fg_accent).bg(t.colors.bg_primary).add_modifier(ratatui::style::Modifier::BOLD),
-                )
-            } else if matches!(item.kind, ItemKind::LibLabel) {
-                (
-                    Style::default().fg(t.colors.fg_accent_dim).bg(t.colors.bg_secondary),
-                    Style::default().fg(t.colors.fg_accent_dim).bg(t.colors.bg_secondary),
-                )
-            } else {
-                (
-                    Style::default().fg(t.colors.shortcut_key).bg(t.colors.bg_primary),
-                    Style::default().fg(t.colors.shortcut_text).bg(t.colors.bg_secondary),
-                )
-            };
-
-            if kw > 0 {
-                frame.render_widget(Paragraph::new(key_text.as_str()).style(key_style),
-                    Rect { x: cx, y: top_row.y, width: kw, height: 1 });
-            }
-            frame.render_widget(Paragraph::new(label_text.as_str()).style(label_style),
-                Rect { x: cx + kw, y: top_row.y, width: lw, height: 1 });
-
-            let full_area = Rect { x: cx, y: top_row.y, width: kw + lw, height: 1 };
-            match item.kind {
-                ItemKind::LibLabel => { tab_bar_regions.library_label = Some(full_area); }
-                ItemKind::Quit => { tab_bar_regions.quit_button = Some(full_area); }
-                ItemKind::ViewTab(idx) => { tab_bar_regions.tabs.push((full_area, idx)); }
-                ItemKind::FKey => { top_items.push((full_area, format!("fkey:{}", item.key))); }
-            }
-            cx += kw + lw;
-        }
-    }
-
-    // Register tab bar hit regions
-    {
-        let mut hr = state.hit_regions.borrow_mut();
-        hr.tab_bar = Some(tab_bar_regions);
-    }
-
-    // rows[1] is spacer — already filled by bg
-    let bottom_items = render_command_row(frame, state, rows[2], false); // Contextual commands
-
-    // Register command bar hit regions
-    {
-        let mut hr = state.hit_regions.borrow_mut();
-        hr.command_bar = Some(crate::ui::hit_regions::CommandBarRegions {
-            top_row: top_items,
-            bottom_row: bottom_items,
-        });
-    }
-}
-
-/// Render the bottom command row — always shows all commands, evenly spaced.
-/// Returns (Rect, action_key) pairs for hit-test registration.
-fn render_command_row(frame: &mut Frame, state: &AppState, area: Rect, _is_top_row: bool) -> Vec<(Rect, String)> {
-    let t = theme();
-    let alt_cmds = crate::app::available_alt_commands(state);
-
-    // All non-F-key commands, always shown (not hidden based on context)
-    let mut filtered: Vec<&crate::app::AltCommand> = alt_cmds.iter()
-        .filter(|cmd| cmd.display_key.is_none())
-        .collect();
-
-    filtered.sort_by(|a, b| {
-        let mod_order = |m: &crate::app::CommandModifier| match m {
-            crate::app::CommandModifier::Ctrl => 0,
-            crate::app::CommandModifier::Alt => 1,
-            crate::app::CommandModifier::None => 2,
-        };
-        mod_order(&a.modifier).cmp(&mod_order(&b.modifier))
-            .then(a.key.cmp(&b.key))
-    });
-
-    if filtered.is_empty() {
-        return vec![];
-    }
-
-    struct CmdItem { key_str: String, label_str: String, action_key: String }
-    let items: Vec<CmdItem> = filtered.iter().map(|cmd| {
-        let key_str = match cmd.modifier {
-            crate::app::CommandModifier::Ctrl => format!(" ^{} ", cmd.key.to_ascii_uppercase()),
-            crate::app::CommandModifier::Alt => format!(" \u{2325}{} ", cmd.key.to_ascii_uppercase()),
-            crate::app::CommandModifier::None => format!(" {} ", cmd.key.to_ascii_uppercase()),
-        };
-        let label_str = format!("{} ", cmd.label);
-        let action_key = format!("{}:{}", match cmd.modifier {
-            crate::app::CommandModifier::Ctrl => "ctrl",
-            crate::app::CommandModifier::Alt => "alt",
-            crate::app::CommandModifier::None => "none",
-        }, cmd.key);
-        CmdItem { key_str, label_str, action_key }
-    }).collect();
-
-    // Evenly distribute across the row
-    let item_widths: Vec<u16> = items.iter().map(|i| i.key_str.len() as u16 + i.label_str.len() as u16).collect();
-    let content_width: u16 = item_widths.iter().sum();
-    let n = items.len() as u16;
-    let total_gap = area.width.saturating_sub(content_width);
-    let gap = if n > 1 { total_gap / (n - 1) } else { 0 };
-    let extra = if n > 1 { (total_gap % (n - 1)) as usize } else { 0 };
-    let block_width = content_width + gap * n.saturating_sub(1) + extra as u16;
-    let start_x = area.x + area.width.saturating_sub(block_width) / 2;
-
-    let mut hit_items: Vec<(Rect, String)> = Vec::new();
-    let mut cx = start_x;
-
-    for (i, item) in items.iter().enumerate() {
-        if i > 0 {
-            cx += gap + if i <= extra { 1 } else { 0 };
-        }
-
-        let kw = item.key_str.len() as u16;
-        let lw = item.label_str.len() as u16;
-        if cx + kw + lw > area.x + area.width { break; }
-
-        // All commands always shown with normal styling (not context-dimmed)
-        frame.render_widget(Paragraph::new(item.key_str.as_str())
-            .style(Style::default().fg(t.colors.shortcut_key).bg(t.colors.bg_primary)),
-            Rect { x: cx, y: area.y, width: kw, height: 1 });
-        frame.render_widget(Paragraph::new(item.label_str.as_str())
-            .style(Style::default().fg(t.colors.shortcut_text).bg(t.colors.bg_secondary)),
-            Rect { x: cx + kw, y: area.y, width: lw, height: 1 });
-
-        hit_items.push((Rect { x: cx, y: area.y, width: kw + lw, height: 1 }, item.action_key.clone()));
-        cx += kw + lw;
-    }
-
-    hit_items
-}
-
-/// Render the search popup as a floating dialog.
-/// Render the library picker popup (F3).
 fn render_library_picker(frame: &mut Frame, state: &AppState) {
     let t = theme();
     let area = centered_rect(50, 30, frame.area());

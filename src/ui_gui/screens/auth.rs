@@ -13,15 +13,15 @@ use crate::ui_gui::message::GuiMessage;
 
 pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
     let body: Element<'_, GuiMessage> = match state.auth_state.step {
-        AuthStep::Checking => container(text("Checking stored credentials\u{2026}").size(14))
+        AuthStep::Checking => container(text("Checking stored credentials\u{2026}").size(16))
             .padding(24)
             .into(),
 
         AuthStep::Login => login_form(state),
 
         AuthStep::Authenticating => container(column![
-            text("Signing in\u{2026}").size(16),
-            text(state.auth_state.username_input.as_str()).size(12),
+            text("Signing in\u{2026}").size(18),
+            text(state.auth_state.username_input.as_str()).size(14),
         ].spacing(8))
             .padding(24)
             .into(),
@@ -35,7 +35,7 @@ pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
                 }
                 _ => "Connecting to server\u{2026}".to_string(),
             };
-            container(text(label).size(14)).padding(24).into()
+            container(text(label).size(16)).padding(24).into()
         }
     };
 
@@ -61,14 +61,14 @@ fn login_form(state: &AppState) -> Element<'_, GuiMessage> {
         .on_input(GuiMessage::AuthUsernameChanged)
         .on_submit(submit_action.clone())
         .padding(8)
-        .size(14);
+        .size(16);
     let password = text_input("Password", &state.auth_state.password_input)
         .on_input(GuiMessage::AuthPasswordChanged)
         .on_submit(submit_action.clone())
         .secure(true)
         .padding(8)
-        .size(14);
-    let sign_in = button(text("Sign in").size(14))
+        .size(16);
+    let sign_in = button(text("Sign in").size(16))
         .on_press(submit_action)
         .padding([6, 18]);
 
@@ -77,11 +77,11 @@ fn login_form(state: &AppState) -> Element<'_, GuiMessage> {
     // The outer container fills the view and centers the form both ways.
     container(
         column![
-            text("Sign in to Plex").size(22),
+            text("Sign in to Plex").size(24),
             username,
             password,
             sign_in,
-            text(error).size(12),
+            text(error).size(14),
         ]
         .spacing(12)
         .align_x(Alignment::Center)
@@ -103,7 +103,7 @@ fn server_picker(state: &AppState) -> Element<'_, GuiMessage> {
             s.name,
             s.connections.len(),
         );
-        button(text(label).size(13))
+        button(text(label).size(15))
             .width(Length::Fill)
             .on_press(GuiMessage::Action(Action::Settings(SettingsAction::SelectServer(s.client_identifier.clone()))))
             .padding([3, 8])
@@ -112,7 +112,7 @@ fn server_picker(state: &AppState) -> Element<'_, GuiMessage> {
 
     container(
         column![
-            text("Select a Plex server").size(18),
+            text("Select a Plex server").size(20),
             iced::widget::Column::with_children(rows).spacing(2),
         ]
         .spacing(8)

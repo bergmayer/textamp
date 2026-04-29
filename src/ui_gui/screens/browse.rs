@@ -17,8 +17,6 @@ use crate::ui_gui::message::GuiMessage;
 use crate::ui_gui::widgets::miller_column;
 use crate::ui_gui::widgets::transport_bar::primary_action_button;
 
-const CATEGORY_COL_WIDTH: f32 = 160.0;
-const TRACK_DETAILS_WIDTH: f32 = 380.0;
 const ALPHABET_STRIP_WIDTH: f32 = 30.0;
 const ALPHABET_STRIP_FONT: f32 = 15.0;
 
@@ -55,8 +53,15 @@ pub fn view<'a>(
     // automatically — no stale "last clicked track" lingering on the
     // right while the left columns moved on.
     let details_track = focused_track(state);
-    let details_reserved = if details_track.is_some() { TRACK_DETAILS_WIDTH + 4.0 } else { 0.0 };
-    let content_width = (viewport_width_logical - CATEGORY_COL_WIDTH - strip_reserved - details_reserved - 16.0)
+    // Equal-width column model: cat col, every miller col, and the
+    // track-details pane all get the same proportion of the row.
+    // Strip is fixed-width chrome. For the visible-window math we
+    // reserve MIN_MILLER_COL_WIDTH per non-miller slot (cat + pane)
+    // and let `compute_visible_window` cap miller cols against
+    // what's left.
+    let n_pane: usize = if details_track.is_some() { 1 } else { 0 };
+    let reserved_non_miller = (1 + n_pane) as f32 * MIN_MILLER_COL_WIDTH;
+    let content_width = (viewport_width_logical - strip_reserved - reserved_non_miller - 16.0)
         .max(MIN_MILLER_COL_WIDTH);
     let category_col = category_column(state);
     let content = content_columns(state, content_width, scroll_info);
@@ -160,33 +165,26 @@ fn alphabet_strip<'a>(descending: bool) -> Element<'a, GuiMessage> {
 /// `BrowseAction::OpenInLibrary`); the user lands at the album view
 /// with the row highlighted. Right-click → standard track context
 /// menu (Play / Add to queue / Show Similar / Open in Library / …).
-fn similar_row<'a>(track: &'a Track) -> Element<'a, GuiMessage> {
-    use crate::app::action::BrowseAction;
+fn similar_row<'a>(track: &'a Track, pane_idx: usize, is_selected: bool) -> Element<'a, GuiMessage> {
     use iced::widget::{button, mouse_area};
     let label = format!("{} \u{2014} {}", track.title, track.track_artist());
-    let click_action: Option<GuiMessage> = match (
-        track.grandparent_rating_key.clone(),
-        track.parent_rating_key.clone(),
-    ) {
-        (Some(artist_key), album_key) => Some(GuiMessage::Action(Action::Browse(
-            BrowseAction::OpenInLibrary {
-                artist_key,
-                artist_name: track.artist_name().to_string(),
-                album_key,
-                album_title: track.parent_title.clone(),
-            },
-        ))),
-        _ => None,
-    };
-    let body = button(text(label).size(12))
+    // First click selects the row; a second click on the same row
+    // (or pressing Enter on it) is what triggers OpenInLibrary —
+    // matches the rule used everywhere else in the app. The handler
+    // for `SimilarRowClick` lives in `App::update`.
+    let body = button(text(label).size(14))
         .width(Length::Fill)
         .padding([3, 8])
-        .on_press_maybe(click_action)
-        .style(|theme: &Theme, status: button::Status| {
+        .on_press(GuiMessage::SimilarRowClick { pane_index: pane_idx })
+        .style(move |theme: &Theme, status: button::Status| {
             let p = theme.extended_palette();
-            let (bg, fg) = match status {
-                button::Status::Hovered => (p.background.weak.color, p.background.weak.text),
-                _ => (Color::TRANSPARENT, p.background.base.text),
+            let (bg, fg) = if is_selected {
+                (p.primary.strong.color, p.primary.strong.text)
+            } else {
+                match status {
+                    button::Status::Hovered => (p.background.weak.color, p.background.weak.text),
+                    _ => (Color::TRANSPARENT, p.background.base.text),
+                }
             };
             button::Style {
                 background: Some(Background::Color(bg)),
@@ -209,16 +207,10 @@ fn similar_row<'a>(track: &'a Track) -> Element<'a, GuiMessage> {
 /// of the focused Miller column, but only if that row is actually a
 /// `BrowseItem::Track`. Returns `None` for artist/album/genre/playlist
 /// rows, which keeps the pane hidden whenever the user is navigating
-/// in a non-track column.
+/// in a non-track column. Honors the Ctrl+W "hide pane" suppression
+/// via `AppState::pane_track`.
 fn focused_track(state: &AppState) -> Option<&Track> {
-    use crate::app::state::BrowseItem;
-    let nav = state.browse_nav()?;
-    let col = nav.focused()?;
-    let item = col.items.get(col.selected_index)?;
-    if !matches!(item, BrowseItem::Track { .. }) {
-        return None;
-    }
-    col.tracks.get(col.selected_index)
+    state.pane_track()
 }
 
 fn track_details_pane<'a>(
@@ -228,15 +220,24 @@ fn track_details_pane<'a>(
 ) -> Element<'a, GuiMessage> {
     use crate::ui_gui::images::lookup_grid;
 
-    // No "x" close affordance: the pane is now driven entirely by
-    // which column is focused. Clicking out of the track column is
-    // the way to dismiss it.
+    // Pane has its own close-x affordance (Cmd+W keyboard equivalent)
+    // — clicking it clears `track_details` so the pane disappears
+    // without disturbing Miller-column focus or selection. Play Track
+    // button sits between the title and the close-x.
+    let track_for_play = track.clone();
     let header = container(
         Row::new()
             .spacing(8)
             .align_y(Alignment::Center)
-            .push(text(" track ").size(12))
-            .push(Space::with_width(Length::Fill)),
+            .push(text(" track ").size(14))
+            .push(Space::with_width(Length::Fill))
+            .push(primary_action_button(
+                "Play Track",
+                GuiMessage::Action(Action::Queue(QueueAction::PlayTrack(track_for_play))),
+            ))
+            .push(crate::ui_gui::widgets::miller_column::close_x_button(
+                GuiMessage::CloseMillerColumn { column_index: None },
+            )),
     )
     .padding([4, 8])
     .width(Length::Fill);
@@ -248,7 +249,7 @@ fn track_details_pane<'a>(
             .width(Length::Fixed(280.0))
             .height(Length::Fixed(280.0))
             .into(),
-        None => container(text("(no cover)").size(11))
+        None => container(text("(no cover)").size(13))
             .width(Length::Fixed(280.0))
             .height(Length::Fixed(280.0))
             .center_x(Length::Fixed(280.0))
@@ -265,37 +266,22 @@ fn track_details_pane<'a>(
             .into(),
     };
 
-    // Play Track button on TOP of the info section, before any text.
-    // Uses the shared `primary_action_button` so it matches Play Album
-    // (album-tracks column header) and Artist Radio (action item).
-    // Centred via the surrounding container so the lozenge button
-    // doesn't stretch the full width of the details pane.
-    let track_for_play = track.clone();
-    let play_btn: Element<'_, GuiMessage> = container(
-        primary_action_button(
-            "Play Track",
-            GuiMessage::Action(Action::Queue(QueueAction::PlayTrack(track_for_play))),
-        ),
-    )
-    .center_x(Length::Fill)
-    .into();
-
-    let title = text(track.title.clone()).size(16);
-    let artist = text(track.track_artist().to_string()).size(13);
+    let title = text(track.title.clone()).size(18);
+    let artist = text(track.track_artist().to_string()).size(15);
     let album_year = match (track.parent_title.as_deref(), track.year) {
         (Some(a), Some(y)) => format!("{a}  ({y})"),
         (Some(a), None)    => a.to_string(),
         (None, Some(y))    => y.to_string(),
         (None, None)       => String::new(),
     };
-    let album = text(album_year).size(12);
+    let album = text(album_year).size(14);
     let duration = {
         let total = track.duration_ms();
         let m = total / 60_000;
         let s = (total / 1000) % 60;
-        text(format!("Duration: {m}:{s:02}")).size(12)
+        text(format!("Duration: {m}:{s:02}")).size(14)
     };
-    let track_no = track.index.map(|n| text(format!("Track #{n}")).size(12));
+    let track_no = track.index.map(|n| text(format!("Track #{n}")).size(14));
 
     // File path: pulled from the first MediaPart. Show only the
     // basename so the column doesn't have to be widened for long
@@ -306,13 +292,11 @@ fn track_details_pane<'a>(
         .and_then(|p| p.file.as_deref())
         .map(|path| {
             let basename = path.rsplit(['/', '\\']).next().unwrap_or(path).to_string();
-            text(format!("File: {basename}")).size(11).into()
+            text(format!("File: {basename}")).size(13).into()
         });
 
     let mut info_col = Column::new()
         .spacing(6)
-        .push(play_btn)
-        .push(Space::with_height(Length::Fixed(8.0)))
         .push(title)
         .push(artist)
         .push(album)
@@ -330,18 +314,21 @@ fn track_details_pane<'a>(
     // row navigates to that track's album in the Library.
     let similar_section: Element<'_, GuiMessage> = {
         let mut col = Column::new().spacing(4).padding([8, 0]);
-        col = col.push(text("Sonically Similar").size(13));
+        col = col.push(text("Sonically Similar").size(15));
         match track_pane_similar.get(&track.rating_key) {
             Some(list) if list.is_empty() => col
-                .push(text("(no similar tracks found)").size(11))
+                .push(text("(no similar tracks found)").size(13))
                 .into(),
             Some(list) => {
-                for sim in list.iter() {
-                    col = col.push(similar_row(sim));
+                for (i, sim) in list.iter().enumerate() {
+                    let pane_idx = i + 1; // 0 reserved for the Play button
+                    let is_selected = state.track_pane_focused
+                        && state.track_pane_index == pane_idx;
+                    col = col.push(similar_row(sim, pane_idx, is_selected));
                 }
                 col.into()
             }
-            None => col.push(text("Loading\u{2026}").size(11)).into(),
+            None => col.push(text("Loading\u{2026}").size(13)).into(),
         }
     };
 
@@ -358,39 +345,68 @@ fn track_details_pane<'a>(
     .style(crate::ui_gui::widgets::chunky_scrollable_style)
     .height(Length::Fill);
 
-    container(iced_column![header, body].spacing(0))
-        .width(Length::Fixed(TRACK_DETAILS_WIDTH))
+    let pane_focused = state.track_pane_focused;
+    let chrome = container(iced_column![header, body].spacing(0))
+        .width(Length::Fill)
         .height(Length::Fill)
-        .style(|theme: &Theme| {
+        .style(move |theme: &Theme| {
             let p = theme.extended_palette();
+            // Mirror the focused-column accent the miller widget
+            // applies (`primary.base.color`) so the user can see at
+            // a glance which surface is focused. Single-focus rule:
+            // exactly one column carries the accent border at any
+            // moment.
+            let border_color = if pane_focused {
+                p.primary.base.color
+            } else {
+                p.background.strong.color
+            };
             container::Style {
                 background: Some(Background::Color(p.background.base.color)),
                 text_color: Some(p.background.base.text),
-                border: Border { color: p.background.strong.color, width: 1.0, radius: 0.0.into() },
+                border: Border { color: border_color, width: 1.0, radius: 0.0.into() },
                 ..container::Style::default()
             }
-        })
-        .into()
+        });
+    // mouse_area on the chrome claims focus when the user clicks
+    // anywhere inside the pane that isn't itself a button — so the
+    // pane behaves like a real column for focus purposes. The header
+    // X / Play Track / similar-row buttons keep their own messages.
+    // Wrap in a FillPortion(1) container so the pane gets the same
+    // share of horizontal space as every other miller column slot.
+    container(
+        iced::widget::mouse_area(chrome)
+            .on_press(GuiMessage::FocusTrackPane),
+    )
+    .width(Length::FillPortion(1))
+    .height(Length::Fill)
+    .into()
 }
 
 fn category_column(state: &AppState) -> Element<'_, GuiMessage> {
     let is_focused = state.category_column_focused;
-    let categories = BrowseCategory::all();
+    // Library / Genres / Folders sit at the top — Playlists no longer
+    // gets its own category row because each playlist is listed
+    // individually below the divider.
+    let categories: &[(BrowseCategory, &str)] = &[
+        (BrowseCategory::Library, "Library"),
+        (BrowseCategory::Genres,  "Genres"),
+        (BrowseCategory::Folders, "Folders"),
+    ];
+    let cat_index_to_idx = |c: BrowseCategory| categories
+        .iter()
+        .position(|(cc, _)| *cc == c);
+    let active_cat_idx = cat_index_to_idx(state.browse_category);
 
     let mut rows: Vec<Element<'_, GuiMessage>> = Vec::new();
-    for (i, cat) in categories.iter().copied().enumerate() {
-        let is_selected = i == state.category_column_index;
-        let label = match cat {
-            BrowseCategory::Library => "Library",
-            BrowseCategory::Playlists => "Playlists",
-            BrowseCategory::Genres => "Genres",
-            BrowseCategory::Folders => "Folders",
-        };
-        let row_label = text(label).size(13);
+    for (i, (cat, label)) in categories.iter().copied().enumerate() {
+        let is_selected = Some(i) == active_cat_idx
+            && cat == state.browse_category
+            && state.category_column_focused
+            && i == state.category_column_index;
+        let highlighted = cat == state.browse_category;
+        let row_label = text(label).size(15);
 
-        // Match the row colour logic used by `miller_column::row_item`
-        // verbatim so the category column reads as just another Miller
-        // column in selection state.
         rows.push(
             button(row_label)
                 .width(Length::Fill)
@@ -400,10 +416,21 @@ fn category_column(state: &AppState) -> Element<'_, GuiMessage> {
                 )))
                 .style(move |theme: &Theme, status: button::Status| {
                     let p = theme.extended_palette();
-                    let (bg, fg) = if is_selected && is_focused {
+                    // The B&W theme collapses every "soft" pair to the
+                    // same white-on-white as the body, so the
+                    // background.weak highlight used here would be
+                    // invisible. Use the strong (black-on-white) pair
+                    // instead so the active category row reads as a
+                    // pressed-in chip.
+                    let is_bw = crate::ui_gui::theme::is_monochrome(theme);
+                    let (bg, fg) = if is_selected {
                         (p.primary.strong.color, p.primary.strong.text)
-                    } else if is_selected {
-                        (p.background.weak.color, p.background.base.text)
+                    } else if highlighted {
+                        if is_bw {
+                            (p.background.strong.color, p.background.strong.text)
+                        } else {
+                            (p.background.weak.color, p.background.base.text)
+                        }
                     } else {
                         match status {
                             button::Status::Hovered => (p.background.weak.color, p.background.weak.text),
@@ -421,6 +448,73 @@ fn category_column(state: &AppState) -> Element<'_, GuiMessage> {
         );
     }
 
+    // Divider then the per-playlist rows. Each row dispatches the
+    // same drill action that the Playlists category column would
+    // (LoadPlaylistTracksForMiller) — but with `SetCategory(Playlists)`
+    // first so the playlist_nav is the active nav when the tracks
+    // column appears.
+    if !state.library.playlists.is_empty() {
+        rows.push(
+            container(Space::with_height(Length::Fixed(1.0)))
+                .padding([6, 8])
+                .width(Length::Fill)
+                .style(|theme: &Theme| container::Style {
+                    background: Some(Background::Color(
+                        theme.extended_palette().background.strong.color,
+                    )),
+                    ..container::Style::default()
+                })
+                .into(),
+        );
+        for p in &state.library.playlists {
+            let title = p.title.clone();
+            let pkey = p.rating_key.clone();
+            let is_active = state.browse_category == BrowseCategory::Playlists
+                && state.playlist_nav.columns
+                    .first()
+                    .and_then(|c| c.items.get(c.selected_index))
+                    .map(|it| it.key() == pkey.as_str())
+                    .unwrap_or(false);
+            let row_label = text(crate::ui_gui::widgets::safe_text(&title).into_owned()).size(15);
+            rows.push(
+                button(row_label)
+                    .width(Length::Fill)
+                    .padding([3, 8])
+                    .on_press(GuiMessage::OpenPlaylistFromCategory {
+                        playlist_key: pkey,
+                        title,
+                    })
+                    .style(move |theme: &Theme, status: button::Status| {
+                        let p = theme.extended_palette();
+                        // Same B&W flip as the category rows above:
+                        // background.weak is white-on-white in that
+                        // theme so we need the strong pair to make
+                        // the active playlist row visible at all.
+                        let is_bw = crate::ui_gui::theme::is_monochrome(theme);
+                        let (bg, fg) = if is_active {
+                            if is_bw {
+                                (p.background.strong.color, p.background.strong.text)
+                            } else {
+                                (p.background.weak.color, p.background.base.text)
+                            }
+                        } else {
+                            match status {
+                                button::Status::Hovered => (p.background.weak.color, p.background.weak.text),
+                                _ => (Color::TRANSPARENT, p.background.base.text),
+                            }
+                        };
+                        button::Style {
+                            background: Some(Background::Color(bg)),
+                            text_color: fg,
+                            border: Border::default(),
+                            ..button::Style::default()
+                        }
+                    })
+                    .into(),
+            );
+        }
+    }
+
     let list = scrollable(Column::with_children(rows).spacing(0))
         .direction(crate::ui_gui::widgets::fat_vertical_scrollbar())
         .style(crate::ui_gui::widgets::chunky_scrollable_style)
@@ -430,7 +524,7 @@ fn category_column(state: &AppState) -> Element<'_, GuiMessage> {
     // category column draws the same border + bg as a regular Miller
     // column. No header row — the category names are self-evident.
     container(list)
-        .width(Length::Fixed(CATEGORY_COL_WIDTH))
+        .width(Length::FillPortion(1))
         .height(Length::Fill)
         .padding(4)
         .style(move |theme: &Theme| {
@@ -463,65 +557,111 @@ fn content_columns<'a>(
     let grid_cache = &state.artwork.grid_cache;
     if let Some(nav) = state.browse_nav() {
         if nav.columns.is_empty() {
-            return container(text("Loading\u{2026}").size(14))
+            return container(text("Loading\u{2026}").size(16))
                 .padding(24)
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .into();
         }
-        let cat_focused = state.category_column_focused;
-        let focused = if cat_focused { usize::MAX } else { nav.focused_column };
+        // Playlists are now listed individually in the leftmost
+        // category column, so playlist_nav.columns[0] (the root
+        // "playlists" list) is a duplicate of the category column
+        // and we skip it. The same nav still drives selection /
+        // drilling — we just hide the redundant root from the
+        // Miller-column area.
+        let column_offset = if state.browse_category == BrowseCategory::Playlists { 1 } else { 0 };
+        if nav.columns.len() <= column_offset {
+            // Either the user just clicked a playlist (load in
+            // flight) or no playlist is selected yet. Show a
+            // loading indicator vs. the "pick a playlist" prompt
+            // accordingly.
+            let msg = if nav.loading {
+                "Loading\u{2026}"
+            } else {
+                "Pick a playlist on the left."
+            };
+            return container(text(msg).size(16))
+                .padding(24)
+                .width(Length::FillPortion(1))
+                .height(Length::Fill)
+                .into();
+        }
+        let visible_total = nav.columns.len() - column_offset;
+        let focused_logical = nav.focused_column.saturating_sub(column_offset);
+        // Single-focus rule: only one of {cat col, a miller col, the
+        // track-details pane} paints as focused at a time. usize::MAX
+        // is the "no miller col is focused" sentinel; we use it both
+        // when the cat col owns focus AND when the pane does.
+        let other_owns_focus = state.category_column_focused || state.track_pane_focused;
+        let focused = if other_owns_focus { usize::MAX } else { focused_logical };
         let (start, end, col_width) = compute_visible_window(
-            nav.columns.len(),
-            nav.focused_column,
+            visible_total,
+            focused_logical,
             content_width,
         );
 
-        // Inline list filter (Alt+F / quick-filter text input) restricts
-        // a single column to items matching the query. When active, the
-        // matched_indices slice is handed to `miller_column::view` which
-        // only renders those rows.
-        let filter_on_col: Option<usize> = if state.list_filter.active
+        // Quick-filter (transport-bar text input) narrows EVERY visible
+        // Miller column on-the-fly. Each column gets its own match-index
+        // list — we run the same priority filter over its items here in
+        // the render pass instead of relying on the single
+        // `state.list_filter.results` precomputed for one specific
+        // column. Pressing Enter in the filter input opens the global
+        // Search popup (which clears the input as a side effect).
+        let live_query: Option<&str> = if state.list_filter.active
             && state.list_filter.category == state.browse_category
+            && !state.list_filter.query.trim().is_empty()
         {
-            Some(state.list_filter.column)
+            Some(state.list_filter.query.trim())
         } else {
             None
         };
-        let matched: Option<&[usize]> = state
-            .list_filter
-            .results
-            .as_ref()
-            .map(|r| r.matched_indices.as_slice());
 
-        let cols = (start..end).map(|idx| {
-            let col = &nav.columns[idx];
-            let is_last_visible = idx + 1 == end;
-            let filter_matched = if filter_on_col == Some(idx) { matched } else { None };
-            let (scroll_y, vp_h) = scroll_info(idx);
-            let element = miller_column::view(idx, col, idx == focused, grid_cache, filter_matched, scroll_y, vp_h, |click| GuiMessage::MillerSelect {
+        // Match-index storage. miller_column::view takes ownership of
+        // the Vec so we don't have to keep a borrow alive across the
+        // returned Element's lifetime. `matches[i]` is for visible
+        // column `i` (logical index — already excludes the skipped
+        // root column).
+        let mut column_matches: Vec<Option<Vec<usize>>> = if let Some(q) = live_query {
+            use crate::services::{filter_with_priority, DEFAULT_MAX_RESULTS};
+            (start..end).map(|logical_idx| {
+                let abs_idx = logical_idx + column_offset;
+                let col = &nav.columns[abs_idx];
+                let r = filter_with_priority(&col.items, q, |it| it.title(), DEFAULT_MAX_RESULTS);
+                Some(r.matched_indices)
+            }).collect()
+        } else {
+            (start..end).map(|_| None).collect()
+        };
+
+        let cols = (start..end).map(|logical_idx| {
+            let abs_idx = logical_idx + column_offset;
+            let col = &nav.columns[abs_idx];
+            let local_idx = logical_idx - start;
+            let filter_matched: Option<Vec<usize>> = column_matches[local_idx].take();
+            let (scroll_y, vp_h) = scroll_info(abs_idx);
+            let element = miller_column::view(abs_idx, col, logical_idx == focused, grid_cache, filter_matched, scroll_y, vp_h, col_width, |click| GuiMessage::MillerSelect {
                 column_index: click.column_index,
                 item_index: click.item_index,
                 activate: click.activate,
             });
-            // Fixed-width for all visible columns except the last, which
-            // fills remaining space so rounding errors do not leave a gap.
-            let element: Element<'_, GuiMessage> = if is_last_visible {
-                container(element).width(Length::Fill).height(Length::Fill).into()
-            } else {
-                container(element).width(Length::Fixed(col_width)).height(Length::Fill).into()
-            };
+            // Equal-width: every visible miller col gets the same
+            // proportion of the row's space (FillPortion(1) each).
+            // The outer Row's width is FillPortion(n_visible) so
+            // each col here ends up matching cat / pane widths.
+            let element: Element<'_, GuiMessage> =
+                container(element).width(Length::FillPortion(1)).height(Length::Fill).into();
             element
         }).collect::<Vec<_>>();
+        let visible_n = end.saturating_sub(start).max(1) as u16;
         Row::with_children(cols)
             .spacing(4)
-            .width(Length::Fill)
+            .width(Length::FillPortion(visible_n))
             .height(Length::Fill)
             .into()
     } else {
-        container(text("Loading\u{2026}").size(14))
+        container(text("Loading\u{2026}").size(16))
             .padding(24)
-            .width(Length::Fill)
+            .width(Length::FillPortion(1))
             .height(Length::Fill)
             .into()
     }
@@ -531,7 +671,7 @@ fn folder_columns(state: &AppState, content_width: f32) -> Element<'_, GuiMessag
     let fs = match state.folder_state.as_ref() {
         Some(fs) => fs,
         None => {
-            return container(text("Loading folders\u{2026}").size(14))
+            return container(text("Loading folders\u{2026}").size(16))
                 .padding(24)
                 .width(Length::Fill)
                 .height(Length::Fill)
@@ -539,33 +679,46 @@ fn folder_columns(state: &AppState, content_width: f32) -> Element<'_, GuiMessag
         }
     };
     if fs.columns.is_empty() {
-        return container(text("No folders").size(14))
+        return container(text("No folders").size(16))
             .padding(24)
             .width(Length::Fill)
             .height(Length::Fill)
             .into();
     }
-    let cat_focused = state.category_column_focused;
-    let focused = if cat_focused { usize::MAX } else { fs.focused_column };
+    let other_owns_focus = state.category_column_focused || state.track_pane_focused;
+    let focused = if other_owns_focus { usize::MAX } else { fs.focused_column };
     let (start, end, col_width) = compute_visible_window(
         fs.columns.len(),
         fs.focused_column,
         content_width,
     );
+    // Quick-filter (transport-bar text input) narrows every visible
+    // folder column on-the-fly — same behaviour as the Library /
+    // Genres / Playlists Miller columns.
+    let live_query: Option<&str> = if state.list_filter.active
+        && state.list_filter.category == BrowseCategory::Folders
+        && !state.list_filter.query.trim().is_empty()
+    {
+        Some(state.list_filter.query.trim())
+    } else {
+        None
+    };
     let cols = (start..end).map(|idx| {
         let col = &fs.columns[idx];
-        let is_last_visible = idx + 1 == end;
-        let element = folder_column_view(idx, col, idx == focused);
-        let element: Element<'_, GuiMessage> = if is_last_visible {
-            container(element).width(Length::Fill).height(Length::Fill).into()
-        } else {
-            container(element).width(Length::Fixed(col_width)).height(Length::Fill).into()
-        };
+        let filter_matched: Option<Vec<usize>> = live_query.map(|q| {
+            use crate::services::{filter_with_priority, DEFAULT_MAX_RESULTS};
+            filter_with_priority(&col.items, q, |it| it.title.as_str(), DEFAULT_MAX_RESULTS)
+                .matched_indices
+        });
+        let element = folder_column_view(idx, col, idx == focused, filter_matched);
+        let element: Element<'_, GuiMessage> =
+            container(element).width(Length::FillPortion(1)).height(Length::Fill).into();
         element
     }).collect::<Vec<_>>();
+    let visible_n = end.saturating_sub(start).max(1) as u16;
     Row::with_children(cols)
         .spacing(4)
-        .width(Length::Fill)
+        .width(Length::FillPortion(visible_n))
         .height(Length::Fill)
         .into()
 }
@@ -598,24 +751,49 @@ fn compute_visible_window(total: usize, focused: usize, width: f32) -> (usize, u
 }
 
 
-fn folder_column_view(column_index: usize, col: &FolderColumn, is_focused: bool) -> Element<'_, GuiMessage> {
+fn folder_column_view(column_index: usize, col: &FolderColumn, is_focused: bool, filter_matched: Option<Vec<usize>>) -> Element<'_, GuiMessage> {
     const FOLDER_ROW_H: f32 = 26.0;
 
-    let header = container(text(&col.title).size(12))
-        .padding([4, 8])
-        .width(Length::Fill);
+    let header = container(
+        Row::new()
+            .spacing(4)
+            .align_y(Alignment::Center)
+            .push(text(&col.title).size(14).width(Length::Fill))
+            .push(crate::ui_gui::widgets::miller_column::close_x_button(
+                GuiMessage::CloseMillerColumn { column_index: Some(column_index) },
+            )),
+    )
+    .padding([4, 8])
+    .width(Length::Fill);
 
     let selected = col.selected_index;
+    let filter_active_no_matches = matches!(&filter_matched, Some(m) if m.is_empty());
     // Pin each row to a fixed pixel height so Iced's layout pass skips
     // cosmic-text measurement for every item. A 10k-entry folder list
     // was the worst offender before this — layout alone took ~300 ms
     // per frame.
-    let rows: Vec<Element<'_, GuiMessage>> = col.items.iter().enumerate().map(|(i, it)| {
-        container(folder_row(column_index, it, i, i == selected, is_focused))
-            .height(Length::Fixed(FOLDER_ROW_H))
-            .width(Length::Fill)
-            .into()
-    }).collect();
+    let indices: Vec<usize> = match filter_matched {
+        Some(matched) => matched,
+        None => (0..col.items.len()).collect(),
+    };
+    let mut rows: Vec<Element<'_, GuiMessage>> = Vec::with_capacity(indices.len() + 1);
+    if filter_active_no_matches {
+        rows.push(
+            container(text("no results").size(15))
+                .padding([6, 12])
+                .width(Length::Fill)
+                .into(),
+        );
+    }
+    for &i in &indices {
+        let Some(it) = col.items.get(i) else { continue };
+        rows.push(
+            container(folder_row(column_index, it, i, i == selected, is_focused))
+                .height(Length::Fixed(FOLDER_ROW_H))
+                .width(Length::Fill)
+                .into()
+        );
+    }
 
     let body = scrollable(Column::with_children(rows))
         .direction(crate::ui_gui::widgets::fat_vertical_scrollbar())
@@ -654,7 +832,7 @@ fn folder_row(column_index: usize, item: &FolderItem, row_index: usize, is_selec
     // siblings of two different parents alive at the same time.
     let is_folder = matches!(item.item_type, FolderItemType::Folder);
     let msg = GuiMessage::FolderRowClick { column_index, row_index, is_folder };
-    let btn = button(text(label).size(13))
+    let btn = button(text(label).size(15))
         .width(Length::Fill)
         .height(Length::Fill)
         .padding([4, 8])

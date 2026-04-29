@@ -40,6 +40,19 @@ pub enum SystemAction {
     LoadSpectrogram,
     /// Load album art for a batch of albums: Vec<(rating_key, thumb_path)>
     LoadAlbumArt(Vec<(String, String)>),
+    /// Open the system browser to a third-party music search (Apple
+    /// Music / Spotify / YouTube). When `query` is None the dispatcher
+    /// derives one from the currently selected artist/album/track (or
+    /// the now-playing track) via `build_external_search_query`.
+    /// Pass `Some(...)` from a right-click context menu so the search
+    /// targets the right-clicked row even when it's not the focused
+    /// one. The dispatcher also gates the action against the per-target
+    /// "Search ⟨service⟩" toggle in `UiConfig` — disabled targets are
+    /// silently skipped with a status notification.
+    OpenExternalSearch {
+        target: crate::services::external_search::SearchTarget,
+        query: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -64,6 +77,11 @@ pub enum DataAction {
     GoBackInRightPanel,
     LoadSimilarAlbums { rating_key: String, title: String },
     LoadSimilarTracks { rating_key: String, title: String },
+    /// Lazy-load sonically similar tracks for the right-side
+    /// track-details pane. Stores results in
+    /// `state.track_pane_similar` keyed by `rating_key` without
+    /// switching the view.
+    LoadTrackPaneSimilar { rating_key: String },
     LoadSimilarArtists { artist_key: String, title: String },
     LoadRelated { artist_key: String, title: String },
     ListUp,
@@ -85,6 +103,10 @@ pub enum MillerAction {
     LoadGenreTracksForMiller { album_key: String },
     PlayGenreTrackFromMiller { column_index: usize, track_index: usize, single_track: bool },
     LoadPlaylistTracksForMiller { playlist_key: String },
+    /// Fetch the next page of a lazy-loaded playlist tracks column.
+    /// `offset` is how many tracks the column already has; the server
+    /// returns the next chunk after that.
+    LoadMorePlaylistTracks { playlist_key: String, offset: u32 },
     PlayPlaylistTrackFromMiller { column_index: usize, track_index: usize, single_track: bool },
     RefreshAlbumTracks { album_key: String },
     LoadCompilationsForMiller,
@@ -324,6 +346,28 @@ pub enum SettingsAction {
     AdventureComplete(Vec<Track>),
     AdventureError(String),
     ArtistRadioComplete(Vec<Track>),
+    /// Toggle whether the named external-search service is offered in
+    /// the palette / context menu / menu bar. Mirrors `UiConfig`'s
+    /// per-service flag onto `AppState::external_search` and persists
+    /// the change to the config file. Sent by Settings checkboxes.
+    ToggleExternalSearchService(crate::services::external_search::SearchTarget),
+    /// Persist the (library, playlist) -> view-toggles mapping. Sent
+    /// when the user changes a playlist tracks column's "Group by
+    /// album" or "Show album artwork" toggles. Settings disk-saver
+    /// fires on every change so the toggles survive restart.
+    SavePlaylistView {
+        library_key: String,
+        playlist_key: String,
+        view: crate::config::settings::PlaylistView,
+    },
+    /// Drop saved per-playlist view-toggle entries for playlists that
+    /// no longer exist in the given library. Sent after a successful
+    /// `PlaylistsLoaded` so deleted playlists' settings don't
+    /// accumulate forever in the config.
+    PrunePlaylistViews {
+        library_key: String,
+        live_playlist_keys: std::collections::HashSet<String>,
+    },
 }
 
 // ============================================================================

@@ -17,7 +17,7 @@ default = ["tui"]
 # dependency because the action-builder helpers (`navigate_to_album`,
 # `get_similar_action`, etc.) are shared between the TUI key input layer
 # and the GUI shortcut layer. They both accept the same `KeyEvent` input.
-tui = ["dep:ratatui", "dep:ratatui-image"]
+tui = ["dep:ratatui", "dep:ratatui-image", "dep:tui-input", "dep:fuzzy-matcher"]
 
 # Desktop GUI (`textamp-gui` binary): iced renderer.
 gui = ["dep:iced", "dep:raw-window-handle"]
@@ -98,9 +98,9 @@ unicode-width = "0.2"
 open = "5"
 
 # Crossterm's key/mouse event types are always available — the shared
-# action-builder helpers (`navigate_to_album`, `auto_drill_artist_action`,
-# etc.) accept them and are called by both the TUI key handler and the
-# GUI shortcut translator. The crate is tiny (~200 KB) and cross-platform.
+# action-builder helpers (e.g. `navigate_to_album`) accept them and are
+# called by both the TUI key handler and the GUI shortcut translator.
+# The crate is tiny (~200 KB) and cross-platform.
 crossterm = "0.28"
 
 # Cross-platform advisory file locking (process lock so TUI and GUI cannot
@@ -113,6 +113,11 @@ fs4 = "0.9"
 
 ratatui = { version = "0.29", optional = true }
 ratatui-image = { version = "9", default-features = false, features = ["crossterm", "image-defaults"], optional = true }
+
+# TUI command-palette: typed text input + fuzzy-match against the
+# command registry. Both crates are TUI-only.
+tui-input = { version = "0.10", optional = true }
+fuzzy-matcher = { version = "0.3", optional = true }
 
 # ============================================================================
 # GUI-only dependencies (feature = "gui").

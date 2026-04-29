@@ -30,6 +30,53 @@ impl Default for Config {
     }
 }
 
+impl Config {
+    /// Read-only lookup of stored view settings for a single
+    /// playlist. Returns `None` when neither the library nor the
+    /// playlist has any saved entry — the caller should fall back to
+    /// defaults (no grouping, no artwork) in that case.
+    pub fn playlist_view(&self, lib_key: &str, playlist_key: &str) -> Option<PlaylistView> {
+        self.ui.library_view_settings
+            .get(lib_key)?
+            .playlists
+            .get(playlist_key)
+            .copied()
+    }
+
+    /// Write the current per-playlist view to config. An all-default
+    /// view (no grouping, no artwork) deletes the entry rather than
+    /// storing a redundant row — keeps the on-disk config minimal.
+    pub fn set_playlist_view(&mut self, lib_key: &str, playlist_key: &str, view: PlaylistView) {
+        let lib = self.ui.library_view_settings
+            .entry(lib_key.to_string())
+            .or_default();
+        if view.is_default() {
+            lib.playlists.remove(playlist_key);
+            if lib.playlists.is_empty() {
+                self.ui.library_view_settings.remove(lib_key);
+            }
+        } else {
+            lib.playlists.insert(playlist_key.to_string(), view);
+        }
+    }
+
+    /// Drop stored playlist entries for any playlist that no longer
+    /// exists in the given library. Called after `PlaylistsLoaded`
+    /// so deleted playlists' settings don't accumulate forever.
+    pub fn prune_stale_playlist_views(
+        &mut self,
+        lib_key: &str,
+        live_playlist_keys: &std::collections::HashSet<String>,
+    ) {
+        if let Some(lib) = self.ui.library_view_settings.get_mut(lib_key) {
+            lib.playlists.retain(|k, _| live_playlist_keys.contains(k));
+            if lib.playlists.is_empty() {
+                self.ui.library_view_settings.remove(lib_key);
+            }
+        }
+    }
+}
+
 /// Per-library settings (indexed by library key).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LibrarySettings {
@@ -168,6 +215,54 @@ pub struct UiConfig {
     /// range at runtime to keep the UI usable.
     #[serde(default = "default_ui_scale")]
     pub ui_scale: f32,
+
+    /// Whether the "Search Apple Music" entry is offered in palette,
+    /// menus, and right-click context menus. When false the entry is
+    /// hidden everywhere and the action becomes a no-op (with a status
+    /// notification). Default ON.
+    #[serde(default = "default_enable_search_service")]
+    pub enable_apple_music_search: bool,
+
+    /// Same as `enable_apple_music_search` but for Spotify search.
+    #[serde(default = "default_enable_search_service")]
+    pub enable_spotify_search: bool,
+
+    /// Same as `enable_apple_music_search` but for YouTube search.
+    #[serde(default = "default_enable_search_service")]
+    pub enable_youtube_search: bool,
+
+    /// Per-library view settings (currently per-playlist toggles for
+    /// "Group by album" and "Show album artwork"). Outer key is the
+    /// library's `lib_key`, inner is the playlist's `rating_key`.
+    /// Pruned on `PlaylistsLoaded` so deleted playlists don't keep
+    /// accumulating stale entries.
+    #[serde(default)]
+    pub library_view_settings: std::collections::HashMap<String, LibraryViewSettings>,
+}
+
+/// View toggles scoped to a single Plex library.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LibraryViewSettings {
+    /// Per-playlist toggles, keyed by the playlist's Plex rating_key.
+    #[serde(default)]
+    pub playlists: std::collections::HashMap<String, PlaylistView>,
+}
+
+/// View toggles for a single playlist's tracks column.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlaylistView {
+    #[serde(default)]
+    pub group_by_album: bool,
+    #[serde(default)]
+    pub show_artwork: bool,
+}
+
+impl PlaylistView {
+    /// True when neither toggle is on — used by the saver to delete
+    /// the entry instead of writing all-default values.
+    pub fn is_default(&self) -> bool {
+        !self.group_by_album && !self.show_artwork
+    }
 }
 
 /// GUI window geometry persisted across launches.
@@ -189,8 +284,16 @@ impl Default for UiConfig {
             artwork_mode: default_artwork_mode(),
             window: WindowConfig::default(),
             ui_scale: default_ui_scale(),
+            enable_apple_music_search: default_enable_search_service(),
+            enable_spotify_search: default_enable_search_service(),
+            enable_youtube_search: default_enable_search_service(),
+            library_view_settings: std::collections::HashMap::new(),
         }
     }
+}
+
+fn default_enable_search_service() -> bool {
+    true
 }
 
 fn default_ui_scale() -> f32 {

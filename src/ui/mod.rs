@@ -4,6 +4,7 @@
 
 mod app;
 pub mod artwork;
+pub mod command_palette;
 pub mod hit_regions;
 pub mod layout;
 pub mod screens;

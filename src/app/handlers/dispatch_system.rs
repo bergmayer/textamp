@@ -32,7 +32,7 @@ use super::helpers;
 /// Dispatch system-level actions. Returns follow-up actions.
 pub async fn dispatch(
     event_tx: &mpsc::Sender<Event>,
-    _config: &mut Config,
+    config: &mut Config,
     action: SystemAction,
     state: &mut AppState,
     client: &mut PlexClient,
@@ -553,6 +553,30 @@ pub async fn dispatch(
                     }
                 });
             }
+        }
+        SystemAction::OpenExternalSearch { target, query } => {
+            use crate::services::external_search::SearchTarget;
+            let enabled = match target {
+                SearchTarget::AppleMusic => config.ui.enable_apple_music_search,
+                SearchTarget::Spotify    => config.ui.enable_spotify_search,
+                SearchTarget::YouTube    => config.ui.enable_youtube_search,
+            };
+            if !enabled {
+                let name = match target {
+                    SearchTarget::AppleMusic => "Apple Music",
+                    SearchTarget::Spotify    => "Spotify",
+                    SearchTarget::YouTube    => "YouTube",
+                };
+                state.set_status(format!("{} search is disabled in Settings", name));
+                return Ok(vec![]);
+            }
+            let q = query.unwrap_or_else(|| super::key_input::build_external_search_query(state));
+            if q.is_empty() {
+                state.set_status("Nothing selected to search".to_string());
+                return Ok(vec![]);
+            }
+            let url = crate::services::external_search::generate_search_url(target, &q);
+            let _ = open::that(&url);
         }
     }
     Ok(vec![])

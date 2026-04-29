@@ -16,13 +16,13 @@ use crate::ui_gui::message::GuiMessage;
 use crate::ui_gui::widgets::transport_bar::popout_button_style;
 
 pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
-    let close_btn = button(text("Close").size(12))
+    let close_btn = button(text("Close").size(14))
         .padding([4, 12])
         .on_press(GuiMessage::CloseRemixToolsPopup)
         .style(popout_button_style);
 
     let header = row![
-        text("Remix Tools").size(18),
+        text("Remix Tools").size(20),
         Space::with_width(Length::Fill),
         close_btn,
     ]
@@ -48,8 +48,8 @@ pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
         .into_iter()
         .map(|(label, descr, action)| {
             let body = column![
-                text(label.to_string()).size(13),
-                text(descr.to_string()).size(11),
+                text(label.to_string()).size(15),
+                text(descr.to_string()).size(13),
             ]
             .spacing(2);
             button(body)

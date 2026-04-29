@@ -69,68 +69,156 @@ fn format_artist_album(track: &crate::plex::models::Track) -> String {
     format!("{} — {}", artist, album_part)
 }
 
-/// Render the queue view — always shows left column (artwork + stations) and right track list.
+/// Render the queue view — left sidebar (Radio / DJ Modes / Remix
+/// Tools / Clear Queue), middle queue list + stations, right
+/// artwork. Mirrors the GUI's Queue layout where the row of action
+/// buttons sits beside the dominant queue list and the artwork is
+/// the right-hand element.
 pub fn render_queue_mode(frame: &mut Frame, state: &AppState, area: Rect) {
     let t = theme();
 
-    // Fill background
     frame.render_widget(
         Block::default().style(Style::default().bg(t.colors.bg_primary)),
         area,
     );
 
-    // Artwork size: 40% of height, width = height*2, capped at 40% area width, min 25
-    let art_height = (area.height * 40 / 100).max(8);
-    let art_width = (art_height * 2).min(area.width * 40 / 100).max(25);
+    let sidebar_w: u16 = 18;
+    // Make the artwork box square in pixels: terminal cells are
+    // ~2:1 (height:width) so width = 2 × height in cells gives a
+    // pixel-square. Bound by the available column width so it
+    // can't squeeze the queue list, with a sensible floor.
+    let art_width = (area.height.saturating_mul(2))
+        .min(area.width.saturating_sub(sidebar_w + 24))
+        .max(20);
 
-    // Left column is always visible (artwork + stations); right is track list
+    // Three-column horizontal split: sidebar | queue (shrunken to
+    // Min(24) so the artwork can grow) | artwork.
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
+            Constraint::Length(sidebar_w),
+            Constraint::Min(24),
             Constraint::Length(art_width),
-            Constraint::Min(40),
         ])
         .split(area);
 
-    // Left column: artwork on top, stations below
-    let left_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(art_height),
-            Constraint::Min(4),
-        ])
-        .split(chunks[0]);
+    // Queue takes the full middle column — the old inline Radio
+    // station panel that lived under it is gone (its features are
+    // reachable via the Radio sidebar button → command palette,
+    // mirroring the GUI's "stations live in a popup" pattern).
+    let queue_area = chunks[1];
 
-    // Register queue hit regions
     {
-        let station_block = ratatui::widgets::Block::default().borders(ratatui::widgets::Borders::ALL);
-        let station_inner = station_block.inner(left_chunks[1]);
         let track_block = ratatui::widgets::Block::default().borders(ratatui::widgets::Borders::ALL);
-        let track_inner = track_block.inner(chunks[1]);
+        let track_inner = track_block.inner(queue_area);
         let mut hr = state.hit_regions.borrow_mut();
         hr.queue_content = Some(crate::ui::hit_regions::QueueRegions {
-            station_panel: left_chunks[1],
-            station_inner,
-            track_list: chunks[1],
+            // Stations panel removed; alias to the queue area so any
+            // residual click-routing logic that consults this rect
+            // doesn't dereference a stale region.
+            station_panel: Rect { x: 0, y: 0, width: 0, height: 0 },
+            station_inner: Rect { x: 0, y: 0, width: 0, height: 0 },
+            track_list: queue_area,
             track_list_inner: track_inner,
-            art_area: left_chunks[0],
+            art_area: chunks[2],
         });
     }
 
-    render_artwork(frame, state, left_chunks[0]);
-    render_station_panel(frame, state, left_chunks[1]);
-    render_track_list(frame, state, chunks[1]);
+    // Artwork box fills the entire right column. Outer layout
+    // already sized the column so width = 2 × height in cells,
+    // i.e. a pixel-square box — no wasted rows beneath the image.
+    render_now_playing_sidebar(frame, state, chunks[0]);
+    render_track_list(frame, state, queue_area);
+    render_artwork(frame, state, chunks[2]);
+}
+
+/// Render the left sidebar with the four GUI-parity buttons:
+/// Radio / DJ Modes / Remix Tools / Clear Queue. Each button has a
+/// hit region; the mouse handler dispatches the right action (most
+/// open the command palette pre-filtered to the relevant subset).
+fn render_now_playing_sidebar(frame: &mut Frame, state: &AppState, area: Rect) {
+    use ratatui::widgets::{Block, Borders};
+    use crate::ui::theme::theme;
+    let t = theme();
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(t.colors.border))
+        .style(Style::default().bg(t.colors.bg_primary).fg(t.colors.fg_primary));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let buttons: [(&str, NpSidebarButton); 4] = [
+        ("Radio",       NpSidebarButton::Radio),
+        ("DJ Modes",    NpSidebarButton::DjModes),
+        ("Remix Tools", NpSidebarButton::Remix),
+        ("Clear Queue", NpSidebarButton::ClearQueue),
+    ];
+
+    let sidebar_focused = matches!(state.now_playing_focus, crate::app::state::NowPlayingFocus::Sidebar);
+    let mut regions: Vec<(Rect, NpSidebarButton)> = Vec::with_capacity(4);
+    for (i, (label, btn)) in buttons.iter().copied().enumerate() {
+        // Two rows per button: the label, then a blank spacer.
+        let y = inner.y + (i as u16) * 2;
+        if y >= inner.y + inner.height {
+            break;
+        }
+        let row = Rect { x: inner.x, y, width: inner.width, height: 1 };
+
+        // Highlight precedence: keyboard-focused selection > active
+        // state (radio playing / DJ on) > inactive.
+        let is_focus_target = sidebar_focused && state.now_playing_sidebar_index == i;
+        let active = btn == NpSidebarButton::Radio
+            && matches!(state.playback_mode, crate::app::state::PlaybackMode::Radio);
+        let active = active
+            || (btn == NpSidebarButton::DjModes && state.dj.active_mode.is_some());
+
+        let style = if is_focus_target {
+            Style::default()
+                .fg(t.colors.fg_primary)
+                .bg(t.colors.bg_selection)
+                .add_modifier(ratatui::style::Modifier::BOLD)
+        } else if active {
+            Style::default()
+                .fg(t.colors.fg_primary)
+                .bg(t.colors.bg_highlight)
+        } else {
+            Style::default().fg(t.colors.fg_primary).bg(t.colors.bg_primary)
+        };
+        let prefix = if is_focus_target { "▶ " } else { "  " };
+        let label = format!("{}{}", prefix, label);
+        frame.render_widget(
+            ratatui::widgets::Paragraph::new(label).style(style),
+            row,
+        );
+        regions.push((row, btn));
+    }
+
+    state.hit_regions.borrow_mut().now_playing_sidebar = Some(regions);
+}
+
+/// Identifies which sidebar button was clicked; the mouse handler
+/// resolves it to an action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NpSidebarButton {
+    Radio,
+    DjModes,
+    Remix,
+    ClearQueue,
 }
 
 /// Render the album artwork.
 fn render_artwork(frame: &mut Frame, state: &AppState, area: Rect) {
     let t = theme();
 
+    let is_focused = state.now_playing_focus == NowPlayingFocus::Artwork;
+    let border_color = if is_focused { t.colors.title_focused } else { t.colors.fg_accent };
+    let title_color = if is_focused { t.colors.title_focused } else { t.colors.fg_accent };
     let block = Block::default()
         .title(" artwork ")
-        .title_style(Style::default().fg(t.colors.fg_accent))
+        .title_style(Style::default().fg(title_color))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(t.colors.fg_accent))
+        .border_style(Style::default().fg(border_color))
         .style(Style::default().bg(t.colors.bg_primary));
 
     let inner = block.inner(area);
@@ -697,7 +785,7 @@ fn render_track_info_panel(frame: &mut Frame, state: &AppState, area: Rect) {
 }
 
 /// Render the visualizer panel with tab bar (Waveform / Spectrum / Spectrogram).
-fn render_visualizer_panel(frame: &mut Frame, state: &AppState, area: Rect) {
+pub(crate) fn render_visualizer_panel(frame: &mut Frame, state: &AppState, area: Rect) {
     let t = theme();
 
     let block = Block::default()
@@ -752,13 +840,23 @@ fn render_visualizer_panel(frame: &mut Frame, state: &AppState, area: Rect) {
             let paragraph = Paragraph::new(lines).alignment(Alignment::Center);
             frame.render_widget(paragraph, content_area);
         }
+        VisualizerTab::Vectorscope => {
+            let lines = draw_vectorscope(state, content_height, content_width);
+            let paragraph = Paragraph::new(lines).alignment(Alignment::Left);
+            frame.render_widget(paragraph, content_area);
+        }
     }
 }
 
 /// Render the visualizer tab bar.
 fn render_visualizer_tab_bar(frame: &mut Frame, state: &AppState, area: Rect) {
     let t = theme();
-    let tabs = [VisualizerTab::Waveform, VisualizerTab::Spectrum, VisualizerTab::Spectrogram];
+    let tabs = [
+        VisualizerTab::Waveform,
+        VisualizerTab::Spectrum,
+        VisualizerTab::Spectrogram,
+        VisualizerTab::Vectorscope,
+    ];
     let selected = state.visualizer_tab as usize;
 
     let titles: Vec<Line> = tabs.iter().enumerate().map(|(i, tab)| {
@@ -813,46 +911,71 @@ fn draw_waveform_seekbar(lines: &mut Vec<Line<'static>>, state: &AppState, heigh
     let generating = state.waveform.generating;
 
     if waveform_available {
-        // Use actual waveform data
+        // Braille rendering: each terminal cell hosts a 2 × 4 dot
+        // grid, giving us **2× horizontal and 4× vertical**
+        // sub-resolution. Bars become roughly quarter-cell wide
+        // (vs the half-cell `▌`/`▐` blocks). Two amplitude bins
+        // per cell — one per dot column — so the waveform's
+        // horizontal density doubles too.
+        let _ = vis_chars; // unused on the braille path
         let data = state.waveform.data.as_ref().unwrap();
-        let bins = data.resample(width);
+        let sub_count = width.saturating_mul(2);
+        let bins = data.resample(sub_count);
 
-        // Calculate vertical center for the waveform
-        let center_row = height / 2;
+        let total_sub_rows = (height as i32) * 4;
+        let center_dot = total_sub_rows / 2;
 
-        // Build the seekbar grid
         for row in 0..height {
             let mut spans: Vec<Span> = Vec::with_capacity(width);
+            let cell_top_dot = (row as i32) * 4;
 
-            for (col, &amplitude) in bins.iter().enumerate() {
-                // Scale amplitude to row
-                let bar_height = (amplitude * (height as f32 / 2.0)).round() as usize;
-                let distance_from_center = if row < center_row {
-                    center_row - row
-                } else {
-                    row - center_row
-                };
+            for col in 0..width {
+                let l_amp = *bins.get(col * 2).unwrap_or(&0.0);
+                let r_amp = *bins.get(col * 2 + 1).unwrap_or(&0.0);
 
-                let is_filled = distance_from_center < bar_height;
+                // Bar height in sub-rows. Half the total because the
+                // bar mirrors above and below the centre line.
+                let l_height = (l_amp * (total_sub_rows as f32 / 2.0)).round() as i32;
+                let r_height = (r_amp * (total_sub_rows as f32 / 2.0)).round() as i32;
+
+                // Build the cell's 8-bit braille bitmask. Dot
+                // mapping (Unicode standard):
+                //    (col 0, row 0) → 0x01    (col 1, row 0) → 0x08
+                //    (col 0, row 1) → 0x02    (col 1, row 1) → 0x10
+                //    (col 0, row 2) → 0x04    (col 1, row 2) → 0x20
+                //    (col 0, row 3) → 0x40    (col 1, row 3) → 0x80
+                let mut bits: u32 = 0;
+                for dy in 0i32..4 {
+                    let dot_y = cell_top_dot + dy;
+                    let dist = (dot_y - center_dot).abs();
+                    if dist < l_height {
+                        bits |= match dy {
+                            0 => 0x01,
+                            1 => 0x02,
+                            2 => 0x04,
+                            3 => 0x40,
+                            _ => 0,
+                        };
+                    }
+                    if dist < r_height {
+                        bits |= match dy {
+                            0 => 0x08,
+                            1 => 0x10,
+                            2 => 0x20,
+                            3 => 0x80,
+                            _ => 0,
+                        };
+                    }
+                }
+                let ch = char::from_u32(0x2800 + bits).unwrap_or(' ');
+
                 let is_position = col == position_col;
                 let is_played = col < position_col;
-
-                let ch = if is_filled {
-                    // Choose character based on amplitude
-                    let level = ((amplitude * 7.0) as usize).min(7);
-                    vis_chars[level]
-                } else {
-                    ' '
-                };
-
                 let style = if is_position {
-                    // Position marker - bright
                     Style::default().fg(Color::White).bg(Color::Blue)
                 } else if is_played {
-                    // Played portion - accent color
                     Style::default().fg(Color::Cyan)
                 } else {
-                    // Unplayed portion - muted
                     Style::default().fg(Color::DarkGray)
                 };
 
@@ -1077,6 +1200,130 @@ fn draw_spectrum_analyzer(lines: &mut Vec<Line<'static>>, state: &AppState, heig
 
 /// Draw spectrogram visualization — 2D time×frequency with half-block characters.
 /// Frequency on x-axis (left=low, right=high), time scrolls vertically (current at bottom).
+/// ANSI vectorscope: stereo Lissajous trace (right channel → X,
+/// left channel → Y) rendered with Unicode braille glyphs so each
+/// terminal cell carries a 2 × 4 sub-pixel grid. Mirrors the GUI's
+/// `Vectorscope` widget, sourcing samples from
+/// `state.vectorscope_buffer`.
+///
+/// Empty buffer / no audio → centered "No audio data" placeholder.
+fn draw_vectorscope(state: &AppState, height: usize, width: usize) -> Vec<Line<'static>> {
+    let t = theme();
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(height);
+
+    if width == 0 || height == 0 {
+        return lines;
+    }
+
+    let samples = &state.vectorscope_buffer;
+    if samples.len() < 2 {
+        // Center a "no audio" message on a blank pane.
+        let msg = if state.audio_available {
+            "No audio data — start playback to see the trace"
+        } else {
+            "No audio backend"
+        };
+        for row in 0..height {
+            if row == height / 2 {
+                let pad = width.saturating_sub(msg.chars().count()) / 2;
+                let line_text = format!("{}{}", " ".repeat(pad), msg);
+                lines.push(Line::from(Span::styled(
+                    line_text,
+                    Style::default().fg(t.colors.fg_muted),
+                )));
+            } else {
+                lines.push(Line::from(" ".repeat(width)));
+            }
+        }
+        return lines;
+    }
+
+    // 2 × 4 sub-pixel grid per terminal cell (braille). Build a
+    // bitmap of lit dots, then convert each cell to its braille
+    // character.
+    let dots_w = width.saturating_mul(2);
+    let dots_h = height.saturating_mul(4);
+    if dots_w == 0 || dots_h == 0 {
+        return lines;
+    }
+    let mut bits: Vec<u8> = vec![0u8; width * height];
+
+    // Plot each (l, r) sample as a single dot. Right channel drives
+    // X (0 → left edge, 1 → right edge); left channel drives Y
+    // (Y is inverted so positive amplitude reads "up").
+    let max_x = (dots_w - 1) as f32;
+    let max_y = (dots_h - 1) as f32;
+    for (l, r) in samples.iter() {
+        let l = l.clamp(-1.0, 1.0);
+        let r = r.clamp(-1.0, 1.0);
+        let xf = ((r + 1.0) * 0.5) * max_x;
+        let yf = (1.0 - (l + 1.0) * 0.5) * max_y;
+        let x = xf.round() as usize;
+        let y = yf.round() as usize;
+        if x >= dots_w || y >= dots_h {
+            continue;
+        }
+        // Braille dot bitmask:
+        //   (col 0, row 0)→0x01    (col 1, row 0)→0x08
+        //   (col 0, row 1)→0x02    (col 1, row 1)→0x10
+        //   (col 0, row 2)→0x04    (col 1, row 2)→0x20
+        //   (col 0, row 3)→0x40    (col 1, row 3)→0x80
+        let cell_x = x / 2;
+        let cell_y = y / 4;
+        let dx = x % 2;
+        let dy = y % 4;
+        let bit: u8 = match (dx, dy) {
+            (0, 0) => 0x01,
+            (0, 1) => 0x02,
+            (0, 2) => 0x04,
+            (0, 3) => 0x40,
+            (1, 0) => 0x08,
+            (1, 1) => 0x10,
+            (1, 2) => 0x20,
+            (1, 3) => 0x80,
+            _ => 0,
+        };
+        let cell_idx = cell_y * width + cell_x;
+        if let Some(slot) = bits.get_mut(cell_idx) {
+            *slot |= bit;
+        }
+    }
+
+    // Cyan trace, matching the GUI canvas. Empty cells are left
+    // blank so the dark background reads through.
+    let trace_style = Style::default().fg(ratatui::style::Color::Cyan);
+    let blank_style = Style::default();
+    for row in 0..height {
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        let mut buf = String::with_capacity(width);
+        let mut current_lit: Option<bool> = None;
+        for col in 0..width {
+            let mask = bits[row * width + col];
+            let lit = mask != 0;
+            // Group consecutive lit / unlit cells into single spans
+            // so we don't emit `width` Span objects per row.
+            if Some(lit) != current_lit && !buf.is_empty() {
+                let style = if current_lit == Some(true) { trace_style } else { blank_style };
+                spans.push(Span::styled(std::mem::take(&mut buf), style));
+            }
+            current_lit = Some(lit);
+            if lit {
+                let ch = char::from_u32(0x2800 + mask as u32).unwrap_or(' ');
+                buf.push(ch);
+            } else {
+                buf.push(' ');
+            }
+        }
+        if !buf.is_empty() {
+            let style = if current_lit == Some(true) { trace_style } else { blank_style };
+            spans.push(Span::styled(buf, style));
+        }
+        lines.push(Line::from(spans));
+    }
+
+    lines
+}
+
 fn draw_spectrogram(lines: &mut Vec<Line<'static>>, state: &AppState, height: usize, width: usize) {
     // Reserve 1 row for seek position indicator at bottom
     let vis_height = height.saturating_sub(1);

@@ -8,32 +8,140 @@ use crate::app::state::{NowPlayingFocus, PlaybackMode, View};
 use crate::app::AppState;
 use crate::plex::models::Track;
 
-/// Handle Queue view keys (track list + stations panel).
+/// Handle Queue view keys (track list + sidebar buttons).
 pub(super) fn handle_queue_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
-    // Tab/Shift+Tab cycles through main views
-    if key.code == KeyCode::Tab {
-        return if key.modifiers.contains(KeyModifiers::SHIFT) {
-            vec![NavigationAction::PrevView.into()]
-        } else {
-            vec![NavigationAction::NextView.into()]
-        };
+    // Tab toggles back to the Library (Browse) view — the inverse
+    // of what Tab does inside Browse. The full cycle through every
+    // intermediate view is gone; Library and Now Playing are the
+    // only two stops Tab visits.
+    if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
+        return vec![NavigationAction::SetView(View::Browse).into()];
     }
-    if key.code == KeyCode::BackTab {
-        return vec![NavigationAction::PrevView.into()];
+    // Horizontal navigation between the three top panes:
+    //   Sidebar  ←→  Tracks  ←→  Artwork
+    // Left from Tracks → Sidebar; Right from Tracks → Artwork.
+    // Sidebar Right and Artwork Left are handled inside their own
+    // sub-handlers below.
+    if state.now_playing_focus == NowPlayingFocus::Tracks && key.code == KeyCode::Left {
+        state.now_playing_focus = NowPlayingFocus::Sidebar;
+        return vec![];
+    }
+    if state.now_playing_focus == NowPlayingFocus::Tracks && key.code == KeyCode::Right {
+        state.now_playing_focus = NowPlayingFocus::Artwork;
+        return vec![];
     }
 
-    // With stations focused, dispatch to station handler
+    // Sidebar focused: navigate the four buttons.
+    if state.now_playing_focus == NowPlayingFocus::Sidebar {
+        return handle_sidebar_keys(key, state);
+    }
+
+    // Artwork focused: arrow keys hop to neighbours; Enter opens
+    // the Artist Bio popup as a little easter egg.
+    if state.now_playing_focus == NowPlayingFocus::Artwork {
+        return handle_artwork_keys(key, state);
+    }
+
+    // (Stations panel was removed; keep the legacy handler for
+    // backward compat — set_focus to Stations is no longer reachable
+    // via standard navigation but the variant still exists in the
+    // enum for older serialized state).
     if state.now_playing_focus == NowPlayingFocus::Stations {
         return handle_station_keys(key, state);
     }
 
-    // Track list handling
     handle_queue_track_keys(key, state)
 }
 
+/// Handle keyboard nav while the right-side artwork panel has
+/// focus. Arrow keys hop to neighbours; Enter is the easter-egg
+/// shortcut to open the Artist Bio popup for the now-playing
+/// (or focused) artist.
+fn handle_artwork_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
+    match key.code {
+        KeyCode::Left => {
+            state.now_playing_focus = NowPlayingFocus::Tracks;
+            vec![]
+        }
+        KeyCode::Down => {
+            // Drop into the visualizer below — focus the tab bar so
+            // the user can immediately pick a viz mode.
+            state.now_playing_focus = NowPlayingFocus::Tracks;
+            state.visualizer_tab_focused = true;
+            vec![NavigationAction::SetView(View::NowPlaying).into()]
+        }
+        KeyCode::Up => {
+            // No-op — artwork is the top-most slot in this column.
+            vec![]
+        }
+        KeyCode::Esc => {
+            state.now_playing_focus = NowPlayingFocus::Tracks;
+            vec![]
+        }
+        KeyCode::Enter => {
+            // Easter egg: pressing Enter on the cover art opens the
+            // Artist Bio popup for whichever artist resolves from
+            // the now-playing track (or focused row).
+            match crate::app::handlers::helpers::get_artist_for_bio(state) {
+                Some((artist_key, artist_name)) =>
+                    vec![SearchAction::ShowArtistBio { artist_key, artist_name }.into()],
+                None => vec![],
+            }
+        }
+        _ => vec![],
+    }
+}
+
+/// Handle keyboard nav over the now-playing left sidebar buttons:
+/// Radio / DJ Modes / Remix Tools / Clear Queue.
+fn handle_sidebar_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
+    const N: usize = 4;
+    match key.code {
+        KeyCode::Up => {
+            state.now_playing_sidebar_index = state.now_playing_sidebar_index.saturating_sub(1);
+            vec![]
+        }
+        KeyCode::Down => {
+            // At the bottom of the sidebar (Clear Queue), Down hops
+            // straight to the visualizer below. Otherwise just
+            // advance to the next button.
+            if state.now_playing_sidebar_index >= N - 1 {
+                state.now_playing_focus = NowPlayingFocus::Tracks;
+                state.visualizer_tab_focused = true;
+                return vec![NavigationAction::SetView(View::NowPlaying).into()];
+            }
+            state.now_playing_sidebar_index = (state.now_playing_sidebar_index + 1).min(N - 1);
+            vec![]
+        }
+        KeyCode::Right | KeyCode::Esc => {
+            state.now_playing_focus = NowPlayingFocus::Tracks;
+            vec![]
+        }
+        KeyCode::Enter => {
+            // Same dispatch the mouse handler uses — open the
+            // palette pre-filtered for DJ / Remix / Now-Playing,
+            // dispatch ClearQueue directly.
+            match state.now_playing_sidebar_index {
+                0 => { crate::ui::command_palette::open_with_query(state, "Now Playing"); vec![] }
+                1 => { crate::ui::command_palette::open_with_query(state, "DJ"); vec![] }
+                2 => { crate::ui::command_palette::open_with_query(state, "Remix"); vec![] }
+                3 => vec![QueueAction::ClearQueue.into()],
+                _ => vec![],
+            }
+        }
+        _ => vec![],
+    }
+}
+
 /// Handle Now Playing visualizer view keys (artwork + track info + waveform seekbar).
+///
+/// Standard arrow-key navigation: arrows always traverse the
+/// on-screen UI elements. Seeking now lives on `,` / `.` so the
+/// arrows are free to walk between the visualizer, the visualizer
+/// tab bar, and the queue / sidebar / tracks at the top of the
+/// combined Now-Playing screen.
 pub(super) fn handle_now_playing_visualizer_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
-    // When visualizer tab bar is focused, arrow keys navigate tabs
+    // When visualizer tab bar is focused, arrow keys navigate tabs.
     if state.visualizer_tab_focused {
         match key.code {
             KeyCode::Left => {
@@ -43,6 +151,12 @@ pub(super) fn handle_now_playing_visualizer_keys(key: event::KeyEvent, state: &m
             KeyCode::Right => {
                 state.visualizer_tab = state.visualizer_tab.next();
                 return vec![];
+            }
+            KeyCode::Up => {
+                // Tab bar → queue tracks at the top of the screen.
+                state.visualizer_tab_focused = false;
+                state.now_playing_focus = NowPlayingFocus::Tracks;
+                return vec![NavigationAction::SetView(View::Queue).into()];
             }
             KeyCode::Down | KeyCode::Enter => {
                 state.visualizer_tab_focused = false;
@@ -56,26 +170,46 @@ pub(super) fn handle_now_playing_visualizer_keys(key: event::KeyEvent, state: &m
         }
     }
 
+    // Tab toggles back to Library — the inverse of what Tab does in
+    // Browse. Same keypress, opposite direction.
+    if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
+        return vec![NavigationAction::SetView(View::Browse).into()];
+    }
+
     match key.code {
-        KeyCode::Esc => {
-            // Esc does nothing (use Tab or Ctrl+key to navigate)
-            vec![]
-        }
+        KeyCode::Esc => vec![],
         KeyCode::F(1) | KeyCode::Char('?') => vec![NavigationAction::SetView(View::Help).into()],
 
-        // Tab/Shift+Tab cycles through main views
-        KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => vec![NavigationAction::PrevView.into()],
-        KeyCode::Tab => vec![NavigationAction::NextView.into()],
-
-        // Up arrow at top: focus the tab bar
+        // Up: focus the visualizer tab bar (waveform / spectrum /
+        // spectrogram). A second Up walks onto the queue tracks at
+        // the top of the screen.
         KeyCode::Up => {
             state.visualizer_tab_focused = true;
             vec![]
         }
+        // Down on the visualizer: nothing — it's the bottom-most
+        // region of the screen.
+        KeyCode::Down => vec![],
 
-        // Left/Right arrow seeking (1 second increments)
-        KeyCode::Left => vec![PlaybackAction::SeekRelative(-1000).into()],
-        KeyCode::Right => vec![PlaybackAction::SeekRelative(1000).into()],
+        // Left jumps up to the queue area and lands on the left-side
+        // sidebar (Radio / DJ Modes / Remix Tools / Clear Queue) —
+        // single keypress from the visualizer to the sidebar.
+        KeyCode::Left => {
+            state.now_playing_focus = NowPlayingFocus::Sidebar;
+            vec![NavigationAction::SetView(View::Queue).into()]
+        }
+        // Right jumps up to the queue track list. Symmetric with
+        // Left so the queue area is one keypress away in either
+        // direction.
+        KeyCode::Right => {
+            state.now_playing_focus = NowPlayingFocus::Tracks;
+            vec![NavigationAction::SetView(View::Queue).into()]
+        }
+
+        // Seeking: vim-style `,` / `.` (1-second steps). Shift+arrow
+        // also seeks, preserving the previous muscle memory.
+        KeyCode::Char(',') => vec![PlaybackAction::SeekRelative(-1000).into()],
+        KeyCode::Char('.') => vec![PlaybackAction::SeekRelative(1000).into()],
 
         _ => vec![],
     }
@@ -338,12 +472,12 @@ fn handle_queue_track_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Ac
 
     match key.code {
         KeyCode::Esc => {
-            // If items are multi-selected, clear selection
-            if !state.queue.selected.is_empty() {
+            // Exit multi-select mode, clearing any selection.
+            if state.select_mode || !state.queue.selected.is_empty() {
+                state.select_mode = false;
                 state.queue.selected.clear();
                 return vec![];
             }
-            // Otherwise ESC does nothing in queue (use Ctrl+shortcuts to navigate)
             vec![]
         }
         KeyCode::F(1) | KeyCode::Char('?') => vec![NavigationAction::SetView(View::Help).into()],
@@ -379,6 +513,15 @@ fn handle_queue_track_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Ac
         KeyCode::Down => {
             state.scroll.queue = None;
             let max = get_max_index(state);
+            // Down at the bottom of the list (or in an empty queue)
+            // hops the focus over to the visualizer area below — its
+            // tab bar gets focused so the user can immediately
+            // arrow-Left/Right between waveform / spectrum /
+            // spectrogram / vectorscope.
+            if state.queue.tracks.is_empty() || state.list_state.queue_index >= max {
+                state.visualizer_tab_focused = true;
+                return vec![NavigationAction::SetView(View::NowPlaying).into()];
+            }
             state.list_state.queue_index = (state.list_state.queue_index + 1).min(max);
             vec![]
         }

@@ -93,6 +93,23 @@ impl EventLoop {
         // Restore artwork mode preference
         state.artwork.mode = crate::app::state::ArtworkMode::from_config(&self.config.ui.artwork_mode);
 
+        // Mirror the per-service "external search enabled" toggles
+        // from config onto AppState so the palette / context menus /
+        // menu bar can gate their entries without threading Config
+        // through every render path. dispatch_settings updates these
+        // when the user flips a Settings toggle.
+        state.external_search.apple_music = self.config.ui.enable_apple_music_search;
+        state.external_search.spotify     = self.config.ui.enable_spotify_search;
+        state.external_search.youtube     = self.config.ui.enable_youtube_search;
+
+        // Mirror saved per-playlist view toggles (group-by-album,
+        // show-artwork) so the playlist-tracks-column event handlers
+        // can apply them without a config handle.
+        state.playlist_views.clear();
+        for (lib, settings) in &self.config.ui.library_view_settings {
+            state.playlist_views.insert(lib.clone(), settings.playlists.clone());
+        }
+
         // Start authentication in background (same logic as GUI).
         state.connection = ConnectionState::Authenticating;
         state.auth_state.step = super::state::AuthStep::Checking;
@@ -413,6 +430,48 @@ impl EventLoop {
         match event {
             Event::Key(key) => {
                 state.cache_mgmt.last_input_time = std::time::Instant::now();
+                // Command-palette overlay swallows every key while
+                // it's open. Open / close transitions:
+                //   - `:` from any normal context  → open palette
+                //   - Esc                          → cancel
+                //   - Enter on a row               → execute and close
+                if state.palette.open {
+                    use crate::ui::command_palette::{handle_key as palette_key, run as palette_run, PaletteOutcome};
+                    return match palette_key(state, key) {
+                        PaletteOutcome::Continue => vec![],
+                        PaletteOutcome::Cancel => {
+                            state.palette.close();
+                            vec![]
+                        }
+                        PaletteOutcome::Execute(cmd) => {
+                            state.palette.close();
+                            palette_run(cmd, state)
+                        }
+                    };
+                }
+                if matches!(key.code, crossterm::event::KeyCode::Char(':'))
+                    && key.modifiers.is_empty()
+                    && !state.list_filter.active
+                    && state.view != crate::app::state::View::Auth
+                {
+                    crate::ui::command_palette::open(state);
+                    return vec![];
+                }
+                // `/` opens the inline filter from anywhere — the
+                // filter input is rendered in the transport bar and
+                // grabs keyboard focus until Esc / Enter closes it.
+                // Activate even when the category column is focused;
+                // typing into the filter is what the user wants when
+                // they hit `/`, regardless of which pane has focus.
+                if matches!(key.code, crossterm::event::KeyCode::Char('/'))
+                    && !key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(crossterm::event::KeyModifiers::ALT)
+                    && !state.list_filter.active
+                    && state.view != crate::app::state::View::Auth
+                {
+                    use crate::app::action::SearchAction;
+                    return vec![SearchAction::ActivateListFilter.into()];
+                }
                 handlers::key_input::handle_key(key, state, &self.config)
             }
             Event::Resize(w, h) => {

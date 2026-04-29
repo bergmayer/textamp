@@ -26,20 +26,20 @@ pub fn view<'a>() -> Element<'a, GuiMessage> {
         });
 
     let meta = column![
-        text(format!("textamp  v{version}")).size(16),
-        text("A keyboard-driven Plex Music client").size(12),
+        text(format!("textamp  v{version}")).size(18),
+        text("A keyboard-driven Plex Music client").size(14),
         Space::with_height(Length::Fixed(8.0)),
-        text("Terminal + desktop \u{2022} GPL-3.0 \u{2022} John Bergmayer").size(11),
-        text("http://bergmayer.net/textamp").size(11)
+        text("Terminal + desktop \u{2022} GPL-3.0 \u{2022} John Bergmayer").size(13),
+        text("http://bergmayer.net/textamp").size(13)
             .color(Color { r: 0.30, g: 0.80, b: 0.90, a: 1.0 }),
         Space::with_height(Length::Fixed(8.0)),
-        text("\u{201C}Why be bleak when you can be Blake?\u{201D}").size(11),
-        text("  \u{2014} Jhon Balance").size(10),
+        text("\u{201C}Why be bleak when you can be Blake?\u{201D}").size(13),
+        text("  \u{2014} Jhon Balance").size(12),
     ]
     .spacing(2)
     .padding(12);
 
-    let close_btn = button(text("Close").size(12))
+    let close_btn = button(text("Close").size(14))
         .padding([4, 16])
         .on_press(GuiMessage::HideAbout)
         .style(popout_button_style);
@@ -105,12 +105,12 @@ fn render_ansi(input: &str) -> Element<'static, GuiMessage> {
     for line in input.split('\n') {
         let spans = parse_line_to_spans(line);
         if spans.is_empty() {
-            lines.push(text(" ".to_string()).size(11).font(Font::MONOSPACE).into());
+            lines.push(text(" ".to_string()).size(13).font(Font::MONOSPACE).into());
         } else {
             lines.push(
                 Rich::<'static, GuiMessage>::with_spans(spans)
                     .font(Font::MONOSPACE)
-                    .size(11)
+                    .size(13)
                     .into(),
             );
         }

@@ -49,13 +49,14 @@ QUEUE REORDER (Now Playing view)
   Ctrl+F  Search        Ctrl+M  Similar   Ctrl+R  Related
   Ctrl+J  Jump to album
   Ctrl+S  Save queue as playlist
-  Quit:   Ctrl+Q (Linux) | Cmd+Q or Cmd+W (Mac) | Alt+F4 (Windows)
+  Ctrl+W (Cmd+W on Mac)  Close current column / details pane
+  Quit:   Ctrl+Q (Linux/Windows) | Cmd+Q (Mac) | Alt+F4 (Windows)
   Ctrl+X  Clear queue   Ctrl+Z  Undo
 
   Alt+R  Random Album Radio
 
-  Search streaming services for selected or now-playing album or artist:
-  Ctrl+Alt+A  Apple Music  Ctrl+Alt+S  Spotify  Ctrl+Alt+Y  YouTube
+  Search streaming services for selected or now-playing album/artist:
+  Tools menu → Search Apple Music / Spotify / YouTube
 
 QUEUE (Ctrl+U)
   Del               Remove track(s) from queue
@@ -87,13 +88,13 @@ STATIONS (Now Playing, "Radio" sidebar button)
 "#;
 
 pub fn view<'a>() -> Element<'a, GuiMessage> {
-    let close_btn = button(text("Close").size(12))
+    let close_btn = button(text("Close").size(14))
         .padding([4, 12])
         .on_press(GuiMessage::CloseKeyboardShortcuts)
         .style(popout_button_style);
 
     let header = row![
-        text("Keyboard Shortcuts").size(18),
+        text("Keyboard Shortcuts").size(20),
         Space::with_width(Length::Fill),
         close_btn,
     ]
@@ -102,7 +103,7 @@ pub fn view<'a>() -> Element<'a, GuiMessage> {
     let body = scrollable(
         container(
             text(HELP_TEXT.trim_start())
-                .size(13)
+                .size(15)
                 .font(Font::MONOSPACE),
         )
         .padding([4, 12]),

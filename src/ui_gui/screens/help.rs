@@ -52,13 +52,14 @@ QUEUE REORDER (Queue view)
   Ctrl+F  Search        Ctrl+M  Similar   Ctrl+R  Related
   Ctrl+J  Jump to album
   Ctrl+S  Save queue as playlist
-  Quit:   Ctrl+Q (Linux) | Cmd+Q or Cmd+W (Mac) | Alt+F4 (Windows)
+  Ctrl+W (Cmd+W on Mac)  Close current column / details pane
+  Quit:   Ctrl+Q (Linux/Windows) | Cmd+Q (Mac) | Alt+F4 (Windows)
   Ctrl+X  Clear queue   Ctrl+Z  Undo
 
   Alt+R  Random Album Radio
 
-  Search streaming services for selected or now-playing album or artist:
-  Ctrl+Alt+A  Apple Music  Ctrl+Alt+S  Spotify  Ctrl+Alt+Y  YouTube
+  Search streaming services for selected or now-playing album/artist:
+  Tools menu → Search Apple Music / Spotify / YouTube
 
 QUEUE (Ctrl+U)
   Del               Remove track(s) from queue
@@ -83,7 +84,7 @@ pub fn view(_state: &AppState) -> Element<'_, GuiMessage> {
     let body = scrollable(
         container(
             text(HELP_TEXT.trim_start())
-                .size(13)
+                .size(15)
                 .font(Font::MONOSPACE),
         )
         .padding([4, 12]),
@@ -94,7 +95,7 @@ pub fn view(_state: &AppState) -> Element<'_, GuiMessage> {
 
     container(
         column![
-            text("Keyboard shortcuts  (Esc to close, ↑↓ PgUp/PgDn to scroll)").size(14),
+            text("Keyboard shortcuts  (Esc to close, ↑↓ PgUp/PgDn to scroll)").size(16),
             body,
         ]
         .spacing(8)

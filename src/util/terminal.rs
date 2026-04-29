@@ -4,17 +4,29 @@ use std::io::{self, Stdout};
 
 use crossterm::{
     cursor,
-    event::{DisableMouseCapture, EnableMouseCapture},
+    event::{
+        DisableMouseCapture, EnableMouseCapture, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::prelude::*;
 
 /// Setup the terminal for TUI mode.
+///
+/// Pushes the kitty keyboard-enhancement flags so we can disambiguate
+/// modified keys that legacy escape codes can't (Shift+Space, Ctrl+i
+/// vs Tab, etc.). Falls through silently when the host terminal
+/// doesn't support the protocol — the push just becomes a no-op.
 pub fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    let _ = execute!(
+        stdout,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    );
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
     Ok(terminal)
@@ -22,6 +34,10 @@ pub fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
 
 /// Restore the terminal to normal mode.
 pub fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> {
+    // Pop the keyboard-enhancement push from setup_terminal. Safe to
+    // call even when the push was a no-op.
+    let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
+
     // Disable mouse capture (may already be disabled by event loop shutdown)
     // and leave alternate screen BEFORE disabling raw mode
     // This ensures escape sequences are properly processed

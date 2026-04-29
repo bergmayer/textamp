@@ -123,15 +123,22 @@ pub fn handle_app_event(
                 });
             }
 
-            // Compute library cache stats in background (per-library)
+            // Compute library cache stats in background (per-library).
+            // Only post the event when the on-disk cache file actually
+            // exists with content — an empty breakdown would clobber
+            // the in-memory estimate that `RefreshCacheStats` posts
+            // when the user opens the Settings popup, leaving every
+            // Size column row stuck at "—".
             {
                 let event_tx = event_tx.clone();
                 let lib_key = state.active_library.clone();
                 tokio::task::spawn_blocking(move || {
                     if let (Some(cache), Some(key)) = (crate::plex::LibraryCache::new(), lib_key) {
-                        let total_bytes = cache.library_size(&key);
                         let breakdown = cache.library_breakdown(&key);
-                        let _ = event_tx.blocking_send(CacheEvent::LibraryCacheStats { total_bytes, breakdown }.into());
+                        if !breakdown.is_empty() {
+                            let total_bytes = cache.library_size(&key);
+                            let _ = event_tx.blocking_send(CacheEvent::LibraryCacheStats { total_bytes, breakdown }.into());
+                        }
                     }
                 });
             }
@@ -411,21 +418,14 @@ pub fn handle_app_event(
             state.library.artists = artists;
             state.library.artists_loading = false;
 
-            // Update artist_nav if we're in Artists category
-            let mut actions = vec![];
+            // Update artist_nav if we're in Artists category. No auto-drill —
+            // child columns only open on explicit Enter/Right.
             if state.browse_category == BrowseCategory::Library && !state.library.artists.is_empty() {
                 let title = "artists";
                 let items = state.build_artist_root_items();
                 state.artist_nav.update_root_items(title, items);
-                // Auto-drill if only root column exists
-                if state.artist_nav.columns.len() == 1 {
-                    if let Some(drill) = super::key_input::auto_drill_artist_action(state) {
-                        state.auto_drill_pending = true;
-                        actions.push(drill);
-                    }
-                }
             }
-            actions
+            vec![]
         }
         Event::Data(DataEvent::AlbumsLoaded(mut albums)) => {
             // Sort by display title, ignoring "The " prefix
@@ -470,21 +470,26 @@ pub fn handle_app_event(
                 });
             }
 
-            // Update playlist_nav with the playlists list
+            // Update playlist_nav with the playlists list. No auto-drill —
+            // child columns only open on explicit Enter/Right.
             let items = crate::app::state::BrowseItem::from_playlists(&playlists);
             state.playlist_nav.update_root_items("playlists", items);
+
+            // Build the live-keys set for stale-pruning of saved
+            // per-playlist view toggles. Anything saved against a
+            // playlist that's no longer in this library's list (i.e.
+            // the user deleted it on Plex) gets dropped from config.
+            let live_keys: std::collections::HashSet<String> =
+                playlists.iter().map(|p| p.rating_key.clone()).collect();
+            let prune_action = state.active_library.as_ref().cloned()
+                .map(|lib_key| SettingsAction::PrunePlaylistViews {
+                    library_key: lib_key,
+                    live_playlist_keys: live_keys,
+                }.into());
+
             state.library.playlists = playlists;
             state.library.playlists_loading = false;
-
-            // Auto-drill if only root column exists
-            let mut actions = vec![];
-            if state.playlist_nav.columns.len() == 1 && !state.playlist_nav.is_empty() {
-                if let Some(drill) = super::key_input::auto_drill_playlist_action(state) {
-                    state.auto_drill_pending = true;
-                    actions.push(drill);
-                }
-            }
-            actions
+            prune_action.map(|a: Action| vec![a]).unwrap_or_default()
         }
         Event::Data(DataEvent::TracksLoaded(tracks)) => {
             state.library.selected_album_tracks = tracks;
@@ -564,6 +569,11 @@ pub fn handle_app_event(
             state.similar.mode = crate::app::state::SimilarMode::Tracks;
             state.similar.loading = false;
             state.list_state.similar_index = 0;
+            vec![]
+        }
+        Event::Data(DataEvent::TrackPaneSimilarLoaded { rating_key, tracks }) => {
+            state.track_pane_similar_loading.remove(&rating_key);
+            state.track_pane_similar.insert(rating_key, tracks);
             vec![]
         }
         Event::Data(DataEvent::SimilarArtistsLoaded(artists)) => {
@@ -1392,6 +1402,46 @@ pub fn handle_app_event(
             state.marquee.borrow_mut().tick();
             state.marquee_subtitle.borrow_mut().tick();
 
+            // Per-tick counter for animated "Loading..." text in
+            // miller column placeholders. Wraps; consumers do `% 4`.
+            state.loading_tick = state.loading_tick.wrapping_add(1);
+
+            // Drain the audio backend's sample tap into the
+            // vectorscope buffer. Done unconditionally (cheap) so
+            // the visualizer is "warm" the moment the user opens
+            // its tab. Buffer is capped at VECTORSCOPE_BUFFER_LEN
+            // — older samples roll off the front of the deque.
+            if let Some(tap) = state.vectorscope_tap.clone() {
+                if let Ok(mut q) = tap.lock() {
+                    while let Some(s) = q.pop_front() {
+                        if state.vectorscope_buffer.len() >= crate::app::state::VECTORSCOPE_BUFFER_LEN {
+                            state.vectorscope_buffer.pop_front();
+                        }
+                        state.vectorscope_buffer.push_back(s);
+                    }
+                }
+            }
+
+            // Track-details pane: lazy-fetch sonically-similar tracks
+            // for whatever Track row is currently focused. Returned
+            // as a follow-up `LoadTrackPaneSimilar` action so the
+            // dispatcher (which has client access) actually fires
+            // the API call. Idempotent — the dispatcher early-returns
+            // when the entry is already loaded or in flight.
+            if state.view == crate::app::state::View::Browse {
+                if let Some(track) = state.focused_track() {
+                    let key = track.rating_key.clone();
+                    if !key.is_empty()
+                        && !state.track_pane_similar.contains_key(&key)
+                        && !state.track_pane_similar_loading.contains(&key)
+                    {
+                        return vec![crate::app::action::DataAction::LoadTrackPaneSimilar {
+                            rating_key: key,
+                        }.into()];
+                    }
+                }
+            }
+
             // Album art loading: lazy-load only for visible items in the focused column
             // Limit concurrent in-flight requests to avoid overwhelming the Plex transcoder
             // Album art loading: lazy-load for columns with artwork_visible
@@ -1653,8 +1703,11 @@ pub fn handle_app_event(
             // Trigger compilation detection from cached tracks if not already done
             helpers::maybe_detect_compilations(event_tx, state, client);
 
-            // Auto-drill: build second column synchronously from cached data
-            super::dispatch_data::auto_drill_from_cache(state)
+            // No auto-drill on launch — land the user on a clean
+            // 2-column view (cat + artists root). They can drill
+            // explicitly with Enter/Right and close cols with
+            // Ctrl+W to come back to this layout cheaply.
+            vec![]
         }
         Event::Preload(PreloadEvent::LibraryCacheLoadFailed { library_key }) => {
             state.library_loading = false;
@@ -1915,19 +1968,236 @@ pub fn handle_app_event(
                 .and_then(|c| c.selected_item())
                 .map(|item| item.title().to_string())
                 .unwrap_or_default();
+            // Header carries the track count (formerly part of each
+            // playlist row's label, like "Soundbombing (59 tracks)").
+            // Now playlist rows show just the title and the count
+            // appears in the resulting tracks column header.
+            let n = tracks.len();
+            let count_str = if n == 1 { "1 track".to_string() } else { format!("{} tracks", n) };
             let title = if playlist_name.is_empty() {
-                "tracks".to_string()
+                format!("tracks \u{2014} {}", count_str)
             } else {
-                format!("tracks \u{2014} {}", playlist_name)
+                format!("{} \u{2014} {}", playlist_name, count_str)
             };
             let items = crate::app::state::BrowseItem::from_tracks(&tracks);
-            let col = crate::app::state::BrowseColumn::new_with_tracks(title, items, tracks);
+            let mut col = crate::app::state::BrowseColumn::new_with_tracks(title, items, tracks);
+            // GUI: render a "Play Playlist" button alongside the
+            // header (same affordance as Play Album on a tracks
+            // column). play_all_label means "play `col.tracks`
+            // directly" — exactly the right semantics for a playlist.
+            col.play_all_label = Some("Play Playlist".to_string());
             state.playlist_nav.push_column(col);
             vec![]
         }
         Event::Radio(RadioEvent::PlaylistTracksForMillerFailed { playlist_key: _, error }) => {
             state.playlist_nav.loading = false;
             state.set_error(format!("Failed to load playlist: {}", error));
+            vec![]
+        }
+
+        // First page of a lazy-loaded playlist column. Same as the
+        // legacy "all tracks loaded" handler above, but stamps lazy
+        // state on the column so `LoadMorePlaylistTracks` can fill in
+        // the tail as the user scrolls.
+        Event::Radio(RadioEvent::PlaylistFirstPageLoaded { playlist_key, tracks, total }) => {
+            state.playlist_nav.loading = false;
+            // Race guard: drop replies for a playlist the user has
+            // already navigated away from (mirrors the original
+            // PlaylistTracksForMillerLoaded path).
+            let selected_key: Option<String> = state.playlist_nav.columns.first()
+                .and_then(|c| c.items.get(c.selected_index))
+                .map(|item| item.key().to_string());
+            if selected_key.as_deref() != Some(playlist_key.as_str()) {
+                tracing::debug!(
+                    "Playlist first-page reply for {} arrived after user navigated to {:?} — discarding",
+                    playlist_key, selected_key,
+                );
+                return vec![];
+            }
+
+            state.auto_drill_pending = false;
+            state.playlist_nav.focused_column = 0;
+
+            let playlist_name = state.playlist_nav.focused()
+                .and_then(|c| c.selected_item())
+                .map(|item| item.title().to_string())
+                .unwrap_or_default();
+            // Header reports the SERVER total, not the partial in-memory
+            // count, so the user knows what they'll eventually scroll to.
+            let n_visible = tracks.len();
+            let total_n = total.map(|t| t as usize).unwrap_or(n_visible);
+            let count_str = if total_n == 1 {
+                "1 track".to_string()
+            } else if (total_n as usize) > n_visible {
+                format!("{} tracks", total_n)
+            } else {
+                format!("{} tracks", n_visible)
+            };
+            let title = if playlist_name.is_empty() {
+                format!("tracks \u{2014} {}", count_str)
+            } else {
+                format!("{} \u{2014} {}", playlist_name, count_str)
+            };
+            let items = crate::app::state::BrowseItem::from_tracks(&tracks);
+            let mut col = crate::app::state::BrowseColumn::new_with_tracks(title, items, tracks);
+            col.play_all_label = Some("Play Playlist".to_string());
+            // Apply this playlist's saved view toggles, if any. The
+            // mirror lives on `state.playlist_views` (sync'd from
+            // `config.ui.library_view_settings` at boot and on every
+            // SavePlaylistView). Defaults are no-grouping +
+            // no-artwork — same as a fresh column.
+            let saved_view = state.active_library.as_ref()
+                .and_then(|lib| state.playlist_views.get(lib))
+                .and_then(|m| m.get(&playlist_key))
+                .copied()
+                .unwrap_or_default();
+            if saved_view.show_artwork {
+                col.artwork_visible = true;
+            }
+            // Mark the column as lazy so the GUI scroll handler knows
+            // to ask for more pages as the user scrolls down.
+            col.lazy = Some(crate::app::state::LazyPlaylist {
+                key: playlist_key.clone(),
+                total,
+                loading: false,
+            });
+            // Apply group-by-album AFTER the column is wired up.
+            // group_by_album resets selected_index to 0 and rebuilds
+            // items, so we have to set the column up first.
+            if saved_view.group_by_album {
+                col.group_by_album();
+            }
+            state.playlist_nav.push_column(col);
+
+            // If artwork was restored ON, kick a full-list art batch
+            // so every album cover loads (mirrors `toggle_artwork`'s
+            // ON-path). The col was just pushed; read it back to
+            // collect art keys.
+            let mut follow_ups: Vec<Action> = Vec::new();
+            if saved_view.show_artwork {
+                let batch = super::dispatch_miller::collect_all_art_to_load(
+                    state.playlist_nav.columns.last(),
+                    &state.artwork.grid_cache,
+                    &state.artwork.grid_pending,
+                );
+                if !batch.is_empty() {
+                    follow_ups.push(SystemAction::LoadAlbumArt(batch).into());
+                }
+            }
+            // If grouping was restored AND there are more pages, the
+            // user expects all the albums to show — kick the next
+            // page fetch so pagination can chain to the end.
+            if saved_view.group_by_album {
+                let next = state.playlist_nav.columns.last().and_then(|col| {
+                    let lazy = col.lazy.as_ref()?;
+                    let total = lazy.total? as usize;
+                    if !lazy.loading && col.tracks.len() < total {
+                        Some((lazy.key.clone(), col.tracks.len() as u32))
+                    } else {
+                        None
+                    }
+                });
+                if let Some((pk, off)) = next {
+                    follow_ups.push(crate::app::action::MillerAction::LoadMorePlaylistTracks {
+                        playlist_key: pk, offset: off,
+                    }.into());
+                }
+            }
+            follow_ups
+        }
+
+        // Subsequent page — append to the existing column.
+        Event::Radio(RadioEvent::PlaylistMorePageLoaded { playlist_key, tracks, total }) => {
+            let Some(col) = state.playlist_nav.columns.iter_mut()
+                .find(|c| c.lazy.as_ref().map(|l| l.key == *playlist_key).unwrap_or(false))
+            else {
+                tracing::debug!(
+                    "Playlist more-page reply for {} arrived after column was replaced — discarding",
+                    playlist_key,
+                );
+                return vec![];
+            };
+            // Refresh total in case the smart playlist shifted between
+            // pages (rare but possible for "Recently Added" if a track
+            // was added mid-scroll).
+            if let Some(lazy) = col.lazy.as_mut() {
+                if let Some(t) = total { lazy.total = Some(t); }
+                lazy.loading = false;
+            }
+            // Append both the BrowseItem rows and the raw Track records
+            // so the column stays consistent for both render and play.
+            let new_items = crate::app::state::BrowseItem::from_tracks(&tracks);
+            col.items.extend(new_items);
+            col.tracks.extend(tracks);
+
+            // If the user had grouping enabled when the toggle fired,
+            // re-run the grouping over the now-larger track list so
+            // the new tracks slot into the existing albums (or open
+            // new album rows). `group_by_album` resets `selected_index`
+            // to 0, which would visibly snap the user's selection back
+            // to the top of the list every time a page lands on a
+            // long playlist — capture the selected album's key first
+            // so we can restore the selection by key after.
+            let was_grouped = col.grouped_by_album;
+            if was_grouped {
+                let prev_key: Option<String> = col.items.get(col.selected_index)
+                    .and_then(|it| match it {
+                        crate::app::state::BrowseItem::Album { key, .. } => Some(key.clone()),
+                        _ => None,
+                    });
+                col.ungroup_by_album();
+                col.group_by_album();
+                if let Some(prev_key) = prev_key {
+                    if let Some(idx) = col.items.iter().position(|it| matches!(
+                        it,
+                        crate::app::state::BrowseItem::Album { key, .. } if key == &prev_key
+                    )) {
+                        col.selected_index = idx;
+                    }
+                }
+            }
+            let artwork_on = col.artwork_visible;
+            // Continue paginating until the column is fully loaded so
+            // grouping / artwork covers the whole playlist.
+            let next_offset = col.lazy.as_ref().and_then(|lazy| {
+                let total = lazy.total? as usize;
+                if !lazy.loading && col.tracks.len() < total {
+                    Some(col.tracks.len() as u32)
+                } else {
+                    None
+                }
+            });
+
+            let mut follow_ups = vec![];
+            if artwork_on {
+                let batch = super::dispatch_miller::collect_all_art_to_load(
+                    Some(&*col),
+                    &state.artwork.grid_cache,
+                    &state.artwork.grid_pending,
+                );
+                if !batch.is_empty() {
+                    follow_ups.push(SystemAction::LoadAlbumArt(batch).into());
+                }
+            }
+            if let Some(off) = next_offset {
+                follow_ups.push(crate::app::action::MillerAction::LoadMorePlaylistTracks {
+                    playlist_key, offset: off,
+                }.into());
+            }
+            follow_ups
+        }
+
+        Event::Radio(RadioEvent::PlaylistMorePageFailed { playlist_key, error }) => {
+            // Don't surface the error inline — the user has the
+            // already-loaded portion of the playlist visible. Just
+            // release the loading lock so a future scroll can retry.
+            if let Some(lazy) = state.playlist_nav.columns.iter_mut()
+                .filter_map(|c| c.lazy.as_mut())
+                .find(|l| l.key == *playlist_key)
+            {
+                lazy.loading = false;
+            }
+            tracing::warn!("Playlist more-page fetch failed for {}: {}", playlist_key, error);
             vec![]
         }
 

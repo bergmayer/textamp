@@ -118,7 +118,11 @@ pub fn primary_action_button<'a>(
 ) -> iced::widget::Button<'a, crate::ui_gui::message::GuiMessage> {
     use iced::widget::{button, text};
     use iced::Length;
-    button(text(label.into()).size(13))
+    // Wrapping::None keeps action labels (e.g. "Artist Radio - <long
+    // artist name>") on a single line; the surrounding column header
+    // clips overflow rather than letting the button wrap into a
+    // multi-line lozenge.
+    button(text(label.into()).size(15).wrapping(text::Wrapping::None))
         .padding([4, 18])
         .width(Length::Shrink)
         .height(Length::Fixed(28.0))
@@ -161,9 +165,9 @@ pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
     let album_text = track.and_then(|t| t.parent_title.clone()).unwrap_or_default();
 
     let track_info = column![
-        text(title_text).size(14),
+        text(title_text).size(16),
         text(format!("{artist_text}  \u{2014}  {album_text}"))
-            .size(11),
+            .size(13),
     ]
     .width(Length::FillPortion(3));
 
@@ -176,15 +180,15 @@ pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
         PlayStatus::Stopped   => ">",
         PlayStatus::Buffering => "...",
     };
-    let play_btn = button(text(play_label).size(14))
+    let play_btn = button(text(play_label).size(16))
         .on_press(GuiMessage::Action(Action::Playback(PlaybackAction::TogglePlayPause)))
         .padding([6, 14])
         .style(popout_button_style);
-    let prev_btn = button(text("<<").size(12))
+    let prev_btn = button(text("<<").size(14))
         .on_press(GuiMessage::Action(Action::Playback(PlaybackAction::Previous)))
         .padding([6, 12])
         .style(popout_button_style);
-    let next_btn = button(text(">>").size(12))
+    let next_btn = button(text(">>").size(14))
         .on_press(GuiMessage::Action(Action::Playback(PlaybackAction::Next)))
         .padding([6, 12])
         .style(popout_button_style);
@@ -196,8 +200,8 @@ pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
         GuiMessage::Action(Action::Playback(PlaybackAction::Seek(ms as u64)))
     })
     .width(Length::Fill);
-    let pos_label = text(fmt_ms(state.playback.position_ms)).size(11);
-    let dur_label = text(fmt_ms(state.playback.duration_ms)).size(11);
+    let pos_label = text(fmt_ms(state.playback.position_ms)).size(13);
+    let dur_label = text(fmt_ms(state.playback.duration_ms)).size(13);
 
     let controls = row![prev_btn, play_btn, next_btn].spacing(4).align_y(Alignment::Center);
     let seek_row = row![pos_label, seek_slider, dur_label]
@@ -230,7 +234,7 @@ pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
         .last_error
         .as_ref()
         .map(|msg| {
-            container(text(msg.clone()).size(11))
+            container(text(msg.clone()).size(13))
                 .padding([4, 12])
                 .width(Length::Fill)
                 .style(|theme: &iced::Theme| {

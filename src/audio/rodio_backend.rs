@@ -5,11 +5,110 @@
 
 use super::streaming::BlockingReader;
 use super::traits::{AudioBackend, AudioError};
-use rodio::{cpal::traits::{DeviceTrait, HostTrait}, Decoder, OutputStream, OutputStreamBuilder, Sink};
+use rodio::source::Source;
+use rodio::{cpal::traits::{DeviceTrait, HostTrait}, ChannelCount, Decoder, OutputStream, OutputStreamBuilder, Sample, SampleRate, Sink};
+use std::collections::VecDeque;
 use std::io::Cursor;
 use std::panic::{self, AssertUnwindSafe};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+/// Shared, thread-safe ring of recent stereo samples that the audio
+/// pipeline keeps populating while playback runs. Used by the
+/// vectorscope visualizer (drained on each UI tick).
+///
+/// Each entry is `(left, right)` in `[-1.0, 1.0]`. We pre-cap the
+/// buffer at `SAMPLE_TAP_CAP` so a stalled UI never lets the audio
+/// thread fill memory unboundedly.
+pub type SampleTap = Arc<Mutex<VecDeque<(f32, f32)>>>;
+
+/// ~85 ms of stereo samples at 48 kHz. Long enough to survive a
+/// dropped or jittery UI frame; short enough that a stale tap can't
+/// inflate a burst of historic samples once playback resumes.
+const SAMPLE_TAP_CAP: usize = 4_096;
+
+fn new_sample_tap() -> SampleTap {
+    Arc::new(Mutex::new(VecDeque::with_capacity(SAMPLE_TAP_CAP)))
+}
+
+/// Source wrapper that copies every sample it forwards into a shared
+/// `SampleTap`. Stereo sources are split into `(L, R)` pairs at the
+/// interleave boundary; mono sources duplicate the sample to both
+/// channels so the vectorscope still has something to plot (the
+/// trace becomes a diagonal line, which is the correct mono visual).
+struct TapSource<S> {
+    inner: S,
+    tap: SampleTap,
+    pending_left: Option<f32>,
+    is_stereo: bool,
+}
+
+impl<S> TapSource<S>
+where
+    S: Source<Item = Sample>,
+{
+    fn new(inner: S, tap: SampleTap) -> Self {
+        let is_stereo = inner.channels() >= 2;
+        Self { inner, tap, pending_left: None, is_stereo }
+    }
+
+    #[inline]
+    fn push_pair(&self, pair: (f32, f32)) {
+        if let Ok(mut buf) = self.tap.lock() {
+            if buf.len() == SAMPLE_TAP_CAP {
+                buf.pop_front();
+            }
+            buf.push_back(pair);
+        }
+    }
+}
+
+impl<S> Iterator for TapSource<S>
+where
+    S: Source<Item = Sample>,
+{
+    type Item = Sample;
+
+    #[inline]
+    fn next(&mut self) -> Option<Sample> {
+        let s = self.inner.next()?;
+        if self.is_stereo {
+            match self.pending_left.take() {
+                Some(l) => self.push_pair((l, s)),
+                None => self.pending_left = Some(s),
+            }
+        } else {
+            self.push_pair((s, s));
+        }
+        Some(s)
+    }
+}
+
+impl<S> Source for TapSource<S>
+where
+    S: Source<Item = Sample>,
+{
+    fn current_span_len(&self) -> Option<usize> { self.inner.current_span_len() }
+    fn channels(&self) -> ChannelCount { self.inner.channels() }
+    fn sample_rate(&self) -> SampleRate { self.inner.sample_rate() }
+    fn total_duration(&self) -> Option<Duration> { self.inner.total_duration() }
+
+    // Forward seek to the inner source — without this the default impl
+    // returns `SeekError::NotSupported` and Sink::try_seek silently
+    // fails, breaking click-to-seek on the waveform / spectrogram /
+    // transport-bar slider.
+    fn try_seek(&mut self, pos: Duration) -> Result<(), rodio::source::SeekError> {
+        // Drop any half-collected pending sample — the inner cursor
+        // is moving so the (L, R) split would otherwise pair a left
+        // sample from the old position with a right sample from the
+        // new one.
+        self.pending_left = None;
+        // Same reason the buffer is cleared on play_data: don't keep
+        // pre-seek tail samples mixed with post-seek ones.
+        if let Ok(mut buf) = self.tap.lock() { buf.clear(); }
+        self.inner.try_seek(pos)
+    }
+}
 
 /// Wrapper around `Arc<Vec<u8>>` that implements `AsRef<[u8]>`,
 /// enabling zero-copy use with `Cursor` for rodio decoding.
@@ -30,6 +129,7 @@ pub struct RodioBackend {
     stream: OutputStream,
     sink: Option<Sink>,
     volume: f32,
+    tap: SampleTap,
 }
 
 impl RodioBackend {
@@ -97,7 +197,15 @@ impl RodioBackend {
             stream,
             sink: None,
             volume: 0.8,
+            tap: new_sample_tap(),
         })
+    }
+
+    /// Clone the shared sample buffer so other layers (the GUI
+    /// vectorscope visualizer) can drain stereo samples in parallel
+    /// with playback.
+    pub fn sample_tap(&self) -> SampleTap {
+        self.tap.clone()
     }
 
     /// Try to decode audio data, catching any panics silently.
@@ -168,11 +276,15 @@ impl RodioBackend {
 
         // Decode from the streaming reader
         let source = Self::try_decode_streaming(reader, byte_len)?;
+        // Drain the previous track's tail samples so the vectorscope
+        // doesn't briefly draw the old waveform when a new track starts.
+        if let Ok(mut buf) = self.tap.lock() { buf.clear(); }
+        let tapped = TapSource::new(source, self.tap.clone());
 
         // Create new sink and start playback
         let sink = Sink::connect_new(self.stream.mixer());
         sink.set_volume(self.volume);
-        sink.append(source);
+        sink.append(tapped);
 
         self.sink = Some(sink);
 
@@ -189,11 +301,13 @@ impl AudioBackend for RodioBackend {
 
         // Decode the audio data
         let source = Self::try_decode(data)?;
+        if let Ok(mut buf) = self.tap.lock() { buf.clear(); }
+        let tapped = TapSource::new(source, self.tap.clone());
 
         // Create new sink and start playback
         let sink = Sink::connect_new(self.stream.mixer());
         sink.set_volume(self.volume);
-        sink.append(source);
+        sink.append(tapped);
 
         self.sink = Some(sink);
 

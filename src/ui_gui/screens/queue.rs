@@ -31,53 +31,80 @@ pub fn view<'a>(
     stations_popup_open: bool,
     dj_modes_popup_open: bool,
     remix_tools_popup_open: bool,
+    vectorscope: &'a crate::ui_gui::widgets::vectorscope_canvas::Vectorscope,
 ) -> Element<'a, GuiMessage> {
     let artwork = big_artwork_view(state);
     let radio_btn = radio_button(state, stations_popup_open);
-    let random_album_btn = random_album_button(state);
     let dj_modes_btn = dj_modes_button(state, dj_modes_popup_open);
     let remix_tools_btn = remix_tools_button(remix_tools_popup_open);
-    let save_queue_btn = save_queue_button(state);
     let clear_queue_btn = clear_queue_button(state);
     let queue = track_list(state, dragging);
 
-    // Left column: buttons only, stacked from the top. The artwork
-    // moved to the right column and the visualizer toggle was removed
-    // (visualizer is always-on now) so the column is shorter.
+    // Left column: just the verb-buttons that aren't already a single
+    // shortcut in the top menu. Save Queue (Cmd+S in File menu) and
+    // Play Random Album (Tools / Alt+R) were removed from here to keep
+    // the sidebar lean — they're still discoverable via the menu bar.
     let left = iced_column![
         radio_btn,
-        random_album_btn,
         dj_modes_btn,
         remix_tools_btn,
-        save_queue_btn,
         clear_queue_btn,
     ]
     .spacing(10)
     .width(Length::Fixed(LEFT_PANEL_WIDTH));
 
-    // TOP HALF: buttons | queue list | big artwork.
-    let top = iced_row![
-        left,
-        container(queue).width(Length::Fill).height(Length::Fill),
-        iced_column![artwork]
-            .width(Length::Fixed(RIGHT_PANEL_WIDTH))
-            .height(Length::Fill),
-    ]
-    .spacing(12);
+    // Each top-half section is wrapped in a bordered container so
+    // they read as three discrete panes — buttons, queue, artwork.
+    let left_panel = container(left)
+        .padding(8)
+        .width(Length::Fixed(LEFT_PANEL_WIDTH + 16.0))
+        .height(Length::Fixed(RIGHT_ART_SIDE))
+        .style(panel_outline_style);
+    let queue_panel = container(queue)
+        .padding(4)
+        .width(Length::Fill)
+        .height(Length::Fixed(RIGHT_ART_SIDE))
+        .style(panel_outline_style);
+    let art_panel = container(artwork)
+        .padding(0)
+        .width(Length::Fixed(RIGHT_PANEL_WIDTH))
+        .height(Length::Fixed(RIGHT_ART_SIDE))
+        .style(panel_outline_style);
+
+    // TOP HALF: buttons | queue list | big artwork — all the same
+    // 480 px height so the row reads as a single horizontal band.
+    let top = iced_row![left_panel, queue_panel, art_panel]
+        .spacing(12);
 
     // BOTTOM HALF: visualizer, full window width, always rendered.
     // Tabs (waveform / spectrum / spectrogram) inside the panel let
     // the user pick the mode without an extra "show / hide" toggle.
-    let viz = super::now_playing::visualizer_panel(state);
+    let viz = super::now_playing::visualizer_panel(state, vectorscope);
 
     let body = iced_column![
-        container(top).width(Length::Fill).height(Length::FillPortion(1)),
-        container(viz).width(Length::Fill).height(Length::FillPortion(1)),
+        container(top).width(Length::Fill).height(Length::Shrink),
+        container(viz).width(Length::Fill).height(Length::Fill),
     ]
     .spacing(8)
     .padding(12);
 
     container(body).width(Length::Fill).height(Length::Fill).into()
+}
+
+/// Outlined-section style used by the three top-half panes (buttons,
+/// queue, artwork). A 1 px border in the theme's strong-bg colour and
+/// a subtle base-bg fill so each pane reads as its own card.
+fn panel_outline_style(theme: &Theme) -> container::Style {
+    let p = theme.extended_palette();
+    container::Style {
+        background: Some(Background::Color(p.background.base.color)),
+        border: Border {
+            color: p.background.strong.color,
+            width: 1.0,
+            radius: 0.0.into(),
+        },
+        ..container::Style::default()
+    }
 }
 
 /// Big right-side album artwork. Square at `RIGHT_ART_SIDE` per side;
@@ -128,7 +155,7 @@ fn big_artwork_view(state: &AppState) -> Element<'_, GuiMessage> {
 }
 
 fn big_placeholder_art<'a>() -> Element<'a, GuiMessage> {
-    container(text("no cover").size(13))
+    container(text("no cover").size(15))
         .width(Length::Fixed(RIGHT_ART_SIDE))
         .height(Length::Fixed(RIGHT_ART_SIDE))
         .center_x(Length::Fixed(RIGHT_ART_SIDE))
@@ -146,7 +173,7 @@ fn radio_button(state: &AppState, stations_popup_open: bool) -> Element<'_, GuiM
     use crate::ui_gui::widgets::transport_bar::toggle_button_style;
     let radio_active = state.playback_mode == PlaybackMode::Radio || stations_popup_open;
     button(
-        container(text("Radio").size(13))
+        container(text("Radio").size(15))
             .center_y(Length::Fixed(36.0))
             .center_x(Length::Fill)
             .padding([0, 12]),
@@ -158,28 +185,6 @@ fn radio_button(state: &AppState, stations_popup_open: bool) -> Element<'_, GuiM
     .into()
 }
 
-/// "Play Random Album" — picks one random album from the active
-/// library, clears the queue, and starts playing it. ONE-SHOT: when
-/// the album finishes, playback ends. The continuous "Random Album
-/// Radio" station (which keeps queuing fresh random albums forever)
-/// is a separate thing reachable via the Radio button → stations
-/// popup; conflating them would mislabel which control is driving
-/// playback. Disabled when no album library is loaded.
-fn random_album_button(state: &AppState) -> Element<'_, GuiMessage> {
-    let enabled = !state.library.albums.is_empty();
-    button(
-        container(text("Play Random Album").size(13))
-            .center_y(Length::Fixed(36.0))
-            .center_x(Length::Fill)
-            .padding([0, 12]),
-    )
-    .width(Length::Fill)
-    .padding(0)
-    .on_press_maybe(if enabled { Some(GuiMessage::PlayOneRandomAlbum) } else { None })
-    .style(popout_button_style)
-    .into()
-}
-
 /// "DJ Modes" launcher — opens the DJ Modes picker popup. Renders in
 /// the pressed style when EITHER a DJ mode is currently active OR the
 /// popup itself is open. Same convention as `radio_button` /
@@ -188,7 +193,7 @@ fn random_album_button(state: &AppState) -> Element<'_, GuiMessage> {
 fn dj_modes_button(state: &AppState, popup_open: bool) -> Element<'_, GuiMessage> {
     let active = state.dj.active_mode.is_some() || popup_open;
     button(
-        container(text("DJ Modes").size(13))
+        container(text("DJ Modes").size(15))
             .center_y(Length::Fixed(36.0))
             .center_x(Length::Fill)
             .padding([0, 12]),
@@ -206,7 +211,7 @@ fn dj_modes_button(state: &AppState, popup_open: bool) -> Element<'_, GuiMessage
 /// runs.
 fn remix_tools_button(popup_open: bool) -> Element<'static, GuiMessage> {
     button(
-        container(text("Remix Tools").size(13))
+        container(text("Remix Tools").size(15))
             .center_y(Length::Fixed(36.0))
             .center_x(Length::Fill)
             .padding([0, 12]),
@@ -215,31 +220,6 @@ fn remix_tools_button(popup_open: bool) -> Element<'static, GuiMessage> {
     .padding(0)
     .on_press(GuiMessage::OpenRemixToolsPopup)
     .style(toggle_button_style(popup_open))
-    .into()
-}
-
-/// "Save Queue as Playlist…" — promoted out of Remix Tools because
-/// saving the queue isn't a remix operation. Disabled when nothing is
-/// queued. Triggers the same `PromptSavePlaylist` flow as the queue
-/// context menu and Cmd+S shortcut.
-fn save_queue_button(state: &AppState) -> Element<'_, GuiMessage> {
-    use crate::app::action::QueueAction;
-    let any_queued = !state.queue.tracks.is_empty() || !state.radio.tracks.is_empty();
-    let action = if any_queued {
-        Some(GuiMessage::Action(Action::Queue(QueueAction::PromptSavePlaylist)))
-    } else {
-        None
-    };
-    button(
-        container(text("Save Queue as Playlist\u{2026}").size(13))
-            .center_y(Length::Fixed(36.0))
-            .center_x(Length::Fill)
-            .padding([0, 12]),
-    )
-    .width(Length::Fill)
-    .padding(0)
-    .on_press_maybe(action)
-    .style(popout_button_style)
     .into()
 }
 
@@ -254,7 +234,7 @@ fn clear_queue_button(state: &AppState) -> Element<'_, GuiMessage> {
         None
     };
     button(
-        container(text("Clear Queue").size(13))
+        container(text("Clear Queue").size(15))
             .center_y(Length::Fixed(36.0))
             .center_x(Length::Fill)
             .padding([0, 12]),
@@ -267,19 +247,32 @@ fn clear_queue_button(state: &AppState) -> Element<'_, GuiMessage> {
 }
 
 fn track_list<'a>(state: &'a AppState, dragging: Option<usize>) -> Element<'a, GuiMessage> {
-    let (tracks, current_idx, mode_label, allow_reorder) = match state.playback_mode {
+    let (tracks, current_idx, base_mode_label, allow_reorder) = match state.playback_mode {
         PlaybackMode::Radio => (&state.radio.tracks, state.radio.track_index, "radio", false),
         PlaybackMode::Queue | PlaybackMode::None => (&state.queue.tracks, state.queue.index, "queue", true),
     };
 
+    // When a DJ mode or radio station is active, surface that as the
+    // header label instead of the bare "queue" / "radio" word — the
+    // user wants the overlay's name visible at the top of the list so
+    // they always remember why tracks are appearing on their own.
+    // Priority: DJ mode > radio station > radio seed > default.
+    let mode_label: String = if let Some(dj) = state.dj.active_mode {
+        dj.name().to_string()
+    } else if matches!(state.playback_mode, PlaybackMode::Radio) {
+        state.radio.title()
+    } else {
+        base_mode_label.to_string()
+    };
+
     let header_text = format!(" {mode_label} \u{2014} {} tracks ", tracks.len());
-    let header = text(header_text).size(12);
+    let header = text(header_text).size(14);
 
     let focused_idx = state.list_state.queue_index;
 
     let rows = if tracks.is_empty() {
         vec![
-            container(text("No tracks queued").size(13))
+            container(text("No tracks queued").size(15))
                 .padding(12)
                 .width(Length::Fill)
                 .into(),
@@ -325,7 +318,7 @@ fn track_list<'a>(state: &'a AppState, dragging: Option<usize>) -> Element<'a, G
             // — standard reorder feedback. Padding stays the same so
             // the rest of the list doesn't reflow under the dragged
             // row.
-            let body = container(text(label).size(13))
+            let body = container(text(label).size(15))
                 .width(Length::Fill)
                 .padding(Padding::from([2, 8]))
                 .style(move |theme: &Theme| {

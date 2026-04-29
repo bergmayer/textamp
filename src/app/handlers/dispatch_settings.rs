@@ -250,6 +250,13 @@ pub async fn dispatch(
                 follow_ups.push(SettingsAction::DiscoverPlayers.into());
             }
 
+            // Refresh cache stats so the cache section shows live
+            // numbers — same as the GUI's settings popup. Without
+            // this the TUI Cache table falls back to whatever was
+            // computed at AuthSuccess (often empty if the on-disk
+            // cache file hadn't been written yet).
+            follow_ups.push(SettingsAction::RefreshCacheStats.into());
+
             // Get username from connection state first (most reliable), then StoredAuth, then config
             state.settings_state.username_input = match &state.connection {
                 ConnectionState::Connected { username, .. } => username.clone(),
@@ -448,7 +455,7 @@ pub async fn dispatch(
                     } else if idx == output_offset + 1 + state.remote.players.len() {
                         // Refresh players
                         follow_ups.push(SettingsAction::DiscoverPlayers.into());
-                    } else {
+                    } else if idx == output_offset + 2 + state.remote.players.len() {
                         // Transcode: cycle through 0 → 128 → 192 → 256 → 320 → 0
                         let options = [0u32, 128, 192, 256, 320];
                         let current_pos = options.iter().position(|&v| v == state.transcode_kbps).unwrap_or(0);
@@ -468,6 +475,20 @@ pub async fn dispatch(
                             state.set_status("Streaming: original (direct play)".to_string());
                         } else {
                             state.set_status(format!("Streaming: transcode to {}kbps MP3", next));
+                        }
+                    } else {
+                        // External-services toggles. Indices, in order
+                        // of the rows shown in `render_textamp_content`:
+                        //   ext_base + 0: Apple Music
+                        //   ext_base + 1: Spotify
+                        //   ext_base + 2: YouTube
+                        let ext_base = output_offset + 3 + state.remote.players.len();
+                        use crate::services::external_search::SearchTarget;
+                        match idx.checked_sub(ext_base) {
+                            Some(0) => follow_ups.push(SettingsAction::ToggleExternalSearchService(SearchTarget::AppleMusic).into()),
+                            Some(1) => follow_ups.push(SettingsAction::ToggleExternalSearchService(SearchTarget::Spotify).into()),
+                            Some(2) => follow_ups.push(SettingsAction::ToggleExternalSearchService(SearchTarget::YouTube).into()),
+                            _ => {}
                         }
                     }
                 }
@@ -1182,6 +1203,66 @@ pub async fn dispatch(
         SettingsAction::AdventureError(msg) => {
             state.adventure.generating = false;
             state.set_error(format!("Adventure failed: {}", msg));
+        }
+        SettingsAction::ToggleExternalSearchService(target) => {
+            use crate::services::external_search::SearchTarget;
+            // Flip both the canonical config flag AND the AppState
+            // mirror so the change is visible immediately to renderers
+            // (palette, context menu, menu bar) AND survives a restart.
+            match target {
+                SearchTarget::AppleMusic => {
+                    config.ui.enable_apple_music_search = !config.ui.enable_apple_music_search;
+                    state.external_search.apple_music = config.ui.enable_apple_music_search;
+                }
+                SearchTarget::Spotify => {
+                    config.ui.enable_spotify_search = !config.ui.enable_spotify_search;
+                    state.external_search.spotify = config.ui.enable_spotify_search;
+                }
+                SearchTarget::YouTube => {
+                    config.ui.enable_youtube_search = !config.ui.enable_youtube_search;
+                    state.external_search.youtube = config.ui.enable_youtube_search;
+                }
+            }
+            follow_ups.push(SettingsAction::SaveSettings.into());
+        }
+        SettingsAction::SavePlaylistView { library_key, playlist_key, view } => {
+            config.set_playlist_view(&library_key, &playlist_key, view);
+            // Mirror the change onto AppState so event handlers
+            // (which don't get &Config) see the latest value.
+            let lib = state.playlist_views
+                .entry(library_key.clone())
+                .or_default();
+            if view.is_default() {
+                lib.remove(&playlist_key);
+                if lib.is_empty() {
+                    state.playlist_views.remove(&library_key);
+                }
+            } else {
+                lib.insert(playlist_key.clone(), view);
+            }
+            follow_ups.push(SettingsAction::SaveSettings.into());
+        }
+        SettingsAction::PrunePlaylistViews { library_key, live_playlist_keys } => {
+            // Snapshot the keys we're about to drop so the saver
+            // only fires when something actually changed (no point
+            // rewriting the config every PlaylistsLoaded).
+            let before = config.ui.library_view_settings.get(&library_key)
+                .map(|l| l.playlists.len())
+                .unwrap_or(0);
+            config.prune_stale_playlist_views(&library_key, &live_playlist_keys);
+            let after = config.ui.library_view_settings.get(&library_key)
+                .map(|l| l.playlists.len())
+                .unwrap_or(0);
+            // Mirror the prune onto AppState.
+            if let Some(lib) = state.playlist_views.get_mut(&library_key) {
+                lib.retain(|k, _| live_playlist_keys.contains(k));
+                if lib.is_empty() {
+                    state.playlist_views.remove(&library_key);
+                }
+            }
+            if before != after {
+                follow_ups.push(SettingsAction::SaveSettings.into());
+            }
         }
         SettingsAction::ArtistRadioComplete(tracks) => {
             if tracks.is_empty() {

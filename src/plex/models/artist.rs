@@ -309,4 +309,15 @@ pub struct TracksResponse {
 pub struct TracksContainer {
     #[serde(default, rename = "Metadata")]
     pub metadata: Vec<Track>,
+    /// Number of items in this response. Used by paginated callers to
+    /// decide whether to fetch another page (Plex omits this for some
+    /// endpoints; default 0 then triggers a fall-through to the
+    /// metadata length).
+    #[serde(default)]
+    pub size: u32,
+    /// Total number of items across all pages. `None` for endpoints
+    /// that don't paginate (Plex returns the field only when it
+    /// applied a Container-Start/Container-Size request).
+    #[serde(default)]
+    pub total_size: Option<u32>,
 }

@@ -21,12 +21,12 @@ use crate::ui_gui::widgets::transport_bar::popout_button_style;
 const POPUP_WIDTH: f32 = 600.0;
 
 pub fn view<'a>(p: &'a AdventureLauncherState) -> Element<'a, GuiMessage> {
-    let close_btn = button(text("Close").size(12))
+    let close_btn = button(text("Close").size(14))
         .padding([4, 12])
         .on_press(GuiMessage::CloseStatePopup(StatePopupKind::AdventureLauncher))
         .style(popout_button_style);
     let header = row![
-        text("Sonic Adventure").size(16),
+        text("Sonic Adventure").size(18),
         Space::with_width(Length::Fill),
         close_btn,
     ]
@@ -56,11 +56,11 @@ pub fn view<'a>(p: &'a AdventureLauncherState) -> Element<'a, GuiMessage> {
     // without re-validating here.
     let count_input = text_input("20", &p.track_count_input)
         .on_input(|s| GuiMessage::Action(Action::Search(SearchAction::AdventureLauncherSetTrackCount(s))))
-        .size(13)
+        .size(15)
         .padding(4)
         .width(Length::Fixed(80.0));
     let count_row = row![
-        container(text("Track count").size(13))
+        container(text("Track count").size(15))
             .width(Length::Fixed(96.0))
             .align_y(Alignment::Center)
             .height(Length::Fixed(28.0)),
@@ -135,26 +135,26 @@ fn field_card<'a>(
     };
 
     let pick_label = if has_track { "Change\u{2026}" } else { "Pick\u{2026}" };
-    let pick_btn = button(text(pick_label).size(12))
+    let pick_btn = button(text(pick_label).size(14))
         .padding([4, 12])
         .on_press(GuiMessage::Action(Action::Search(SearchAction::AdventureLauncherSetStep(activate_step))))
         .style(popout_button_style);
 
     let mut right_buttons = row![pick_btn].spacing(6);
     if has_track {
-        let clear_btn = button(text("x").size(12))
+        let clear_btn = button(text("x").size(14))
             .padding([4, 10])
             .on_press(GuiMessage::Action(Action::Search(clear_action)))
             .style(popout_button_style);
         right_buttons = right_buttons.push(clear_btn);
     }
 
-    let label_col = container(text(label).size(13))
+    let label_col = container(text(label).size(15))
         .width(Length::Fixed(96.0))
         .align_y(Alignment::Center)
         .height(Length::Fixed(28.0));
 
-    let track_text = container(text(track_line).size(13))
+    let track_text = container(text(track_line).size(15))
         .width(Length::Fill)
         .padding([4, 8])
         .style(move |theme: &Theme| {
@@ -189,7 +189,7 @@ fn field_card<'a>(
 /// `enabled` is false the button has no `on_press` so iced renders
 /// it in its disabled style and ignores clicks.
 fn action_button<'a>(label: &'a str, enabled: bool, action: Action) -> Element<'a, GuiMessage> {
-    let btn = button(text(label).size(13)).padding([6, 16]).style(popout_button_style);
+    let btn = button(text(label).size(15)).padding([6, 16]).style(popout_button_style);
     if enabled {
         btn.on_press(GuiMessage::Action(action)).into()
     } else {
@@ -204,7 +204,7 @@ fn search_panel<'a>(p: &'a AdventureLauncherState) -> Element<'a, GuiMessage> {
     let query_input = text_input("Search artists / albums / tracks\u{2026}", &p.query)
         .on_input(|s| GuiMessage::Action(Action::Search(SearchAction::AdventureLauncherSetQuery(s))))
         .on_submit(GuiMessage::Action(Action::Search(SearchAction::AdventureLauncherSearch)))
-        .size(12)
+        .size(14)
         .padding(4)
         .width(Length::Fill);
 
@@ -226,14 +226,14 @@ fn search_panel<'a>(p: &'a AdventureLauncherState) -> Element<'a, GuiMessage> {
                     }
                 }
                 if rows.is_empty() {
-                    rows.push(text("No matching tracks.").size(12).into());
+                    rows.push(text("No matching tracks.").size(14).into());
                 }
             } else if p.loading {
-                rows.push(text("Searching\u{2026}").size(12).into());
+                rows.push(text("Searching\u{2026}").size(14).into());
             } else if p.query.is_empty() {
-                rows.push(text("Type to search for a track\u{2026}").size(12).into());
+                rows.push(text("Type to search for a track\u{2026}").size(14).into());
             } else {
-                rows.push(text("Press Enter to search.").size(12).into());
+                rows.push(text("Press Enter to search.").size(14).into());
             }
         }
         AdventureDrillLevel::ArtistAlbums { artist_name, albums, .. } => {
@@ -261,13 +261,13 @@ fn search_panel<'a>(p: &'a AdventureLauncherState) -> Element<'a, GuiMessage> {
 }
 
 fn section_header<'a>(label: &str) -> Element<'a, GuiMessage> {
-    container(text(format!("\u{2014} {} \u{2014}", label)).size(11))
+    container(text(format!("\u{2014} {} \u{2014}", label)).size(13))
         .padding([4, 6])
         .into()
 }
 
 fn result_row(label: String, idx: usize, is_selected: bool) -> Element<'static, GuiMessage> {
-    button(text(label).size(12))
+    button(text(label).size(14))
         .width(Length::Fill)
         .padding([4, 10])
         .on_press(GuiMessage::AdventureLauncherClick(idx))

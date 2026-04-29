@@ -69,8 +69,9 @@ pub async fn dispatch(
                             let lib_title = "Music".to_string();
                             load_from_cache(state, cached, lib_key, &lib_title);
 
-                            // Auto-drill: build second column synchronously from cached data
-                            let drill_actions = auto_drill_from_cache(state);
+                            // No auto-drill on cache load — leave the
+                            // user on a clean cat+artists 2-col view
+                            // and let them drill explicitly.
 
                             // Trigger compilation detection if cache had no compilation data
                             helpers::maybe_detect_compilations(event_tx, state, client);
@@ -78,22 +79,6 @@ pub async fn dispatch(
                             // Use two-tier staleness check for the current view
                             if let Some(tier1_cat) = helpers::current_view_category(state) {
                                 helpers::check_staleness_on_view_load(event_tx, state, client, tier1_cat);
-                            }
-
-                            if !drill_actions.is_empty() {
-                                // Fetch libraries in background before returning follow-ups
-                                let tx = event_tx.clone();
-                                let client_clone = client.clone();
-                                tokio::spawn(async move {
-                                    match client_clone.get_libraries().await {
-                                        Ok(libs) => { let _ = tx.send(DataEvent::LibrariesLoaded(libs).into()).await; }
-                                        Err(e) => {
-                                            tracing::error!("Failed to load libraries: {}", e);
-                                            let _ = tx.send(DataEvent::DataLoadError(format!("Failed to load libraries: {}", e)).into()).await;
-                                        }
-                                    }
-                                });
-                                return Ok(drill_actions);
                             }
                         }
                     }
@@ -336,6 +321,24 @@ pub async fn dispatch(
             helpers::spawn_api_call(event_tx, client,
                 move |c| async move { c.get_similar_tracks(&rating_key, 50).await },
                 |x| DataEvent::SimilarTracksLoaded(x).into(), "Failed to load similar tracks",
+            );
+        }
+        DataAction::LoadTrackPaneSimilar { rating_key } => {
+            // Idempotent — return early if already loaded or in flight.
+            if state.track_pane_similar.contains_key(&rating_key)
+                || state.track_pane_similar_loading.contains(&rating_key)
+            {
+                return Ok(vec![]);
+            }
+            state.track_pane_similar_loading.insert(rating_key.clone());
+            let key_for_event = rating_key.clone();
+            helpers::spawn_api_call(event_tx, client,
+                move |c| async move { c.get_similar_tracks(&rating_key, 12).await },
+                move |tracks| DataEvent::TrackPaneSimilarLoaded {
+                    rating_key: key_for_event.clone(),
+                    tracks,
+                }.into(),
+                "Failed to load track-pane similar tracks",
             );
         }
         DataAction::LoadSimilarArtists { artist_key, title } => {
@@ -832,64 +835,3 @@ fn load_from_cache(state: &mut AppState, cached: CacheData, lib_key: &str, lib_t
 
 }
 
-/// Build the auto-drill child column synchronously from cached data.
-/// Returns follow-up actions (e.g. artwork loading, async playlist track fetch).
-pub fn auto_drill_from_cache(state: &mut crate::app::AppState) -> Vec<Action> {
-    use crate::app::state::{BrowseCategory, BrowseColumn, BrowseItem};
-
-    let mut follow_ups = vec![];
-
-    match state.browse_category {
-        BrowseCategory::Library => {
-            if state.artist_nav.columns.len() == 1 && !state.artist_nav.is_empty() && !state.library.albums.is_empty() {
-                // "All Artists" (index 0) → show all albums
-                let mut items = vec![BrowseItem::AllTracks {
-                    artist_key: "__all_library__".to_string(),
-                    artist_name: "All Artists".to_string(),
-                    thumb: None,
-                }];
-                items.extend(BrowseItem::from_albums(&state.library.albums, &state.library.album_display_artist));
-                let mut col = BrowseColumn::new("all albums", items);
-                col.artwork_visible = state.artwork.default_visible;
-                state.artist_nav.replace_child_column(col);
-
-                // Trigger artwork loading for the new column
-                if state.artwork.default_visible {
-                    let art_batch = super::dispatch_miller::collect_art_to_load(
-                        state.artist_nav.columns.last(),
-                        &state.artwork.grid_cache,
-                        &state.artwork.grid_pending,
-                    );
-                    if !art_batch.is_empty() {
-                        follow_ups.push(SystemAction::LoadAlbumArt(art_batch).into());
-                    }
-                }
-            }
-        }
-        BrowseCategory::Playlists => {
-            if state.playlist_nav.columns.len() == 1 && !state.playlist_nav.is_empty() {
-                if let Some(playlist_item) = state.playlist_nav.selected_item().cloned() {
-                    let playlist_key = playlist_item.key().to_string();
-                    if let Some(cached) = state.playlist_tracks_cache.get(&playlist_key) {
-                        // Build column synchronously from cached tracks
-                        let tracks = cached.tracks.clone();
-                        let playlist_name = playlist_item.title().to_string();
-                        let title = format!("tracks \u{2014} {}", playlist_name);
-                        let items = BrowseItem::from_tracks(&tracks);
-                        let col = BrowseColumn::new_with_tracks(title, items, tracks);
-                        state.playlist_nav.replace_child_column(col);
-                    } else {
-                        // Async fallback: tracks not in disk cache (e.g. smart playlists)
-                        state.auto_drill_pending = true;
-                        if let Some(action) = super::key_input::auto_drill_playlist_action(state) {
-                            follow_ups.push(action);
-                        }
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
-
-    follow_ups
-}

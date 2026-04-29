@@ -1776,6 +1776,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fuzzy-matcher"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "54614a3312934d066701a80f20f15fa3b56d67ac7722b39eea5b4c9dd1d66c94"
+dependencies = [
+ "thread_local",
+]
+
+[[package]]
 name = "gdk"
 version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4531,6 +4540,27 @@ checksum = "973443cf09a9c8656b574a866ab68dfa19f0867d0340648c7d2f6a71b8a8ea68"
 
 [[package]]
 name = "ratatui"
+version = "0.28.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fdef7f9be5c0122f890d58bdf4d964349ba6a6161f705907526d891efabba57d"
+dependencies = [
+ "bitflags 2.10.0",
+ "cassowary",
+ "compact_str",
+ "crossterm",
+ "instability",
+ "itertools 0.13.0",
+ "lru",
+ "paste",
+ "strum",
+ "strum_macros",
+ "unicode-segmentation",
+ "unicode-truncate",
+ "unicode-width 0.1.14",
+]
+
+[[package]]
+name = "ratatui"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eabd94c2f37801c20583fc49dd5cd6b0ba68c716787c2dd6ed18571e1e63117b"
@@ -4560,7 +4590,7 @@ dependencies = [
  "icy_sixel",
  "image 0.25.9",
  "rand 0.8.5",
- "ratatui",
+ "ratatui 0.29.0",
  "rustix 0.38.44",
  "thiserror 1.0.69",
  "windows 0.58.0",
@@ -5715,13 +5745,14 @@ dependencies = [
  "dirs 5.0.1",
  "fs4",
  "futures",
+ "fuzzy-matcher",
  "hostname",
  "iced",
  "image 0.25.9",
  "muda",
  "open",
  "rand 0.9.2",
- "ratatui",
+ "ratatui 0.29.0",
  "ratatui-image",
  "raw-window-handle",
  "reqwest",
@@ -5738,6 +5769,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "tui-input",
  "unicode-width 0.2.0",
  "urlencoding",
  "uuid",
@@ -6206,6 +6238,16 @@ name = "ttf-parser"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
+
+[[package]]
+name = "tui-input"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bd137780d743c103a391e06fe952487f914b299a4fe2c3626677f6a6339a7c6b"
+dependencies = [
+ "ratatui 0.28.1",
+ "unicode-width 0.1.14",
+]
 
 [[package]]
 name = "typenum"

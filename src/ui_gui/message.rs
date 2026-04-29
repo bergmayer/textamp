@@ -112,6 +112,16 @@ pub enum GuiMessage {
     /// at the cursor position.
     OpenStandaloneTrackContextMenu(Box<crate::plex::models::Track>),
 
+    /// Click on a playlist row that lives in the leftmost category
+    /// column (under the Library / Genres / Folders header rows).
+    /// Switches the browse category to Playlists and drills into the
+    /// clicked playlist's tracks in one motion, so the user doesn't
+    /// have to step through "click Playlists, then click the row".
+    OpenPlaylistFromCategory {
+        playlist_key: String,
+        title: String,
+    },
+
     /// A single `Action` (from a menu item click, widget callback, etc.).
     Action(Action),
 
@@ -311,6 +321,32 @@ pub enum GuiMessage {
     /// which column the arrow keys / sort menu act on without
     /// clicking a row first.
     FocusMillerColumn { column_index: usize },
+
+    /// User clicked the small "x" in a Miller column / track-details
+    /// pane header. Focuses the targeted column first (so the close
+    /// helper drops the right one) and runs the same logic as Cmd+W.
+    /// `column_index = None` is reserved for the track-details pane,
+    /// where there is no Miller column to focus — only `track_details`
+    /// gets cleared.
+    CloseMillerColumn { column_index: Option<usize> },
+
+    /// User clicked anywhere inside the track-details pane (chrome,
+    /// padding, or even the artwork). Treats the pane as a column —
+    /// claims focus from the cat col / miller cols so the
+    /// single-focused-column rule renders the right thing. The
+    /// per-element messages (Play Track button, similar-row click,
+    /// close X) keep their own message types and are NOT routed
+    /// through this — they already do the right thing.
+    FocusTrackPane,
+
+    /// Click on a Sonically Similar row in the track pane. First
+    /// click highlights only — sets `track_pane_index` to the row;
+    /// a second click on the same row (or pressing Enter on it)
+    /// fires `OpenInLibrary` for that track's album, mirroring the
+    /// click-on-highlighted = Enter rule used everywhere else.
+    /// `pane_index` is 1-based — index 0 is reserved for the Play
+    /// button.
+    SimilarRowClick { pane_index: usize },
 
     /// User pressed the mouse on queue row `idx`. Records the index as
     /// the drag source AND moves `list_state.queue_index` to it so the

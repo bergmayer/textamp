@@ -49,17 +49,17 @@ pub fn view<'a>(p: &'a RadioLauncherState) -> Element<'a, GuiMessage> {
             }
         }
     } else if p.loading {
-        rows.push(text("Searching\u{2026}").size(12).into());
+        rows.push(text("Searching\u{2026}").size(14).into());
     } else {
-        rows.push(text("Type to search, Enter to seed radio.").size(12).into());
+        rows.push(text("Type to search, Enter to seed radio.").size(14).into());
     }
 
-    let close_btn = button(text("Close").size(12))
+    let close_btn = button(text("Close").size(14))
         .padding([4, 12])
         .on_press(GuiMessage::CloseStatePopup(StatePopupKind::RadioLauncher))
         .style(popout_button_style);
     let header = row![
-        text(format!("Radio from: {}", p.query)).size(16),
+        text(format!("Radio from: {}", p.query)).size(18),
         Space::with_width(Length::Fill),
         close_btn,
     ]
@@ -79,13 +79,13 @@ pub fn view<'a>(p: &'a RadioLauncherState) -> Element<'a, GuiMessage> {
 }
 
 fn section_header(label: &'static str) -> Element<'static, GuiMessage> {
-    container(text(format!("\u{2014} {} \u{2014}", label)).size(11))
+    container(text(format!("\u{2014} {} \u{2014}", label)).size(13))
         .padding([4, 6])
         .into()
 }
 
 fn result_row(label: String, idx: usize, is_selected: bool) -> Element<'static, GuiMessage> {
-    button(text(label).size(12))
+    button(text(label).size(14))
         .width(Length::Fill)
         .padding([4, 10])
         .on_press(GuiMessage::RadioLauncherClick(idx))

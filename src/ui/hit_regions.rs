@@ -48,14 +48,32 @@ pub struct HitRegions {
     /// Category selector column (Browse view, column 0).
     pub category_column: Option<CategoryColumnRegion>,
 
+    /// Browse alphabet jump strip (between category column and the
+    /// first Miller column when on Library + sortable).
+    pub alphabet_strip: Option<AlphabetStripRegions>,
+
     /// Miller columns (Browse view, content columns).
     pub miller_columns: Option<MillerRegions>,
+
+    /// Track-details pane regions (right-side pane on Browse view
+    /// when a Track row is focused). Holds the Play button rect
+    /// and the per-similar-track row rects so the mouse handler
+    /// can dispatch the right action.
+    pub track_pane: Option<TrackPaneRegions>,
 
     /// Queue view content areas.
     pub queue_content: Option<QueueRegions>,
 
     /// Now Playing visualizer content areas.
     pub now_playing_content: Option<NowPlayingRegions>,
+
+    /// Now Playing left sidebar buttons (Radio / DJ Modes / Remix /
+    /// Clear Queue). Cleared and rebuilt every render of the queue
+    /// view. Stored as a flat list of `(area, which)` pairs because
+    /// the set is small and the click site only needs sequential
+    /// hit-testing.
+    pub now_playing_sidebar:
+        Option<Vec<(Rect, crate::ui::screens::now_playing::NpSidebarButton)>>,
 
     /// Similar popup (outer rect).
     pub similar_content: Option<SimilarRegions>,
@@ -169,6 +187,28 @@ pub struct CommandBarRegions {
     pub top_row: Vec<(Rect, String)>,
     /// Bottom row items: (rect, action_key).
     pub bottom_row: Vec<(Rect, String)>,
+}
+
+/// Browse alphabet jump strip — one rect per visible letter, in
+/// `ALPHABET_STRIP_LETTERS` order (or reversed for descending sort).
+#[derive(Debug, Clone)]
+pub struct AlphabetStripRegions {
+    pub area: Rect,
+    /// (rect, alphabet-strip index) per letter cell. The index is
+    /// into `ALPHABET_STRIP_LETTERS`, not the rendered visual order
+    /// — that way descending sort doesn't flip click handling.
+    pub letters: Vec<(Rect, usize)>,
+}
+
+/// Track-details pane click regions — Play button + similar-track
+/// rows. Index space matches `state.track_pane_index`: 0 is the
+/// Play button, 1..=N are the similar tracks in order.
+#[derive(Debug, Clone)]
+pub struct TrackPaneRegions {
+    pub outer: Rect,
+    pub play_button: Rect,
+    /// (rect, index-into-similar-list) per visible similar track.
+    pub similar_rows: Vec<(Rect, usize)>,
 }
 
 /// Category selector column region (Browse view, column 0).

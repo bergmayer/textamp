@@ -18,9 +18,9 @@ pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
         "Related artists \u{2014} {}",
         if state.related.source_title.is_empty() { "(no source)" } else { state.related.source_title.as_str() }
     ))
-    .size(18);
+    .size(20);
 
-    let close_btn = button(text("Close").size(12))
+    let close_btn = button(text("Close").size(14))
         .padding([4, 12])
         .on_press(GuiMessage::CloseRelatedPopup)
         .style(popout_button_style);
@@ -28,12 +28,12 @@ pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
         .align_y(Alignment::Center);
 
     let list: Element<'_, GuiMessage> = if state.related.loading {
-        container(text("Loading related\u{2026}").size(14))
+        container(text("Loading related\u{2026}").size(16))
             .padding(24)
             .center_x(Length::Fill)
             .into()
     } else if state.related.groups.is_empty() {
-        container(text("No related artists found.").size(13))
+        container(text("No related artists found.").size(15))
             .padding(24)
             .center_x(Length::Fill)
             .into()
@@ -51,7 +51,7 @@ pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
             // Show up to 5 album titles underneath as context.
             for a in g.albums.iter().take(5) {
                 rows.push(
-                    container(text(format!("    \u{00B7} {}", a.title)).size(11))
+                    container(text(format!("    \u{00B7} {}", a.title)).size(13))
                         .padding([2, 24])
                         .into(),
                 );
@@ -85,7 +85,7 @@ pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
 }
 
 fn artist_row(label: String, artist_key: String) -> Element<'static, GuiMessage> {
-    button(text(label).size(13))
+    button(text(label).size(15))
         .width(Length::Fill)
         .padding([6, 12])
         .on_press(GuiMessage::NavigateToArtist { artist_key })

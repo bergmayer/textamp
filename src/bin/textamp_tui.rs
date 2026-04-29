@@ -207,17 +207,20 @@ async fn run_app(
         Ok(Ok(a)) => a,
         Ok(Err(e)) => {
             tracing::warn!("Audio device unavailable: {} — launching without playback", e);
-            AudioPlayer::new_without_audio().unwrap()
+            AudioPlayer::new_without_audio()
         }
         _ => {
             tracing::warn!("Audio initialization timed out — launching without playback");
-            AudioPlayer::new_without_audio().unwrap()
+            AudioPlayer::new_without_audio()
         }
     };
 
     // Create application state
     let mut state = AppState::new();
     state.audio_available = audio.has_audio();
+    // Wire the audio backend's sample tap so the vectorscope
+    // visualizer can drain live (L, R) sample pairs each tick.
+    state.vectorscope_tap = audio.sample_tap();
 
     // Get terminal size
     let size = match terminal.size() {

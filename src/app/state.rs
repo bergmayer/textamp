@@ -5,6 +5,12 @@
 
 use std::collections::VecDeque;
 
+/// Capacity of the live vectorscope sample buffer. ~2 048 stereo
+/// pairs at 48 kHz is roughly 43 ms of audio — long enough for the
+/// Lissajous trace to look like a continuous shape, short enough
+/// for it to "breathe" with the music. Matches the GUI buffer size.
+pub const VECTORSCOPE_BUFFER_LEN: usize = 2_048;
+
 /// Generate `next()` and `prev()` methods for cyclic enums.
 ///
 /// Given variants in order, `next()` advances to the next variant (wrapping around)
@@ -600,7 +606,16 @@ impl SortPopupState {
             self.options.push(SortPopupOption::Artwork);
         }
 
-        if self.is_playlist {
+        // "Group by album" toggles a playlist's track list between
+        // flat and album-grouped views. It's only meaningful on the
+        // playlist's OWN track column — once the user has drilled
+        // into one of those grouped albums, the child column shows
+        // a single album's tracks (`SortColumnType::Track`) and
+        // grouping again would be a no-op. Same logic for any other
+        // single-album track column reached by drilling.
+        if self.is_playlist
+            && matches!(self.column_type, SortColumnType::AllTracks | SortColumnType::Album)
+        {
             self.options.push(SortPopupOption::GroupByAlbum);
         }
 
@@ -661,6 +676,29 @@ pub struct BrowseColumn {
     /// Anchor for shift+click range select — the row of the last
     /// non-shift click. `None` until the first click.
     pub selection_anchor: Option<usize>,
+
+    /// When `Some`, this column is a lazy-paginated playlist tracks
+    /// column. The GUI's scroll handler reads this to decide
+    /// whether to fire `LoadMorePlaylistTracks`. `None` for every
+    /// other column type.
+    pub lazy: Option<LazyPlaylist>,
+}
+
+/// Pagination state for playlist-tracks columns whose source list is
+/// too big to fetch in one round-trip (smart playlists like "Recently
+/// Added" can resolve to tens of thousands of tracks).
+#[derive(Debug, Clone)]
+pub struct LazyPlaylist {
+    /// Plex rating key — used to re-issue a fetch for the next page.
+    pub key: String,
+    /// Total tracks the server says exist for this column. Once the
+    /// in-memory `tracks.len()` reaches this number the GUI stops
+    /// firing `LoadMorePlaylistTracks`. `None` means "we don't yet
+    /// know how many" (Plex didn't return `totalSize`).
+    pub total: Option<u32>,
+    /// True while a page fetch is in flight so the scroll handler
+    /// doesn't fire duplicate requests.
+    pub loading: bool,
 }
 
 impl BrowseColumn {
@@ -681,6 +719,7 @@ impl BrowseColumn {
             play_all_label: None,
             selected_set: std::collections::BTreeSet::new(),
             selection_anchor: None,
+            lazy: None,
         }
     }
 
@@ -702,6 +741,7 @@ impl BrowseColumn {
             play_all_label: None,
             selected_set: std::collections::BTreeSet::new(),
             selection_anchor: None,
+            lazy: None,
         }
     }
 
@@ -1627,6 +1667,60 @@ pub struct AppState {
 
     // Now Playing panel focus (track list vs stations)
     pub now_playing_focus: NowPlayingFocus,
+    /// Index of the highlighted sidebar button on the now-playing
+    /// screen (0..4). Only meaningful when `now_playing_focus ==
+    /// Sidebar`.
+    pub now_playing_sidebar_index: usize,
+
+    /// Alphabet jump strip (Library category only). Whether the strip
+    /// has keyboard focus, and which letter index is highlighted.
+    /// Index space matches `ALPHABET_STRIP_LETTERS`: 0=%, 1=0, 2..=27=a..z.
+    pub alphabet_strip_focused: bool,
+    pub alphabet_strip_index: usize,
+
+    /// Sonically-similar tracks displayed in the right-side track
+    /// details pane, keyed by the focused track's `rating_key`.
+    /// Populated lazily by the tick handler when a track row is
+    /// selected and never queried before. Empty `Vec` means the API
+    /// returned no similar tracks (distinct from "not yet loaded").
+    pub track_pane_similar: HashMap<String, Vec<Track>>,
+    /// Track keys whose similar-tracks fetch is currently in flight.
+    pub track_pane_similar_loading: std::collections::HashSet<String>,
+
+    /// Multi-select "expand" mode. While `true`, Up/Down arrows
+    /// extend the selection on the focused track list (Miller
+    /// column or queue) instead of just moving the cursor. Toggled
+    /// on/off by Space; Shift+Space turns it on without clearing
+    /// the existing selection. Auto-clears whenever the view or
+    /// focused column changes (so it can't strand on a list the
+    /// user has navigated away from).
+    pub select_mode: bool,
+
+    /// Track-details pane has keyboard focus. While `true`, Up/Down
+    /// navigates between the Play button (index 0) and the
+    /// Sonically-Similar entries (indices 1..). Right or Left
+    /// returns focus to the focused Miller column. Auto-cleared
+    /// whenever the focused track changes or the user navigates
+    /// away from the Browse view.
+    pub track_pane_focused: bool,
+    /// Index of the highlighted row inside the focused track-details
+    /// pane: 0 = Play button, 1..=N = Sonically-Similar tracks.
+    pub track_pane_index: usize,
+
+    /// Live audio sample tap from the audio backend, drained each
+    /// Tick into `vectorscope_buffer` for the vectorscope
+    /// visualizer. `None` when no audio backend is available
+    /// (`AudioPlayer::new_without_audio`).
+    pub vectorscope_tap: Option<crate::audio::SampleTap>,
+    /// Rolling stereo sample buffer for the TUI vectorscope
+    /// (Lissajous XY trace). Capped at `VECTORSCOPE_BUFFER_LEN`
+    /// — once full, oldest samples are overwritten in-place.
+    pub vectorscope_buffer: std::collections::VecDeque<(f32, f32)>,
+
+    /// Per-tick counter, used to drive simple animated text in
+    /// loading placeholders ("Loading", "Loading.", "Loading..",
+    /// "Loading…"). Wraps freely; consumers use `% 4` etc.
+    pub loading_tick: u32,
 
     // Visualizer tab (Waveform / Spectrum / Spectrogram)
     pub visualizer_tab: VisualizerTab,
@@ -1649,6 +1743,11 @@ pub struct AppState {
 
     // Inline list filter state (/ key in browse view)
     pub list_filter: ListFilterState,
+
+    /// TUI command-palette overlay state (`:` to open). The field is
+    /// always present so render/dispatch code doesn't need feature
+    /// gates; the GUI just never sets `open = true`.
+    pub palette: PaletteState,
 
     /// Auto-drill flag: when true, the next load action replaces the child column
     /// instead of pushing a new one, and does not change focus.
@@ -1679,11 +1778,45 @@ pub struct AppState {
     // Scroll pins and cooldowns
     pub scroll: ScrollPins,
 
-    /// GUI track-details pane. When `Some`, the browse view renders a
-    /// fixed-width details pane to the right of the Miller columns
-    /// showing the selected track's metadata + a Play Track button.
-    /// Replaced (not stacked) by each new track click.
+    /// Track-details pane. The pane behaves like a Miller column: it
+    /// only opens after the user explicitly drills into a track
+    /// (Enter / double-click on a Track row), which fires
+    /// `BrowseAction::OpenTrackDetails` and stamps the track here.
+    /// The renderer further requires the focused row to still match
+    /// — see `pane_track()` — so navigating to a different row hides
+    /// the pane until the user explicitly drills again. Cleared by
+    /// Ctrl+W ("close current column").
     pub track_details: Option<crate::plex::models::Track>,
+
+    /// Per-service "external search enabled" toggles, mirrored from
+    /// `config.ui.enable_*_search`. Renderers (palette / context menu
+    /// / menu bar) read these to decide whether to surface each
+    /// service's search entry. The dispatcher also re-checks against
+    /// the canonical `Config` so a stale mirror still cannot leak
+    /// requests through to disabled services.
+    pub external_search: ExternalSearchSettings,
+
+    /// Mirror of `config.ui.library_view_settings` so event handlers
+    /// (which don't get `&Config`) can read saved per-playlist
+    /// "Group by album" / "Show artwork" toggles when a playlist
+    /// tracks column lands. The dispatcher keeps this in sync with
+    /// the canonical config on every `SavePlaylistView` /
+    /// `PrunePlaylistViews`.
+    pub playlist_views: HashMap<String, HashMap<String, crate::config::settings::PlaylistView>>,
+}
+
+/// Mirror of the three "Search ⟨service⟩" toggles from `UiConfig`.
+#[derive(Debug, Clone, Copy)]
+pub struct ExternalSearchSettings {
+    pub apple_music: bool,
+    pub spotify: bool,
+    pub youtube: bool,
+}
+
+impl Default for ExternalSearchSettings {
+    fn default() -> Self {
+        Self { apple_music: true, spotify: true, youtube: true }
+    }
 }
 
 /// Which view a scrollbar drag is operating on.
@@ -2075,6 +2208,17 @@ impl AppState {
             adventure: AdventureState::default(),
             dj: DjState::default(),
             now_playing_focus: NowPlayingFocus::default(),
+            now_playing_sidebar_index: 0,
+            alphabet_strip_focused: false,
+            alphabet_strip_index: 0,
+            track_pane_similar: HashMap::new(),
+            track_pane_similar_loading: std::collections::HashSet::new(),
+            select_mode: false,
+            track_pane_focused: false,
+            track_pane_index: 0,
+            vectorscope_tap: None,
+            vectorscope_buffer: std::collections::VecDeque::with_capacity(VECTORSCOPE_BUFFER_LEN),
+            loading_tick: 0,
             visualizer_tab: VisualizerTab::default(),
             visualizer_tab_focused: false,
             genre_tab: GenreTab::default(),
@@ -2083,6 +2227,7 @@ impl AppState {
             waveform: WaveformState::default(),
             spectrogram: SpectrogramState::default(),
             list_filter: ListFilterState::default(),
+            palette: PaletteState::default(),
             auto_drill_pending: false,
             marquee: std::cell::RefCell::new(MarqueeState::default()),
             marquee_subtitle: std::cell::RefCell::new(MarqueeState::default()),
@@ -2094,7 +2239,27 @@ impl AppState {
             waveform_cache_stats: None,
             scroll: ScrollPins::default(),
             track_details: None,
+            external_search: ExternalSearchSettings::default(),
+            playlist_views: HashMap::new(),
         }
+    }
+
+    /// Build the ordered list of rows that appear in the leftmost
+    /// "category" column. Library / Genres / Folders pin to the top;
+    /// each loaded playlist follows as its own row. Both the TUI
+    /// keyboard handler and the GUI's category column iterate this
+    /// to keep their layouts in sync.
+    ///
+    /// `state.category_column_index` indexes into the returned vec.
+    pub fn category_rows(&self) -> Vec<CategoryRow> {
+        let mut rows = Vec::with_capacity(3 + self.library.playlists.len());
+        for &c in BrowseCategory::top_rows() {
+            rows.push(CategoryRow::Category(c));
+        }
+        for i in 0..self.library.playlists.len() {
+            rows.push(CategoryRow::Playlist(i));
+        }
+        rows
     }
 
     /// Get the BrowseNavigationState for the current browse category.
@@ -2117,6 +2282,105 @@ impl AppState {
             BrowseCategory::Playlists => Some(&mut self.playlist_nav),
             BrowseCategory::Folders => None,
         }
+    }
+
+    /// Whether the alphabet jump strip should be visible. Mirrors the
+    /// render-side condition so keyboard handlers can reach the strip
+    /// only when it's actually on screen.
+    pub fn alphabet_strip_visible(&self) -> bool {
+        self.browse_category == BrowseCategory::Library
+            && self
+                .artist_nav
+                .columns
+                .first()
+                .map_or(false, |c| {
+                    !c.items.is_empty() && c.sort_mode != ColumnSortMode::Shuffled
+                })
+    }
+
+    /// The track currently highlighted in the focused Miller column,
+    /// if any. Used by the right-side track details pane: the pane
+    /// shows iff this returns `Some`. Mirrors the GUI helper of the
+    /// same name in `ui_gui::screens::browse`.
+    pub fn focused_track(&self) -> Option<&crate::plex::models::Track> {
+        let nav = self.browse_nav()?;
+        let col = nav.columns.get(nav.focused_column)?;
+        let item = col.items.get(col.selected_index)?;
+        if !matches!(item, BrowseItem::Track { .. }) {
+            return None;
+        }
+        col.tracks.get(col.selected_index)
+    }
+
+    /// The track to render in the details pane. The pane is treated
+    /// like a Miller column: it only opens when the user explicitly
+    /// drills into a track (Enter / double-click), which sets
+    /// `track_details`. Selecting a track row alone is NOT enough —
+    /// otherwise drilling into a tracks column would silently open
+    /// the pane on first frame.
+    ///
+    /// We additionally require the focused row to still match the
+    /// drilled-into track, so navigating to a sibling track hides
+    /// the pane (the user has to Enter again to reopen).
+    pub fn pane_track(&self) -> Option<&crate::plex::models::Track> {
+        let details = self.track_details.as_ref()?;
+        let focused = self.focused_track()?;
+        if focused.rating_key != details.rating_key {
+            return None;
+        }
+        Some(focused)
+    }
+
+    /// The album currently highlighted in the focused Miller column,
+    /// if any. Returns `(rating_key, title)`. Used by the palette
+    /// to surface "Play Album" / "Artist Bio" context-aware entries.
+    pub fn focused_album(&self) -> Option<(String, String)> {
+        let nav = self.browse_nav()?;
+        let col = nav.columns.get(nav.focused_column)?;
+        let item = col.items.get(col.selected_index)?;
+        match item {
+            BrowseItem::Album { key, title, .. } => Some((key.clone(), title.clone())),
+            _ => None,
+        }
+    }
+
+    /// Effective context-target track for palette commands (Play
+    /// Track / Open in Library / Artist Bio / external search).
+    ///
+    /// Priority:
+    ///   1. The highlighted Sonically-Similar row inside the focused
+    ///      track-details pane — so the user can Open-in-Library a
+    ///      similar track, Bio its artist, etc., without leaving
+    ///      the pane.
+    ///   2. The track on the focused Miller row.
+    pub fn palette_target_track(&self) -> Option<crate::plex::models::Track> {
+        if self.track_pane_focused && self.track_pane_index > 0 {
+            if let Some(parent) = self.focused_track() {
+                let sim_idx = self.track_pane_index - 1;
+                if let Some(sim) = self
+                    .track_pane_similar
+                    .get(&parent.rating_key)
+                    .and_then(|v| v.get(sim_idx))
+                {
+                    return Some(sim.clone());
+                }
+            }
+        }
+        self.focused_track().cloned()
+    }
+
+    /// Whether the palette's context-aware target is a Sonically-
+    /// Similar row inside the track pane (vs. a Miller-column row).
+    /// Used to gate per-list commands like "Play Track and Following"
+    /// that don't make sense on a free-floating similar track.
+    pub fn palette_target_is_similar(&self) -> bool {
+        self.track_pane_focused
+            && self.track_pane_index > 0
+            && self
+                .focused_track()
+                .and_then(|p| self.track_pane_similar.get(&p.rating_key))
+                .map(|v| v.get(self.track_pane_index - 1).is_some())
+                .unwrap_or(false)
     }
 
     /// Build artist root items, using compilation-aware version if compilations are detected.
@@ -2229,14 +2493,25 @@ impl AppState {
         self.category_column_index = BrowseCategory::all().iter()
             .position(|c| *c == cat).unwrap_or(0);
         self.category_column_focused = false;
+        // Strip is Library-only; clear the focus flag whenever the
+        // active category changes so it can't strand on a hidden strip.
+        self.alphabet_strip_focused = false;
+        // Multi-select mode is per-list — switching category abandons
+        // the list it was active on, so reset the flag.
+        self.select_mode = false;
     }
 
     /// Focus the category column, syncing category_column_index to match
     /// the active browse_category so the highlight is always correct.
+    /// Single-focus rule: also drops pane focus so only one surface
+    /// paints as focused.
     pub fn focus_category_column(&mut self) {
         self.category_column_index = BrowseCategory::all().iter()
             .position(|c| *c == self.browse_category).unwrap_or(0);
         self.category_column_focused = true;
+        self.alphabet_strip_focused = false;
+        self.select_mode = false;
+        self.track_pane_focused = false;
     }
 
     pub fn set_error(&mut self, msg: String) {
@@ -2577,9 +2852,15 @@ pub enum VisualizerTab {
     Waveform,
     Spectrum,
     Spectrogram,
+    /// Stereo Lissajous vectorscope. Drives X with the right
+    /// channel and Y with the left, plotting the live audio's
+    /// stereo image as a figure-of-eight trace. Both the TUI
+    /// (braille glyphs) and the GUI (canvas) render this from
+    /// the shared sample-tap pipeline.
+    Vectorscope,
 }
 
-cyclic_enum!(VisualizerTab, Waveform, Spectrum, Spectrogram);
+cyclic_enum!(VisualizerTab, Waveform, Spectrum, Spectrogram, Vectorscope);
 
 impl VisualizerTab {
     pub fn name(&self) -> &'static str {
@@ -2587,6 +2868,7 @@ impl VisualizerTab {
             VisualizerTab::Waveform => "waveform",
             VisualizerTab::Spectrum => "spectrum",
             VisualizerTab::Spectrogram => "spectrogram",
+            VisualizerTab::Vectorscope => "vectorscope",
         }
     }
 }
@@ -2692,6 +2974,18 @@ impl BrowseCategory {
         ]
     }
 
+    /// Categories shown as fixed rows at the top of the leftmost
+    /// column. Playlists are listed individually below this set
+    /// (see `AppState::category_rows`) rather than collapsed into a
+    /// single "Playlists" entry.
+    pub fn top_rows() -> &'static [BrowseCategory] {
+        &[
+            BrowseCategory::Library,
+            BrowseCategory::Genres,
+            BrowseCategory::Folders,
+        ]
+    }
+
     pub fn name(&self) -> &'static str {
         match self {
             BrowseCategory::Library => "library",
@@ -2708,6 +3002,143 @@ impl BrowseCategory {
             BrowseCategory::Genres => 'g',
             BrowseCategory::Folders => 'o',
         }
+    }
+}
+
+/// A single navigable row in the leftmost "category" column.
+///
+/// `Category(_)` covers Library / Genres / Folders (the fixed top
+/// rows); `Playlist(i)` is the i-th entry of `state.library.playlists`
+/// promoted to a top-level row, matching the GUI's design where each
+/// playlist gets its own clickable line below the divider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CategoryRow {
+    Category(BrowseCategory),
+    Playlist(usize),
+}
+
+/// TUI command-palette overlay state. `open == false` means we're in
+/// the normal input mode; the field is left present in shared state
+/// so render fns and the event loop can read it without feature
+/// gates spreading across the codebase.
+///
+/// The palette holds the fuzzy-match query as a plain String + a
+/// char-cursor; the TUI input layer wraps these in a
+/// `tui_input::Input` to leverage that crate's edit semantics
+/// (Ctrl+A / Ctrl+E / etc.) without leaking the `tui-input` type
+/// into the shared model.
+///
+/// `entries` is the materialized candidate list — it's rebuilt each
+/// time the user types, mixing the static command registry with
+/// runtime content (radio stations, playlists, …). `matches` indexes
+/// into `entries` post-fuzzy-sort.
+#[derive(Debug, Clone, Default)]
+pub struct PaletteState {
+    pub open: bool,
+    pub query: String,
+    pub cursor: usize,
+    pub selected: usize,
+    pub entries: Vec<PaletteEntry>,
+    pub matches: Vec<usize>,
+}
+
+/// One materialized row in the palette. The display string is owned
+/// because some rows are built from runtime data (e.g. radio station
+/// titles); the executable side is in `command`.
+#[derive(Debug, Clone)]
+pub struct PaletteEntry {
+    pub label: String,
+    pub hint: String,
+    pub command: PaletteCommandKind,
+}
+
+/// The dispatchable command attached to a palette entry. Mirror of
+/// `ui::command_palette::PaletteCommand` but lives in shared state so
+/// the GUI never needs to import the TUI module.
+#[derive(Debug, Clone)]
+pub enum PaletteCommandKind {
+    Quit,
+    GotoLibrary,
+    GotoGenres,
+    GotoFolders,
+    GotoQueue,
+    GotoNowPlaying,
+    OpenHelp,
+    OpenSettings,
+    OpenSearch,
+    OpenSimilar,
+    OpenRelated,
+    SaveQueue,
+    ClearQueue,
+    ToggleFilter,
+    Refresh,
+    PlayPause,
+    NextTrack,
+    PrevTrack,
+    ToggleDj(DjMode),
+    RemixGemini,
+    RemixTwofer,
+    RemixStretch,
+    RemixDoppelganger,
+    RemixShuffle,
+    RemixUndoShuffle,
+    /// Start a Plex Radio station identified by its rating key.
+    PlayStation { key: String, title: String },
+    /// Pick one album at random from the active library and play it
+    /// once (clear queue + load tracks). Distinct from
+    /// "Random Album Radio" which is a continuous station.
+    RandomAlbum,
+    /// Drill into the currently-playing track's album in the Library
+    /// view (so the user lands on it as if they'd browsed there).
+    OpenInLibrary,
+    /// Open the sort popup for the focused column.
+    OpenSort,
+    /// Toggle album-art tiles on the focused album column.
+    ToggleArtwork,
+    /// Toggle group-by-album on a playlist tracks column.
+    ToggleGroupByAlbum,
+    /// Play just the focused track (replace queue with this one
+    /// track). Context-aware: only surfaced when the focused row is
+    /// a Track.
+    PlayFocusedTrack,
+    /// Play the focused track plus every track after it in the
+    /// current view (replace queue). Context-aware on Track rows.
+    PlayFocusedTrackAndFollowing,
+    /// Open the system browser to search Apple Music / Spotify /
+    /// YouTube for the current selection (artist / album / track /
+    /// now-playing).
+    SearchAppleMusic,
+    SearchSpotify,
+    SearchYouTube,
+    /// Play the currently-focused album immediately (replaces the
+    /// queue with its tracks). Surfaced when a Browse album row is
+    /// focused.
+    PlayFocusedAlbum,
+    /// Open the Artist Bio popup for whatever artist the current
+    /// row resolves to (track → its artist; album → album artist;
+    /// artist row → that artist; falls back to now-playing).
+    ShowArtistBio,
+    /// Apply a specific sort mode to the focused Miller column
+    /// (same dispatch the sort popup uses). Surfaced as individual
+    /// "Sort: …" entries in the palette so the user can pick a
+    /// mode without going through the popup.
+    ApplySort(ColumnSortMode),
+    /// Flip the sort direction (ascending ↔ descending) on the
+    /// focused column.
+    ReverseSort,
+    /// Close the focused Miller column (and any cols to its
+    /// right). Same effect as the Ctrl+W shortcut.
+    CloseColumn,
+}
+
+impl PaletteState {
+    pub fn close(&mut self) {
+        self.open = false;
+        self.query.clear();
+        self.cursor = 0;
+        self.selected = 0;
+        self.entries.clear();
+        self.matches.clear();
     }
 }
 
@@ -2776,12 +3207,21 @@ pub enum Focus {
     Right,
 }
 
-/// Focus within the Now Playing queue view (track list vs stations panel).
+/// Focus within the Now Playing queue view. Stations is legacy
+/// (the inline stations panel was removed); Sidebar covers the
+/// left-hand action buttons (Radio / DJ Modes / Remix / Clear) so
+/// the user can keyboard-navigate them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NowPlayingFocus {
     #[default]
     Tracks,
     Stations,
+    Sidebar,
+    /// The right-side artwork panel on the queue screen. Up/Down or
+    /// Left/Right arrows can land here as the third stop in the
+    /// horizontal sidebar→tracks→artwork progression. Enter opens
+    /// the artist bio popup.
+    Artwork,
 }
 
 /// What the right panel is showing.
