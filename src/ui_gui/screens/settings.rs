@@ -6,9 +6,10 @@
 //! already covers that content; if the shared state lands on `About`
 //! (e.g. via keyboard nav), we fall through to the Account section.
 
-use iced::widget::{button, column, container, row as iced_row, scrollable, text, Column, Row, Space};
+use iced::widget::{button, column, container, row as iced_row, scrollable, Column, Row, Space};
 use iced::{Alignment, Background, Border, Color, Element, Length, Theme};
 
+use crate::ui_gui::widgets::text;
 use crate::app::action::{Action, SettingsAction};
 use crate::app::state::{AppState, ConnectionState, RefreshCategory, SettingsSection};
 use crate::app::theme::ThemeName;
@@ -25,18 +26,20 @@ pub fn view<'a>(state: &'a AppState, ui_scale: f32) -> Element<'a, GuiMessage> {
         other => other,
     };
     let tabs = iced_row![
-        tab_button("Account", current == SettingsSection::Account, SettingsSection::Account),
-        tab_button("Textamp", current == SettingsSection::Textamp, SettingsSection::Textamp),
-        tab_button("Cache",   current == SettingsSection::Cache,   SettingsSection::Cache),
+        tab_button("Account",  current == SettingsSection::Account,  SettingsSection::Account),
+        tab_button("Textamp",  current == SettingsSection::Textamp,  SettingsSection::Textamp),
+        tab_button("Sections", current == SettingsSection::Sections, SettingsSection::Sections),
+        tab_button("Cache",    current == SettingsSection::Cache,    SettingsSection::Cache),
     ]
     .spacing(4)
     .align_y(Alignment::Center);
 
     let body: Element<'a, GuiMessage> = match current {
-        SettingsSection::Account => account_section(state),
-        SettingsSection::Textamp => textamp_section(state, ui_scale),
-        SettingsSection::Cache   => cache_section(state),
-        SettingsSection::About   => account_section(state),
+        SettingsSection::Account  => account_section(state),
+        SettingsSection::Textamp  => textamp_section(state, ui_scale),
+        SettingsSection::Sections => sections_section(state),
+        SettingsSection::Cache    => cache_section(state),
+        SettingsSection::About    => account_section(state),
     };
 
     // Shrink height so the wrapping scrollable's content_h matches
@@ -240,7 +243,7 @@ fn cache_info_block(state: &AppState) -> Element<'_, GuiMessage> {
         ("Albums",    state.library.albums.len(),     false, Some(RefreshCategory::Albums),    Some("albums")),
         ("Tracks",    state.library.all_tracks.len(), state.library.all_tracks.is_empty(), Some(RefreshCategory::AllTracks), Some("tracks")),
         ("Playlists", state.library.playlists.len(),  false, Some(RefreshCategory::Playlists), Some("playlist tracks")),
-        ("Genres",    state.library.genres.len(),     false, Some(RefreshCategory::Genres),    Some("genres")),
+        ("Genres",    state.library.album_genres.len(),     false, Some(RefreshCategory::AlbumGenres),    Some("genres")),
         ("Moods",     state.library.moods.len(),      false, Some(RefreshCategory::Moods),     None),
         ("Styles",    state.library.styles.len(),     false, Some(RefreshCategory::Styles),    None),
         ("Stations",  state.stations.len(),           false, Some(RefreshCategory::Stations),  Some("stations")),
@@ -415,6 +418,40 @@ fn format_duration(secs: u64) -> String {
     } else {
         format!("{}d", secs / 86400)
     }
+}
+
+fn sections_section(state: &AppState) -> Element<'_, GuiMessage> {
+    use iced::widget::checkbox;
+    use crate::app::state::BrowseCategory;
+
+    let cb = |label: &'static str, visible: bool, section: BrowseCategory| -> Element<'static, GuiMessage> {
+        let toggle = move |_| GuiMessage::Action(Action::Settings(
+            SettingsAction::ToggleSectionVisibility(section),
+        ));
+        iced_row![
+            checkbox("", visible)
+                .size(16)
+                .on_toggle(toggle),
+            text(label).size(15),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into()
+    };
+
+    let mut col = column![
+        text("Show in left column").size(16),
+        text("Uncheck a section to hide it from the leftmost browse column.")
+            .size(13),
+    ]
+    .spacing(6);
+
+    for cat in BrowseCategory::all() {
+        let visible = !state.hidden_sections.contains(cat);
+        col = col.push(cb(cat.display_label(), visible, *cat));
+    }
+
+    container(col).padding([8, 12]).into()
 }
 
 fn textamp_section<'a>(state: &'a AppState, ui_scale: f32) -> Element<'a, GuiMessage> {

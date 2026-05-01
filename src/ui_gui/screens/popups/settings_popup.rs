@@ -4,13 +4,14 @@
 //! popup frame with a Close button. Settings stay accessible without
 //! the user navigating away from whatever view they were on.
 
-use iced::widget::{button, column, container, row, scrollable, text, Space};
+use iced::widget::{button, column, container, row, scrollable, Space};
 use iced::{Alignment, Background, Border, Element, Length, Theme};
 
 use crate::app::AppState;
 use crate::ui_gui::message::GuiMessage;
 use crate::ui_gui::widgets::transport_bar::popout_button_style;
 
+use crate::ui_gui::widgets::text;
 pub fn view<'a>(state: &'a AppState, ui_scale: f32) -> Element<'a, GuiMessage> {
     let close_btn = button(text("Close").size(14))
         .padding([4, 12])

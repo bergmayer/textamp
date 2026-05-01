@@ -3,7 +3,7 @@
 
 use crate::app::{Action, AppState, Event};
 use crate::app::action::{NavigationAction, BrowseAction, FolderAction, SystemAction};
-use crate::app::state::{BrowseCategory, Focus, GenreContentType, RightPanelMode, View};
+use crate::app::state::{BrowseCategory, Focus, RightPanelMode, View};
 use crate::plex::PlexClient;
 
 use anyhow::Result;
@@ -83,8 +83,19 @@ pub async fn dispatch(
                 state.set_view(View::Browse);
             }
 
-            // Always unfocus category column when a category is selected
-            state.category_column_focused = false;
+            // Auto-drill (sections-column Up/Down sweep) sets
+            // `auto_drill_pending` to communicate "don't take focus
+            // off the sections column — the user is still arrow-keying
+            // through it". Right / Enter / click / palette leave it
+            // false and the dispatcher steals focus as usual.
+            //
+            // We peek (don't take) so `set_browse_category` (called
+            // below) can see the same flag, and clear it at the end
+            // of the dispatch.
+            let auto_drill = state.auto_drill_pending;
+            if !auto_drill {
+                state.category_column_focused = false;
+            }
 
             if state.browse_category != category {
                 // Unshuffle Library root when leaving, so "All Artists" is in correct position
@@ -119,47 +130,24 @@ pub async fn dispatch(
                             state.playlist_nav.reset("playlists", items);
                         }
                     }
-                    BrowseCategory::Genres => {
-                        if state.genre_tab == crate::app::state::GenreTab::All {
-                            follow_ups.push(BrowseAction::RefreshGenreView.into());
-                        } else {
-                            // Load the appropriate content based on current genre content type
-                            match state.library.genre_content_type {
-                                GenreContentType::Genres => {
-                                    if state.library.genres.is_empty() && !state.library.genres_loading {
-                                        follow_ups.push(BrowseAction::LoadGenres.into());
-                                    }
-                                }
-                                GenreContentType::ArtistGenres => {
-                                    if state.library.artist_genres.is_empty() && !state.library.artist_genres_loading {
-                                        follow_ups.push(BrowseAction::LoadArtistGenres.into());
-                                    }
-                                }
-                                GenreContentType::AlbumGenres => {
-                                    if state.library.album_genres.is_empty() && !state.library.album_genres_loading {
-                                        follow_ups.push(BrowseAction::LoadAlbumGenres.into());
-                                    }
-                                }
-                                GenreContentType::Moods => {
-                                    if state.library.moods.is_empty() && !state.library.moods_loading {
-                                        follow_ups.push(BrowseAction::LoadMoods.into());
-                                    }
-                                }
-                                GenreContentType::Styles => {
-                                    if state.library.styles.is_empty() && !state.library.styles_loading {
-                                        follow_ups.push(BrowseAction::LoadStyles.into());
-                                    }
-                                }
-                            }
-                        }
-                    }
                     BrowseCategory::Folders => {
                         if state.folder_state.is_none() {
                             follow_ups.push(FolderAction::LoadFolderRoot.into());
                         }
                     }
+                    cat if cat.is_tag_section() => {
+                        // Reset shared tag_nav for the new section.
+                        state.tag_nav.columns.clear();
+                        state.tag_nav.focused_column = 0;
+                        follow_ups.push(BrowseAction::RefreshTagView.into());
+                    }
+                    _ => {}
                 }
             }
+            // Single sink for `auto_drill_pending` on this dispatch
+            // chain. After this point the flag is dead; subsequent
+            // actions (and the next keypress) start clean.
+            state.auto_drill_pending = false;
         }
         NavigationAction::ToggleFocus => {
             state.focus = match state.focus {
@@ -283,8 +271,8 @@ mod tests {
         state.set_browse_category(BrowseCategory::Library);
         state.focus = Focus::Right;
 
-        dispatch(&tx, NavigationAction::SetCategory(BrowseCategory::Genres).into(), &mut state, &mut client).await.unwrap();
-        assert_eq!(state.browse_category, BrowseCategory::Genres);
+        dispatch(&tx, NavigationAction::SetCategory(BrowseCategory::AlbumGenres).into(), &mut state, &mut client).await.unwrap();
+        assert_eq!(state.browse_category, BrowseCategory::AlbumGenres);
         assert_eq!(state.focus, Focus::Left);
     }
 

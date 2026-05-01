@@ -195,31 +195,40 @@ pub fn sort_key(title: &str) -> String {
 }
 
 /// Letters shown on the browse alphabet strip, in the natural sort
-/// order: `%` (non-alphanumeric), `0` (digits), then `a..z`.
+/// order: `%` (ASCII non-alphanumeric), `0` (digits), `a..z`, then
+/// `'文'` (the bucket for everything starting with a non-ASCII glyph
+/// — CJK, Cyrillic, Greek, etc., which sort after `z`).
 /// Index space is shared between rendering, click hit-testing, and
 /// keyboard nav of the strip itself.
-pub const ALPHABET_STRIP_LETTERS: [char; 28] = [
+pub const ALPHABET_STRIP_LETTERS: [char; 29] = [
     '%', '0',
     'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm',
     'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
+    '文',
 ];
 
 /// Find the row index in the artist root column whose `sort_key`
-/// starts with the given alphabet-strip letter. `'%'` matches any
-/// non-alphanumeric first character; `'0'` matches digits;
-/// `'a'..='z'` matches that letter.
+/// starts with the given alphabet-strip letter.
+/// - `'%'` matches an ASCII non-alphanumeric first character (punctuation, &, etc.)
+/// - `'0'` matches an ASCII digit
+/// - `'a'..='z'` matches that letter
+/// - `'文'` matches any non-ASCII first character (CJK, Cyrillic, etc.)
 pub fn alphabet_target_index(state: &crate::app::state::AppState, ch: char) -> Option<usize> {
     use crate::app::state::BrowseCategory;
     if state.browse_category == BrowseCategory::Folders {
         return None;
     }
-    let target = ch.to_ascii_lowercase();
-    let pred: Box<dyn Fn(&str) -> bool> = match target {
+    let pred: Box<dyn Fn(&str) -> bool> = match ch {
         '0' => Box::new(|t: &str| sort_key(t).chars().next().map_or(false, |c| c.is_ascii_digit())),
-        '%' => Box::new(|t: &str| sort_key(t).chars().next().map_or(false, |c| !c.is_ascii_alphanumeric())),
-        c if c.is_ascii_alphabetic() => Box::new(move |t: &str| {
-            sort_key(t).chars().next().map_or(false, |first| first.to_ascii_lowercase() == c)
-        }),
+        '%' => Box::new(|t: &str| sort_key(t).chars().next().map_or(false,
+            |c| c.is_ascii() && !c.is_ascii_alphanumeric())),
+        '文' => Box::new(|t: &str| sort_key(t).chars().next().map_or(false, |c| !c.is_ascii())),
+        c if c.is_ascii_alphabetic() => {
+            let lc = c.to_ascii_lowercase();
+            Box::new(move |t: &str| {
+                sort_key(t).chars().next().map_or(false, |first| first.to_ascii_lowercase() == lc)
+            })
+        }
         _ => return None,
     };
     let nav = state.browse_nav()?;

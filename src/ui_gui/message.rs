@@ -111,6 +111,18 @@ pub enum GuiMessage {
     /// Add to queue / Show Similar / Related / Open in Library / …)
     /// at the cursor position.
     OpenStandaloneTrackContextMenu(Box<crate::plex::models::Track>),
+    /// Open the command palette overlay. Fired from the Tools →
+    /// Command Palette menu item (Cmd+K) — a guaranteed-to-work
+    /// entry point that goes through muda's accelerator handler
+    /// rather than relying on the iced keyboard subscription
+    /// (which can miss keystrokes if a focused widget swallows
+    /// them first).
+    OpenCommandPalette,
+    /// Same menu but for a "floating" track — i.e. one that's not
+    /// anchored in the user's current Miller-drill context (e.g. a
+    /// similar-track row in the track-details pane). Forces "Open in
+    /// Library" near the top regardless of the active view.
+    OpenFloatingTrackContextMenu(Box<crate::plex::models::Track>),
 
     /// Click on a playlist row that lives in the leftmost category
     /// column (under the Library / Genres / Folders header rows).
@@ -326,8 +338,8 @@ pub enum GuiMessage {
     /// pane header. Focuses the targeted column first (so the close
     /// helper drops the right one) and runs the same logic as Cmd+W.
     /// `column_index = None` is reserved for the track-details pane,
-    /// where there is no Miller column to focus — only `track_details`
-    /// gets cleared.
+    /// where there is no Miller column to focus — only
+    /// `track_pane_open` gets flipped off.
     CloseMillerColumn { column_index: Option<usize> },
 
     /// User clicked anywhere inside the track-details pane (chrome,

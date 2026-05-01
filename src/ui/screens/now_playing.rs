@@ -435,7 +435,7 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
             }
         }
         PlaybackMode::Queue | PlaybackMode::None => {
-            let mut parts = vec!["queue".to_string()];
+            let mut parts = vec!["now playing".to_string()];
             if let Some(dj) = state.dj.active_mode {
                 parts.push(format!("({})", dj.name()));
             }
@@ -615,12 +615,16 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
                 "Radio"
             }
         }
-        PlaybackMode::Queue => "Queue",
-        PlaybackMode::None => "",
+        // Queue mode is the default — no footer label, just the row
+        // counter so "1/6 | Queue" becomes "1/6". Radio mode keeps
+        // its label because it's a meaningful distinction.
+        PlaybackMode::Queue | PlaybackMode::None => "",
     };
 
     let footer = if tracks.is_empty() {
         mode_indicator.to_string()
+    } else if mode_indicator.is_empty() {
+        format!("{}/{}", selected_idx + 1, tracks.len())
     } else {
         format!("{}/{} | {}", selected_idx + 1, tracks.len(), mode_indicator)
     };

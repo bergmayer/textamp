@@ -223,17 +223,86 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
         let max_fit = ((usable / MIN_COL_WIDTH) as usize).max(2);
         total_cols_wanted.max(2).min(max_fit)
     };
-    let strip_width: u16 = if strip_wants_to_show { 3 } else { 0 };
-    let visible_count = resolve_layout(strip_width);
+
+    // Niri-style scroll layout: sections col, every Miller col of
+    // the active browse category, and the track pane all live in
+    // one horizontal ribbon. Each slot is `col_width = full / 2`,
+    // two slots fit on screen at a time. The focused slot sits at
+    // the right edge; older slots — including the sections col —
+    // push off-screen left. The alphabet strip (Library only) is
+    // anchored to the root nav slot (ribbon idx 1) and overlays its
+    // leftmost cells; when that slot scrolls off, the strip goes
+    // with it. Folders are excluded — they use a different render
+    // path (`render_folder_view`) so the ribbon model doesn't
+    // apply directly there yet.
+    let scrolling_browse = state.miller_layout
+        == crate::app::state::MillerLayoutMode::Scrolling
+        && matches!(
+            state.browse_category,
+            BrowseCategory::Library | BrowseCategory::Playlists
+        ) || (state.miller_layout == crate::app::state::MillerLayoutMode::Scrolling
+            && state.browse_category.is_tag_section());
+
+    // Number of leading nav cols the inner Miller renderer always
+    // skips for this category (Playlists hides its root col 0
+    // because the playlists are listed in the sections column).
+    let category_base_offset: usize = match state.browse_category {
+        BrowseCategory::Playlists => 1,
+        _ => 0,
+    };
+    let nav_count = state.browse_nav().map(|n| n.columns.len()).unwrap_or(0);
+    let visible_nav_cols = nav_count.saturating_sub(category_base_offset);
+
+    const RIBBON_VISIBLE: usize = 2;
+    let ribbon_total = if scrolling_browse {
+        1 + visible_nav_cols + n_pane
+    } else { 0 };
+    let ribbon_focused = if scrolling_browse {
+        if state.category_column_focused { 0 }
+        else if state.track_pane_focused { ribbon_total.saturating_sub(1) }
+        else if state.alphabet_strip_focused { 1 }
+        else {
+            let nav_focused = state.browse_nav().map(|n| n.focused_column).unwrap_or(0);
+            1 + nav_focused.saturating_sub(category_base_offset)
+        }
+    } else { 0 };
+    let ribbon_start = if scrolling_browse {
+        (ribbon_focused + 1).saturating_sub(RIBBON_VISIBLE)
+    } else { 0 };
+    let ribbon_end = if scrolling_browse {
+        (ribbon_start + RIBBON_VISIBLE).min(ribbon_total)
+    } else { 0 };
+    let scroll_sections_visible = scrolling_browse && ribbon_start == 0;
+    let scroll_artists_visible = scrolling_browse && ribbon_start <= 1 && ribbon_end >= 2;
+
+    let strip_width: u16 = if strip_wants_to_show && (!scrolling_browse || scroll_artists_visible) {
+        3
+    } else {
+        0
+    };
+    let (visible_count, col_width) = if scrolling_browse {
+        // Two slots visible, each half the screen.
+        let cw = (full_area.width / RIBBON_VISIBLE as u16).max(MIN_COL_WIDTH);
+        (RIBBON_VISIBLE, cw)
+    } else {
+        let vc = resolve_layout(strip_width);
+        let usable_width = full_area.width.saturating_sub(strip_width);
+        let cw = (usable_width / vc as u16).max(MIN_COL_WIDTH);
+        (vc, cw)
+    };
     let _virtual_start: usize = 0;
     let _ = virtual_focus;
-    let usable_width = full_area.width.saturating_sub(strip_width);
-    let col_width = (usable_width / visible_count as u16).max(MIN_COL_WIDTH);
 
     let show_alphabet_strip = strip_width > 0;
 
+    // In Niri-style scroll mode, the sections col is at ribbon idx 0
+    // and disappears when ribbon_start > 0. Suppress its render in
+    // that case; the rest of the layout (Miller area, pane, strip)
+    // shifts left to claim its slot.
+    let cat_col_renders = cat_col_visible && (!scrolling_browse || scroll_sections_visible);
+
     // Render the category column if visible
-    if cat_col_visible {
+    if cat_col_renders {
         let col_area = Rect {
             x: full_area.x,
             y: full_area.y,
@@ -262,24 +331,26 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
             });
         }
 
-        // Layout: top categories (Library/Genres/Folders), one blank
-        // separator row, then playlists. The visual y-offset of each
-        // row is therefore index + (1 if past the separator).
-        let top_count = crate::app::state::BrowseCategory::top_rows().len();
+        // Categories, dividers, and playlists render as one continuous
+        // list — the visual y-offset is just the row index.
         for (i, row) in category_rows.iter().enumerate() {
-            // Add a 1-row gap between the top categories and the
-            // playlists list so the boundary reads at a glance.
-            let y_offset = i as u16 + if i >= top_count { 1 } else { 0 };
+            let y_offset = i as u16;
             if y_offset >= inner.height { break; }
+
+            // Divider rows render a horizontal rule and skip the rest.
+            if matches!(row, crate::app::state::CategoryRow::Divider) {
+                let sep = "\u{2500}".repeat(inner.width as usize);
+                let line_area = Rect { x: inner.x, y: inner.y + y_offset, width: inner.width, height: 1 };
+                frame.render_widget(
+                    Paragraph::new(sep).style(Style::default().fg(t.colors.border)),
+                    line_area,
+                );
+                continue;
+            }
 
             let (label, is_active) = match row {
                 crate::app::state::CategoryRow::Category(cat) => {
-                    let label = match cat {
-                        BrowseCategory::Library => "Library",
-                        BrowseCategory::Genres => "Genres",
-                        BrowseCategory::Folders => "Folders",
-                        BrowseCategory::Playlists => "Playlists", // unreachable in top_rows
-                    };
+                    let label = cat.display_label();
                     let active = state.browse_category == *cat;
                     (label.to_string(), active)
                 }
@@ -293,49 +364,61 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
                             .and_then(|c| c.items.get(c.selected_index))
                             .map(|it| it.key() == p.rating_key.as_str())
                             .unwrap_or(false);
-                    (p.title.clone(), active)
+                    // Force text-presentation for hearts so the
+                    // playlist label paints in the column's foreground
+                    // color instead of the colorful emoji glyph.
+                    (crate::util::force_text_presentation(&p.title), active)
                 }
+                crate::app::state::CategoryRow::Divider => unreachable!(),
             };
 
             let is_selected = i == state.category_column_index;
-            // Only one row can carry a highlight bg at a time:
-            //   - When the cat col is focused: the cursor row wins
-            //     (selection bg). The active-category row stays plain
-            //     so the user doesn't see two simultaneous highlights.
-            //   - When the cat col is NOT focused: nothing is "the
-            //     cursor" yet, so the active-category row paints with
-            //     the dimmer highlight bg as a "you are here" hint.
             let show_cursor = is_focused && is_selected;
             let show_active = !is_focused && is_active;
+            // Foreground on selection/highlight rows must use
+            // `selection_text`, not `fg_primary` — in the
+            // black-and-white theme `fg_primary` is the same colour
+            // as `bg_selection`/`bg_highlight`, which makes the row
+            // text invisible.
             let style = if show_cursor {
-                Style::default().fg(t.colors.fg_primary).bg(t.colors.bg_selection)
+                Style::default().fg(t.colors.selection_text).bg(t.colors.bg_selection)
             } else if show_active {
-                Style::default().fg(t.colors.fg_primary).bg(t.colors.bg_highlight)
+                Style::default().fg(t.colors.selection_text).bg(t.colors.bg_highlight)
             } else {
                 Style::default().fg(t.colors.fg_primary)
             };
 
             let indicator = if show_cursor { "\u{25b8} " } else { "  " };
-            let text = format!("{}{}", indicator, label);
+            // Mac-style middle truncation when the label is wider
+            // than the column. The 2-cell indicator prefix has to
+            // fit too — reserve it before truncating.
+            let indicator_w = indicator.chars().count();
+            let max_label_w = (inner.width as usize).saturating_sub(indicator_w);
+            let label_display = if label.chars().count() > max_label_w {
+                crate::util::truncate_middle(&label, max_label_w)
+            } else {
+                label.clone()
+            };
+            // Pad the row's text to the full inner width so the
+            // selection / highlight background fills the row edge to
+            // edge — same look as the Miller columns. Without this,
+            // ratatui only paints the bg under the literal text cells
+            // and the sections column ends up with a thin highlight
+            // ribbon while the rest of the app uses chunky bars.
+            let text = format!("{}{}", indicator, label_display);
+            let display_w = unicode_width::UnicodeWidthStr::width(text.as_str());
+            let pad = (inner.width as usize).saturating_sub(display_w);
+            let padded = format!("{}{}", text, " ".repeat(pad));
             let line_area = Rect { x: inner.x, y: inner.y + y_offset, width: inner.width, height: 1 };
-            frame.render_widget(Paragraph::new(text).style(style), line_area);
-        }
-
-        // Draw the separator: a horizontal rule between the top
-        // categories and the playlists. Use a faint border colour so
-        // it reads as chrome rather than content.
-        if !state.library.playlists.is_empty() && (top_count as u16) < inner.height {
-            let sep_y = inner.y + top_count as u16;
-            let sep = "─".repeat(inner.width as usize);
-            frame.render_widget(
-                Paragraph::new(sep).style(Style::default().fg(t.colors.border)),
-                Rect { x: inner.x, y: sep_y, width: inner.width, height: 1 },
-            );
+            frame.render_widget(Paragraph::new(padded).style(style), line_area);
         }
     }
 
-    // Render the alphabet strip in the gap between cat col and content.
-    if show_alphabet_strip {
+    // Strip rendering in shrinking layout only (between sections and
+    // Miller). In Niri scroll mode the strip is painted later, AFTER
+    // the Miller cols, as an overlay on the artists slot's leftmost
+    // cells.
+    if show_alphabet_strip && !scrolling_browse {
         let strip_area = Rect {
             x: full_area.x + col_width,
             y: full_area.y,
@@ -345,18 +428,31 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
         render_alphabet_strip(frame, state, strip_area);
     }
 
-    // Equal-width column layout. Cat col, miller cols and the
-    // track pane are all sized to `col_width`. Strip is fixed
-    // chrome between cat and the miller cols. No spacer columns.
-    let cat_w = if cat_col_visible { col_width } else { 0 };
-    let pane_w = if n_pane > 0 { col_width } else { 0 };
+    let cat_w = if cat_col_renders { col_width } else { 0 };
+
+    // In scroll mode the pane only "claims" a slot when its ribbon
+    // index is actually in the visible window; otherwise it's
+    // scrolled off and shouldn't push miller cols out of the layout.
+    let pane_renders = if scrolling_browse {
+        let pane_ribbon_idx = ribbon_total.saturating_sub(1);
+        n_pane > 0 && pane_ribbon_idx >= ribbon_start && pane_ribbon_idx < ribbon_end
+    } else {
+        n_pane > 0
+    };
+    let pane_w = if pane_renders { col_width } else { 0 };
     let n_visible_miller = visible_count
-        .saturating_sub(if cat_col_visible { 1 } else { 0 })
-        .saturating_sub(n_pane);
+        .saturating_sub(if cat_col_renders { 1 } else { 0 })
+        .saturating_sub(if pane_renders { 1 } else { 0 });
     let miller_w = (n_visible_miller as u16) * col_width;
 
+    // In Niri scroll mode, the Miller area's x position depends on
+    // whether the sections col is on screen — when scrolled off, the
+    // Miller cols slide left to claim that slot. Strip width offset
+    // applies only in shrinking layout (in scrolling mode the strip
+    // overlays the artists col's leftmost cells, not its own slot).
+    let content_area_x_offset = if scrolling_browse { 0 } else { strip_width };
     let content_area = Rect {
-        x: full_area.x + cat_w + strip_width,
+        x: full_area.x + cat_w + content_area_x_offset,
         y: full_area.y,
         width: miller_w,
         height: full_area.height,
@@ -391,11 +487,18 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
                 && state.list_filter.category == BrowseCategory::Library {
                 (state.list_filter.results.as_ref(), Some(state.list_filter.column))
             } else { (None, None) };
+            // In Niri scroll mode, when the sections col (ribbon
+            // idx 0) and possibly the artists col (ribbon idx 1)
+            // have scrolled off the left, the inner Miller renderer
+            // skips that many leading nav cols by way of
+            // `column_offset`. Otherwise (shrinking layout) we pass
+            // 0 — render every nav col.
+            let column_offset = if scrolling_browse { ribbon_start.saturating_sub(1) } else { 0 };
             render_browse_miller_columns(
                 frame, state, &state.artist_nav, "artists", current_track_key,
                 filter_results, filter_column, false,
                 content_area, Rect { x: 0, y: 0, width: 0, height: 0 },
-                Some(col_width), content_focus_override, 0,
+                Some(col_width), content_focus_override, column_offset,
             );
         }
         BrowseCategory::Playlists => {
@@ -407,23 +510,17 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
                 && state.list_filter.category == BrowseCategory::Playlists {
                 (state.list_filter.results.as_ref(), Some(state.list_filter.column))
             } else { (None, None) };
+            // category_base_offset = 1 for Playlists (root col always
+            // skipped); scroll mode adds further offset as the user
+            // drills past the leftmost slot.
+            let column_offset = if scrolling_browse {
+                1 + ribbon_start.saturating_sub(1)
+            } else { 1 };
             render_browse_miller_columns(
                 frame, state, &state.playlist_nav, "playlists", current_track_key,
                 filter_results, filter_column, true,
                 content_area, Rect { x: 0, y: 0, width: 0, height: 0 },
-                Some(col_width), content_focus_override, 1,
-            );
-        }
-        BrowseCategory::Genres => {
-            let (filter_results, filter_column) = if state.list_filter.active
-                && state.list_filter.category == BrowseCategory::Genres {
-                (state.list_filter.results.as_ref(), Some(state.list_filter.column))
-            } else { (None, None) };
-            render_browse_miller_columns(
-                frame, state, &state.genre_nav, "genres", current_track_key,
-                filter_results, filter_column, false,
-                content_area, Rect { x: 0, y: 0, width: 0, height: 0 },
-                Some(col_width), content_focus_override, 0,
+                Some(col_width), content_focus_override, column_offset,
             );
         }
         BrowseCategory::Folders => {
@@ -435,11 +532,80 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
                 content_area, Rect { x: 0, y: 0, width: 0, height: 0 },
                 Some(col_width), content_focus_override);
         }
+        cat if cat.is_tag_section() => {
+            let (filter_results, filter_column) = if state.list_filter.active
+                && state.list_filter.category == cat {
+                (state.list_filter.results.as_ref(), Some(state.list_filter.column))
+            } else { (None, None) };
+            let column_offset = if scrolling_browse { ribbon_start.saturating_sub(1) } else { 0 };
+            render_browse_miller_columns(
+                frame, state, &state.tag_nav, cat.name(), current_track_key,
+                filter_results, filter_column, false,
+                content_area, Rect { x: 0, y: 0, width: 0, height: 0 },
+                Some(col_width), content_focus_override, column_offset,
+            );
+        }
+        _ => {}
     }
 
     // Track details pane (when focused row is a Track).
     if let (Some(area), Some(track)) = (pane_area, pane_track.as_ref()) {
         render_track_details_pane(frame, state, area, track);
+    }
+
+    // In scrolling mode, the strip overlays the artists col's
+    // leftmost cells. Painted after the Miller cols so it sits on
+    // top, claiming the leftmost `strip_width` cells of the artists
+    // slot. Hidden when artists has scrolled off-left.
+    if show_alphabet_strip && scrolling_browse && scroll_artists_visible {
+        // Artists is at ribbon idx 1. On screen its x = full_area.x +
+        // ((1 - ribbon_start) * col_width). The strip overlays its
+        // leftmost cells.
+        let artists_screen_idx = 1usize.saturating_sub(ribbon_start);
+        let strip_area = Rect {
+            x: full_area.x + (artists_screen_idx as u16 * col_width),
+            y: full_area.y,
+            width: strip_width,
+            height: full_area.height,
+        };
+        render_alphabet_strip(frame, state, strip_area);
+    }
+
+    // Horizontal scrollbar across the bottom row of the browse band.
+    // Half-height: rail uses the "lower one eighth block" glyph, thumb
+    // uses the "lower half block" glyph. Both pin to the bottom of
+    // the row so they visually merge into a single thin horizontal
+    // stripe rather than a chunky full-row bar. Only painted when
+    // the ribbon contains more slots than fit on screen.
+    if scrolling_browse && ribbon_total > RIBBON_VISIBLE && full_area.height >= 1 {
+        let bar_y = full_area.y + full_area.height - 1;
+        let total_cells = full_area.width as usize;
+        let filled_w = ((RIBBON_VISIBLE * total_cells + ribbon_total / 2) / ribbon_total).max(1);
+        let filled_x = (ribbon_start * total_cells + ribbon_total / 2) / ribbon_total;
+        // Cap so the filled segment never overshoots the rail.
+        let filled_x = filled_x.min(total_cells.saturating_sub(filled_w));
+
+        let rail_style = Style::default().fg(t.colors.border).bg(t.colors.bg_primary);
+        let thumb_style = Style::default()
+            .fg(t.colors.fg_accent)
+            .bg(t.colors.bg_primary);
+
+        // U+2581 LOWER ONE EIGHTH BLOCK: thin line hugging the bottom
+        // of the row, leaving the rest of the row empty.
+        let rail_text = "\u{2581}".repeat(total_cells);
+        let rail_area = Rect { x: full_area.x, y: bar_y, width: full_area.width, height: 1 };
+        frame.render_widget(Paragraph::new(rail_text).style(rail_style), rail_area);
+
+        // U+2584 LOWER HALF BLOCK: thumb stands proud above the rail
+        // but still in the lower half of the row.
+        let thumb_text = "\u{2584}".repeat(filled_w);
+        let thumb_area = Rect {
+            x: full_area.x + filled_x as u16,
+            y: bar_y,
+            width: filled_w as u16,
+            height: 1,
+        };
+        frame.render_widget(Paragraph::new(thumb_text).style(thumb_style), thumb_area);
     }
 
     // Chrome: tab bar, transport, command bar
@@ -633,12 +799,24 @@ fn render_folder_view(
                 };
                 let block_tmp = Block::default().borders(Borders::ALL);
                 let inner_tmp = block_tmp.inner(col_area);
+                let close_x = if col_idx > 0 && col_area.width >= 4 {
+                    Some(Rect {
+                        x: col_area.x + col_area.width.saturating_sub(3),
+                        y: col_area.y,
+                        width: 1,
+                        height: 1,
+                    })
+                } else {
+                    None
+                };
                 column_regions.push(crate::ui::hit_regions::MillerColumnRegion {
                     col_idx,
                     area: col_area,
                     inner: inner_tmp,
                     rows_per_item: 1, // Folder items are always 1-row
                     is_art_mode: false,
+                    art_row_height: 0,
+                    close_x,
                 });
             }
             let mut hr = state.hit_regions.borrow_mut();
@@ -698,6 +876,23 @@ fn render_folder_view(
 
             let inner = block.inner(col_area);
             frame.render_widget(block, col_area);
+
+            // Tiny "x" close affordance for every drilled-in folder
+            // column (the root folder column isn't closeable).
+            if col_idx > 0 && col_area.width >= 4 {
+                let close_x = Rect {
+                    x: col_area.x + col_area.width.saturating_sub(3),
+                    y: col_area.y,
+                    width: 1,
+                    height: 1,
+                };
+                let style = if is_focused {
+                    Style::default().fg(t.colors.fg_accent).bg(t.colors.bg_primary)
+                } else {
+                    Style::default().fg(t.colors.fg_muted).bg(t.colors.bg_primary)
+                };
+                frame.render_widget(Paragraph::new("\u{2715}").style(style), close_x);
+            }
 
             if col.items.is_empty() {
                 let empty = Paragraph::new("(empty)")
@@ -775,7 +970,7 @@ fn render_folder_view(
                             } else if is_selected {
                                 // Selected row in a non-focused folder
                                 // col: dim highlight, not the cursor.
-                                Style::default().fg(t.colors.fg_primary).bg(t.colors.bg_highlight)
+                                Style::default().fg(t.colors.selection_text).bg(t.colors.bg_highlight)
                             } else {
                                 Style::default().fg(t.colors.fg_primary)
                             };
@@ -856,7 +1051,7 @@ fn is_two_row_column(
     }
 
     // Genre/mood album columns
-    if first_is_album && state.browse_category == BrowseCategory::Genres {
+    if first_is_album && state.browse_category.is_tag_section() {
         return true;
     }
 
@@ -866,6 +1061,29 @@ fn is_two_row_column(
     }
 
     false
+}
+
+/// Single source of truth for the art-grid row height (and matching
+/// art width). Used by `render_album_art_grid` for layout *and* by
+/// the Miller-column hit-region registration so `mouse_input` can
+/// read the same value that was rendered. Returns `(row_height,
+/// art_width)`, both in terminal cells.
+///
+/// Sizing logic:
+/// - `art_width` is capped at 60% of inner width, leaves at least 8
+///   cells for the title/year on the right, and floors at 8 cells.
+/// - `art_row_height` derives from `art_width / 2` so the cover stays
+///   roughly square (cells are ~2:1 height:width), capped at 16 cells
+///   so it doesn't dominate on very wide columns, and clamped to the
+///   inner area so it never overflows.
+pub(crate) fn compute_art_grid_row(inner_width: u16, inner_height: u16) -> (u16, u16) {
+    let max_art = ((inner_width as u32 * 3 / 5) as u16).max(20);
+    let art_width = max_art.min(inner_width.saturating_sub(8)).max(8);
+    let art_row_height = (art_width / 2)
+        .max(6)
+        .min(16)
+        .min(inner_height.saturating_sub(1).max(1));
+    (art_row_height, art_width)
 }
 
 /// Render a BrowseNavigationState as dynamic Miller columns.
@@ -1027,6 +1245,15 @@ fn render_alphabet_strip(frame: &mut Frame, state: &AppState, area: Rect) {
         match ch {
             '0' => "0".to_string(),
             '%' => "%".to_string(),
+            // The canonical foreign-character bucket key is `'文'`, but
+            // a CJK glyph is double-width and the TUI strip is only one
+            // cell wide internally — `'文'` would render as a clipped /
+            // invisible half-cell. Use Greek capital omega instead: a
+            // single-column glyph that's still clearly non-Latin and is
+            // commonly used as a "miscellaneous / everything-else"
+            // marker. The GUI strip has more room and renders `'文'`
+            // directly there.
+            '文' => "Ω".to_string(),
             c => c.to_ascii_uppercase().to_string(),
         }
     };
@@ -1041,14 +1268,19 @@ fn render_alphabet_strip(frame: &mut Frame, state: &AppState, area: Rect) {
         }
     };
 
+    // 4 even groups × 7 letters each cover indices 0..28 (% 0 a..z),
+    // plus a separate foreign-character bucket (`'文'`, index 28) sitting
+    // a gap below the last group.
     const N_GROUPS: usize = 4;
-    const GROUP_SIZE: usize = 7; // 4 * 7 == 28 == ALPHABET_STRIP_LETTERS.len()
-    const N_GAPS: usize = N_GROUPS - 1;
-    const MIN_HEIGHT: usize = N_GROUPS * GROUP_SIZE + N_GAPS; // 31
+    const GROUP_SIZE: usize = 7;
+    const N_GAPS: usize = N_GROUPS; // gaps between groups + one before 文
+    const MAIN_LETTERS: usize = N_GROUPS * GROUP_SIZE; // 28
+    const EXTRA_LETTERS: usize = 1; // 文
+    const MIN_HEIGHT: usize = MAIN_LETTERS + EXTRA_LETTERS + N_GAPS; // 33
 
     // Compute the row for each visual letter index. Returns a
     // `Vec<usize>` of length `n` mapping visual_idx → row when there
-    // is room for the 4-group layout.
+    // is room for the 4-group + foreign-bucket layout.
     let letter_rows: Option<Vec<usize>> = if h >= MIN_HEIGHT {
         let extra = h - MIN_HEIGHT;
         // Distribute extra rows: half to inter-group gaps (so the
@@ -1070,10 +1302,12 @@ fn render_alphabet_strip(frame: &mut Frame, state: &AppState, area: Rect) {
                 rows.push(row);
                 row += 1;
             }
-            if group < N_GAPS {
-                row += gap_avg + (if group < gap_extra { 1 } else { 0 });
-            }
+            // After each group, leave a gap (including after the last
+            // group, which separates the 文 foreign bucket).
+            row += gap_avg + (if group < gap_extra { 1 } else { 0 });
         }
+        // The lone foreign-bucket letter (文) sits below the gap.
+        rows.push(row);
         Some(rows)
     } else {
         None
@@ -1193,6 +1427,27 @@ fn render_track_details_pane(
     if inner.height == 0 || inner.width == 0 {
         return;
     }
+
+    // Tiny "x" close glyph in the top-right corner — same affordance
+    // as the Miller columns. The pane is the rightmost "column" in
+    // the browse layout so it gets the same treatment.
+    let close_x_rect: Option<Rect> = if area.width >= 4 {
+        let r = Rect {
+            x: area.x + area.width.saturating_sub(3),
+            y: area.y,
+            width: 1,
+            height: 1,
+        };
+        let style = if pane_focused {
+            Style::default().fg(t.colors.fg_accent).bg(t.colors.bg_primary)
+        } else {
+            Style::default().fg(t.colors.fg_muted).bg(t.colors.bg_primary)
+        };
+        frame.render_widget(Paragraph::new("\u{2715}").style(style), r);
+        Some(r)
+    } else {
+        None
+    };
 
     // Top row: clickable Play Track button. Highlighted when the
     // pane has keyboard focus and `track_pane_index == 0`. Anchored
@@ -1415,12 +1670,13 @@ fn render_track_details_pane(
     }
 
     // Register click regions so the mouse handler can dispatch
-    // Play / drill-into-similar.
+    // Play / drill-into-similar / close-pane.
     let mut hr = state.hit_regions.borrow_mut();
     hr.track_pane = Some(crate::ui::hit_regions::TrackPaneRegions {
         outer: area,
         play_button: play_area,
         similar_rows,
+        close_x: close_x_rect,
     });
 }
 
@@ -1508,9 +1764,17 @@ fn render_browse_miller_columns(
     // When loading with existing columns, reserve space for a loading indicator column
     let layout_columns = if nav.loading { effective_columns + 1 } else { effective_columns };
 
-    // When a fixed column width is provided (from the outer browse layout), use it
-    // to keep column widths consistent with the category column. Otherwise fall back
-    // to the traditional calculation.
+    // Pick the column width.
+    //
+    // In `Scrolling` layout (Library only) the *outer* `render_browse`
+    // already sized `area` and `fixed_col_width` so every Miller col
+    // = col_width and only 2 cols fit. We just adopt the outer's
+    // numbers here. The first visible col may overlap the alphabet
+    // strip in its leftmost cells (`render_browse` paints the strip
+    // on top after we render). That's OK — the artists col's items
+    // are inset by 2 cells ("▸ name") so no item glyph collides.
+    let scrolling = state.miller_layout == crate::app::state::MillerLayoutMode::Scrolling
+        && state.browse_category == BrowseCategory::Library;
     let (max_visible, col_width) = if let Some(fixed_w) = fixed_col_width {
         let max_vis = (area.width / fixed_w).max(1) as usize;
         (max_vis, fixed_w)
@@ -1533,25 +1797,53 @@ fn render_browse_miller_columns(
         let mut column_regions = Vec::new();
         for (vis_idx, col_idx) in (start_col..effective_columns.min(start_col + max_visible)).enumerate() {
             let col = &nav.columns[col_idx];
+            // In scrolling mode every column is locked at exactly
+            // `col_width` — never extend the last visible column to
+            // mop up leftover space, since that would make it wider
+            // than half the screen and the user explicitly wants
+            // every column at the same fixed half-screen width. In
+            // shrinking mode keep the historic "last col absorbs
+            // the rounding remainder" behavior so 3 cols always
+            // sum to area.width exactly.
             let col_area = Rect {
                 x: area.x + (vis_idx as u16 * col_width),
                 y: area.y,
-                width: if vis_idx == max_visible - 1 {
+                width: if !scrolling && vis_idx == max_visible - 1 {
                     area.width - (vis_idx as u16 * col_width)
                 } else {
-                    col_width
+                    col_width.min(area.width.saturating_sub(vis_idx as u16 * col_width))
                 },
                 height: area.height,
             };
             let block_tmp = Block::default().borders(Borders::ALL);
             let inner_tmp = block_tmp.inner(col_area);
             let is_two_row = is_two_row_column(state, col, col_idx, nav, two_row_tracks);
+            // Top-right "x" close glyph hit area. Skip the root col
+            // (which isn't closeable). The glyph lives inside the
+            // border, one cell wide, on the top border row.
+            let close_x = if col_idx > column_offset && col_area.width >= 4 {
+                Some(Rect {
+                    x: col_area.x + col_area.width.saturating_sub(3),
+                    y: col_area.y,
+                    width: 1,
+                    height: 1,
+                })
+            } else {
+                None
+            };
+            let art_row_height = if col.artwork_visible {
+                compute_art_grid_row(inner_tmp.width, inner_tmp.height).0
+            } else {
+                0
+            };
             column_regions.push(crate::ui::hit_regions::MillerColumnRegion {
                 col_idx,
                 area: col_area,
                 inner: inner_tmp,
                 rows_per_item: if is_two_row { 2 } else { 1 },
                 is_art_mode: col.artwork_visible,
+                art_row_height,
+                close_x,
             });
         }
         let mut hr = state.hit_regions.borrow_mut();
@@ -1576,10 +1868,13 @@ fn render_browse_miller_columns(
         let col_area = Rect {
             x: area.x + (vis_idx as u16 * col_width),
             y: area.y,
-            width: if vis_idx == max_visible - 1 {
+            // Mirror the registration-loop sizing rule above — in
+            // scrolling mode columns stay exactly `col_width`; in
+            // shrinking mode the last column absorbs the remainder.
+            width: if !scrolling && vis_idx == max_visible - 1 {
                 area.width - (vis_idx as u16 * col_width) // Last column gets remaining width
             } else {
-                col_width
+                col_width.min(area.width.saturating_sub(vis_idx as u16 * col_width))
             },
             height: area.height,
         };
@@ -1602,6 +1897,30 @@ fn render_browse_miller_columns(
             }
         } else {
             String::new()
+        };
+        // In scroll mode the alphabet strip overlays the leftmost
+        // 3 cells of the artist root col (Library only). Without
+        // padding the title — which ratatui anchors to the top-left
+        // border — gets eaten by the strip. Reserve those leading
+        // cells with non-breaking spaces so the title text starts
+        // past the strip.
+        let strip_overlap_w: usize = if scrolling
+            && state.browse_category == BrowseCategory::Library
+            && state.alphabet_strip_visible()
+            && col_idx == column_offset
+            && vis_idx == 0
+        {
+            3
+        } else {
+            0
+        };
+        let title = if !title.is_empty() && strip_overlap_w > 0 {
+            // Trim leading space, prepend `strip_overlap_w` spaces so
+            // the title slides right past the overlay.
+            let inner = title.trim_start();
+            format!("{}{}", " ".repeat(strip_overlap_w), inner)
+        } else {
+            title
         };
         // Block titles overflow past the column edge when they're
         // longer than the column is wide — Mac-style middle-truncate
@@ -1634,6 +1953,25 @@ fn render_browse_miller_columns(
 
         let inner = block.inner(col_area);
         frame.render_widget(block, col_area);
+
+        // Tiny "x" close affordance in the top-right corner of every
+        // closeable column (everything past the hidden root prefix).
+        // Painted directly over the border so it rides on top of the
+        // line-drawing glyph that ratatui's `Block` already drew.
+        if col_idx > column_offset && col_area.width >= 4 {
+            let close_x = Rect {
+                x: col_area.x + col_area.width.saturating_sub(3),
+                y: col_area.y,
+                width: 1,
+                height: 1,
+            };
+            let style = if is_focused {
+                Style::default().fg(t.colors.fg_accent).bg(t.colors.bg_primary)
+            } else {
+                Style::default().fg(t.colors.fg_muted).bg(t.colors.bg_primary)
+            };
+            frame.render_widget(Paragraph::new("\u{2715}").style(style), close_x);
+        }
 
         if col.items.is_empty() {
             let empty = Paragraph::new("(empty)")
@@ -1908,8 +2246,8 @@ fn render_browse_miller_columns(
                                     // user can tell at a glance which col
                                     // is actually accepting input.
                                     (
-                                        Style::default().fg(t.colors.fg_primary),
-                                        Style::default().fg(t.colors.fg_muted),
+                                        Style::default().fg(t.colors.selection_text),
+                                        Style::default().fg(t.colors.selection_text),
                                         Style::default().bg(t.colors.bg_highlight),
                                     )
                                 } else if is_multi_selected {
@@ -1954,7 +2292,7 @@ fn render_browse_miller_columns(
                                 let style = if is_selected && is_focused {
                                     Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
                                 } else if is_selected {
-                                    Style::default().fg(t.colors.fg_primary).bg(t.colors.bg_highlight)
+                                    Style::default().fg(t.colors.selection_text).bg(t.colors.bg_highlight)
                                 } else if is_multi_selected {
                                     Style::default().fg(t.colors.fg_accent).bg(t.colors.bg_secondary)
                                 } else if is_pinned {
@@ -1973,7 +2311,7 @@ fn render_browse_miller_columns(
                             } else if is_selected {
                                 // Same row in an unfocused col: dim
                                 // "you were here" mark.
-                                Style::default().fg(t.colors.fg_primary).bg(t.colors.bg_highlight)
+                                Style::default().fg(t.colors.selection_text).bg(t.colors.bg_highlight)
                             } else if is_multi_selected {
                                 Style::default().fg(t.colors.fg_accent).bg(t.colors.bg_secondary)
                             } else if is_now_playing {
@@ -2044,6 +2382,11 @@ fn render_browse_miller_columns(
         };
         render_loading_column(frame, placeholder_area, state.loading_tick);
     }
+
+    // Scroll-position visual lives at the OUTER browse layer
+    // (`render_browse`) so it spans the full window and reflects
+    // the entire ribbon (sections + nav + pane), not just nav cols.
+    let _ = scrolling;
 }
 
 /// Render an animated "Loading…" placeholder filling the given
@@ -2161,14 +2504,12 @@ fn render_album_art_grid(
     // Count art items to size rows (one-row items don't affect art sizing)
     let art_item_count = items_with_indices.iter().filter(|(_, item)| !is_one_row(item)).count();
 
-    // Each list row: artwork on left, text on right
-    // Size rows to fill available vertical space with at least 3 visible items.
-    // Row height is derived from panel height, then art_width from row_height.
-    let target_visible = 3u16.max((art_item_count.max(1) as u16).min(5));
-    let art_row_height = (inner.height / target_visible).max(3);
-    // Art width: 2x art_row_height (terminal chars are ~2:1 aspect), capped at half column width
-    let max_art = inner.width / 2;
-    let art_width = (art_row_height * 2).min(max_art).max(6);
+    // Each list row: artwork on left, text on right.
+    //
+    // Single source of truth for the art-grid row height — both the
+    // renderer and the mouse hit-test go through `compute_art_grid_row`.
+    let _ = art_item_count;
+    let (art_row_height, art_width) = compute_art_grid_row(inner.width, inner.height);
 
     if art_row_height == 0 {
         return;

@@ -18,6 +18,7 @@ pub mod context;
 pub mod events;
 pub mod helpers;
 pub mod key_input;
+pub mod lazy_art;
 #[cfg(feature = "tui")]
 pub mod mouse_input;
 

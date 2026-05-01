@@ -18,11 +18,17 @@ pub enum PreloadType {
     Artists,
     Albums,
     Playlists,
-    Genres,
     Moods,
     ArtistGenres,
     AlbumGenres,
     Styles,
+    Decades,
+    Years,
+    Collections,
+    Countries,
+    Labels,
+    Formats,
+    Studios,
     Stations,
     /// All tracks in the library (for compilation detection + track-level artist derivation).
     AllTracks,
@@ -85,19 +91,6 @@ pub fn preload_data(event_tx: &mpsc::Sender<Event>, preload_type: PreloadType, l
                     }
                 }
             }
-            PreloadType::Genres => {
-                tracing::debug!("Preloading genres for library: {}", lib_key);
-                match client.get_genres(lib_key_ref).await {
-                    Ok(data) => {
-                        tracing::debug!("Genres preloaded: {} items", data.len());
-                        let _ = event_tx.send(PreloadEvent::GenresPreloaded { library_key: lib_key, genres: data }.into()).await;
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to preload genres: {}", e);
-                        let _ = event_tx.send(PreloadEvent::PreloadFailed { category: "Genres".to_string() }.into()).await;
-                    }
-                }
-            }
             PreloadType::Moods => {
                 tracing::debug!("Preloading moods for library: {}", lib_key);
                 match client.get_moods(lib_key_ref).await {
@@ -138,17 +131,49 @@ pub fn preload_data(event_tx: &mpsc::Sender<Event>, preload_type: PreloadType, l
                 }
             }
             PreloadType::Styles => {
-                tracing::debug!("Preloading styles for library: {}", lib_key);
                 match client.get_styles(lib_key_ref).await {
                     Ok(data) => {
-                        tracing::debug!("Styles preloaded: {} items", data.len());
                         let _ = event_tx.send(PreloadEvent::StylesPreloaded { library_key: lib_key, styles: data }.into()).await;
                     }
-                    Err(e) => {
-                        tracing::error!("Failed to preload styles: {}", e);
+                    Err(_) => {
                         let _ = event_tx.send(PreloadEvent::PreloadFailed { category: "Styles".to_string() }.into()).await;
                     }
                 }
+            }
+            PreloadType::Decades => {
+                let res = client.get_decades(lib_key_ref).await;
+                emit_tag_preload(res, &event_tx, &lib_key,
+                    crate::app::state::RefreshCategory::Decades, "Decades").await;
+            }
+            PreloadType::Years => {
+                let res = client.get_years(lib_key_ref).await;
+                emit_tag_preload(res, &event_tx, &lib_key,
+                    crate::app::state::RefreshCategory::Years, "Years").await;
+            }
+            PreloadType::Collections => {
+                let res = client.get_collections(lib_key_ref).await;
+                emit_tag_preload(res, &event_tx, &lib_key,
+                    crate::app::state::RefreshCategory::Collections, "Collections").await;
+            }
+            PreloadType::Countries => {
+                let res = client.get_countries(lib_key_ref).await;
+                emit_tag_preload(res, &event_tx, &lib_key,
+                    crate::app::state::RefreshCategory::Countries, "Countries").await;
+            }
+            PreloadType::Labels => {
+                let res = client.get_labels(lib_key_ref).await;
+                emit_tag_preload(res, &event_tx, &lib_key,
+                    crate::app::state::RefreshCategory::Labels, "Labels").await;
+            }
+            PreloadType::Formats => {
+                let res = client.get_formats(lib_key_ref).await;
+                emit_tag_preload(res, &event_tx, &lib_key,
+                    crate::app::state::RefreshCategory::Formats, "Formats").await;
+            }
+            PreloadType::Studios => {
+                let res = client.get_studios(lib_key_ref).await;
+                emit_tag_preload(res, &event_tx, &lib_key,
+                    crate::app::state::RefreshCategory::Studios, "Studios").await;
             }
             PreloadType::Stations => {
                 tracing::debug!("Preloading stations for library: {}", lib_key);
@@ -483,11 +508,44 @@ pub fn preload_all_library_data(event_tx: &mpsc::Sender<Event>, lib_key: &str, l
     preload_data(event_tx, PreloadType::Folders { lib_title: lib_title.to_string() }, lib_key, client);
     preload_data(event_tx, PreloadType::Albums, lib_key, client);
     preload_data(event_tx, PreloadType::AllTracks, lib_key, client);
-    preload_data(event_tx, PreloadType::Genres, lib_key, client);
     preload_data(event_tx, PreloadType::ArtistGenres, lib_key, client);
     preload_data(event_tx, PreloadType::AlbumGenres, lib_key, client);
     preload_data(event_tx, PreloadType::Moods, lib_key, client);
     preload_data(event_tx, PreloadType::Styles, lib_key, client);
+    preload_data(event_tx, PreloadType::Decades, lib_key, client);
+    preload_data(event_tx, PreloadType::Years, lib_key, client);
+    preload_data(event_tx, PreloadType::Collections, lib_key, client);
+    preload_data(event_tx, PreloadType::Countries, lib_key, client);
+    preload_data(event_tx, PreloadType::Labels, lib_key, client);
+    preload_data(event_tx, PreloadType::Formats, lib_key, client);
+    preload_data(event_tx, PreloadType::Studios, lib_key, client);
     preload_data(event_tx, PreloadType::Stations, lib_key, client);
     preload_data(event_tx, PreloadType::Playlists, lib_key, client);
+}
+
+/// Send the right preload event for a tag-style fetch result. The
+/// `category` discriminator on `TagListPreloaded` lets the events
+/// handler route the items into the matching `library` field.
+async fn emit_tag_preload(
+    res: Result<Vec<crate::plex::models::Genre>, crate::plex::ApiError>,
+    event_tx: &mpsc::Sender<Event>,
+    lib_key: &str,
+    category: crate::app::state::RefreshCategory,
+    label: &str,
+) {
+    match res {
+        Ok(items) => {
+            let _ = event_tx.send(PreloadEvent::TagListPreloaded {
+                library_key: lib_key.to_string(),
+                category,
+                items,
+            }.into()).await;
+        }
+        Err(e) => {
+            tracing::error!("Failed to preload {}: {}", label, e);
+            let _ = event_tx.send(PreloadEvent::PreloadFailed {
+                category: label.to_string(),
+            }.into()).await;
+        }
+    }
 }

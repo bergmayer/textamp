@@ -5,7 +5,7 @@
 
 use crate::app::event::*;
 use crate::app::{Action, AppState, Event};
-use crate::app::action::{DataAction, SystemAction};
+use crate::app::action::{BrowseAction, DataAction, SystemAction};
 use crate::app::state::{BrowseCategory, BrowseItem, Focus, RightPanelMode, View};
 use crate::plex::PlexClient;
 use crate::plex::models::Track;
@@ -203,20 +203,19 @@ pub async fn dispatch(
                         }
                     }
                 }
-                BrowseCategory::Genres => {
-                    if state.library.genres.is_empty() {
-                        if let Some(lib_key) = &state.active_library {
-                            match client.get_genres(lib_key).await {
-                                Ok(genres) => state.library.genres = genres,
-                                Err(e) => tracing::error!("Failed to load genres: {}", e),
-                            }
-                        }
-                    }
-                }
                 BrowseCategory::Folders => {
-                    // Folders don't use this load mechanism
                     return Ok(vec![]);
                 }
+                cat if cat.is_tag_section() => {
+                    // The active section's tag list is the source of truth
+                    // for selected_category_key(). If empty, kick off a load
+                    // and bail — the result will arrive via the
+                    // PreloadEvent / TagListPreloaded path.
+                    if state.tag_list_for(cat).is_empty() {
+                        return Ok(vec![BrowseAction::LoadTagList(cat).into()]);
+                    }
+                }
+                _ => return Ok(vec![]),
             }
 
             // Get rating key AFTER category data is loaded
@@ -252,7 +251,8 @@ pub async fn dispatch(
                                 Err(e) => Err(e),
                             }
                         }
-                        BrowseCategory::Genres => {
+                        BrowseCategory::Folders => unreachable!(),
+                        cat if cat.is_tag_section() => {
                             if let Some(lib_key) = &lib_key {
                                 match client.get_genre_tracks(lib_key, &key).await {
                                     Ok(tracks) => Ok(Either::Tracks(tracks)),
@@ -262,7 +262,7 @@ pub async fn dispatch(
                                 Err(crate::plex::ApiError::NoServerSelected)
                             }
                         }
-                        BrowseCategory::Folders => unreachable!(),
+                        _ => return,
                     };
 
                     match result {
@@ -773,7 +773,7 @@ fn load_from_cache(state: &mut AppState, cached: CacheData, lib_key: &str, lib_t
 
     // Genres, artist genres, album genres, moods, styles
     // Just store the data — genre_nav is populated lazily via DrillGenreCategory
-    if !cached.genres.is_empty() { state.library.genres = cached.genres; }
+    if !cached.genres.is_empty() { state.library.album_genres = cached.genres; }
     if !cached.artist_genres.is_empty() { state.library.artist_genres = cached.artist_genres; }
     if !cached.album_genres.is_empty() { state.library.album_genres = cached.album_genres; }
     if !cached.moods.is_empty() { state.library.moods = cached.moods; }

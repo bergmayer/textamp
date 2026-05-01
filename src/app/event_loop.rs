@@ -93,6 +93,10 @@ impl EventLoop {
         // Restore artwork mode preference
         state.artwork.mode = crate::app::state::ArtworkMode::from_config(&self.config.ui.artwork_mode);
 
+        // Restore Miller column layout preference (TUI only; the GUI
+        // ignores the field). Default = Shrinking.
+        state.miller_layout = crate::app::state::MillerLayoutMode::from_config(&self.config.ui.miller_layout);
+
         // Mirror the per-service "external search enabled" toggles
         // from config onto AppState so the palette / context menus /
         // menu bar can gate their entries without threading Config
@@ -101,6 +105,8 @@ impl EventLoop {
         state.external_search.apple_music = self.config.ui.enable_apple_music_search;
         state.external_search.spotify     = self.config.ui.enable_spotify_search;
         state.external_search.youtube     = self.config.ui.enable_youtube_search;
+
+        state.hidden_sections = self.config.ui.hidden_sections.clone();
 
         // Mirror saved per-playlist view toggles (group-by-album,
         // show-artwork) so the playlist-tracks-column event handlers
@@ -449,29 +455,9 @@ impl EventLoop {
                         }
                     };
                 }
-                if matches!(key.code, crossterm::event::KeyCode::Char(':'))
-                    && key.modifiers.is_empty()
-                    && !state.list_filter.active
-                    && state.view != crate::app::state::View::Auth
-                {
-                    crate::ui::command_palette::open(state);
-                    return vec![];
-                }
-                // `/` opens the inline filter from anywhere — the
-                // filter input is rendered in the transport bar and
-                // grabs keyboard focus until Esc / Enter closes it.
-                // Activate even when the category column is focused;
-                // typing into the filter is what the user wants when
-                // they hit `/`, regardless of which pane has focus.
-                if matches!(key.code, crossterm::event::KeyCode::Char('/'))
-                    && !key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
-                    && !key.modifiers.contains(crossterm::event::KeyModifiers::ALT)
-                    && !state.list_filter.active
-                    && state.view != crate::app::state::View::Auth
-                {
-                    use crate::app::action::SearchAction;
-                    return vec![SearchAction::ActivateListFilter.into()];
-                }
+                // `:` (open palette) and `/` (open filter) are now
+                // handled inside the shared `key_input::handle_key`
+                // so both the TUI and GUI honour them identically.
                 handlers::key_input::handle_key(key, state, &self.config)
             }
             Event::Resize(w, h) => {

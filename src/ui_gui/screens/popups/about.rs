@@ -3,12 +3,13 @@
 //! matches the TUI exit banner.
 
 use iced::widget::text::{Rich, Span};
-use iced::widget::{button, column, container, mouse_area, row, stack, text, Column, Space};
+use iced::widget::{button, column, container, mouse_area, row, stack, Column, Space};
 use iced::{Alignment, Background, Border, Color, Element, Font, Length, Theme};
 
 use crate::ui_gui::message::GuiMessage;
 use crate::ui_gui::widgets::transport_bar::popout_button_style;
 
+use crate::ui_gui::widgets::text;
 const LOGO_ANSI: &str = include_str!("../../../../textamp_clean.ansi");
 
 pub fn view<'a>() -> Element<'a, GuiMessage> {

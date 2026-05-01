@@ -23,6 +23,9 @@ pub struct HitRegions {
     /// Search/filter popup (Ctrl+F overlay).
     pub search_popup: Option<SearchPopupRegions>,
 
+    /// Command palette overlay (`:` palette).
+    pub command_palette: Option<CommandPaletteRegions>,
+
     /// Sort popup (Ctrl+S).
     pub sort_popup: Option<SortPopupRegions>,
 
@@ -124,6 +127,20 @@ pub struct SearchPopupRegions {
     pub results_area: Rect,
 }
 
+/// Command palette overlay regions. Clicking inside `outer` but not
+/// on a `rows` rect is a no-op (keeps the palette open). Clicking
+/// outside `outer` cancels (closes) the palette. Clicking a row
+/// selects that row and executes its command.
+#[derive(Debug, Clone)]
+pub struct CommandPaletteRegions {
+    /// Outer popup rect (border included).
+    pub outer: Rect,
+    /// One rect per visible row, paired with the index into
+    /// `state.palette.matches` (NOT `state.palette.entries` —
+    /// `matches` is the filtered slice the renderer iterates over).
+    pub rows: Vec<(Rect, usize)>,
+}
+
 /// Sort popup regions.
 #[derive(Debug, Clone)]
 pub struct SortPopupRegions {
@@ -209,6 +226,10 @@ pub struct TrackPaneRegions {
     pub play_button: Rect,
     /// (rect, index-into-similar-list) per visible similar track.
     pub similar_rows: Vec<(Rect, usize)>,
+    /// Hit rect for the small "x" close glyph in the top-right
+    /// corner. The pane is treated as a standard rightmost column
+    /// for closing purposes — clicking the glyph clears the pane.
+    pub close_x: Option<Rect>,
 }
 
 /// Category selector column region (Browse view, column 0).
@@ -231,10 +252,21 @@ pub struct MillerColumnRegion {
     pub area: Rect,
     /// Inner area (border excluded).
     pub inner: Rect,
-    /// Rows per item (1 or 2).
+    /// Rows per item (1 or 2). Meaningless when `is_art_mode` is true.
     pub rows_per_item: u16,
     /// Whether this column is in artwork grid mode.
     pub is_art_mode: bool,
+    /// Cell-row height the art-grid renderer used for art-height items
+    /// in this column. Only meaningful when `is_art_mode` is true. The
+    /// mouse hit-test reads this so it can never drift from the renderer
+    /// (a previous mismatched formula was making clicks land on the
+    /// album below the one the user clicked on).
+    pub art_row_height: u16,
+    /// Hit rect for the small "x" close glyph in the top-right
+    /// corner. `None` for the root column (which isn't closeable).
+    /// A click anywhere in this rect closes this column and every
+    /// column to its right.
+    pub close_x: Option<Rect>,
 }
 
 /// Miller columns layout regions.

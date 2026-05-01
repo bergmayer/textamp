@@ -238,6 +238,30 @@ pub struct UiConfig {
     /// accumulating stale entries.
     #[serde(default)]
     pub library_view_settings: std::collections::HashMap<String, LibraryViewSettings>,
+
+    /// Sections hidden from the leftmost browse column. Each entry is a
+    /// `BrowseCategory` variant. The user toggles these from the
+    /// Settings dialog's "Sections" panel; sparsely-populated tag types
+    /// (Collections, Countries, Labels, Formats, Studios) are hidden by
+    /// default to keep the column readable.
+    #[serde(default = "default_hidden_sections")]
+    pub hidden_sections: Vec<crate::app::state::BrowseCategory>,
+
+    /// TUI-only: how the Library screen's Miller columns share the
+    /// horizontal space when more than two are open.
+    /// - `"shrinking"` (default): every visible column shrinks to fit.
+    /// - `"scrolling"`: every column keeps its starting width (half the
+    ///   inner area), the layout extends past the screen, and the
+    ///   viewport scrolls as the user drills deeper. A horizontal
+    ///   scroll indicator hints at off-screen columns.
+    #[serde(default = "default_miller_layout")]
+    pub miller_layout: String,
+}
+
+fn default_miller_layout() -> String { "shrinking".to_string() }
+
+fn default_hidden_sections() -> Vec<crate::app::state::BrowseCategory> {
+    crate::app::state::BrowseCategory::hidden_by_default().to_vec()
 }
 
 /// View toggles scoped to a single Plex library.
@@ -288,6 +312,8 @@ impl Default for UiConfig {
             enable_spotify_search: default_enable_search_service(),
             enable_youtube_search: default_enable_search_service(),
             library_view_settings: std::collections::HashMap::new(),
+            hidden_sections: default_hidden_sections(),
+            miller_layout: default_miller_layout(),
         }
     }
 }

@@ -15,6 +15,7 @@
 
 pub mod artist_alias_service;
 pub mod external_search;
+pub mod track_context;
 mod adventure;
 mod cache_service;
 mod folder_service;

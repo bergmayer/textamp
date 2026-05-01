@@ -1,6 +1,6 @@
 //! Sort popup — pick a column sort mode.
 
-use iced::widget::{button, column, container, row, text, Column, Space};
+use iced::widget::{button, column, container, row, Column, Space};
 use iced::{Alignment, Background, Border, Color, Element, Length, Theme};
 
 use crate::app::state::SortPopupState;
@@ -9,6 +9,7 @@ use crate::ui_gui::widgets::transport_bar::popout_button_style;
 
 pub fn view<'a>(p: &'a SortPopupState) -> Element<'a, GuiMessage> {
     use crate::app::state::{ColumnSortMode, SortPopupOption};
+use crate::ui_gui::widgets::text;
     let rows = p.options.iter().enumerate().map(|(i, o)| {
         let is_selected = i == p.selected_index;
         let mark = if is_selected { "> " } else { "  " };
@@ -54,7 +55,7 @@ pub fn view<'a>(p: &'a SortPopupState) -> Element<'a, GuiMessage> {
     // also fix the title at "View Options" (the column name was just
     // visual noise that varied wildly in length).
     let close_btn = container(
-        button(text("Close").size(14).wrapping(text::Wrapping::None))
+        button(text("Close").size(14).wrapping(iced::widget::text::Wrapping::None))
             .padding([4, 12])
             .on_press(GuiMessage::CloseStatePopup(StatePopupKind::Sort))
             .style(popout_button_style),

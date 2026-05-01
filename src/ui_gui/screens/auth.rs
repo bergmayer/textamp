@@ -3,7 +3,7 @@
 //! Matches the TUI's AuthStep progression: Checking → Login / AuthPin →
 //! Authenticating → ServerSelect → Connecting → Connected.
 
-use iced::widget::{button, column, container, text, text_input};
+use iced::widget::{button, column, container, text_input};
 use iced::{Alignment, Element, Length};
 
 use crate::app::action::SettingsAction;
@@ -11,6 +11,7 @@ use crate::app::{Action, AppState};
 use crate::app::state::{AuthStep, ConnectionState};
 use crate::ui_gui::message::GuiMessage;
 
+use crate::ui_gui::widgets::text;
 pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
     let body: Element<'_, GuiMessage> = match state.auth_state.step {
         AuthStep::Checking => container(text("Checking stored credentials\u{2026}").size(16))

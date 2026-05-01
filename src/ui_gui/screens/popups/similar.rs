@@ -5,7 +5,7 @@
 //! handlers populate that struct asynchronously; we just render what's
 //! there and show a loading hint until the results arrive.
 
-use iced::widget::{button, column, container, scrollable, text, Column, Space};
+use iced::widget::{button, column, container, scrollable, Column, Space};
 use iced::{Alignment, Background, Border, Color, Element, Length, Theme};
 
 use crate::app::action::BrowseAction;
@@ -14,6 +14,7 @@ use crate::app::{Action, AppState};
 use crate::ui_gui::message::GuiMessage;
 use crate::ui_gui::widgets::transport_bar::popout_button_style;
 
+use crate::ui_gui::widgets::text;
 pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
     let mode_label = match state.similar.mode {
         SimilarMode::Albums => "Similar Albums",

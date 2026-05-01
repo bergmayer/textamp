@@ -7,7 +7,7 @@
 //! vector/GPU rendering, not ANSI block chars.
 
 use iced::widget::canvas::Canvas;
-use iced::widget::{button, column, container, image, row, text};
+use iced::widget::{button, column, container, image, row};
 use iced::{Alignment, Background, Border, Color, Element, Length, Theme};
 
 use crate::app::state::VisualizerTab;
@@ -16,7 +16,7 @@ use crate::ui_gui::images::lookup_grid;
 use crate::ui_gui::message::GuiMessage;
 use crate::ui_gui::widgets::transport_bar::fmt_ms;
 use crate::ui_gui::widgets::vectorscope_canvas::Vectorscope;
-use crate::ui_gui::widgets::{spectrogram_canvas, spectrum_canvas, waveform_canvas};
+use crate::ui_gui::widgets::{spectrogram_canvas, spectrum_canvas, text, waveform_canvas};
 
 pub fn view<'a>(state: &'a AppState, vectorscope: &'a Vectorscope) -> Element<'a, GuiMessage> {
     let track = state.current_track();

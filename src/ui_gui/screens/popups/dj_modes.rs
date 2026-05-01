@@ -6,7 +6,7 @@
 //! action) but leaves the popup open so the user can switch modes.
 //! Clicking the active mode again clears it.
 
-use iced::widget::{button, column, container, row, scrollable, text, Column, Space};
+use iced::widget::{button, column, container, row, scrollable, Column, Space};
 use iced::{Alignment, Background, Border, Color, Element, Length, Theme};
 
 use crate::app::action::RadioAction;
@@ -15,6 +15,7 @@ use crate::app::Action;
 use crate::ui_gui::message::GuiMessage;
 use crate::ui_gui::widgets::transport_bar::popout_button_style;
 
+use crate::ui_gui::widgets::text;
 pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
     let active = state.dj.active_mode;
     let modes = [

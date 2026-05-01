@@ -9,12 +9,13 @@
 //! menu can appear at the cursor point without a dedicated Iced overlay
 //! widget (Iced 0.13 has no built-in context-menu widget).
 
-use iced::widget::{button, column as iced_column, container, mouse_area, text, Column};
+use iced::widget::{button, column as iced_column, container, mouse_area, Column};
 use iced::{Background, Border, Color, Element, Length, Padding, Shadow, Theme, Vector};
 
 use crate::app::Action;
 use crate::ui_gui::message::GuiMessage;
 
+use crate::ui_gui::widgets::text;
 /// Entry shown in a context menu. Separator renders as a thin divider
 /// line; Entry renders a clickable button that emits either a bundle
 /// of `Action`s or a specific `GuiMessage` when the label is chosen.

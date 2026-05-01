@@ -7,9 +7,10 @@
 //! visualizer panel up, popup open) render in their pressed style
 //! so the user always sees what's on at a glance.
 
-use iced::widget::{button, column as iced_column, container, image, mouse_area, row as iced_row, scrollable, text, Column};
+use iced::widget::{button, column as iced_column, container, image, mouse_area, row as iced_row, scrollable, Column};
 use iced::{Background, Border, Color, Element, Length, Padding, Shadow, Theme, Vector};
 
+use crate::ui_gui::widgets::text;
 use crate::app::state::PlaybackMode;
 use crate::app::{Action, AppState};
 use crate::ui_gui::images;

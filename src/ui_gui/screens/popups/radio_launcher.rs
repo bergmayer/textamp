@@ -1,12 +1,13 @@
 //! Radio launcher popup (search for seed, pick station).
 
-use iced::widget::{button, column, container, row, scrollable, text, Column, Space};
+use iced::widget::{button, column, container, row, scrollable, Column, Space};
 use iced::{Alignment, Background, Border, Color, Element, Length, Theme};
 
 use crate::app::state::RadioLauncherState;
 use crate::ui_gui::message::{GuiMessage, StatePopupKind};
 use crate::ui_gui::widgets::transport_bar::popout_button_style;
 
+use crate::ui_gui::widgets::text;
 pub fn view<'a>(p: &'a RadioLauncherState) -> Element<'a, GuiMessage> {
     // Rows follow the layout `select_radio_launcher_result` expects:
     // artists first, then albums, then tracks — a flat `item_index`

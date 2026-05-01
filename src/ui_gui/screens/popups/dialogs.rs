@@ -7,12 +7,13 @@
 //! previous bug where the Yes button hard-coded `SystemAction::Quit`
 //! regardless of what the dialog was actually asking.
 
-use iced::widget::{button, column, container, row, text, text_input};
+use iced::widget::{button, column, container, row, text_input};
 use iced::{Alignment, Element, Length};
 
 use crate::app::state::{ConfirmDialog, InputDialog};
 use crate::ui_gui::message::GuiMessage;
 
+use crate::ui_gui::widgets::text;
 pub fn confirm<'a>(d: &'a ConfirmDialog) -> Element<'a, GuiMessage> {
     let yes = button(text("Yes").size(15))
         .on_press(GuiMessage::ConfirmDialogYes)

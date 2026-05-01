@@ -6,7 +6,7 @@
 //! Folders), and the remaining columns are Miller columns for the active
 //! category's navigation state.
 
-use iced::widget::{button, column as iced_column, container, image, scrollable, text, Column, Row, Space};
+use iced::widget::{button, column as iced_column, container, image, scrollable, Column, Row, Space};
 use iced::{Alignment, Background, Border, Color, Element, Length, Theme};
 
 use crate::app::action::{NavigationAction, QueueAction};
@@ -14,7 +14,7 @@ use crate::app::state::BrowseCategory;
 use crate::app::{Action, AppState};
 use crate::plex::models::{FolderColumn, FolderItem, FolderItemType, Track};
 use crate::ui_gui::message::GuiMessage;
-use crate::ui_gui::widgets::miller_column;
+use crate::ui_gui::widgets::{miller_column, text};
 use crate::ui_gui::widgets::transport_bar::primary_action_button;
 
 const ALPHABET_STRIP_WIDTH: f32 = 30.0;
@@ -94,14 +94,18 @@ pub fn view<'a>(
 /// focused root list scrolls to the first item starting with that
 /// character.
 fn alphabet_strip<'a>(descending: bool) -> Element<'a, GuiMessage> {
+    // Order matches `helpers::ALPHABET_STRIP_LETTERS`: % → 0 → a..z → 文.
+    // `'文'` is the bucket for non-ASCII first characters (CJK, Cyrillic,
+    // Greek, etc.), which sort after `z` in code-point order.
     let mut chars: Vec<char> = std::iter::once('%')
         .chain(std::iter::once('0'))
         .chain('a'..='z')
+        .chain(std::iter::once('文'))
         .collect();
     if descending {
         // Sort-descending puts Z-named artists at the top of the
         // list, so the alphabet strip should mirror that order:
-        // Z…A, then 9…0, then % at the bottom (the last sort
+        // 文 → Z…A, then 9…0, then % at the bottom (the last sort
         // key in the natural ordering).
         chars.reverse();
     }
@@ -115,6 +119,12 @@ fn alphabet_strip<'a>(descending: bool) -> Element<'a, GuiMessage> {
         let label = match ch {
             '0' => "0".to_string(),
             '%' => "%".to_string(),
+            // Canonical bucket key in `ALPHABET_STRIP_LETTERS` is `'文'`,
+            // but render it as `Ω` to match the TUI strip (which can't
+            // fit a double-width CJK glyph in one cell). Greek omega
+            // reads as a clear "everything else" marker in either
+            // front-end.
+            '文' => "Ω".to_string(),
             c   => c.to_ascii_uppercase().to_string(),
         };
         let inner = container(text(label).size(ALPHABET_STRIP_FONT))
@@ -193,13 +203,12 @@ fn similar_row<'a>(track: &'a Track, pane_idx: usize, is_selected: bool) -> Elem
                 ..button::Style::default()
             }
         });
-    // Right-click → standard track context menu (Play / Play next /
-    // Add to queue / Show Similar Tracks / Show Similar Albums /
-    // Related Artists / Sonic Adventure / Show Artist Bio / Open in
-    // Library). Same as the menu Browse miller-column track rows and
-    // queue rows show.
+    // Right-click → standard track context menu, but the "floating"
+    // variant — similar-track rows are by definition outside any
+    // library drill, so "Open in Library" must appear near the top
+    // regardless of the active view category.
     mouse_area(body)
-        .on_right_press(GuiMessage::OpenStandaloneTrackContextMenu(Box::new(track.clone())))
+        .on_right_press(GuiMessage::OpenFloatingTrackContextMenu(Box::new(track.clone())))
         .into()
 }
 
@@ -221,9 +230,9 @@ fn track_details_pane<'a>(
     use crate::ui_gui::images::lookup_grid;
 
     // Pane has its own close-x affordance (Cmd+W keyboard equivalent)
-    // — clicking it clears `track_details` so the pane disappears
-    // without disturbing Miller-column focus or selection. Play Track
-    // button sits between the title and the close-x.
+    // — clicking it flips `track_pane_open` to false so the pane
+    // disappears without disturbing Miller-column focus or selection.
+    // Play Track button sits between the title and the close-x.
     let track_for_play = track.clone();
     let header = container(
         Row::new()
@@ -385,21 +394,17 @@ fn track_details_pane<'a>(
 
 fn category_column(state: &AppState) -> Element<'_, GuiMessage> {
     let is_focused = state.category_column_focused;
-    // Library / Genres / Folders sit at the top — Playlists no longer
-    // gets its own category row because each playlist is listed
-    // individually below the divider.
-    let categories: &[(BrowseCategory, &str)] = &[
-        (BrowseCategory::Library, "Library"),
-        (BrowseCategory::Genres,  "Genres"),
-        (BrowseCategory::Folders, "Folders"),
-    ];
-    let cat_index_to_idx = |c: BrowseCategory| categories
-        .iter()
-        .position(|(cc, _)| *cc == c);
-    let active_cat_idx = cat_index_to_idx(state.browse_category);
+    // Build the visible category list: every BrowseCategory that
+    // isn't hidden via Settings, except Playlists (which is rendered
+    // individually as one row per playlist below the divider).
+    let visible_cats: Vec<(BrowseCategory, &'static str)> = BrowseCategory::all().iter()
+        .filter(|c| **c != BrowseCategory::Playlists && !state.hidden_sections.contains(c))
+        .map(|c| (*c, c.display_label()))
+        .collect();
+    let active_cat_idx = visible_cats.iter().position(|(c, _)| *c == state.browse_category);
 
     let mut rows: Vec<Element<'_, GuiMessage>> = Vec::new();
-    for (i, (cat, label)) in categories.iter().copied().enumerate() {
+    for (i, (cat, label)) in visible_cats.iter().copied().enumerate() {
         let is_selected = Some(i) == active_cat_idx
             && cat == state.browse_category
             && state.category_column_focused
@@ -448,25 +453,47 @@ fn category_column(state: &AppState) -> Element<'_, GuiMessage> {
         );
     }
 
-    // Divider then the per-playlist rows. Each row dispatches the
-    // same drill action that the Playlists category column would
-    // (LoadPlaylistTracksForMiller) — but with `SetCategory(Playlists)`
-    // first so the playlist_nav is the active nav when the tracks
-    // column appears.
-    if !state.library.playlists.is_empty() {
-        rows.push(
-            container(Space::with_height(Length::Fixed(1.0)))
-                .padding([6, 8])
-                .width(Length::Fill)
-                .style(|theme: &Theme| container::Style {
-                    background: Some(Background::Color(
-                        theme.extended_palette().background.strong.color,
-                    )),
-                    ..container::Style::default()
-                })
-                .into(),
-        );
-        for p in &state.library.playlists {
+    // Per-playlist rows. The pin-and-filter logic lives in
+    // `AppState::category_rows()` so the TUI and GUI agree on which
+    // playlists appear and in what order; here we just slice the
+    // playlist part out and walk it.
+    let cat_rows = state.category_rows();
+    let pinned_keys = ['\u{2764}', '\u{2661}', '\u{1f90d}', '\u{2665}'];
+    let divider_row = || -> Element<'_, GuiMessage> {
+        container(Space::with_height(Length::Fixed(1.0)))
+            .padding([6, 8])
+            .width(Length::Fill)
+            .style(|theme: &Theme| container::Style {
+                background: Some(Background::Color(
+                    theme.extended_palette().background.strong.color,
+                )),
+                ..container::Style::default()
+            })
+            .into()
+    };
+    if !state.hidden_sections.contains(&BrowseCategory::Playlists) {
+        // Divider between categories block and playlists block.
+        let has_any_playlist = cat_rows.iter()
+            .any(|r| matches!(r, crate::app::state::CategoryRow::Playlist(_)));
+        if !visible_cats.is_empty() && has_any_playlist {
+            rows.push(divider_row());
+        }
+        let mut prev_was_pinned: Option<bool> = None;
+        for r in &cat_rows {
+            let i = match r {
+                crate::app::state::CategoryRow::Playlist(i) => *i,
+                _ => continue,
+            };
+            let Some(p) = state.library.playlists.get(i) else { continue };
+            let is_pinned = p.title.eq_ignore_ascii_case("recently added")
+                || pinned_keys.iter().any(|k| p.title.contains(*k));
+            // Insert a divider when transitioning from pinned to unpinned.
+            if let Some(prev) = prev_was_pinned {
+                if prev && !is_pinned {
+                    rows.push(divider_row());
+                }
+            }
+            prev_was_pinned = Some(is_pinned);
             let title = p.title.clone();
             let pkey = p.rating_key.clone();
             let is_active = state.browse_category == BrowseCategory::Playlists
@@ -475,7 +502,10 @@ fn category_column(state: &AppState) -> Element<'_, GuiMessage> {
                     .and_then(|c| c.items.get(c.selected_index))
                     .map(|it| it.key() == pkey.as_str())
                     .unwrap_or(false);
-            let row_label = text(crate::ui_gui::widgets::safe_text(&title).into_owned()).size(15);
+            // Force text-presentation for heart glyphs so the playlist
+            // row paints in the body text color, not the colorful emoji.
+            let display = crate::util::force_text_presentation(&title);
+            let row_label = text(crate::ui_gui::widgets::safe_text(&display).into_owned()).size(15);
             rows.push(
                 button(row_label)
                     .width(Length::Fill)

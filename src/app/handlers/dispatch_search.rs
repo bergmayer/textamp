@@ -84,7 +84,7 @@ pub async fn dispatch(
 
             let albums = search_albums_with_ranking(&state.library.albums, &query, 50);
             let playlists = search_with_ranking(&state.library.playlists, &query, |p| &p.title, 50);
-            let genres = search_with_ranking(&state.library.genres, &query, |g| &g.title, 50);
+            let genres = search_with_ranking(&state.library.album_genres, &query, |g| &g.title, 50);
 
             // Store local results immediately (tracks filled async by API)
             state.search.results = Some(SearchResults {
@@ -158,10 +158,11 @@ pub async fn dispatch(
             state.list_filter.column = match state.browse_category {
                 BrowseCategory::Library => state.artist_nav.focused_column,
                 BrowseCategory::Playlists => state.playlist_nav.focused_column,
-                BrowseCategory::Genres => state.genre_nav.focused_column,
                 BrowseCategory::Folders => {
                     state.folder_state.as_ref().map(|fs| fs.focused_column).unwrap_or(0)
                 }
+                cat if cat.is_tag_section() => state.tag_nav.focused_column,
+                _ => 0,
             };
         }
         SearchAction::DeactivateListFilter => {
@@ -246,11 +247,12 @@ pub async fn dispatch(
                     state.list_filter.column = match state.browse_category {
                         BrowseCategory::Library => state.artist_nav.focused_column,
                         BrowseCategory::Playlists => state.playlist_nav.focused_column,
-                        BrowseCategory::Genres => state.genre_nav.focused_column,
                         BrowseCategory::Folders => state.folder_state
                             .as_ref()
                             .map(|fs| fs.focused_column)
                             .unwrap_or(0),
+                        cat if cat.is_tag_section() => state.tag_nav.focused_column,
+                        _ => 0,
                     };
                 }
                 state.list_filter.query = query;
@@ -381,7 +383,7 @@ pub async fn dispatch(
             // Toggling grouping reshapes the column (track list ↔
             // album list), so any open track-details pane is now
             // pointing at a row that may no longer exist. Close it.
-            state.track_details = None;
+            state.track_pane_open = false;
             follow_ups.extend(super::key_input::sort_popup::toggle_group_by_album(state, col_idx));
         }
         SearchAction::CloseRadioLauncher => {
@@ -483,6 +485,7 @@ pub async fn dispatch(
                 // into `results.tracks` without an artist+album
                 // offset.
                 search_tab: crate::app::state::SearchTab::Tracks,
+                search_version: 0,
             });
         }
         SearchAction::OpenAdventureLauncherWithStart { start_track } => {
@@ -508,6 +511,7 @@ pub async fn dispatch(
                 // into `results.tracks` without an artist+album
                 // offset.
                 search_tab: crate::app::state::SearchTab::Tracks,
+                search_version: 0,
             });
         }
         SearchAction::CloseAdventureLauncher => {
@@ -989,47 +993,22 @@ fn select_search_result(state: &mut AppState) -> Vec<Action> {
                 state.search.query.clear();
 
                 state.popups.search_active = false;
-                state.set_browse_category(BrowseCategory::Genres);
+                // Search results' genre list comes from album_genres, so
+                // open the Album Genres section.
+                state.set_browse_category(BrowseCategory::AlbumGenres);
                 state.set_view(View::Browse);
-                // Search-results genres come from `state.library.genres`,
-                // which corresponds to the "Library" GenreCategory.
-                state.library.genre_content_type = crate::app::state::GenreContentType::Genres;
 
-                // Build the proper Miller breadcrumb instead of pushing
-                // an albums column straight onto the categories root.
-                // Column 0 = GenreCategory list with "Library" selected.
-                // Column 1 = library genres list with the searched genre
-                //            selected.
-                // Column 2 = albums for the genre (pushed below by the
-                //            LoadGenreAlbumsForMiller dispatch).
-                let categories = vec![
-                    BrowseItem::GenreCategory { key: "genre_cat:all".to_string(), title: "All".to_string() },
-                    BrowseItem::GenreCategory { key: "genre_cat:library".to_string(), title: "Library".to_string() },
-                    BrowseItem::GenreCategory { key: "genre_cat:artist".to_string(), title: "Artist".to_string() },
-                    BrowseItem::GenreCategory { key: "genre_cat:album".to_string(), title: "Album".to_string() },
-                    BrowseItem::GenreCategory { key: "genre_cat:mood".to_string(), title: "Mood".to_string() },
-                    BrowseItem::GenreCategory { key: "genre_cat:style".to_string(), title: "Style".to_string() },
-                ];
-                if state.genre_nav.columns.is_empty()
-                    || state.genre_nav.columns.first().map_or(true, |c| {
-                        c.items.first().map_or(true, |i| !matches!(i, BrowseItem::GenreCategory { .. }))
-                    })
-                {
-                    state.genre_nav.reset("genres", categories);
+                // Populate column 0 with the album-genre list, with the
+                // searched genre selected. Column 1 (albums) is pushed by
+                // LoadGenreAlbumsForMiller below.
+                let genre_items = BrowseItem::from_genres(&state.library.album_genres);
+                let mut col0 = crate::app::state::BrowseColumn::new(BrowseCategory::AlbumGenres.name(), genre_items);
+                if let Some(pos) = col0.items.iter().position(|i| i.key() == genre_key) {
+                    col0.selected_index = pos;
                 }
-                if let Some(col0) = state.genre_nav.columns.get_mut(0) {
-                    // Index 1 = "Library" in the categories list above.
-                    col0.selected_index = 1;
-                }
-
-                let genre_items = BrowseItem::from_genres(&state.library.genres);
-                let mut col1 = crate::app::state::BrowseColumn::new("library genres", genre_items);
-                if let Some(pos) = col1.items.iter().position(|i| i.key() == genre_key) {
-                    col1.selected_index = pos;
-                }
-                state.genre_nav.columns.truncate(1);
-                state.genre_nav.columns.push(col1);
-                state.genre_nav.focused_column = 1;
+                state.tag_nav.columns.clear();
+                state.tag_nav.columns.push(col0);
+                state.tag_nav.focused_column = 0;
                 state.library.selected_album_title = format!("genre: {}", genre_title);
 
                 return vec![crate::app::action::MillerAction::LoadGenreAlbumsForMiller { genre_key }.into()];
@@ -1131,8 +1110,8 @@ async fn execute_list_filter(
                 });
             }
         }
-        BrowseCategory::Genres => {
-            if let Some(col) = state.genre_nav.columns.get(column) {
+        cat if cat.is_tag_section() => {
+            if let Some(col) = state.tag_nav.columns.get(column) {
                 let items: Vec<_> = col.items.clone();
                 let aliases = aliases.clone();
                 let empty = empty_comp_keys.clone();
@@ -1155,6 +1134,7 @@ async fn execute_list_filter(
                 }
             }
         }
+        _ => {}
     }
 
     Ok(())
@@ -1207,26 +1187,35 @@ async fn adventure_launcher_search(
 
     let albums = search_albums_with_ranking(&state.library.albums, &query, SEARCH_RESULT_LIMIT);
     let playlists = search_with_ranking(&state.library.playlists, &query, |p| &p.title, SEARCH_RESULT_LIMIT);
-    let genres = search_with_ranking(&state.library.genres, &query, |g| &g.title, SEARCH_RESULT_LIMIT);
+    let genres = search_with_ranking(&state.library.album_genres, &query, |g| &g.title, SEARCH_RESULT_LIMIT);
 
-    // Async API search for tracks
+    // Async API search for tracks. Same incremental-with-debounce
+    // shape the regular search uses: bump a per-launcher version
+    // before each kick-off, sleep 350ms inside the spawned task, then
+    // hit the API. The events handler discards results whose version
+    // doesn't match the current launcher state, so out-of-order
+    // callbacks from older keystrokes are dropped instead of
+    // overwriting the current results.
     let need_tracks = launcher.query.len() >= 2;
     if need_tracks {
+        launcher.search_version = launcher.search_version.wrapping_add(1);
+        let version = launcher.search_version;
         launcher.loading = true;
         let event_tx = event_tx.clone();
         let client_clone = client.clone();
         let q = launcher.query.clone();
         tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(350)).await;
             match client_clone.search(&q).await {
                 Ok(results) => {
-                    let _ = event_tx.send(DataEvent::TrackSearchCompleted {
-                        version: u64::MAX - 1, // Marker for adventure launcher
+                    let _ = event_tx.send(DataEvent::AdventureTrackSearchCompleted {
+                        version,
                         tracks: results.tracks,
                     }.into()).await;
                 }
                 Err(_) => {
-                    let _ = event_tx.send(DataEvent::TrackSearchCompleted {
-                        version: u64::MAX - 1,
+                    let _ = event_tx.send(DataEvent::AdventureTrackSearchCompleted {
+                        version,
                         tracks: vec![],
                     }.into()).await;
                 }
@@ -1319,6 +1308,23 @@ async fn adventure_launcher_select_track(
     launcher.drill = AdventureDrillLevel::Search;
     launcher.item_index = 0;
     launcher.focus = SearchFocus::Input;
+
+    // Auto-advance the launcher's step so the UI keeps moving after a
+    // selection instead of leaving the user on a now-empty search:
+    //   - Picked a start track → step into EnterTrackCount.
+    //   - Picked an end track when count is set → fire Generate.
+    //   - Picked an end track when count is empty → step into
+    //     EnterTrackCount so the user fills in a count.
+    let both_tracks_set = launcher.start_track.is_some() && launcher.end_track.is_some();
+    let count_set = !launcher.track_count_input.trim().is_empty();
+    if both_tracks_set && count_set {
+        return Ok(vec![SearchAction::AdventureLauncherGenerate.into()]);
+    }
+    if launcher.start_track.is_some() && launcher.end_track.is_none() {
+        launcher.step = AdventureStep::EnterTrackCount;
+    } else if both_tracks_set && !count_set {
+        launcher.step = AdventureStep::EnterTrackCount;
+    }
 
     Ok(vec![])
 }
@@ -1429,11 +1435,12 @@ pub(super) fn is_on_filter_column(state: &AppState) -> bool {
     match state.list_filter.category {
         BrowseCategory::Library => state.artist_nav.focused_column == filter_col,
         BrowseCategory::Playlists => state.playlist_nav.focused_column == filter_col,
-        BrowseCategory::Genres => state.genre_nav.focused_column == filter_col,
         BrowseCategory::Folders => {
             state.folder_state.as_ref()
                 .map(|fs| fs.focused_column == filter_col)
                 .unwrap_or(true)
         }
+        cat if cat.is_tag_section() => state.tag_nav.focused_column == filter_col,
+        _ => false,
     }
 }

@@ -18,6 +18,7 @@ mod search;
 mod radio_launcher;
 mod artist_radio_picker;
 mod adventure_launcher;
+pub mod command_palette;
 pub mod stations;
 pub mod similar;
 pub mod related;
@@ -82,6 +83,13 @@ pub fn overlay<'a>(state: &'a AppState, base: Element<'a, GuiMessage>) -> Elemen
 }
 
 fn active_popup(state: &AppState) -> Option<Element<'_, GuiMessage>> {
+    // Command palette outranks every other popup: it's a transient
+    // overlay opened with `:` and dismissed by Esc / Enter, and the
+    // user can fire any other action from inside it. Match the TUI
+    // event loop's "palette swallows every key while open" rule.
+    if state.palette.open {
+        return Some(command_palette::view(state));
+    }
     // Order matches the TUI's hit-test precedence: dialogs outrank list popups.
     if let Some(d) = state.popups.confirm_dialog.as_ref() {
         return Some(dialogs::confirm(d));

@@ -184,6 +184,9 @@ pub(super) fn handle_settings_keys(key: event::KeyEvent, state: &mut AppState, c
                                 let artwork_count = crate::app::state::ArtworkMode::all().len();
                                 theme_count + artwork_count + 1 + state.remote.players.len() + 1 + 3
                             }
+                            SettingsSection::Sections => {
+                                crate::app::state::BrowseCategory::all().len().saturating_sub(1)
+                            }
                             SettingsSection::Cache => 0,
                             SettingsSection::About => 0,
                         };

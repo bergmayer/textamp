@@ -11,9 +11,10 @@
 //! Escape, or clicking elsewhere closes any open menu.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
-use iced::widget::{button, column, container, mouse_area, row, text, Space};
+use iced::widget::{button, column, container, mouse_area, row, Space};
 use iced::{Alignment, Background, Border, Color, Element, Length, Padding, Theme};
 
+use crate::ui_gui::widgets::text;
 use crate::app::action::{
     NavigationAction, PlaybackAction, QueueAction, RadioAction, SearchAction, SettingsAction, SystemAction,
 };
@@ -215,8 +216,12 @@ fn items_for(menu: TopMenu, state: &AppState) -> Vec<Item> {
             entry("Now Playing", "Ctrl+N", Action::Navigation(NavigationAction::SetView(View::NowPlaying))),
             Item::Sep,
             entry_with("Library",     "Ctrl+L", Action::Navigation(NavigationAction::SetCategory(BrowseCategory::Library)),   connected),
-            entry_with("Playlists",   "Ctrl+P", Action::Navigation(NavigationAction::SetCategory(BrowseCategory::Playlists)), connected),
-            entry_with("Genres",      "Ctrl+G", Action::Navigation(NavigationAction::SetCategory(BrowseCategory::Genres)),    connected),
+            // Playlists no longer has an accelerator: Ctrl+P / Cmd+P
+            // now opens the command palette. The leftmost browse
+            // column lists every playlist directly, so a dedicated
+            // shortcut to a "Playlists view" is no longer needed.
+            entry_with("Playlists",   "",       Action::Navigation(NavigationAction::SetCategory(BrowseCategory::Playlists)), connected),
+            entry_with("Genres",      "Ctrl+G", Action::Navigation(NavigationAction::SetCategory(BrowseCategory::AlbumGenres)),    connected),
             entry_with("Folders",     "Ctrl+O", Action::Navigation(NavigationAction::SetCategory(BrowseCategory::Folders)),   connected),
             Item::Sep,
             // Similar / Related / Open-in-Library / Artist Bio resolve
@@ -346,6 +351,12 @@ fn items_for(menu: TopMenu, state: &AppState) -> Vec<Item> {
         TopMenu::Tools => {
             use crate::services::external_search::SearchTarget;
             vec![
+            Item::Custom {
+                label: "Command Palette\u{2026}".to_string(),
+                shortcut: "Cmd+P",
+                message: GuiMessage::OpenCommandPalette,
+                enabled: true,
+            },
             entry_with("Search\u{2026}",       "Cmd+F", Action::Search(SearchAction::OpenSearchPopup),         connected),
             key_entry_with("Random Album",     "Alt+R",  KeyModifiers::ALT, KeyCode::Char('r'), has_active_library),
             Item::Sep,

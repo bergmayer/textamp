@@ -6,7 +6,7 @@
 //! (Clear, Save as playlist). Clicking any entry runs the action
 //! and closes the popup — these are one-shots, not toggles.
 
-use iced::widget::{button, column, container, row, scrollable, text, Column, Space};
+use iced::widget::{button, column, container, row, scrollable, Column, Space};
 use iced::{Alignment, Background, Border, Element, Length, Theme};
 
 use crate::app::action::QueueAction;
@@ -15,6 +15,7 @@ use crate::app::Action;
 use crate::ui_gui::message::GuiMessage;
 use crate::ui_gui::widgets::transport_bar::popout_button_style;
 
+use crate::ui_gui::widgets::text;
 pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
     let close_btn = button(text("Close").size(14))
         .padding([4, 12])

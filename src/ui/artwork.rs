@@ -159,12 +159,14 @@ impl ArtworkRenderer {
 
     /// Render the artwork to a frame area.
     ///
-    /// Uses `Resize::Crop` so a square cover image fills the entire
-    /// box even when the box's cell dimensions don't perfectly
-    /// match the terminal's actual cell aspect ratio. The cropped
-    /// portion is centered (default Crop behaviour) so a square
-    /// album cover loses at most 1-2 pixel rows / cols off the
-    /// edges — invisible on most album art.
+    /// `Resize::Scale` rather than `Resize::Crop`/`Resize::Fit` because
+    /// in ratatui-image 9 only `Scale` actually upscales when the
+    /// source image is smaller than the render area — the other two
+    /// cap at source pixel size and leave a tiny cover drifting in the
+    /// upper-left of a much larger box. Plex thumbs come back at
+    /// 300–600 px while the now-playing panel can easily be 800+ px
+    /// tall on a wide terminal, so without `Scale` the cover doesn't
+    /// fill its square.
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
         if self.mode == ArtworkMode::Braille {
             if let Some(ref img) = self.braille_image {
@@ -173,7 +175,7 @@ impl ArtworkRenderer {
             return;
         }
         if let Some(ref mut protocol) = self.protocol {
-            let image = StatefulImage::new().resize(Resize::Crop(None));
+            let image = StatefulImage::new().resize(Resize::Scale(None));
             frame.render_stateful_widget(image, area, protocol);
         }
     }
@@ -410,9 +412,12 @@ pub fn render_grid_image(frame: &mut Frame, area: Rect, key: &str, data: &[u8]) 
     GRID_PROTOCOLS.with(|protos| {
         let mut map = protos.borrow_mut();
         if let Some(protocol) = map.get_mut(key) {
-            // Crop-fill so square album thumbs fill non-square cells
-            // (terminal cell aspect varies) without leaving gaps.
-            let image = StatefulImage::new().resize(Resize::Crop(None));
+            // `Resize::Scale` upscales when the source thumbnail is
+            // smaller than the render area; `Resize::Crop`/`Resize::Fit`
+            // both cap at the source image size in ratatui-image 9, which
+            // is why the cached 300 px Plex thumbs used to render as a
+            // tiny square in the upper-left of a much larger row.
+            let image = StatefulImage::new().resize(Resize::Scale(None));
             frame.render_stateful_widget(image, area, protocol);
             true
         } else {

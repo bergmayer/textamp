@@ -6,13 +6,14 @@
 //! the library — matching the user's request that similar/related
 //! clicks take them straight to the artist.
 
-use iced::widget::{button, column, container, row as iced_row, scrollable, text, Column, Space};
+use iced::widget::{button, column, container, row as iced_row, scrollable, Column, Space};
 use iced::{Alignment, Background, Border, Color, Element, Length, Theme};
 
 use crate::app::AppState;
 use crate::ui_gui::message::GuiMessage;
 use crate::ui_gui::widgets::transport_bar::popout_button_style;
 
+use crate::ui_gui::widgets::text;
 pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
     let title_line = text(format!(
         "Related artists \u{2014} {}",

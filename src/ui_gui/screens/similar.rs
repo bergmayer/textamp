@@ -1,12 +1,13 @@
 //! Similar tracks / albums / artists screen.
 
-use iced::widget::{column, container, scrollable, text, Column};
+use iced::widget::{column, container, scrollable, Column};
 use iced::{Element, Length};
 
 use crate::app::AppState;
 use crate::app::state::SimilarMode;
 use crate::ui_gui::message::GuiMessage;
 
+use crate::ui_gui::widgets::text;
 pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
     let header = text(format!("Similar \u{2014} {:?}", state.similar.mode)).size(16);
 

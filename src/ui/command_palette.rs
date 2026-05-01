@@ -38,7 +38,6 @@ fn static_entries() -> Vec<StaticEntry> {
         StaticEntry { label: "Library",        hint: "^L",  command: PaletteCommandKind::GotoLibrary },
         StaticEntry { label: "Genres",         hint: "^G",  command: PaletteCommandKind::GotoGenres },
         StaticEntry { label: "Folders",        hint: "^O",  command: PaletteCommandKind::GotoFolders },
-        StaticEntry { label: "Queue",          hint: "^U",  command: PaletteCommandKind::GotoQueue },
         StaticEntry { label: "Now Playing",    hint: "^N",  command: PaletteCommandKind::GotoNowPlaying },
         StaticEntry { label: "Help",           hint: "F1",  command: PaletteCommandKind::OpenHelp },
         StaticEntry { label: "Settings",       hint: "F2",  command: PaletteCommandKind::OpenSettings },
@@ -54,6 +53,17 @@ fn static_entries() -> Vec<StaticEntry> {
         StaticEntry { label: "Previous Track", hint: "<<",  command: PaletteCommandKind::PrevTrack },
         StaticEntry { label: "Random Album",       hint: "",    command: PaletteCommandKind::RandomAlbum },
         StaticEntry { label: "Open in Library",    hint: "^J",  command: PaletteCommandKind::OpenInLibrary },
+        StaticEntry { label: "Sonic Adventure\u{2026}", hint: "", command: PaletteCommandKind::SonicAdventure },
+        // Mirror the Now Playing sidebar buttons so the palette is a
+        // first-class alternative to the GUI sidebar. Each maps to
+        // either an existing PaletteCommandKind (Goto*, ClearQueue)
+        // or to "Now Playing" itself (the TUI surfaces stations in
+        // that view's sidebar — there's no separate popup like the
+        // GUI). Each individual DJ / Remix entry is still listed
+        // below for direct access.
+        StaticEntry { label: "Radio",          hint: "",    command: PaletteCommandKind::GotoNowPlaying },
+        StaticEntry { label: "DJ Modes",       hint: "",    command: PaletteCommandKind::GotoNowPlaying },
+        StaticEntry { label: "Remix Tools",    hint: "",    command: PaletteCommandKind::GotoNowPlaying },
 
         // Sort cluster — typing "sort" in the palette surfaces all
         // of these together: the umbrella popup entry plus each
@@ -115,42 +125,49 @@ pub fn materialize_entries(state: &AppState) -> Vec<PaletteEntry> {
     //    items AND the Sonically-Similar list inside the track
     //    pane: when a similar row is focused, all the track-context
     //    commands target THAT track, not the parent row.
-    let not_in_library = !(state.view == View::Browse
-        && state.browse_category == BrowseCategory::Library);
+    // "In a library-style context" = the track is being shown inside a
+    // proper artist → album → track Miller chain. That's true for the
+    // Library category itself, AND for every tag-style section
+    // (Album Genres / Artist Genres / Moods / Styles / Decades /
+    // Years / Collections / Countries / Labels / Formats / Studios) —
+    // each of those drills `tag → album → tracks`, so the highlighted
+    // track is already next to its album+artist context. Folders and
+    // Playlists list tracks without an artist+album drill, so they're
+    // NOT a library context — "Open in Library" still helps the user
+    // find that track's album page.
+    let in_library_context = state.view == View::Browse
+        && (state.browse_category == BrowseCategory::Library
+            || state.browse_category.is_tag_section());
+    let not_in_library = !in_library_context;
     let target_track = state.palette_target_track();
     let target_is_similar = state.palette_target_is_similar();
 
-    if target_track.is_some() {
-        // "Play Track" makes sense for both miller and similar
-        // rows (single-track playback). "Play Track and Following"
-        // only fits a list context — drop it on similar rows.
-        out.push(PaletteEntry {
-            label: "Play Track".to_string(),
-            hint: String::new(),
-            command: PaletteCommandKind::PlayFocusedTrack,
-        });
-        if !target_is_similar {
+    if let Some(track) = target_track.clone() {
+        // Build the contextual entry list from the shared
+        // `track_context_entries` source so the palette stays
+        // identical to the GUI right-click context menu. Adding /
+        // reordering happens in
+        // `crate::services::track_context::track_context_entries`.
+        let entries = crate::services::track_context::track_context_entries(
+            state, &track, target_is_similar,
+        );
+        let track_box = Box::new(track);
+        for ce in entries {
+            use crate::services::track_context::ContextKind;
+            // The palette doesn't render visual separators (its rows
+            // are a fuzzy-search list, not a structured menu).
+            if matches!(ce.kind, ContextKind::Separator) {
+                continue;
+            }
             out.push(PaletteEntry {
-                label: "Play Track and Following".to_string(),
-                hint: String::new(),
-                command: PaletteCommandKind::PlayFocusedTrackAndFollowing,
+                label: ce.label,
+                hint: ce.hint.unwrap_or_default(),
+                command: PaletteCommandKind::FromTrackContext {
+                    kind: ce.kind,
+                    track: track_box.clone(),
+                },
             });
         }
-        if not_in_library || target_is_similar {
-            // Similar tracks are always worth offering "Open in
-            // Library" for — the user is *implicitly* not in that
-            // similar track's library context yet.
-            out.push(PaletteEntry {
-                label: "Open in Library".to_string(),
-                hint: "^J".to_string(),
-                command: PaletteCommandKind::OpenInLibrary,
-            });
-        }
-        out.push(PaletteEntry {
-            label: "Artist Bio".to_string(),
-            hint: "F4".to_string(),
-            command: PaletteCommandKind::ShowArtistBio,
-        });
     } else if state.focused_album().is_some() {
         out.push(PaletteEntry {
             label: "Play Album".to_string(),
@@ -180,42 +197,50 @@ pub fn materialize_entries(state: &AppState) -> Vec<PaletteEntry> {
     if !ext_query.is_empty() {
         if state.external_search.apple_music {
             out.push(PaletteEntry {
-                label: format!("Search Apple Music for \u{201c}{}\u{201d}", ext_query),
+                label: "Search Apple Music for selection".to_string(),
                 hint: String::new(),
                 command: PaletteCommandKind::SearchAppleMusic,
             });
         }
         if state.external_search.spotify {
             out.push(PaletteEntry {
-                label: format!("Search Spotify for \u{201c}{}\u{201d}", ext_query),
+                label: "Search Spotify for selection".to_string(),
                 hint: String::new(),
                 command: PaletteCommandKind::SearchSpotify,
             });
         }
         if state.external_search.youtube {
             out.push(PaletteEntry {
-                label: format!("Search YouTube for \u{201c}{}\u{201d}", ext_query),
+                label: "Search YouTube for selection".to_string(),
                 hint: String::new(),
                 command: PaletteCommandKind::SearchYouTube,
             });
         }
     }
 
-    // DJ + Remix entries only make sense when there's a queue
-    // running (Now Playing view AND tracks loaded). The palette is
-    // global, but these commands operate on the current playback —
-    // showing them everywhere just clutters the menu with options
-    // that fail silently.
-    let queue_context = state.view == View::NowPlaying
-        && !state.queue.tracks.is_empty();
+    // DJ + Remix entries belong to the Now Playing context — they're
+    // the palette analogue of the "DJ Modes" / "Remix Tools" sidebar
+    // buttons, so they should surface any time the user is in Now
+    // Playing (matching what the sidebar does). Don't gate on
+    // queue.tracks.is_empty(): the queue may still be populating
+    // (e.g. radio station starting) and the user typing "DJ" expects
+    // results regardless.
+    let queue_context = state.view == View::NowPlaying;
 
-    let in_library = state.view == View::Browse
-        && state.browse_category == BrowseCategory::Library;
+    // Same gate as the contextual block above — "Open in Library"
+    // makes no sense from inside a library-style miller chain, but is
+    // still useful from Folders / Playlists / Queue / Now Playing.
+    let in_library = in_library_context;
 
     // 3. Static registry. Filter:
     //   - DJ + Remix entries unless `queue_context` is satisfied.
-    //   - "Open in Library" when the user is already in the Library
-    //     category (the entry would just take them where they are).
+    //   - "Open in Library" when the user is already in a library-
+    //     style context (the entry would just take them where they
+    //     are), or when the contextual section already added one for
+    //     the focused track/album (avoid duplicates).
+    let context_has_open_in_library =
+        (target_track.is_some() && (not_in_library || target_is_similar))
+            || (state.focused_album().is_some() && not_in_library);
     out.extend(static_entries().into_iter().filter_map(|e| {
         let is_dj_or_remix = matches!(
             e.command,
@@ -230,7 +255,9 @@ pub fn materialize_entries(state: &AppState) -> Vec<PaletteEntry> {
         if is_dj_or_remix && !queue_context {
             return None;
         }
-        if matches!(e.command, PaletteCommandKind::OpenInLibrary) && in_library {
+        if matches!(e.command, PaletteCommandKind::OpenInLibrary)
+            && (in_library || context_has_open_in_library)
+        {
             return None;
         }
         Some(PaletteEntry {
@@ -253,8 +280,12 @@ pub fn materialize_entries(state: &AppState) -> Vec<PaletteEntry> {
             "dj_mode" | "remix" if !queue_context => continue,
             _ => {}
         }
+        // Prefix station rows with "Radio: " so typing "Radio" in the
+        // palette (e.g. via the sidebar button) surfaces every station
+        // in one cluster, while still letting the user type the
+        // station name directly.
         out.push(PaletteEntry {
-            label: s.title.clone(),
+            label: format!("Radio: {}", s.title),
             hint: String::new(),
             command: PaletteCommandKind::PlayStation {
                 key: s.key.clone(),
@@ -271,7 +302,7 @@ pub fn run(cmd: PaletteCommandKind, state: &mut AppState) -> Vec<Action> {
     match cmd {
         PaletteCommandKind::Quit            => vec![SystemAction::Quit.into()],
         PaletteCommandKind::GotoLibrary     => vec![NavigationAction::SetCategory(BrowseCategory::Library).into()],
-        PaletteCommandKind::GotoGenres      => vec![NavigationAction::SetCategory(BrowseCategory::Genres).into()],
+        PaletteCommandKind::GotoGenres      => vec![NavigationAction::SetCategory(BrowseCategory::AlbumGenres).into()],
         PaletteCommandKind::GotoFolders     => vec![NavigationAction::SetCategory(BrowseCategory::Folders).into()],
         PaletteCommandKind::GotoQueue       => vec![NavigationAction::SetView(View::Queue).into()],
         PaletteCommandKind::GotoNowPlaying  => vec![NavigationAction::SetView(View::NowPlaying).into()],
@@ -379,7 +410,7 @@ pub fn run(cmd: PaletteCommandKind, state: &mut AppState) -> Vec<Action> {
                     .library
                     .albums
                     .iter()
-                    .chain(state.library.genre_albums.iter())
+                    .chain(state.library.tag_albums.iter())
                     .chain(state.library.selected_artist_albums.iter())
                     .find(|a| a.rating_key == album_key)
                     .and_then(|a| a.parent_rating_key.clone());
@@ -484,6 +515,82 @@ pub fn run(cmd: PaletteCommandKind, state: &mut AppState) -> Vec<Action> {
             crate::app::handlers::key_input::close_focused_browse_column(state);
             vec![]
         }
+        PaletteCommandKind::SonicAdventureFromFocusedTrack => {
+            match state.palette_target_track() {
+                Some(track) => vec![SearchAction::OpenAdventureLauncherWithStart {
+                    start_track: Box::new(track),
+                }.into()],
+                None => {
+                    state.set_status("No track focused".to_string());
+                    vec![]
+                }
+            }
+        }
+        PaletteCommandKind::SonicAdventure => {
+            vec![SearchAction::OpenAdventureLauncher.into()]
+        }
+        PaletteCommandKind::FromTrackContext { kind, track } => {
+            // Translate the shared `ContextKind` into the right
+            // dispatch shape. Mirrors the GUI's
+            // `build_track_context_menu_inner`. Whenever an entry
+            // gets added or reordered in
+            // `services::track_context::track_context_entries`,
+            // both UIs pick it up automatically — the only
+            // per-UI work is this kind-to-dispatch table.
+            use crate::app::action::{BrowseAction, DataAction, NavigationAction, QueueAction, SearchAction, SystemAction};
+            use crate::app::state::{SimilarMode, View};
+            use crate::services::track_context::ContextKind;
+            match kind {
+                ContextKind::Separator => vec![],
+                ContextKind::PlayTrack => vec![QueueAction::PlayTrack(*track).into()],
+                ContextKind::PlayTrackAndFollowing => play_focused_track(state, false),
+                ContextKind::PlayNextInQueue =>
+                    vec![QueueAction::EnqueueTracksNext(vec![*track]).into()],
+                ContextKind::AddToEndOfQueue =>
+                    vec![QueueAction::EnqueueTrack(*track).into()],
+                ContextKind::OpenInLibrary => {
+                    if let Some(artist_key) = track.grandparent_rating_key.clone() {
+                        vec![BrowseAction::OpenInLibrary {
+                            artist_key,
+                            artist_name: track.artist_name().to_string(),
+                            album_key: track.parent_rating_key.clone(),
+                            album_title: track.parent_title.clone(),
+                        }.into()]
+                    } else {
+                        state.set_status("Track has no artist key".to_string());
+                        vec![]
+                    }
+                }
+                ContextKind::SonicAdventure =>
+                    vec![SearchAction::OpenAdventureLauncherWithStart { start_track: track }.into()],
+                ContextKind::ArtistBio { artist_key, artist_name } =>
+                    vec![SearchAction::ShowArtistBio { artist_key, artist_name }.into()],
+                ContextKind::SearchExternal(target) =>
+                    vec![SystemAction::OpenExternalSearch { target, query: None }.into()],
+                ContextKind::ShowSimilarTracks { rating_key, title } => {
+                    state.similar.mode = SimilarMode::Tracks;
+                    state.similar.source_title = title.clone();
+                    vec![
+                        DataAction::LoadSimilarTracks { rating_key, title }.into(),
+                        NavigationAction::SetView(View::Similar).into(),
+                    ]
+                }
+                ContextKind::ShowSimilarAlbums { rating_key, title } => {
+                    state.similar.mode = SimilarMode::Albums;
+                    state.similar.source_title = title.clone();
+                    vec![
+                        DataAction::LoadSimilarAlbums { rating_key, title }.into(),
+                        NavigationAction::SetView(View::Similar).into(),
+                    ]
+                }
+                ContextKind::ShowRelatedArtists { artist_key, title } => {
+                    vec![
+                        DataAction::LoadRelated { artist_key, title }.into(),
+                        NavigationAction::SetView(View::Related).into(),
+                    ]
+                }
+            }
+        }
     }
 }
 
@@ -528,7 +635,7 @@ fn play_focused_track(state: &AppState, single: bool) -> Vec<Action> {
     let column_index = nav.focused_column;
     let track_index = col.selected_index;
     let action = match state.browse_category {
-        BrowseCategory::Genres => MillerAction::PlayGenreTrackFromMiller {
+        BrowseCategory::AlbumGenres => MillerAction::PlayGenreTrackFromMiller {
             column_index,
             track_index,
             single_track: single,
@@ -708,7 +815,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         .highlight_style(
             Style::default()
                 .bg(t.colors.bg_selection)
-                .fg(t.colors.fg_primary)
+                .fg(t.colors.selection_text)
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("▶ ");
@@ -718,6 +825,42 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         list_state.select(Some(state.palette.selected));
     }
     frame.render_stateful_widget(list, chunks[2], &mut list_state);
+
+    // Register hit regions so mouse clicks can pick a row. Each
+    // visible row maps to its `state.palette.matches` index — the
+    // mouse handler bumps `state.palette.selected` to that index and
+    // then runs the same Execute path Enter triggers.
+    let visible = chunks[2].height as usize;
+    let total_matches = state.palette.matches.len();
+    // Mirror ratatui's ListState scroll: keep `selected` in view.
+    let scroll = if total_matches <= visible {
+        0
+    } else if state.palette.selected >= visible {
+        state.palette.selected + 1 - visible
+    } else {
+        0
+    };
+    let mut rows = Vec::with_capacity(visible.min(total_matches));
+    for vis_row in 0..visible {
+        let match_idx = scroll + vis_row;
+        if match_idx >= total_matches {
+            break;
+        }
+        rows.push((
+            Rect {
+                x: chunks[2].x,
+                y: chunks[2].y + vis_row as u16,
+                width: chunks[2].width,
+                height: 1,
+            },
+            match_idx,
+        ));
+    }
+    state.hit_regions.borrow_mut().command_palette =
+        Some(crate::ui::hit_regions::CommandPaletteRegions {
+            outer: popup_area,
+            rows,
+        });
 }
 
 fn centered(area: Rect, width_pct: u16, height_lines: u16) -> Rect {

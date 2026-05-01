@@ -9,7 +9,7 @@
 //! start slot when launched from a track context (right-click on a
 //! track → Sonic Adventure…).
 
-use iced::widget::{button, column, container, row, scrollable, text, text_input, Column, Space};
+use iced::widget::{button, column, container, row, scrollable, text_input, Column, Space};
 use iced::{Alignment, Background, Border, Color, Element, Length, Theme};
 
 use crate::app::action::{Action, SearchAction};
@@ -18,6 +18,7 @@ use crate::plex::models::Track;
 use crate::ui_gui::message::{GuiMessage, StatePopupKind};
 use crate::ui_gui::widgets::transport_bar::popout_button_style;
 
+use crate::ui_gui::widgets::text;
 const POPUP_WIDTH: f32 = 600.0;
 
 pub fn view<'a>(p: &'a AdventureLauncherState) -> Element<'a, GuiMessage> {

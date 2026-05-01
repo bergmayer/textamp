@@ -4,7 +4,7 @@
 //! - Default (Plexamp-inspired dark)
 //! - Solarized Dark
 //! - Solarized Light
-//! - Retro (Norton Commander/Borland style)
+//! - Retro (Norton Commander DOS style)
 
 use ratatui::style::{Color, Modifier, Style};
 
@@ -181,48 +181,6 @@ impl ThemeColors {
         }
     }
 
-    /// Borland theme (Turbo Pascal / Norton Commander style).
-    /// Classic CGA/EGA colors with blue background.
-    pub fn borland() -> Self {
-        // Classic CGA/EGA colors
-        let blue = Color::Rgb(0, 0, 170);        // #0000AA - Classic blue background
-        let cyan = Color::Rgb(0, 170, 170);      // #00AAAA - Selection bar
-        let white = Color::Rgb(255, 255, 255);   // #FFFFFF - High-intensity white
-        let light_gray = Color::Rgb(170, 170, 170); // #AAAAAA - Secondary text
-        let yellow = Color::Rgb(255, 255, 85);   // #FFFF55 - Command/status text
-        let red = Color::Rgb(170, 0, 0);         // #AA0000 - Errors/warnings
-        let green = Color::Rgb(0, 170, 0);       // #00AA00 - Success
-        let dark_blue = Color::Rgb(0, 0, 85);    // #000055 - Darker blue for secondary
-
-        Self {
-            bg_primary: blue,
-            bg_secondary: dark_blue,
-            bg_highlight: cyan,
-            bg_selection: cyan,
-
-            fg_primary: white,
-            fg_secondary: light_gray,
-            fg_muted: light_gray,
-            fg_accent: yellow,
-            fg_accent_dim: light_gray,
-
-            border: cyan,
-            border_focused: yellow,
-            title_focused: white,
-
-            error: red,
-            success: green,
-            warning: yellow,
-
-            selection_bar_bg: cyan,
-            selection_bar_fg: Color::Black,
-            selection_text: Color::Black,
-            transport_bg: dark_blue,
-            shortcut_key: yellow,
-            shortcut_text: white,
-        }
-    }
-
     /// Platinum theme — inspired by classic Mac OS 9 "Platinum" UI:
     /// light gray window chrome, black text, blue highlight.
     pub fn platinum() -> Self {
@@ -301,15 +259,224 @@ impl ThemeColors {
         }
     }
 
+    /// Vintage amber-on-black CRT — IBM 3270 / DEC monochrome look.
+    /// One hue, three brightnesses; the highlight states use a dim
+    /// amber background so foreground amber stays legible on top.
+    pub fn amber() -> Self {
+        let bg = Color::Rgb(15, 8, 0);
+        let amber = Color::Rgb(255, 176, 0);
+        let amber_dim = Color::Rgb(180, 120, 0);
+        let amber_dark = Color::Rgb(80, 50, 0);
+        Self {
+            bg_primary: bg,
+            bg_secondary: Color::Rgb(25, 14, 0),
+            bg_highlight: amber_dark,
+            bg_selection: amber_dark,
+
+            fg_primary: amber,
+            fg_secondary: amber_dim,
+            fg_muted: Color::Rgb(120, 80, 0),
+            fg_accent: amber,
+            fg_accent_dim: amber_dim,
+
+            border: amber_dim,
+            border_focused: amber,
+            title_focused: amber,
+
+            error: Color::Rgb(255, 100, 50),
+            success: amber,
+            warning: amber,
+
+            selection_bar_bg: amber,
+            selection_bar_fg: bg,
+            selection_text: bg,
+            transport_bg: Color::Rgb(20, 11, 0),
+            shortcut_key: amber,
+            shortcut_text: amber_dim,
+        }
+    }
+
+    /// Vintage green-on-black CRT (Apple ][, DEC VT, early Macs).
+    pub fn phosphor_green() -> Self {
+        let bg = Color::Rgb(0, 12, 0);
+        let green = Color::Rgb(80, 255, 100);
+        let green_dim = Color::Rgb(50, 180, 70);
+        let green_dark = Color::Rgb(0, 60, 20);
+        Self {
+            bg_primary: bg,
+            bg_secondary: Color::Rgb(0, 22, 5),
+            bg_highlight: green_dark,
+            bg_selection: green_dark,
+
+            fg_primary: green,
+            fg_secondary: green_dim,
+            fg_muted: Color::Rgb(40, 120, 50),
+            fg_accent: green,
+            fg_accent_dim: green_dim,
+
+            border: green_dim,
+            border_focused: green,
+            title_focused: green,
+
+            error: Color::Rgb(255, 100, 60),
+            success: green,
+            warning: Color::Rgb(255, 200, 60),
+
+            selection_bar_bg: green,
+            selection_bar_fg: bg,
+            selection_text: bg,
+            transport_bg: Color::Rgb(0, 18, 5),
+            shortcut_key: green,
+            shortcut_text: green_dim,
+        }
+    }
+
+    /// Norton Commander DOS file manager — blue background with the
+    /// classic cyan title, yellow accents, white body text. The
+    /// surviving member of the DOS-blue family (the older Borland
+    /// theme has been removed).
+    pub fn norton() -> Self {
+        let bg_blue = Color::Rgb(0, 0, 170);     // DOS bright blue
+        let cyan = Color::Rgb(85, 255, 255);     // DOS bright cyan (titles)
+        let yellow = Color::Rgb(255, 255, 85);   // DOS bright yellow (highlight)
+        let white = Color::Rgb(255, 255, 255);
+        let lightgray = Color::Rgb(200, 200, 200);
+        let darkblue = Color::Rgb(0, 0, 110);
+        Self {
+            bg_primary: bg_blue,
+            bg_secondary: darkblue,
+            bg_highlight: cyan,
+            bg_selection: cyan,
+
+            fg_primary: white,
+            fg_secondary: lightgray,
+            fg_muted: Color::Rgb(160, 160, 200),
+            fg_accent: yellow,
+            fg_accent_dim: Color::Rgb(200, 200, 70),
+
+            border: cyan,
+            border_focused: yellow,
+            title_focused: yellow,
+
+            error: Color::Rgb(255, 85, 85),
+            success: Color::Rgb(85, 255, 85),
+            warning: yellow,
+
+            selection_bar_bg: cyan,
+            selection_bar_fg: Color::Rgb(0, 0, 0),
+            selection_text: Color::Rgb(0, 0, 0),
+            transport_bg: darkblue,
+            shortcut_key: yellow,
+            shortcut_text: white,
+        }
+    }
+
+    /// Dracula — popular dark theme: dark gray background with
+    /// purple, pink, cyan, and green accents.
+    /// Reference palette: https://draculatheme.com/contribute
+    pub fn dracula() -> Self {
+        let bg = Color::Rgb(40, 42, 54);          // #282a36
+        let current_line = Color::Rgb(68, 71, 90); // #44475a
+        let foreground = Color::Rgb(248, 248, 242); // #f8f8f2
+        let comment = Color::Rgb(98, 114, 164);   // #6272a4
+        let cyan = Color::Rgb(139, 233, 253);     // #8be9fd
+        let green = Color::Rgb(80, 250, 123);     // #50fa7b
+        let pink = Color::Rgb(255, 121, 198);     // #ff79c6
+        let purple = Color::Rgb(189, 147, 249);   // #bd93f9
+        let red = Color::Rgb(255, 85, 85);        // #ff5555
+        let yellow = Color::Rgb(241, 250, 140);   // #f1fa8c
+        Self {
+            bg_primary: bg,
+            bg_secondary: Color::Rgb(33, 34, 44),
+            bg_highlight: current_line,
+            bg_selection: current_line,
+
+            fg_primary: foreground,
+            fg_secondary: Color::Rgb(200, 200, 220),
+            fg_muted: comment,
+            fg_accent: pink,
+            fg_accent_dim: purple,
+
+            border: comment,
+            border_focused: purple,
+            title_focused: pink,
+
+            error: red,
+            success: green,
+            warning: yellow,
+
+            selection_bar_bg: purple,
+            selection_bar_fg: bg,
+            selection_text: bg,
+            transport_bg: Color::Rgb(30, 31, 40),
+            shortcut_key: cyan,
+            shortcut_text: foreground,
+        }
+    }
+
+    /// Nord — muted icy-blue dark theme.
+    /// Reference palette: https://www.nordtheme.com/docs/colors-and-palettes
+    pub fn nord() -> Self {
+        // Polar Night
+        let nord0 = Color::Rgb(46, 52, 64);        // #2e3440
+        let nord1 = Color::Rgb(59, 66, 82);        // #3b4252
+        let nord2 = Color::Rgb(67, 76, 94);        // #434c5e
+        let nord3 = Color::Rgb(76, 86, 106);       // #4c566a
+        // Snow Storm
+        let nord4 = Color::Rgb(216, 222, 233);     // #d8dee9
+        let nord5 = Color::Rgb(229, 233, 240);     // #e5e9f0
+        let _nord6 = Color::Rgb(236, 239, 244);    // #eceff4
+        // Frost
+        let nord7 = Color::Rgb(143, 188, 187);     // #8fbcbb
+        let nord8 = Color::Rgb(136, 192, 208);     // #88c0d0
+        let nord9 = Color::Rgb(129, 161, 193);     // #81a1c1
+        let nord10 = Color::Rgb(94, 129, 172);     // #5e81ac
+        // Aurora
+        let nord11 = Color::Rgb(191, 97, 106);     // #bf616a — red
+        let nord13 = Color::Rgb(235, 203, 139);    // #ebcb8b — yellow
+        let nord14 = Color::Rgb(163, 190, 140);    // #a3be8c — green
+        Self {
+            bg_primary: nord0,
+            bg_secondary: nord1,
+            bg_highlight: nord2,
+            bg_selection: nord3,
+
+            fg_primary: nord4,
+            fg_secondary: nord5,
+            fg_muted: Color::Rgb(120, 130, 150),
+            fg_accent: nord8,
+            fg_accent_dim: nord9,
+
+            border: nord3,
+            border_focused: nord8,
+            title_focused: nord7,
+
+            error: nord11,
+            success: nord14,
+            warning: nord13,
+
+            selection_bar_bg: nord10,
+            selection_bar_fg: nord5,
+            selection_text: nord5,
+            transport_bg: nord1,
+            shortcut_key: nord8,
+            shortcut_text: nord4,
+        }
+    }
+
     /// Get colors for a theme name.
     pub fn for_theme(theme: ThemeName) -> Self {
         match theme {
             ThemeName::Dark => Self::dark(),
             ThemeName::SolarizedDark => Self::solarized_dark(),
             ThemeName::SolarizedLight => Self::solarized_light(),
-            ThemeName::Borland => Self::borland(),
             ThemeName::Platinum => Self::platinum(),
             ThemeName::BlackAndWhite => Self::black_and_white(),
+            ThemeName::Amber => Self::amber(),
+            ThemeName::PhosphorGreen => Self::phosphor_green(),
+            ThemeName::Norton => Self::norton(),
+            ThemeName::Dracula => Self::dracula(),
+            ThemeName::Nord => Self::nord(),
         }
     }
 }

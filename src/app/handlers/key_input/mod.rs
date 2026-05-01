@@ -38,6 +38,38 @@ use super::helpers;
 
 /// Handle keyboard input (CUA-style with Ctrl shortcuts).
 pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::config::Config) -> Vec<Action> {
+    // ":" opens the command palette from any normal context. Allow
+    // SHIFT in the modifier set because `:` is typed as Shift+; on
+    // most keyboards — iced reports that as Char(':') + SHIFT, so
+    // an `is_empty()` gate would never fire there. The TUI's
+    // crossterm backend strips SHIFT for printable characters, so
+    // both paths land here. Must run before any other
+    // character-key handlers consume the keystroke.
+    if matches!(key.code, KeyCode::Char(':'))
+        && !key.modifiers.contains(KeyModifiers::CONTROL)
+        && !key.modifiers.contains(KeyModifiers::ALT)
+        && !key.modifiers.contains(KeyModifiers::SUPER)
+        && !state.list_filter.active
+        && state.view != crate::app::state::View::Auth
+        && !state.palette.open
+    {
+        crate::ui::command_palette::open(state);
+        return vec![];
+    }
+    // "/" activates the inline list filter from anywhere — the
+    // filter input is rendered in the transport bar (TUI) or
+    // bottom strip (GUI) and grabs keyboard focus until Esc /
+    // Enter closes it.
+    if matches!(key.code, KeyCode::Char('/'))
+        && !key.modifiers.contains(KeyModifiers::CONTROL)
+        && !key.modifiers.contains(KeyModifiers::ALT)
+        && !state.list_filter.active
+        && !state.palette.open
+        && state.view != crate::app::state::View::Auth
+    {
+        return vec![SearchAction::ActivateListFilter.into()];
+    }
+
     // Clear mouse scroll pin on keyboard input, EXCEPT for drill-down/back keys
     // (Enter, Right, Left, Backspace, Esc) which should preserve the pinned
     // scroll position so the viewport doesn't re-center during column changes.
@@ -260,15 +292,19 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
             }
         }
         (KeyModifiers::CONTROL, KeyCode::Char('g')) => {
-            // Ctrl+G = Genres category (no cycling — use Tab to switch tabs)
-            if state.view == View::Browse && state.browse_category == BrowseCategory::Genres {
+            // Ctrl+G = Album Genres section. The other tag sections
+            // (Artist Genres, Moods, Styles, Decades, Years, …) are
+            // accessed by navigating the leftmost sections column.
+            if state.view == View::Browse && state.browse_category == BrowseCategory::AlbumGenres {
                 return vec![];
             }
-            // Not in genres view - switch to it and reset right panel
-            state.set_browse_category(BrowseCategory::Genres);
+            state.set_browse_category(BrowseCategory::AlbumGenres);
             reset_right_panel(state);
-            // RefreshGenreView uses cached data when available, only fetches if empty
-            return vec![BrowseAction::RefreshGenreView.into(), NavigationAction::SetView(View::Browse).into(), SystemAction::CheckStaleness(crate::app::state::RefreshCategory::Genres).into()];
+            return vec![
+                BrowseAction::RefreshTagView.into(),
+                NavigationAction::SetView(View::Browse).into(),
+                SystemAction::CheckStaleness(crate::app::state::RefreshCategory::AlbumGenres).into(),
+            ];
         }
         (KeyModifiers::CONTROL, KeyCode::Char('n')) => {
             // Ctrl+N = Now Playing (visualizer view)
@@ -293,21 +329,15 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
             return vec![NavigationAction::SetView(View::Browse).into(), SystemAction::CheckStaleness(tier1).into()];
         }
         (KeyModifiers::CONTROL, KeyCode::Char('p')) => {
-            // Ctrl+P = Playlists category
-            if state.view == View::Browse && state.browse_category == BrowseCategory::Playlists {
-                return vec![];
+            // Ctrl+P / Cmd+P = open the command palette. Playlists no
+            // longer has a dedicated shortcut — they're listed as
+            // individual rows in the leftmost browse column, so the
+            // category itself doesn't need a hot-key. Match the muda
+            // menu accelerator wired in `src/ui_gui/menu.rs`.
+            if !state.palette.open && state.view != View::Auth {
+                crate::ui::command_palette::open(state);
             }
-            state.set_browse_category(BrowseCategory::Playlists);
-            reset_right_panel(state);
-            let mut actions = vec![NavigationAction::SetView(View::Browse).into()];
-            if state.library.playlists.is_empty() {
-                actions.insert(0, DataAction::LoadPlaylists.into());
-            } else {
-                let items = crate::app::state::BrowseItem::from_playlists(&state.library.playlists);
-                state.playlist_nav.reset("playlists", items);
-            }
-            actions.push(SystemAction::CheckStaleness(crate::app::state::RefreshCategory::Playlists).into());
-            return actions;
+            return vec![];
         }
         (KeyModifiers::CONTROL, KeyCode::Char('o')) => {
             // Ctrl+O = Folders category
@@ -331,6 +361,24 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
                 return vec![SettingsAction::OpenSettings.into()];
             }
         }
+        // `,` mirrors the macOS Cmd+, "Preferences" convention as a
+        // single-key shortcut (no modifier). Lives alongside `:`,
+        // `/`, `?`, `Tab` in the bottom-right hint strip. GUI keeps
+        // F2 (its menu bar already provides Settings via that path).
+        (m, KeyCode::Char(',')) if m.is_empty() => {
+            if state.view != View::Settings {
+                return vec![SettingsAction::OpenSettings.into()];
+            }
+        }
+        // `\` toggles the TUI's Miller-column layout between
+        // shrinking (default) and scrolling, scoped to the Library
+        // browse view. Single keypress, no modifier — sits next to
+        // `,` in the bottom-right hint strip.
+        (m, KeyCode::Char('\\')) if m.is_empty() => {
+            if state.view == View::Browse {
+                return vec![SettingsAction::ToggleMillerLayout.into()];
+            }
+        }
         (_, KeyCode::F(3)) => {
             // F3 = Quick library switcher
             if !state.libraries.is_empty() {
@@ -349,43 +397,38 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
             return helpers::refresh_current_view(state);
         }
         // Space: multi-select on track lists (queue or focused
-        // Miller track column), play/pause everywhere else. Plain
-        // Space toggles select mode and clears prior selection on
-        // entry; Ctrl+Space, Alt+Space, or Shift+Space activates
-        // the mode WITHOUT clearing so multiple ranges can be
-        // combined. We accept all three because terminals vary in
-        // which modifier+Space combos they actually disambiguate
-        // — Ctrl+Space is the most reliably distinct (most
-        // terminals send it as Ctrl+Char(' ') or KeyCode::Null).
-        (mods, KeyCode::Char(' '))
+        // Space always toggles playback (the conventional music-app
+        // gesture). Per-track-list "select mode" lives on `v` /
+        // `V` (vim's visual-mode convention), which doesn't fight
+        // a media keybinding and works reliably in every terminal.
+        (_, KeyCode::Char(' '))
             if state.view != View::Search && !state.list_filter.active
                 && !state.popups.search_active
                 && state.popups.radio_launcher.is_none()
                 && state.popups.adventure_launcher.is_none()
                 && state.popups.artist_radio_picker.is_none() =>
         {
-            let add_to_selection = mods.contains(KeyModifiers::SHIFT)
-                || mods.contains(KeyModifiers::ALT)
-                || mods.contains(KeyModifiers::CONTROL);
+            return vec![PlaybackAction::TogglePlayPause.into()];
+        }
+        // `v` enters select mode on the focused track list, clearing
+        // any prior selection. `V` (Shift+v) enters / extends select
+        // mode WITHOUT clearing — same "additive" behaviour the old
+        // Ctrl+Space provided. Vim convention matches.
+        (mods, KeyCode::Char('v')) | (mods, KeyCode::Char('V'))
+            if !mods.contains(KeyModifiers::CONTROL)
+                && !mods.contains(KeyModifiers::ALT)
+                && state.view != View::Search && !state.list_filter.active
+                && !state.popups.search_active
+                && state.popups.radio_launcher.is_none()
+                && state.popups.adventure_launcher.is_none()
+                && state.popups.artist_radio_picker.is_none() =>
+        {
+            let add_to_selection = mods.contains(KeyModifiers::SHIFT);
             if toggle_select_mode_on_focused_list(state, add_to_selection) {
                 return vec![];
             }
-            return vec![PlaybackAction::TogglePlayPause.into()];
-        }
-        // Some terminals (xterm, Terminal.app) send Ctrl+Space as
-        // KeyCode::Null instead of Char(' ') with the CTRL flag.
-        // Treat it as the "add to selection" trigger.
-        (_, KeyCode::Null)
-            if state.view != View::Search && !state.list_filter.active
-                && !state.popups.search_active
-                && state.popups.radio_launcher.is_none()
-                && state.popups.adventure_launcher.is_none()
-                && state.popups.artist_radio_picker.is_none() =>
-        {
-            if toggle_select_mode_on_focused_list(state, true) {
-                return vec![];
-            }
-            return vec![];
+            // Not on a track list — fall through so `v` still works as
+            // a letter-jump in artist / genre / playlist columns.
         }
         // < and > for prev/next track (crossterm reports these with NONE modifiers, not SHIFT)
         (_, KeyCode::Char('<')) if state.view != View::Search && !state.list_filter.active && !state.popups.search_active && state.popups.radio_launcher.is_none() && state.popups.adventure_launcher.is_none() => {
@@ -1058,8 +1101,8 @@ fn reset_right_panel(state: &mut AppState) {
     state.focus = Focus::Left;
     state.library.selected_artist_albums.clear();
     state.library.selected_album_tracks.clear();
-    state.library.genre_albums.clear();
-    state.library.genre_albums_index = 0;
+    state.library.tag_albums.clear();
+    state.library.tag_albums_index = 0;
     state.library.selected_artist_name.clear();
     state.library.selected_album_title.clear();
 }
@@ -1297,7 +1340,7 @@ fn get_selected_album(state: &AppState) -> Option<(String, String)> {
                     })
                 }
                 RightPanelMode::CategoryAlbums => {
-                    state.library.genre_albums.get(state.library.genre_albums_index).map(|a| {
+                    state.library.tag_albums.get(state.library.tag_albums_index).map(|a| {
                         (a.rating_key.clone(), format!("{} - {}", a.artist_name(), a.title))
                     })
                 }
@@ -1334,7 +1377,7 @@ pub fn close_focused_browse_column(state: &mut AppState) {
 
     // Pane visible? Close ONLY the pane.
     if state.pane_track().is_some() {
-        state.track_details = None;
+        state.track_pane_open = false;
         state.track_pane_focused = false;
         state.track_pane_index = 0;
         return;
@@ -1397,6 +1440,51 @@ pub fn close_focused_browse_column(state: &mut AppState) {
             nav.columns.truncate(column_offset);
             nav.focused_column = column_offset.saturating_sub(1);
             true
+        }
+    } else {
+        true
+    };
+
+    if drop_nav {
+        state.focus_category_column();
+    }
+}
+
+/// Close a specific Miller column (and every column to its right) by
+/// index, regardless of which column currently has keyboard focus.
+/// Drives the "x" close-button hit region in the column title bars.
+pub fn close_browse_column_at(state: &mut AppState, col_idx: usize) {
+    use crate::app::state::BrowseCategory;
+
+    if state.browse_category == BrowseCategory::Folders {
+        if let Some(fs) = state.folder_state.as_mut() {
+            if col_idx == 0 {
+                state.folder_state = None;
+                state.focus_category_column();
+            } else if col_idx < fs.columns.len() {
+                fs.columns.truncate(col_idx);
+                fs.focused_column = col_idx.saturating_sub(1);
+            }
+        }
+        return;
+    }
+
+    let column_offset: usize = match state.browse_category {
+        BrowseCategory::Playlists => 1,
+        _ => 0,
+    };
+
+    let drop_nav = if let Some(nav) = state.browse_nav_mut() {
+        if col_idx <= column_offset {
+            nav.columns.truncate(column_offset);
+            nav.focused_column = column_offset.saturating_sub(1);
+            true
+        } else if col_idx < nav.columns.len() {
+            nav.columns.truncate(col_idx);
+            nav.focused_column = col_idx.saturating_sub(1);
+            false
+        } else {
+            false
         }
     } else {
         true
@@ -1478,14 +1566,16 @@ fn jump_to_letter(state: &mut AppState, letter: char) {
                     state.list_state.playlists_index = idx;
                 }
             }
-            BrowseCategory::Genres => {
-                if let Some(idx) = state.library.genres.iter().position(|g| starts_with(&g.title)) {
-                    state.library.genres_index = idx;
+            BrowseCategory::Folders => {}
+            cat if cat.is_tag_section() => {
+                let list = state.tag_list_for(cat);
+                if let Some(idx) = list.iter().position(|g| starts_with(&g.title)) {
+                    if let Some(c) = state.tag_nav.columns.first_mut() {
+                        c.selected_index = idx;
+                    }
                 }
             }
-            BrowseCategory::Folders => {
-                // Handled separately in folder navigation
-            }
+            _ => {}
         }
     } else {
         // Jump in right panel
@@ -1502,8 +1592,8 @@ fn jump_to_letter(state: &mut AppState, letter: char) {
                 }
             }
             RightPanelMode::CategoryAlbums => {
-                if let Some(idx) = state.library.genre_albums.iter().position(|a| starts_with(&a.title)) {
-                    state.library.genre_albums_index = idx;
+                if let Some(idx) = state.library.tag_albums.iter().position(|a| starts_with(&a.title)) {
+                    state.library.tag_albums_index = idx;
                 }
             }
             RightPanelMode::Empty => {}

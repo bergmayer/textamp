@@ -67,7 +67,7 @@ pub async fn dispatch(
             state.library.artists.clear();
             state.library.albums.clear();
             state.library.playlists.clear();
-            state.library.genres.clear();
+            state.library.album_genres.clear();
             state.library.artist_genres.clear();
             state.library.album_genres.clear();
             state.library.moods.clear();
@@ -86,7 +86,7 @@ pub async fn dispatch(
 
             state.library.selected_artist_albums.clear();
             state.library.selected_album_tracks.clear();
-            state.library.genre_albums.clear();
+            state.library.tag_albums.clear();
             state.folder_state = None;
             state.folder_contents_cache.clear();
             state.subfolder_preload_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -492,15 +492,16 @@ pub async fn dispatch(
                         }
                     }
                 }
-                SettingsSection::Cache => {
-                    // GUI renders the Cache section as buttons; the
-                    // shared keyboard handler doesn't have a list to
-                    // index into here. Left intentionally inert so
-                    // the TUI's Enter on this section is a no-op.
+                SettingsSection::Sections => {
+                    let idx = state.settings_state.item_index;
+                    let cats = crate::app::state::BrowseCategory::all();
+                    if idx < cats.len() {
+                        let section = cats[idx];
+                        follow_ups.push(SettingsAction::ToggleSectionVisibility(section).into());
+                    }
                 }
-                SettingsSection::About => {
-                    // Display-only section, no selectable items
-                }
+                SettingsSection::Cache => {}
+                SettingsSection::About => {}
             }
         }
         SettingsAction::SettingsSignIn => {
@@ -634,7 +635,7 @@ pub async fn dispatch(
                 state.library.artists.clear();
                 state.library.albums.clear();
                 state.library.playlists.clear();
-                state.library.genres.clear();
+                state.library.album_genres.clear();
                 state.library.artist_genres.clear();
                 state.library.album_genres.clear();
                 state.library.moods.clear();
@@ -664,7 +665,7 @@ pub async fn dispatch(
 
                 // Clear Miller column navigation states
                 state.artist_nav = crate::app::state::BrowseNavigationState::new();
-                state.genre_nav = crate::app::state::BrowseNavigationState::new();
+                state.tag_nav = crate::app::state::BrowseNavigationState::new();
                 state.playlist_nav = crate::app::state::BrowseNavigationState::new();
                 state.station_nav = crate::app::state::StationNavigationState::new();
 
@@ -763,7 +764,7 @@ pub async fn dispatch(
                     state.library.artists.clear();
                     state.library.albums.clear();
                     state.library.playlists.clear();
-                    state.library.genres.clear();
+                    state.library.album_genres.clear();
                     state.library.artist_genres.clear();
                     state.library.album_genres.clear();
                     state.library.moods.clear();
@@ -787,7 +788,7 @@ pub async fn dispatch(
                     state.cache_mgmt.category_timestamps.clear();
                     state.cache_mgmt.dirty = false;
                     state.artist_nav = crate::app::state::BrowseNavigationState::new();
-                    state.genre_nav = crate::app::state::BrowseNavigationState::new();
+                    state.tag_nav = crate::app::state::BrowseNavigationState::new();
                     state.playlist_nav = crate::app::state::BrowseNavigationState::new();
                     state.station_nav = crate::app::state::StationNavigationState::new();
 
@@ -890,7 +891,7 @@ pub async fn dispatch(
                         state.library.artists.clear();
                         state.library.albums.clear();
                         state.library.playlists.clear();
-                        state.library.genres.clear();
+                        state.library.album_genres.clear();
                         state.library.artist_genres.clear();
                         state.library.album_genres.clear();
                         state.library.moods.clear();
@@ -968,7 +969,7 @@ pub async fn dispatch(
                 ("tracks".into(),          measure(&state.library.all_tracks)),
                 ("playlist tracks".into(), measure(&state.playlist_tracks_cache)),
                 ("genres".into(),
-                    measure(&state.library.genres)
+                    measure(&state.library.album_genres)
                     + measure(&state.library.artist_genres)
                     + measure(&state.library.album_genres)
                     + measure(&state.library.moods)
@@ -1206,9 +1207,6 @@ pub async fn dispatch(
         }
         SettingsAction::ToggleExternalSearchService(target) => {
             use crate::services::external_search::SearchTarget;
-            // Flip both the canonical config flag AND the AppState
-            // mirror so the change is visible immediately to renderers
-            // (palette, context menu, menu bar) AND survives a restart.
             match target {
                 SearchTarget::AppleMusic => {
                     config.ui.enable_apple_music_search = !config.ui.enable_apple_music_search;
@@ -1223,6 +1221,34 @@ pub async fn dispatch(
                     state.external_search.youtube = config.ui.enable_youtube_search;
                 }
             }
+            follow_ups.push(SettingsAction::SaveSettings.into());
+        }
+        SettingsAction::ToggleMillerLayout => {
+            state.miller_layout = state.miller_layout.toggled();
+            // Reset scroll offset so the freshly-toggled layout
+            // starts at column 0 — going back into Shrinking with a
+            // stale offset would also leave it dangling.
+            state.miller_scroll_col = 0;
+            config.ui.miller_layout = state.miller_layout.name().to_string();
+            state.set_status(format!("miller layout: {}", state.miller_layout.name()));
+            follow_ups.push(SettingsAction::SaveSettings.into());
+        }
+        SettingsAction::ToggleSectionVisibility(section) => {
+            if let Some(pos) = state.hidden_sections.iter().position(|s| s == &section) {
+                state.hidden_sections.remove(pos);
+            } else {
+                state.hidden_sections.push(section);
+            }
+            // If the active category was just hidden, fall back to the
+            // first visible section.
+            if state.hidden_sections.contains(&state.browse_category) {
+                let fallback = crate::app::state::BrowseCategory::all().iter()
+                    .find(|c| !state.hidden_sections.contains(c))
+                    .copied()
+                    .unwrap_or(crate::app::state::BrowseCategory::Library);
+                state.set_browse_category(fallback);
+            }
+            config.ui.hidden_sections = state.hidden_sections.clone();
             follow_ups.push(SettingsAction::SaveSettings.into());
         }
         SettingsAction::SavePlaylistView { library_key, playlist_key, view } => {

@@ -41,7 +41,16 @@ fn is_two_row_browse_column(
     }
 
     // Genre/mood album columns
-    if first_is_album && state.browse_category == BrowseCategory::Genres {
+    if first_is_album && state.browse_category.is_tag_section() {
+        return true;
+    }
+
+    // Grouped-by-album playlist columns (albums with artist on 2nd row).
+    // Mirrors the renderer's `is_two_row_column` in `src/ui/app.rs`;
+    // without this branch, clicks in playlists like "rephlex and skam"
+    // (which the user grouped by album) misalign because the hit-test
+    // thinks rows are 1 cell tall while the renderer paints 2.
+    if first_is_album && col.grouped_by_album {
         return true;
     }
 
@@ -135,6 +144,43 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
     // "click in command bar" branches never fire.
     let commands_start = state.terminal_height;
     let command_top_row = state.terminal_height;
+
+    // Command palette overlay intercepts clicks when open. Click on a
+    // row → set selection + execute (same as Enter). Click elsewhere
+    // inside the popup → no-op (keep open). Click outside → cancel.
+    if state.palette.open {
+        if let MouseEventKind::Down(MouseButton::Left) = event.kind {
+            let regions = state.hit_regions.borrow().command_palette.clone();
+            if let Some(regions) = regions {
+                let inside_outer = click_row >= regions.outer.y
+                    && click_row < regions.outer.y + regions.outer.height
+                    && click_col >= regions.outer.x
+                    && click_col < regions.outer.x + regions.outer.width;
+                if !inside_outer {
+                    state.palette.close();
+                    return vec![];
+                }
+                for (rect, match_idx) in &regions.rows {
+                    if click_row >= rect.y && click_row < rect.y + rect.height
+                        && click_col >= rect.x && click_col < rect.x + rect.width
+                    {
+                        state.palette.selected = *match_idx;
+                        if let Some(&entry_idx) = state.palette.matches.get(*match_idx) {
+                            if let Some(entry) = state.palette.entries.get(entry_idx) {
+                                let cmd = entry.command.clone();
+                                state.palette.close();
+                                return command_palette::run(cmd, state);
+                            }
+                        }
+                        return vec![];
+                    }
+                }
+            }
+        }
+        // Swallow non-left-click events while palette is open — no
+        // scrolling / right-click context menus on the overlay.
+        return vec![];
+    }
 
     // Confirm dialog intercepts mouse clicks when active
     if state.popups.confirm_dialog.is_some() {
@@ -1109,11 +1155,12 @@ fn miller_hit_test(
 
         // Check if this column has artwork_visible enabled
         if col.artwork_visible {
-            // Cover art mode: mixed row heights (one-row pinned items vs art-height items)
+            // Cover art mode: mixed row heights (one-row pinned items vs art-height items).
+            // Pull the art_row_height the renderer actually used out of the
+            // hit-region — recomputing here used to drift from the renderer
+            // and made clicks land on the album below the one clicked on.
             let total_items = col.items.len();
-            let art_count = col.items.iter().filter(|item| !is_one_row_item(item)).count().max(1);
-            let target_visible = 3u16.max((art_count as u16).min(5));
-            let art_row_height = (inner_height / target_visible).max(3) as usize;
+            let art_row_height = col_region.art_row_height.max(1) as usize;
 
             // Spacer: blank row between last one-row item and first art item
             let has_spacer_after = |idx: usize| -> bool {
@@ -1320,6 +1367,43 @@ fn miller_column_at(click_col: u16, _nav: &BrowseNavigationState, state: &AppSta
 fn handle_right_click_select(click_row: u16, click_col: u16, state: &mut AppState) {
     match state.view {
         View::Browse => {
+            // Track-details pane: right-clicking a similar-track row
+            // should target THAT row in the palette (so "Open in
+            // Library" surfaces as a top entry — similar rows always
+            // get it, even when the user is in Library view). Without
+            // this, the right-click only updates a miller-column
+            // selection and the palette ends up targeting the parent
+            // miller row instead.
+            {
+                let pane = state.hit_regions.borrow().track_pane.clone();
+                if let Some(pane) = pane {
+                    // Click on the play button → focus pane on Play
+                    // (track_pane_index = 0 = parent track).
+                    if click_row == pane.play_button.y
+                        && click_col >= pane.play_button.x
+                        && click_col < pane.play_button.x + pane.play_button.width
+                    {
+                        state.track_pane_focused = true;
+                        state.track_pane_index = 0;
+                        state.category_column_focused = false;
+                        return;
+                    }
+                    // Click on a similar-track row → focus pane on
+                    // that row.
+                    for (row_rect, sim_idx) in &pane.similar_rows {
+                        if click_row == row_rect.y
+                            && click_col >= row_rect.x
+                            && click_col < row_rect.x + row_rect.width
+                        {
+                            state.track_pane_focused = true;
+                            state.track_pane_index = *sim_idx + 1;
+                            state.category_column_focused = false;
+                            return;
+                        }
+                    }
+                }
+            }
+
             // Folders + Library/Genres/Playlists use different
             // navigation state shapes. Try each in turn until a hit.
             match state.browse_category {
@@ -1332,27 +1416,36 @@ fn handle_right_click_select(click_row: u16, click_col: u16, state: &mut AppStat
                             fs.focused_column = col_idx;
                         }
                         state.category_column_focused = false;
+                        state.track_pane_focused = false;
                     }
                 }
                 _ => {
                     let nav_view: BrowseNavigationState = match state.browse_category {
                         BrowseCategory::Library => state.artist_nav.clone(),
-                        BrowseCategory::Genres => state.genre_nav.clone(),
                         BrowseCategory::Playlists => state.playlist_nav.clone(),
                         BrowseCategory::Folders => return,
+                        cat if cat.is_tag_section() => state.tag_nav.clone(),
+                        _ => return,
                     };
                     if let Some((col_idx, item_idx, _)) = miller_hit_test(click_col, click_row, &nav_view, state) {
                         let nav = match state.browse_category {
                             BrowseCategory::Library => &mut state.artist_nav,
-                            BrowseCategory::Genres => &mut state.genre_nav,
                             BrowseCategory::Playlists => &mut state.playlist_nav,
                             BrowseCategory::Folders => return,
+                            cat if cat.is_tag_section() => &mut state.tag_nav,
+                            _ => return,
                         };
                         if let Some(col) = nav.columns.get_mut(col_idx) {
                             col.selected_index = item_idx;
                         }
                         nav.focused_column = col_idx;
                         state.category_column_focused = false;
+                        // A right-click on a miller row implies the
+                        // target is that row, not whatever was in the
+                        // pane before — clear pane focus so the
+                        // palette's target_track resolves to the
+                        // miller selection.
+                        state.track_pane_focused = false;
                     }
                 }
             }
@@ -1390,13 +1483,9 @@ fn handle_right_click_select(click_row: u16, click_col: u16, state: &mut AppStat
 
 /// Handle click in Browse view using Miller column hit-testing.
 fn handle_browse_click(click_row: u16, click_col: u16, state: &mut AppState) -> Vec<Action> {
-    // Check category column click first.
-    //
-    // The leftmost column lays out as: top categories
-    // (Library/Genres/Folders) → 1-row blank separator → playlists.
-    // The vertical offset of row index `i` is therefore
-    // `i + (1 if i >= top_count else 0)`. We invert that here to
-    // turn the click's y-offset back into a CategoryRow index.
+    // Check category column click first. The leftmost column renders
+    // every CategoryRow at its index — the click's y-offset maps
+    // directly to a CategoryRow index. Divider rows ignore clicks.
     {
         let hr = state.hit_regions.borrow();
         if let Some(ref cat_region) = hr.category_column {
@@ -1405,17 +1494,7 @@ fn handle_browse_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
                 && click_row >= cat_region.inner.y
                 && click_row < cat_region.inner.y + cat_region.inner.height
             {
-                let y_offset = (click_row - cat_region.inner.y) as usize;
-                let top_count = crate::app::state::BrowseCategory::top_rows().len();
-                // Skip the separator: clicking on it is a no-op.
-                if y_offset == top_count {
-                    return vec![];
-                }
-                let item_idx = if y_offset > top_count {
-                    y_offset - 1
-                } else {
-                    y_offset
-                };
+                let item_idx = (click_row - cat_region.inner.y) as usize;
                 if item_idx < cat_region.item_count {
                     drop(hr);
                     let rows = state.category_rows();
@@ -1440,7 +1519,7 @@ fn handle_browse_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
                             state.category_column_index = item_idx;
                             vec![MillerAction::LoadPlaylistTracksForMiller { playlist_key: key }.into()]
                         }
-                        None => vec![],
+                        Some(crate::app::state::CategoryRow::Divider) | None => vec![],
                     };
                 }
             }
@@ -1472,12 +1551,23 @@ fn handle_browse_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
         }
     }
 
-    // Track-details pane click: Play button + similar-track rows.
+    // Track-details pane click: close-x + Play button + similar-track rows.
     // Checked before the miller hit-test so a click that lands on
     // the pane's column doesn't fall through to a miller-col selection.
     {
         let pane = state.hit_regions.borrow().track_pane.clone();
         if let Some(pane) = pane {
+            // Close-x glyph in the top-right corner.
+            if let Some(close) = pane.close_x {
+                if click_row >= close.y && click_row < close.y + close.height
+                    && click_col >= close.x && click_col < close.x + close.width
+                {
+                    state.track_pane_open = false;
+                    state.track_pane_focused = false;
+                    state.track_pane_index = 0;
+                    return vec![];
+                }
+            }
             // Play Track button
             if click_row == pane.play_button.y
                 && click_col >= pane.play_button.x
@@ -1513,28 +1603,13 @@ fn handle_browse_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
                     if !was_selected {
                         return vec![];
                     }
-                    // Already selected → drill into Library.
-                    let track = state.focused_track().cloned();
-                    let sim = track.as_ref().and_then(|t| {
-                        state
-                            .track_pane_similar
-                            .get(&t.rating_key)
-                            .and_then(|v| v.get(*sim_idx))
-                            .cloned()
-                    });
-                    if let Some(sim) = sim {
-                        if let Some(artist_key) = sim.grandparent_rating_key.clone() {
-                            state.track_pane_focused = false;
-                            state.track_pane_index = 0;
-                            return vec![BrowseAction::OpenInLibrary {
-                                artist_key,
-                                artist_name: sim.track_artist().to_string(),
-                                album_key: sim.parent_rating_key.clone(),
-                                album_title: sim.parent_title.clone(),
-                            }
-                            .into()];
-                        }
-                    }
+                    // Already selected → open the command palette so
+                    // the user picks an action (Play Track / Open in
+                    // Library / Artist Bio / Sonic Adventure / external
+                    // search…). The palette's contextual section
+                    // targets the highlighted similar row via
+                    // `palette_target_track()`.
+                    crate::ui::command_palette::open(state);
                     return vec![];
                 }
             }
@@ -1559,25 +1634,43 @@ fn handle_browse_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
                 return actions;
             }
         }
-        BrowseCategory::Library | BrowseCategory::Genres | BrowseCategory::Playlists => {
+        cat if !matches!(cat, BrowseCategory::Folders) => {
             if let Some(actions) = try_browse_scrollbar_click(click_col, click_row, state) {
                 return actions;
             }
         }
+        _ => {}
     }
 
     match state.browse_category {
         BrowseCategory::Folders => {
             return handle_folder_click(click_row, click_col, state);
         }
-        BrowseCategory::Library | BrowseCategory::Genres | BrowseCategory::Playlists => {
+        cat if !matches!(cat, BrowseCategory::Folders) => {
             // All use BrowseNavigationState
             let nav = match state.browse_category {
                 BrowseCategory::Library => &state.artist_nav,
-                BrowseCategory::Genres => &state.genre_nav,
+                cat if cat.is_tag_section() => &state.tag_nav,
                 BrowseCategory::Playlists => &state.playlist_nav,
                 _ => unreachable!(),
             };
+
+            // Check if click is on the column's "x" close glyph
+            // (top-right corner). Closes the column and every column
+            // to its right.
+            {
+                let close_target = state.hit_regions.borrow().miller_columns.as_ref()
+                    .and_then(|m| m.columns.iter()
+                        .find(|c| c.close_x.map(|r|
+                            click_col >= r.x && click_col < r.x + r.width
+                                && click_row >= r.y && click_row < r.y + r.height
+                        ).unwrap_or(false))
+                        .map(|c| c.col_idx));
+                if let Some(col_idx) = close_target {
+                    crate::app::handlers::key_input::close_browse_column_at(state, col_idx);
+                    return vec![];
+                }
+            }
 
             // Check if click is on a column title bar (border row)
             if let Some(col_idx) = miller_title_hit_test(click_col, click_row, state) {
@@ -1599,7 +1692,7 @@ fn handle_browse_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
                     let item = {
                         let nav = match state.browse_category {
                             BrowseCategory::Library => &state.artist_nav,
-                            BrowseCategory::Genres => &state.genre_nav,
+                            cat if cat.is_tag_section() => &state.tag_nav,
                             BrowseCategory::Playlists => &state.playlist_nav,
                             _ => return vec![],
                         };
@@ -1624,7 +1717,7 @@ fn handle_browse_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
 
                 let nav = match state.browse_category {
                     BrowseCategory::Library => &mut state.artist_nav,
-                    BrowseCategory::Genres => &mut state.genre_nav,
+                    cat if cat.is_tag_section() => &mut state.tag_nav,
                     BrowseCategory::Playlists => &mut state.playlist_nav,
                     _ => unreachable!(),
                 };
@@ -1645,7 +1738,7 @@ fn handle_browse_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
                     let drill = handle_filtered_column_click(state, col_idx, item_idx, scroll_offset, col_sel);
                     let nav = match state.browse_category {
                         BrowseCategory::Library => &mut state.artist_nav,
-                        BrowseCategory::Genres => &mut state.genre_nav,
+                        cat if cat.is_tag_section() => &mut state.tag_nav,
                         BrowseCategory::Playlists => &mut state.playlist_nav,
                         _ => return vec![],
                     };
@@ -1664,10 +1757,10 @@ fn handle_browse_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
                     //      already open: the user has committed to
                     //      "show the child for whatever's selected",
                     //      so the drill re-fires from the new row.
-                    let pane_open = state.track_details.is_some();
+                    let pane_open = state.track_pane_open;
                     let nav = match state.browse_category {
                         BrowseCategory::Library => &mut state.artist_nav,
-                        BrowseCategory::Genres => &mut state.genre_nav,
+                        cat if cat.is_tag_section() => &mut state.tag_nav,
                         BrowseCategory::Playlists => &mut state.playlist_nav,
                         _ => return vec![],
                     };
@@ -1686,7 +1779,7 @@ fn handle_browse_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
                     if let Some(item) = {
                         let nav = match state.browse_category {
                             BrowseCategory::Library => &state.artist_nav,
-                            BrowseCategory::Genres => &state.genre_nav,
+                            cat if cat.is_tag_section() => &state.tag_nav,
                             BrowseCategory::Playlists => &state.playlist_nav,
                             _ => return vec![],
                         };
@@ -1697,10 +1790,10 @@ fn handle_browse_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
                         // the new column (no specific track is
                         // picked out), so close it. The Track
                         // branch of `browse_drill_down_action`
-                        // re-sets `track_details` if a track was
-                        // clicked.
+                        // reopens it via OpenTrackDetails if a
+                        // track was clicked.
                         if !matches!(item, BrowseItem::Track { .. }) {
-                            state.track_details = None;
+                            state.track_pane_open = false;
                             state.track_pane_focused = false;
                             state.track_pane_index = 0;
                         }
@@ -1709,6 +1802,7 @@ fn handle_browse_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
                 }
             }
         }
+        _ => {}
     }
 
     vec![]
@@ -1756,22 +1850,20 @@ fn browse_drill_down_action(item: BrowseItem, col_idx: usize, item_idx: usize, s
                 BrowseItem::Track { .. } => {
                     // Click-on-already-highlighted track = same as
                     // pressing Enter on it: open the track-details
-                    // pane focused on the Play button.
-                    state.track_pane_focused = true;
-                    state.track_pane_index = 0;
-                    match state.focused_track().cloned() {
-                        Some(t) => vec![BrowseAction::OpenTrackDetails(t).into()],
-                        None => vec![],
+                    // pane focused on the Play button. Focus is
+                    // applied by the OpenTrackDetails dispatcher when
+                    // `auto_drill_pending` is false (the case here).
+                    if state.focused_track().is_some() {
+                        vec![BrowseAction::OpenTrackDetails.into()]
+                    } else {
+                        vec![]
                     }
                 }
                 _ => vec![],
             }
         }
-        BrowseCategory::Genres => {
+        cat if cat.is_tag_section() => {
             match item {
-                BrowseItem::GenreCategory { key, .. } => {
-                    vec![BrowseAction::DrillGenreCategory { category_key: key }.into()]
-                }
                 BrowseItem::Genre { key, .. } => {
                     vec![MillerAction::LoadGenreAlbumsForMiller { genre_key: key }.into()]
                 }
@@ -1779,13 +1871,11 @@ fn browse_drill_down_action(item: BrowseItem, col_idx: usize, item_idx: usize, s
                     vec![MillerAction::LoadGenreTracksForMiller { album_key: key }.into()]
                 }
                 BrowseItem::Track { .. } => {
-                    // Click-on-already-highlighted track = Enter:
-                    // open the track-details pane.
-                    state.track_pane_focused = true;
-                    state.track_pane_index = 0;
-                    match state.focused_track().cloned() {
-                        Some(t) => vec![BrowseAction::OpenTrackDetails(t).into()],
-                        None => vec![],
+                    // Focus owned by OpenTrackDetails dispatcher.
+                    if state.focused_track().is_some() {
+                        vec![BrowseAction::OpenTrackDetails.into()]
+                    } else {
+                        vec![]
                     }
                 }
                 _ => vec![],
@@ -1811,12 +1901,12 @@ fn browse_drill_down_action(item: BrowseItem, col_idx: usize, item_idx: usize, s
                 }
                 BrowseItem::Track { .. } => {
                     // Click-on-already-highlighted track = Enter:
-                    // open the track-details pane.
-                    state.track_pane_focused = true;
-                    state.track_pane_index = 0;
-                    match state.focused_track().cloned() {
-                        Some(t) => vec![BrowseAction::OpenTrackDetails(t).into()],
-                        None => vec![],
+                    // open the track-details pane. Focus owned by the
+                    // OpenTrackDetails dispatcher.
+                    if state.focused_track().is_some() {
+                        vec![BrowseAction::OpenTrackDetails.into()]
+                    } else {
+                        vec![]
                     }
                 }
                 _ => vec![],
@@ -1866,6 +1956,22 @@ fn browse_double_click_action(item: &BrowseItem, _state: &mut AppState) -> Optio
 /// Handle click in Folder browse mode.
 fn handle_folder_click(click_row: u16, click_col: u16, state: &mut AppState) -> Vec<Action> {
     use crate::services::FolderItemType;
+
+    // "x" close-column glyph (top-right corner of every drilled-in
+    // column). Closes the column and every column to its right.
+    {
+        let close_target = state.hit_regions.borrow().miller_columns.as_ref()
+            .and_then(|m| m.columns.iter()
+                .find(|c| c.close_x.map(|r|
+                    click_col >= r.x && click_col < r.x + r.width
+                        && click_row >= r.y && click_row < r.y + r.height
+                ).unwrap_or(false))
+                .map(|c| c.col_idx));
+        if let Some(col_idx) = close_target {
+            crate::app::handlers::key_input::close_browse_column_at(state, col_idx);
+            return vec![];
+        }
+    }
 
     if let Some((col_idx, item_idx, scroll_offset)) = folder_hit_test(click_col, click_row, state) {
         // Double-click detection (before column-focus changes)
@@ -1992,13 +2098,11 @@ fn handle_now_playing_down(click_row: u16, click_col: u16, modifiers: crossterm:
                 use crate::ui::command_palette;
                 return match btn {
                     NpSidebarButton::Radio => {
-                        // No dedicated TUI radio popup yet — surface
-                        // the closest analogue by opening the palette
-                        // pre-typed to "DJ" / "Remix" subset filters.
-                        // For Radio we just go straight to the
-                        // existing radio screen (NowPlaying view) —
-                        // a fuller picker can land later.
-                        command_palette::open_with_query(state, "Now Playing");
+                        // Open the palette pre-filtered to "Radio:" —
+                        // every station entry carries that prefix so
+                        // the list narrows to all available stations
+                        // (plus the "Radio" Goto entry).
+                        command_palette::open_with_query(state, "Radio");
                         vec![]
                     }
                     NpSidebarButton::DjModes => {
@@ -2601,12 +2705,21 @@ fn settings_visual_row_to_item(visual_row: usize, state: &AppState) -> Option<us
                 }
             }
         }
+        SettingsSection::Sections => {
+            // Each visible row = one BrowseCategory checkbox. Row 0 is
+            // a header; rows 1.. map to BrowseCategory::all().
+            if visual_row >= 1 {
+                let idx = visual_row - 1;
+                if idx < crate::app::state::BrowseCategory::all().len() {
+                    return Some(idx);
+                }
+            }
+            None
+        }
         SettingsSection::Cache => {
-            // GUI-only tab; the TUI doesn't expose row hit-testing here.
             None
         }
         SettingsSection::About => {
-            // Display-only section, no selectable items
             None
         }
     }
@@ -2902,10 +3015,10 @@ fn handle_browse_scroll(up: bool, click_row: u16, click_col: u16, state: &mut Ap
                 }
             }
         }
-        BrowseCategory::Library | BrowseCategory::Genres | BrowseCategory::Playlists => {
+        cat if !matches!(cat, BrowseCategory::Folders) => {
             let nav = match state.browse_category {
                 BrowseCategory::Library => &state.artist_nav,
-                BrowseCategory::Genres => &state.genre_nav,
+                cat if cat.is_tag_section() => &state.tag_nav,
                 BrowseCategory::Playlists => &state.playlist_nav,
                 _ => unreachable!(),
             };
@@ -2942,7 +3055,7 @@ fn handle_browse_scroll(up: bool, click_row: u16, click_col: u16, state: &mut Ap
                             if let Some(&item_idx) = results.matched_indices.get(new_sel) {
                                 let nav = match state.browse_category {
                                     BrowseCategory::Library => &mut state.artist_nav,
-                                    BrowseCategory::Genres => &mut state.genre_nav,
+                                    cat if cat.is_tag_section() => &mut state.tag_nav,
                                     BrowseCategory::Playlists => &mut state.playlist_nav,
                                     _ => unreachable!(),
                                 };
@@ -2955,7 +3068,7 @@ fn handle_browse_scroll(up: bool, click_row: u16, click_col: u16, state: &mut Ap
                 } else {
                     let nav = match state.browse_category {
                         BrowseCategory::Library => &mut state.artist_nav,
-                        BrowseCategory::Genres => &mut state.genre_nav,
+                        cat if cat.is_tag_section() => &mut state.tag_nav,
                         BrowseCategory::Playlists => &mut state.playlist_nav,
                         _ => unreachable!(),
                     };
@@ -2977,6 +3090,7 @@ fn handle_browse_scroll(up: bool, click_row: u16, click_col: u16, state: &mut Ap
                 }
             }
         }
+        _ => {}
     }
 
     // After scroll, lazily load album art for newly visible items
@@ -3330,7 +3444,7 @@ fn handle_scrollbar_drag(mouse_y: u16, state: &mut AppState) -> Vec<Action> {
                 ScrollbarView::Browse => {
                     let nav = match state.browse_category {
                         BrowseCategory::Library => &mut state.artist_nav,
-                        BrowseCategory::Genres => &mut state.genre_nav,
+                        cat if cat.is_tag_section() => &mut state.tag_nav,
                         BrowseCategory::Playlists => &mut state.playlist_nav,
                         _ => return vec![],
                     };
@@ -3408,7 +3522,7 @@ fn try_browse_scrollbar_click(
 
     let nav = match state.browse_category {
         BrowseCategory::Library => &state.artist_nav,
-        BrowseCategory::Genres => &state.genre_nav,
+        cat if cat.is_tag_section() => &state.tag_nav,
         BrowseCategory::Playlists => &state.playlist_nav,
         _ => return None,
     };
@@ -3452,9 +3566,8 @@ fn try_browse_scrollbar_click(
         }
 
         let visible_items = if col_reg.is_art_mode && filter_on_col != Some(col_idx) {
-            let art_count = col.items.iter().filter(|item| !is_one_row_item(item)).count().max(1);
-            let target_visible = 3u16.max((art_count as u16).min(5));
-            let art_row_height = (inner_height as u16 / target_visible).max(3) as usize;
+            // Use the renderer-supplied art_row_height; do not recompute.
+            let art_row_height = col_reg.art_row_height.max(1) as usize;
             let mut y = 0usize;
             let mut count = 0;
             let offset = state.scroll.browse.and_then(|(pc, po)| if pc == col_idx { Some(po) } else { None }).unwrap_or(0);

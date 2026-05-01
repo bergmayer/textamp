@@ -212,8 +212,8 @@ fn apply_key_to_state(state: &mut AppState, key: KeyEvent) {
                             BrowseCategory::Playlists => {
                                 state.list_state.playlists_index = state.list_state.playlists_index.saturating_sub(1);
                             }
-                            BrowseCategory::Genres => {
-                                state.library.genres_index = state.library.genres_index.saturating_sub(1);
+                            BrowseCategory::AlbumGenres => {
+                                state.library.tag_albums_index = state.library.tag_albums_index.saturating_sub(1);
                             }
                             BrowseCategory::Folders => {}
                         }
@@ -232,9 +232,9 @@ fn apply_key_to_state(state: &mut AppState, key: KeyEvent) {
                                 let max = state.library.playlists.len().saturating_sub(1);
                                 state.list_state.playlists_index = (state.list_state.playlists_index + 1).min(max);
                             }
-                            BrowseCategory::Genres => {
-                                let max = state.library.genres.len().saturating_sub(1);
-                                state.library.genres_index = (state.library.genres_index + 1).min(max);
+                            BrowseCategory::AlbumGenres => {
+                                let max = state.library.album_genres.len().saturating_sub(1);
+                                state.library.tag_albums_index = (state.library.tag_albums_index + 1).min(max);
                             }
                             BrowseCategory::Folders => {}
                         }

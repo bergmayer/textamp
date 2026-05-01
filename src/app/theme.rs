@@ -15,9 +15,19 @@ pub enum ThemeName {
     SolarizedDark,
     SolarizedLight,
     Dark,
-    Borland,
     Platinum,
     BlackAndWhite,
+    /// Vintage amber-on-black CRT (IBM 3270 / DEC monochrome look).
+    Amber,
+    /// Vintage green-on-black CRT (Apple ][ / DEC VT terminal look).
+    PhosphorGreen,
+    /// Norton Commander DOS file manager — blue background with
+    /// cyan / yellow / white accents.
+    Norton,
+    /// Dracula — dark gray background with purple / pink / cyan accents.
+    Dracula,
+    /// Nord — muted icy-blue dark theme.
+    Nord,
 }
 
 impl ThemeName {
@@ -27,9 +37,13 @@ impl ThemeName {
             ThemeName::SolarizedDark,
             ThemeName::SolarizedLight,
             ThemeName::Dark,
-            ThemeName::Borland,
+            ThemeName::Dracula,
+            ThemeName::Nord,
+            ThemeName::Norton,
             ThemeName::Platinum,
             ThemeName::BlackAndWhite,
+            ThemeName::Amber,
+            ThemeName::PhosphorGreen,
         ]
     }
 
@@ -39,9 +53,13 @@ impl ThemeName {
             ThemeName::Dark => "dark",
             ThemeName::SolarizedDark => "solarized dark",
             ThemeName::SolarizedLight => "solarized light",
-            ThemeName::Borland => "borland",
             ThemeName::Platinum => "platinum",
             ThemeName::BlackAndWhite => "black and white",
+            ThemeName::Amber => "amber crt",
+            ThemeName::PhosphorGreen => "phosphor green",
+            ThemeName::Norton => "norton",
+            ThemeName::Dracula => "dracula",
+            ThemeName::Nord => "nord",
         }
     }
 
@@ -51,9 +69,13 @@ impl ThemeName {
             ThemeName::Dark => "dark",
             ThemeName::SolarizedDark => "solarized-dark",
             ThemeName::SolarizedLight => "solarized-light",
-            ThemeName::Borland => "borland",
             ThemeName::Platinum => "platinum",
             ThemeName::BlackAndWhite => "black-and-white",
+            ThemeName::Amber => "amber",
+            ThemeName::PhosphorGreen => "phosphor-green",
+            ThemeName::Norton => "norton",
+            ThemeName::Dracula => "dracula",
+            ThemeName::Nord => "nord",
         }
     }
 
@@ -63,22 +85,24 @@ impl ThemeName {
             "solarized-dark" | "solarizeddark" => ThemeName::SolarizedDark,
             "solarized-light" | "solarizedlight" => ThemeName::SolarizedLight,
             "dark" => ThemeName::Dark,
-            "borland" | "retro" | "norton" => ThemeName::Borland,
             "platinum" | "mac" | "macos9" => ThemeName::Platinum,
             "black-and-white" | "blackandwhite" | "bw" | "mono" => ThemeName::BlackAndWhite,
+            "amber" | "amber-crt" | "ambercrt" => ThemeName::Amber,
+            "phosphor" | "phosphor-green" | "phosphorgreen" | "green" => ThemeName::PhosphorGreen,
+            // Old "borland" config values map to Norton — they're the
+            // same family (DOS-blue + cyan/yellow), and Norton is the
+            // surviving theme.
+            "norton" | "norton-commander" | "nc" | "dos" | "borland" | "retro" => ThemeName::Norton,
+            "dracula" => ThemeName::Dracula,
+            "nord" => ThemeName::Nord,
             _ => ThemeName::SolarizedDark,
         }
     }
 
     /// Cycle to the next theme.
     pub fn next(&self) -> Self {
-        match self {
-            ThemeName::SolarizedDark => ThemeName::SolarizedLight,
-            ThemeName::SolarizedLight => ThemeName::Dark,
-            ThemeName::Dark => ThemeName::Borland,
-            ThemeName::Borland => ThemeName::Platinum,
-            ThemeName::Platinum => ThemeName::BlackAndWhite,
-            ThemeName::BlackAndWhite => ThemeName::SolarizedDark,
-        }
+        let all = Self::all();
+        let idx = all.iter().position(|t| t == self).unwrap_or(0);
+        all[(idx + 1) % all.len()]
     }
 }

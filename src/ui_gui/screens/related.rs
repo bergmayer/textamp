@@ -1,11 +1,12 @@
 //! Related artists screen (grouped by relationship type).
 
-use iced::widget::{column, container, scrollable, text, Column};
+use iced::widget::{column, container, scrollable, Column};
 use iced::{Element, Length};
 
 use crate::app::AppState;
 use crate::ui_gui::message::GuiMessage;
 
+use crate::ui_gui::widgets::text;
 pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
     let groups = &state.related.groups;
     let mut rows: Vec<Element<'_, GuiMessage>> = Vec::with_capacity(groups.len() * 2);

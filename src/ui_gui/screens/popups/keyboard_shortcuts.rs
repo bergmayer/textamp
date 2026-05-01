@@ -2,12 +2,13 @@
 //! screen. Same body text the TUI shows under F1; rendered as a
 //! scrollable monospace block so the columnar layout reads cleanly.
 
-use iced::widget::{button, column, container, row, scrollable, text, Space};
+use iced::widget::{button, column, container, row, scrollable, Space};
 use iced::{Alignment, Background, Border, Element, Font, Length, Theme};
 
 use crate::ui_gui::message::GuiMessage;
 use crate::ui_gui::widgets::transport_bar::popout_button_style;
 
+use crate::ui_gui::widgets::text;
 const HELP_TEXT: &str = r#"
 VIEWS
   Ctrl+L  Library         Ctrl+P  Playlists       Ctrl+G  Genres

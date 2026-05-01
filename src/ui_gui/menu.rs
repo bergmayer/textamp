@@ -113,6 +113,7 @@ pub mod ids {
     pub const TOOLS_SEARCH_APPLE:     u32 = 5005;
     pub const TOOLS_SEARCH_SPOTIFY:   u32 = 5006;
     pub const TOOLS_SEARCH_YOUTUBE:   u32 = 5007;
+    pub const TOOLS_PALETTE:          u32 = 5008;
 
     // ── Help ───────────────────────────────────────────────────────────
     pub const HELP_USER_GUIDE: u32 = 6000;
@@ -181,7 +182,11 @@ pub fn build() -> muda::Menu {
         &MenuItem::with_id(ids::VIEW_NOW_PLAYING,    "Now Playing",                  true, accel(cmd_or_ctrl(), Code::KeyN)),
         &PredefinedMenuItem::separator(),
         &MenuItem::with_id(ids::VIEW_LIBRARY,        "Library",                      true, accel(cmd_or_ctrl(), Code::KeyL)),
-        &MenuItem::with_id(ids::VIEW_PLAYLISTS,      "Playlists",                    true, accel(cmd_or_ctrl(), Code::KeyP)),
+        // Playlists used to live on Cmd+P; that's now the command
+        // palette shortcut (matching VS Code / many other apps).
+        // Playlists is still reachable from the leftmost browse
+        // column and from this menu — just without an accelerator.
+        &MenuItem::with_id(ids::VIEW_PLAYLISTS,      "Playlists",                    true, None),
         &MenuItem::with_id(ids::VIEW_GENRES,         "Genres",                       true, accel(cmd_or_ctrl(), Code::KeyG)),
         &MenuItem::with_id(ids::VIEW_FOLDERS,        "Folders",                      true, accel(cmd_or_ctrl(), Code::KeyO)),
         &PredefinedMenuItem::separator(),
@@ -281,6 +286,14 @@ pub fn build() -> muda::Menu {
     // album" command, not a radio source.
     let tools = Submenu::new("&Tools", true);
     tools.append_items(&[
+        &MenuItem::with_id(ids::TOOLS_PALETTE,       "Command Palette\u{2026}", true,
+            // Cmd+P (was Playlists). The shared `key_input::handle_key`
+            // also opens the palette on `:` directly, so both paths
+            // work on every platform — the menu accelerator is the
+            // belt-and-suspenders backstop for cases where iced's
+            // keyboard subscription doesn't catch the keypress
+            // (focused widget capturing it, etc.).
+            accel(cmd_or_ctrl(), Code::KeyP)),
         &MenuItem::with_id(ids::TOOLS_SEARCH,        "Search\u{2026}",   true, accel(cmd_or_ctrl(), Code::KeyF)),
         &MenuItem::with_id(ids::TOOLS_RANDOM_ALBUM,  "Random Album",      true, accel(Modifiers::ALT, Code::KeyR)),
         &PredefinedMenuItem::separator(),
@@ -331,7 +344,7 @@ pub fn menu_event_for_id(id: &str) -> Option<GuiMessage> {
         ids::VIEW_NOW_PLAYING    => GuiMessage::Action(Action::Navigation(NavigationAction::SetView(View::NowPlaying))),
         ids::VIEW_LIBRARY        => GuiMessage::Action(Action::Navigation(NavigationAction::SetCategory(BrowseCategory::Library))),
         ids::VIEW_PLAYLISTS      => GuiMessage::Action(Action::Navigation(NavigationAction::SetCategory(BrowseCategory::Playlists))),
-        ids::VIEW_GENRES         => GuiMessage::Action(Action::Navigation(NavigationAction::SetCategory(BrowseCategory::Genres))),
+        ids::VIEW_GENRES         => GuiMessage::Action(Action::Navigation(NavigationAction::SetCategory(BrowseCategory::AlbumGenres))),
         ids::VIEW_FOLDERS        => GuiMessage::Action(Action::Navigation(NavigationAction::SetCategory(BrowseCategory::Folders))),
         ids::VIEW_SIMILAR        => GuiMessage::MenuKeyClick(ctrl_char_key('m')),
         ids::VIEW_RELATED        => GuiMessage::MenuKeyClick(ctrl_char_key('r')),
@@ -387,6 +400,7 @@ pub fn menu_event_for_id(id: &str) -> Option<GuiMessage> {
         ids::RADIO_STATIONS     => GuiMessage::OpenStationsPopup,
 
         // ── Tools ───────────────────────────────────────────────────────
+        ids::TOOLS_PALETTE        => GuiMessage::OpenCommandPalette,
         ids::TOOLS_SEARCH         => GuiMessage::Action(Action::Search(SearchAction::OpenSearchPopup)),
         ids::TOOLS_ADVENTURE      => GuiMessage::Action(Action::Search(SearchAction::OpenAdventureLauncher)),
         ids::TOOLS_ARTIST_RADIO   => GuiMessage::Action(Action::Search(SearchAction::OpenArtistRadioPicker)),

@@ -58,6 +58,116 @@ pub fn truncate_str(s: &str, max_len: usize) -> String {
     }
 }
 
+/// Strip codepoints that have no visible glyph but cause renderers
+/// to paint a "tofu" notdef shape — control chars, format chars
+/// (zero-width joiners / directionality marks / language tags),
+/// private-use codepoints, and the misc emoji-format selectors.
+///
+/// Plex artist / album / track titles occasionally carry these as
+/// metadata leftovers (especially the format-category and
+/// private-use ones); the system font has no glyph for them, so
+/// they show up as mystery shapes — small boxes, stacks of
+/// horizontal lines, etc. — that don't appear in Plex's web client
+/// because the web stack is also stripping them.
+///
+/// Allocation-free fast path for clean ASCII / Latin titles via
+/// `Cow::Borrowed`; only allocates when the input actually contains
+/// a strippable codepoint.
+pub fn sanitize_display_text(input: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    let mut owned: Option<String> = None;
+    for (idx, c) in input.char_indices() {
+        if needs_strip(c) {
+            let buf = owned.get_or_insert_with(|| {
+                let mut b = String::with_capacity(input.len());
+                b.push_str(&input[..idx]);
+                b
+            });
+            let _ = buf; // strip-only: we don't push the char
+            continue;
+        }
+        if let Some(buf) = owned.as_mut() {
+            buf.push(c);
+        }
+    }
+    match owned {
+        Some(s) => Cow::Owned(s),
+        None => Cow::Borrowed(input),
+    }
+}
+
+fn needs_strip(c: char) -> bool {
+    let cp = c as u32;
+    // Variation selectors + ZWJ + tag chars.
+    if matches!(cp, 0xFE00..=0xFE0F | 0x200D | 0xE0020..=0xE007F) {
+        return true;
+    }
+    // C0 / C1 control characters (keep \t / \n / \r — Plex titles
+    // sometimes use them and the renderer collapses to spaces).
+    if (cp <= 0x1F && !matches!(cp, 0x09 | 0x0A | 0x0D)) || (0x7F..=0x9F).contains(&cp) {
+        return true;
+    }
+    // Format-category (Cf) characters. Hand-rolled list to avoid
+    // pulling in `unicode-properties` for one cold-path check.
+    if matches!(cp,
+        0x00AD                // SOFT HYPHEN
+        | 0x0600..=0x0605
+        | 0x061C
+        | 0x06DD
+        | 0x070F
+        | 0x0890..=0x0891
+        | 0x08E2
+        | 0x180E
+        | 0x200B..=0x200F     // ZWSP / ZWNJ / ZWJ / LRM / RLM
+        | 0x202A..=0x202E
+        | 0x2060..=0x2064
+        | 0x2066..=0x2069
+        | 0x206A..=0x206F
+        | 0xFEFF
+        | 0xFFF9..=0xFFFB
+        | 0x110BD
+        | 0x110CD
+        | 0x13430..=0x13438
+        | 0x1BCA0..=0x1BCA3
+        | 0x1D173..=0x1D17A
+        | 0xE0001
+    ) {
+        return true;
+    }
+    // Private-Use Area.
+    if (0xE000..=0xF8FF).contains(&cp)
+        || (0xF0000..=0xFFFFD).contains(&cp)
+        || (0x100000..=0x10FFFD).contains(&cp)
+    {
+        return true;
+    }
+    false
+}
+
+/// Normalize heart-like glyphs in a string to their text-presentation
+/// form so terminals render them as monochrome glyphs instead of
+/// colorful emoji.
+///
+/// Strips the U+FE0F (emoji-presentation) variation selector and
+/// appends U+FE0E (text-presentation) after each heart glyph. Most
+/// terminals honour the selector and switch to a monochrome font path,
+/// which keeps the heart from "popping out" against the rest of the
+/// muted text in the category column.
+pub fn force_text_presentation(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    for c in s.chars() {
+        if c == '\u{fe0f}' { continue; }
+        out.push(c);
+        match c {
+            '\u{2764}' | '\u{2665}' | '\u{2661}' | '\u{1f90d}' | '\u{1f5a4}' => {
+                out.push('\u{fe0e}');
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 /// Middle-truncate a string, preserving both the beginning and end.
 ///
 /// Replaces the center characters with a single ellipsis (…) so that both

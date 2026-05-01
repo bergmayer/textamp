@@ -9,12 +9,13 @@
 //! bullets keep their structural breaks; blank lines become
 //! paragraph spacing.
 
-use iced::widget::{button, column, container, row, scrollable, text, Column, Space};
+use iced::widget::{button, column, container, row, scrollable, Column, Space};
 use iced::{Alignment, Background, Border, Element, Length, Theme};
 
 use crate::ui_gui::message::GuiMessage;
 use crate::ui_gui::widgets::transport_bar::popout_button_style;
 
+use crate::ui_gui::widgets::text;
 const README_GUI: &str = include_str!("../../../../README-GUI.md");
 
 const POPUP_WIDTH: f32 = 780.0;

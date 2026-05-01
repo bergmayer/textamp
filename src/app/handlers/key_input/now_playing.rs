@@ -118,11 +118,11 @@ fn handle_sidebar_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action
             vec![]
         }
         KeyCode::Enter => {
-            // Same dispatch the mouse handler uses — open the
-            // palette pre-filtered for DJ / Remix / Now-Playing,
-            // dispatch ClearQueue directly.
+            // Mirror the mouse-click flow: open the palette
+            // pre-filtered to surface the matching cluster, or fire
+            // the action directly for ClearQueue.
             match state.now_playing_sidebar_index {
-                0 => { crate::ui::command_palette::open_with_query(state, "Now Playing"); vec![] }
+                0 => { crate::ui::command_palette::open_with_query(state, "Radio"); vec![] }
                 1 => { crate::ui::command_palette::open_with_query(state, "DJ"); vec![] }
                 2 => { crate::ui::command_palette::open_with_query(state, "Remix"); vec![] }
                 3 => vec![QueueAction::ClearQueue.into()],

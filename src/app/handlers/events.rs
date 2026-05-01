@@ -536,8 +536,8 @@ pub fn handle_app_event(
         }
         Event::Data(DataEvent::CategoryAlbumsLoaded { albums, status_message }) => {
             state.library.right_panel_mode = crate::app::state::RightPanelMode::CategoryAlbums;
-            state.library.genre_albums = albums;
-            state.library.genre_albums_index = 0;
+            state.library.tag_albums = albums;
+            state.library.tag_albums_index = 0;
             state.set_status(status_message);
             state.library.right_panel_loading = false;
             vec![]
@@ -607,23 +607,30 @@ pub fn handle_app_event(
                     }
                     launcher.loading = false;
                 }
-            } else if version == u64::MAX - 1 {
-                // Adventure launcher track search result — re-rank by query
-                if let Some(ref mut launcher) = state.popups.adventure_launcher {
+            } else if version == state.search.track_version {
+                // Only apply results if version matches (not stale)
+                let ranked = search_tracks_with_ranking(&tracks, &state.search.query, 50);
+                if let Some(ref mut results) = state.search.results {
+                    results.tracks = ranked;
+                }
+                state.search.track_loading = false;
+            }
+            vec![]
+        }
+        Event::Data(DataEvent::AdventureTrackSearchCompleted { version, tracks }) => {
+            use crate::services::search_tracks_with_ranking;
+            // Discard stale callbacks: only apply if the launcher is
+            // still open AND its current `search_version` matches the
+            // one we kicked off with. Anything older was superseded
+            // by a later keystroke.
+            if let Some(ref mut launcher) = state.popups.adventure_launcher {
+                if launcher.search_version == version {
                     let ranked = search_tracks_with_ranking(&tracks, &launcher.query, 50);
                     if let Some(ref mut results) = launcher.results {
                         results.tracks = ranked;
                     }
                     launcher.loading = false;
                 }
-            } else if version == state.search.track_version {
-                // Only apply results if version matches (not stale)
-                // Re-rank API results using local bucket ranking
-                let ranked = search_tracks_with_ranking(&tracks, &state.search.query, 50);
-                if let Some(ref mut results) = state.search.results {
-                    results.tracks = ranked;
-                }
-                state.search.track_loading = false;
             }
             vec![]
         }
@@ -1109,146 +1116,35 @@ pub fn handle_app_event(
             if state.cache_mgmt.preloads_in_progress.is_empty() { state.cache_mgmt.preloads_total = 0; }
             vec![]
         }
-        Event::Preload(PreloadEvent::GenresPreloaded { library_key, genres }) => {
-            // Ignore if this is for a different library (race condition from library switch)
-            if state.active_library.as_ref() != Some(&library_key) {
-                tracing::debug!("Ignoring stale genres preload for library {}", library_key);
-                return vec![];
-            }
-            if state.library.genres.is_empty() && !state.library.genres_loading {
-                let count = genres.len();
-                state.library.genres = genres;
-                tracing::debug!("Genres preloaded: {} items", count);
-                // If genre_nav is loading and waiting for this data, drill into it
-                if state.genre_nav.loading {
-                    if let Some(item) = state.genre_nav.columns.first()
-                        .and_then(|c| c.items.get(c.selected_index))
-                    {
-                        if matches!(item, crate::app::state::BrowseItem::GenreCategory { key, .. }
-                            if key == "genre_cat:library" || key == "genre_cat:all")
-                        {
-                            let key = item.key().to_string();
-                            state.auto_drill_pending = true;
-                            return vec![BrowseAction::DrillGenreCategory { category_key: key }.into()];
-                        }
-                    }
-                }
-            }
-            state.cache_mgmt.preloads_in_progress.remove("Genres");
-            if state.cache_mgmt.preloads_in_progress.is_empty() { state.cache_mgmt.preloads_total = 0; }
-            vec![]
-        }
         Event::Preload(PreloadEvent::ArtistGenresPreloaded { library_key, genres }) => {
-            // Ignore if this is for a different library (race condition from library switch)
-            if state.active_library.as_ref() != Some(&library_key) {
-                tracing::debug!("Ignoring stale artist genres preload for library {}", library_key);
-                return vec![];
-            }
-            if state.library.artist_genres.is_empty() && !state.library.artist_genres_loading {
-                let count = genres.len();
-                state.library.artist_genres = genres;
-                tracing::debug!("Artist genres preloaded: {} items", count);
-                if state.genre_nav.loading {
-                    if let Some(item) = state.genre_nav.columns.first()
-                        .and_then(|c| c.items.get(c.selected_index))
-                    {
-                        if matches!(item, crate::app::state::BrowseItem::GenreCategory { key, .. }
-                            if key == "genre_cat:artist" || key == "genre_cat:all")
-                        {
-                            let key = item.key().to_string();
-                            state.auto_drill_pending = true;
-                            return vec![BrowseAction::DrillGenreCategory { category_key: key }.into()];
-                        }
-                    }
-                }
-            }
-            state.cache_mgmt.preloads_in_progress.remove("Artist Genres");
-            if state.cache_mgmt.preloads_in_progress.is_empty() { state.cache_mgmt.preloads_total = 0; }
-            vec![]
+            handle_tag_preload(state, &library_key, "Artist Genres",
+                crate::app::state::BrowseCategory::ArtistGenres, genres)
         }
         Event::Preload(PreloadEvent::AlbumGenresPreloaded { library_key, genres }) => {
-            // Ignore if this is for a different library (race condition from library switch)
-            if state.active_library.as_ref() != Some(&library_key) {
-                tracing::debug!("Ignoring stale album genres preload for library {}", library_key);
-                return vec![];
-            }
-            if state.library.album_genres.is_empty() && !state.library.album_genres_loading {
-                let count = genres.len();
-                state.library.album_genres = genres;
-                tracing::debug!("Album genres preloaded: {} items", count);
-                if state.genre_nav.loading {
-                    if let Some(item) = state.genre_nav.columns.first()
-                        .and_then(|c| c.items.get(c.selected_index))
-                    {
-                        if matches!(item, crate::app::state::BrowseItem::GenreCategory { key, .. }
-                            if key == "genre_cat:album" || key == "genre_cat:all")
-                        {
-                            let key = item.key().to_string();
-                            state.auto_drill_pending = true;
-                            return vec![BrowseAction::DrillGenreCategory { category_key: key }.into()];
-                        }
-                    }
-                }
-            }
-            state.cache_mgmt.preloads_in_progress.remove("Album Genres");
-            if state.cache_mgmt.preloads_in_progress.is_empty() { state.cache_mgmt.preloads_total = 0; }
-            vec![]
+            handle_tag_preload(state, &library_key, "Album Genres",
+                crate::app::state::BrowseCategory::AlbumGenres, genres)
         }
         Event::Preload(PreloadEvent::MoodsPreloaded { library_key, moods }) => {
-            // Ignore if this is for a different library (race condition from library switch)
-            if state.active_library.as_ref() != Some(&library_key) {
-                tracing::debug!("Ignoring stale moods preload for library {}", library_key);
-                return vec![];
-            }
-            if state.library.moods.is_empty() && !state.library.moods_loading {
-                let count = moods.len();
-                state.library.moods = moods;
-                tracing::debug!("Moods preloaded: {} items", count);
-                if state.genre_nav.loading {
-                    if let Some(item) = state.genre_nav.columns.first()
-                        .and_then(|c| c.items.get(c.selected_index))
-                    {
-                        if matches!(item, crate::app::state::BrowseItem::GenreCategory { key, .. }
-                            if key == "genre_cat:mood" || key == "genre_cat:all")
-                        {
-                            let key = item.key().to_string();
-                            state.auto_drill_pending = true;
-                            return vec![BrowseAction::DrillGenreCategory { category_key: key }.into()];
-                        }
-                    }
-                }
-            }
-            state.cache_mgmt.preloads_in_progress.remove("Moods");
-            if state.cache_mgmt.preloads_in_progress.is_empty() { state.cache_mgmt.preloads_total = 0; }
-            vec![]
+            handle_tag_preload(state, &library_key, "Moods",
+                crate::app::state::BrowseCategory::Moods, moods)
         }
         Event::Preload(PreloadEvent::StylesPreloaded { library_key, styles }) => {
-            // Ignore if this is for a different library (race condition from library switch)
-            if state.active_library.as_ref() != Some(&library_key) {
-                tracing::debug!("Ignoring stale styles preload for library {}", library_key);
-                return vec![];
-            }
-            if state.library.styles.is_empty() && !state.library.styles_loading {
-                let count = styles.len();
-                state.library.styles = styles;
-                tracing::debug!("Styles preloaded: {} items", count);
-                if state.genre_nav.loading {
-                    if let Some(item) = state.genre_nav.columns.first()
-                        .and_then(|c| c.items.get(c.selected_index))
-                    {
-                        if matches!(item, crate::app::state::BrowseItem::GenreCategory { key, .. }
-                            if key == "genre_cat:style" || key == "genre_cat:all")
-                        {
-                            let key = item.key().to_string();
-                            state.auto_drill_pending = true;
-                            return vec![BrowseAction::DrillGenreCategory { category_key: key }.into()];
-                        }
-                    }
-                }
-            }
-            state.cache_mgmt.preloads_in_progress.remove("Styles");
-            if state.cache_mgmt.preloads_in_progress.is_empty() { state.cache_mgmt.preloads_total = 0; }
-            vec![]
+            handle_tag_preload(state, &library_key, "Styles",
+                crate::app::state::BrowseCategory::Styles, styles)
+        }
+        Event::Preload(PreloadEvent::TagListPreloaded { library_key, category, items }) => {
+            use crate::app::state::{BrowseCategory, RefreshCategory};
+            let (label, sec) = match category {
+                RefreshCategory::Decades => ("Decades", BrowseCategory::Decades),
+                RefreshCategory::Years => ("Years", BrowseCategory::Years),
+                RefreshCategory::Collections => ("Collections", BrowseCategory::Collections),
+                RefreshCategory::Countries => ("Countries", BrowseCategory::Countries),
+                RefreshCategory::Labels => ("Labels", BrowseCategory::Labels),
+                RefreshCategory::Formats => ("Formats", BrowseCategory::Formats),
+                RefreshCategory::Studios => ("Studios", BrowseCategory::Studios),
+                _ => return vec![],
+            };
+            handle_tag_preload(state, &library_key, label, sec, items)
         }
         Event::Preload(PreloadEvent::StationsPreloaded { library_key, mut stations }) => {
             // Ignore if this is for a different library (race condition from library switch)
@@ -1422,6 +1318,16 @@ pub fn handle_app_event(
                 }
             }
 
+            // Lazy-art settle: if `suppress_loads` was raised by a
+            // recent rapid-nav gesture and the user has been still for
+            // `ART_LOAD_PAUSE_MS`, clear the gate and dispatch one
+            // viewport-wide `LoadAlbumArt` batch.
+            if let Some(actions) = super::lazy_art::settle(state) {
+                if !actions.is_empty() {
+                    return actions;
+                }
+            }
+
             // Track-details pane: lazy-fetch sonically-similar tracks
             // for whatever Track row is currently focused. Returned
             // as a follow-up `LoadTrackPaneSimilar` action so the
@@ -1450,8 +1356,8 @@ pub fn handle_app_event(
             {
                 let nav = match state.browse_category {
                     crate::app::state::BrowseCategory::Library => &state.artist_nav,
-                    crate::app::state::BrowseCategory::Genres => &state.genre_nav,
                     crate::app::state::BrowseCategory::Playlists => &state.playlist_nav,
+                    cat if cat.is_tag_section() => &state.tag_nav,
                     _ => &state.artist_nav,
                 };
                 if let Some(col) = nav.focused().filter(|c| c.artwork_visible) {
@@ -1641,7 +1547,7 @@ pub fn handle_app_event(
 
             // Genres, artist genres, album genres, moods, styles
             // Just store the data — genre_nav is populated lazily via DrillGenreCategory
-            if !cached.genres.is_empty() { state.library.genres = cached.genres; }
+            if !cached.genres.is_empty() { state.library.album_genres = cached.genres; }
             if !cached.artist_genres.is_empty() { state.library.artist_genres = cached.artist_genres; }
             if !cached.album_genres.is_empty() { state.library.album_genres = cached.album_genres; }
             if !cached.moods.is_empty() { state.library.moods = cached.moods; }
@@ -2323,4 +2229,54 @@ pub fn handle_app_event(
 
         _ => vec![],
     }
+}
+
+/// Generic preload handler for tag-style sections. Stores the items in
+/// the matching `library` field, clears the preload tracker, and — if
+/// the user is currently sitting on this section with `tag_nav.loading`
+/// — dispatches a fresh `RefreshTagView` so the empty list gets
+/// replaced with the just-loaded data.
+fn handle_tag_preload(
+    state: &mut AppState,
+    library_key: &str,
+    preload_label: &str,
+    section: BrowseCategory,
+    items: Vec<crate::plex::models::Genre>,
+) -> Vec<Action> {
+    if state.active_library.as_deref() != Some(library_key) {
+        tracing::debug!("Ignoring stale {} preload for library {}", preload_label, library_key);
+        return vec![];
+    }
+
+    let already_present = !state.tag_list_for(section).is_empty();
+    if !already_present {
+        let count = items.len();
+        match section {
+            BrowseCategory::AlbumGenres => state.library.album_genres = items,
+            BrowseCategory::ArtistGenres => state.library.artist_genres = items,
+            BrowseCategory::Moods => state.library.moods = items,
+            BrowseCategory::Styles => state.library.styles = items,
+            BrowseCategory::Decades => state.library.decades = items,
+            BrowseCategory::Years => state.library.years = items,
+            BrowseCategory::Collections => state.library.collections = items,
+            BrowseCategory::Countries => state.library.countries = items,
+            BrowseCategory::Labels => state.library.labels = items,
+            BrowseCategory::Formats => state.library.formats = items,
+            BrowseCategory::Studios => state.library.studios = items,
+            _ => {}
+        }
+        tracing::debug!("{} preloaded: {} items", preload_label, count);
+    }
+
+    state.cache_mgmt.preloads_in_progress.remove(preload_label);
+    if state.cache_mgmt.preloads_in_progress.is_empty() {
+        state.cache_mgmt.preloads_total = 0;
+    }
+
+    // If the user is sitting on this section and the nav is empty/loading,
+    // refresh the view so the just-loaded items appear.
+    if state.browse_category == section && state.tag_nav.loading {
+        return vec![BrowseAction::RefreshTagView.into()];
+    }
+    vec![]
 }

@@ -205,7 +205,7 @@ fn has_album_context(state: &AppState) -> bool {
                         && state.list_state.right_albums_index <= state.library.selected_artist_albums.len()
                 }
                 RightPanelMode::CategoryAlbums => {
-                    state.library.genre_albums_index < state.library.genre_albums.len()
+                    state.library.tag_albums_index < state.library.tag_albums.len()
                 }
                 _ => false,
             }
@@ -237,7 +237,7 @@ fn has_enqueue_context(state: &AppState) -> bool {
                 RightPanelMode::AlbumTracks | RightPanelMode::CategoryTracks => {
                     !state.library.selected_album_tracks.is_empty()
                 }
-                RightPanelMode::CategoryAlbums => !state.library.genre_albums.is_empty(),
+                RightPanelMode::CategoryAlbums => !state.library.tag_albums.is_empty(),
                 _ => false,
             }
         }
@@ -297,7 +297,7 @@ fn has_miller_album_context(state: &AppState) -> bool {
     }
     let nav = match state.browse_category {
         BrowseCategory::Library => &state.artist_nav,
-        BrowseCategory::Genres => &state.genre_nav,
+        cat if cat.is_tag_section() => &state.tag_nav,
         BrowseCategory::Playlists => &state.playlist_nav,
         _ => return false,
     };

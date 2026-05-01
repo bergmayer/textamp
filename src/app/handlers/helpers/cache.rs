@@ -65,7 +65,7 @@ pub fn maybe_save_cache_async(event_tx: &mpsc::Sender<Event>, state: &mut AppSta
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
     };
-    cache_data.genres = state.library.genres.clone();
+    cache_data.genres = state.library.album_genres.clone();
     cache_data.artist_genres = state.library.artist_genres.clone();
     cache_data.album_genres = state.library.album_genres.clone();
     cache_data.moods = state.library.moods.clone();

@@ -136,15 +136,21 @@ fn render_tab_strip(frame: &mut Frame, state: &AppState, area: Rect) {
     let lib_label = " library ";
     let divider = "│";
     let np_label = " now playing ";
-    // Four-key cheat sheet: `:` = command palette, `/` = filter
-    // overlay, `?` = help, `⇥` = Tab toggles Library ↔ Now Playing.
-    // Mirrors classic vim chrome — same row as the Library / Now
-    // Playing tabs, on the right edge.
-    let palette_hint = " :  /  ?  \u{21e5} ";
+    // Five-key cheat sheet: `:` = command palette, `/` = filter
+    // overlay, `?` = help, `⇥` = Tab toggles Library ↔ Now Playing,
+    // `,` = open Settings (mirrors macOS Cmd+,). Mirrors classic vim
+    // chrome — same row as the Library / Now Playing tabs, on the
+    // right edge.
+    let palette_hint = " :  /  ?  \u{21e5}  ,  \\ ";
 
+    // Active tab uses an inverted (selection-style) background so the
+    // selected/unselected distinction is obvious in every theme — in
+    // B&W in particular, the previous "bold accent on transport bg"
+    // versus "muted on transport bg" lookup was just bold-vs-non-bold
+    // black-on-white, which the user couldn't read at a glance.
     let active_style = Style::default()
-        .fg(t.colors.fg_accent)
-        .bg(t.colors.transport_bg)
+        .fg(t.colors.selection_bar_fg)
+        .bg(t.colors.selection_bar_bg)
         .add_modifier(Modifier::BOLD);
     let inactive_style = Style::default()
         .fg(t.colors.fg_muted)

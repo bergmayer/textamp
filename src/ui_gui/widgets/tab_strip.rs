@@ -8,7 +8,7 @@
 //! - Now Playing → Queue view (combined queue list + optional
 //!                 visualizer panel)
 
-use iced::widget::{button, container, row, text, text_input};
+use iced::widget::{button, container, row, text_input};
 use iced::{Alignment, Background, Border, Element, Length, Shadow, Theme};
 
 use crate::app::action::{NavigationAction, SearchAction};
@@ -16,6 +16,7 @@ use crate::app::state::{BrowseCategory, View};
 use crate::app::{Action, AppState};
 use crate::ui_gui::message::GuiMessage;
 
+use crate::ui_gui::widgets::text;
 /// Build the message that the filter text_input fires on Enter.
 ///
 /// If the filter has a query: leave fast-filter mode, open the global

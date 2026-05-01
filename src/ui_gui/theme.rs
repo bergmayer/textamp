@@ -36,9 +36,13 @@ pub fn iced_theme(name: ThemeName) -> Theme {
         ThemeName::Dark => Theme::Dark,
         ThemeName::SolarizedDark => Theme::SolarizedDark,
         ThemeName::SolarizedLight => Theme::SolarizedLight,
-        ThemeName::Borland => borland_theme(),
         ThemeName::Platinum => platinum_theme(),
         ThemeName::BlackAndWhite => black_and_white_theme(),
+        ThemeName::Amber => amber_theme(),
+        ThemeName::PhosphorGreen => phosphor_green_theme(),
+        ThemeName::Norton => norton_theme(),
+        ThemeName::Dracula => Theme::Dracula,
+        ThemeName::Nord => Theme::Nord,
     }
 }
 
@@ -59,18 +63,42 @@ fn rgb(r: u8, g: u8, b: u8) -> Color {
     Color::from_rgb8(r, g, b)
 }
 
-/// Classic Turbo Pascal / Norton Commander palette — blue background,
-/// white text, cyan selection, yellow accents. Matches the TUI's
-/// `ThemeColors::borland()` so the two front-ends look equivalent.
-fn borland_theme() -> Theme {
+/// Norton Commander DOS palette — bright blue background, cyan title,
+/// yellow accents, white body text. Surviving member of the DOS-blue
+/// family.
+fn norton_theme() -> Theme {
     let palette = Palette {
-        background: rgb(0, 0, 170),  // classic #0000AA blue
+        background: rgb(0, 0, 170),       // DOS bright blue
         text:       rgb(255, 255, 255),
-        primary:    rgb(0, 170, 170), // cyan — selection bar
-        success:    rgb(0, 170, 0),
-        danger:     rgb(170, 0, 0),
+        primary:    rgb(85, 255, 255),    // bright cyan
+        success:    rgb(85, 255, 85),
+        danger:     rgb(255, 85, 85),
     };
-    Theme::Custom(Arc::new(Custom::new("Borland".to_string(), palette)))
+    Theme::Custom(Arc::new(Custom::new("Norton".to_string(), palette)))
+}
+
+/// Vintage amber-on-black CRT.
+fn amber_theme() -> Theme {
+    let palette = Palette {
+        background: rgb(15, 8, 0),
+        text:       rgb(255, 176, 0),
+        primary:    rgb(255, 176, 0),
+        success:    rgb(255, 176, 0),
+        danger:     rgb(255, 100, 50),
+    };
+    Theme::Custom(Arc::new(Custom::new("Amber CRT".to_string(), palette)))
+}
+
+/// Vintage green-on-black CRT.
+fn phosphor_green_theme() -> Theme {
+    let palette = Palette {
+        background: rgb(0, 12, 0),
+        text:       rgb(80, 255, 100),
+        primary:    rgb(80, 255, 100),
+        success:    rgb(80, 255, 100),
+        danger:     rgb(255, 100, 60),
+    };
+    Theme::Custom(Arc::new(Custom::new("Phosphor Green".to_string(), palette)))
 }
 
 /// Mac OS 9 "Platinum" palette — light gray window chrome, black text,

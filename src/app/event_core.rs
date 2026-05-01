@@ -52,6 +52,10 @@ pub enum DataEvent {
     RelatedDataLoaded { groups: Vec<crate::app::state::RelatedArtistGroup> },
     SearchCompleted(SearchResults),
     TrackSearchCompleted { version: u64, tracks: Vec<Track> },
+    /// Adventure-launcher-specific track search result. Carries a
+    /// per-launcher version so stale callbacks (issued before the
+    /// user kept typing) can be discarded by the events handler.
+    AdventureTrackSearchCompleted { version: u64, tracks: Vec<Track> },
     ApiError(String),
 }
 
@@ -102,11 +106,18 @@ pub enum PreloadEvent {
     ArtistsPreloaded { library_key: String, artists: Vec<Artist> },
     AlbumsPreloaded { library_key: String, albums: Vec<Album> },
     PlaylistsPreloaded { library_key: String, playlists: Vec<Playlist> },
-    GenresPreloaded { library_key: String, genres: Vec<Genre> },
     ArtistGenresPreloaded { library_key: String, genres: Vec<Genre> },
     AlbumGenresPreloaded { library_key: String, genres: Vec<Genre> },
     MoodsPreloaded { library_key: String, moods: Vec<Genre> },
     StylesPreloaded { library_key: String, styles: Vec<Genre> },
+    /// Generic tag-list preload for new tag-style sections (decade, year,
+    /// collection, country, label, format, studio). The category param
+    /// tells the events handler which `library` field to populate.
+    TagListPreloaded {
+        library_key: String,
+        category: crate::app::state::RefreshCategory,
+        items: Vec<Genre>,
+    },
     StationsPreloaded { library_key: String, stations: Vec<Station> },
     AllTracksPreloaded { library_key: String, tracks: Vec<Track> },
     PreloadFailed { category: String },

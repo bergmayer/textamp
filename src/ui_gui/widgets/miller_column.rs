@@ -14,9 +14,10 @@
 use std::collections::HashMap;
 
 use iced::border::Radius;
-use iced::widget::{button, column, container, image, mouse_area, row, scrollable, text, Column, Space};
+use iced::widget::{button, column, container, image, mouse_area, row, scrollable, Column, Space};
 use iced::{Alignment, Background, Border, Color, Element, Length, Theme};
 
+use crate::ui_gui::widgets::text;
 use crate::app::Action;
 use crate::app::state::{BrowseColumn, BrowseItem};
 use crate::ui_gui::images;
@@ -27,10 +28,20 @@ use crate::ui_gui::message::GuiMessage;
 /// content position. Rows force `.height(Length::Fixed(row_h))` so
 /// layout is trivial and these values are authoritative.
 pub const ROW_H_TEXT: f32 = 26.0;
-pub const ROW_H_ART: f32 = 132.0;
+/// Per-row height for an album-art row. Set to leave a small chrome
+/// margin (4 px = 2 above + 2 below) above the actual thumbnail
+/// height so consecutive rows don't visually merge.
+pub const ROW_H_ART: f32 = 196.0;
 pub const ROW_H_ACTION: f32 = 34.0;
 
-const ART_THUMB_SIZE: f32 = 128.0;
+/// Side length of the album cover thumbnail rendered in cover-art-on
+/// rows. Bumped from the original 128 px so the thumbnail actually
+/// fills the available horizontal space in a typical Miller column
+/// (the user's repeated request — at 128 the cover sat in a small
+/// upper-left corner of an otherwise empty row). Pair with
+/// `ROW_H_ART` above so the row contains the full square plus a
+/// small margin without clipping.
+const ART_THUMB_SIZE: f32 = 192.0;
 
 /// How many rows of buffer to render above and below the viewport.
 /// Large enough to cover one frame of fast-scroll latency between
@@ -223,7 +234,7 @@ pub fn view<'a>(
     // SF Pro at size 14 averages ~7 px per glyph for Latin text.
     let max_chars = ((title_budget_px / 7.0) as usize).max(8);
     let display_title = middle_truncate(&display_title, max_chars);
-    let title_text = container(text(display_title).size(14).wrapping(text::Wrapping::None))
+    let title_text = container(text(display_title).size(14).wrapping(iced::widget::text::Wrapping::None))
         .padding([4, 8])
         .width(Length::Fill)
         .clip(true);
@@ -505,7 +516,7 @@ fn row_item<'a>(
             None => Space::with_width(Length::Fixed(ART_THUMB_SIZE)).into(),
         };
 
-        let label_btn = button(text(label).size(15).wrapping(text::Wrapping::None))
+        let label_btn = button(text(label).size(15).wrapping(iced::widget::text::Wrapping::None))
             .width(Length::Fill)
             .height(Length::Fill)
             .padding([4, 8])
@@ -529,7 +540,7 @@ fn row_item<'a>(
         .clip(true)
         .into()
     } else {
-        let btn = button(text(label).size(15).wrapping(text::Wrapping::None))
+        let btn = button(text(label).size(15).wrapping(iced::widget::text::Wrapping::None))
             .width(Length::Fill)
             .height(Length::Fill)
             .padding([4, 8])
@@ -606,26 +617,26 @@ fn sanitize(s: &str) -> String {
 /// as Cmd+W (focus the targeted column, then call
 /// `close_focused_browse_column`).
 ///
-/// Uses U+00D7 (multiplication sign) — universally available in
-/// system fonts on every desktop platform, unlike U+2715 ✕ which
-/// some font configurations fall back to a notdef glyph for.
+/// Subtle close affordance — small "x" that lives quietly in the
+/// column title bar. Hover dims the foreground color slightly
+/// instead of slapping a danger-colored chip in place; the goal is
+/// "easy to find, easy to ignore", not a button competing with the
+/// primary actions next to it.
 pub fn close_x_button<'a>(on_press: GuiMessage) -> iced::widget::Button<'a, GuiMessage> {
-    button(text("\u{00d7}").size(18))
-        .padding([0, 8])
+    button(text("x").size(13))
+        .padding([0, 6])
         .on_press(on_press)
         .style(|theme: &Theme, status: button::Status| {
             let p = theme.extended_palette();
-            let (bg, fg) = match status {
-                button::Status::Hovered =>
-                    (p.danger.base.color, p.danger.base.text),
-                _ =>
-                    (Color::TRANSPARENT, p.background.base.text),
+            let fg = match status {
+                button::Status::Hovered => p.background.strong.text,
+                _ => p.background.weak.text,
             };
             button::Style {
-                background: Some(Background::Color(bg)),
+                background: Some(Background::Color(Color::TRANSPARENT)),
                 text_color: fg,
                 border: Border {
-                    color: Color::TRANSPARENT, width: 0.0, radius: 4.0.into(),
+                    color: Color::TRANSPARENT, width: 0.0, radius: 0.0.into(),
                 },
                 ..button::Style::default()
             }

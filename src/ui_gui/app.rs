@@ -179,15 +179,8 @@ pub struct App {
     #[cfg(all(target_os = "macos", feature = "native-menus"))]
     macos_menu_installed: bool,
 
-    /// Timestamp of the last user-driven motion event (keyboard nav,
-    /// mouse-wheel scroll, miller-row click). Used together with
-    /// `state.artwork.suppress_loads` to throttle album-art fetches
-    /// while the user is rapidly navigating: while motion has been
-    /// happening within the last `ART_LOAD_PAUSE_MS`, every
-    /// `LoadAlbumArt` is dropped; once motion settles for that long,
-    /// the next tick clears the flag and dispatches a fresh load
-    /// against the current viewport.
-    last_motion_at: std::time::Instant,
+    // Motion-throttle clock now lives on `state.artwork.last_motion_at`
+    // so the TUI can share the same settle logic.
 
     /// Live keyboard modifier state, updated from a window-level
     /// `keyboard::Event::ModifiersChanged` subscription. Mouse clicks
@@ -273,73 +266,6 @@ pub fn run() -> Result<()> {
         .window(window)
         .scale_factor(App::scale_factor)
         .default_font(default_font);
-
-    // Preload Windows fallback fonts so cosmic-text has CJK + symbol
-    // + emoji glyph coverage when the base font (Segoe UI) is missing
-    // a glyph. Segoe UI is Latin-only; without these, Japanese /
-    // Chinese / Korean track names render as a row of squares (the
-    // user's "I never want to see those gross unicode boxes" report)
-    // and assorted dingbats (heavy multiplication X, music note,
-    // bullets) drop out the same way.
-    //
-    // All four files ship with every modern Windows install, but if
-    // any are missing we keep going — cosmic-text will render boxes
-    // for the unmapped codepoints, which is no worse than today.
-    #[cfg(target_os = "windows")]
-    let app_builder = {
-        const FALLBACK_FONTS: &[&str] = &[
-            r"C:\Windows\Fonts\seguisym.ttf", // Segoe UI Symbol — dingbats, arrows, math
-            r"C:\Windows\Fonts\seguiemj.ttf", // Segoe UI Emoji — emoji
-            r"C:\Windows\Fonts\msyh.ttc",     // Microsoft YaHei — Simplified Chinese / shared CJK Han
-            r"C:\Windows\Fonts\YuGothM.ttc",  // Yu Gothic Medium — Japanese kana + kanji
-            r"C:\Windows\Fonts\malgun.ttf",   // Malgun Gothic — Korean Hangul
-        ];
-        let mut b = app_builder;
-        for path in FALLBACK_FONTS {
-            match std::fs::read(path) {
-                Ok(bytes) => {
-                    tracing::info!("Loaded fallback font: {path}");
-                    b = b.font(bytes);
-                }
-                Err(e) => tracing::debug!("Skipping fallback font {path}: {e}"),
-            }
-        }
-        b
-    };
-
-    // macOS analogue: SF Pro is Latin/Cyrillic/Greek-only, so without
-    // these preloads cosmic-text renders boxes for emoji, dingbats,
-    // and CJK glyphs (the user's "Fresh ❤" / "❤️ Tracks" report —
-    // playlist names that came back as "Fresh [box]" instead).
-    //
-    // Apple Color Emoji is a CBDT-style colour bitmap font that iced
-    // 0.13 / cosmic-text 0.12 will pick up for codepoints in the
-    // emoji ranges; it just needs to be in the in-memory font db.
-    #[cfg(target_os = "macos")]
-    let app_builder = {
-        const FALLBACK_FONTS: &[&str] = &[
-            "/System/Library/Fonts/Apple Color Emoji.ttc",      // emoji (colour bitmap)
-            "/System/Library/Fonts/Apple Symbols.ttf",          // misc symbols
-            "/System/Library/Fonts/Symbol.ttf",                 // math / Greek
-            "/System/Library/Fonts/ZapfDingbats.ttf",           // ✓ ✗ ❤ ★ etc.
-            "/System/Library/Fonts/CJKSymbolsFallback.ttc",     // CJK punctuation
-            "/System/Library/Fonts/Hiragino Sans GB.ttc",       // Simplified Chinese
-            "/System/Library/Fonts/AppleSDGothicNeo.ttc",       // Korean Hangul
-            "/System/Library/Fonts/ヒラギノ角ゴシック W4.ttc",  // Japanese kana + kanji
-            "/System/Library/Fonts/GeezaPro.ttc",               // Arabic
-        ];
-        let mut b = app_builder;
-        for path in FALLBACK_FONTS {
-            match std::fs::read(path) {
-                Ok(bytes) => {
-                    tracing::info!("Loaded fallback font: {path}");
-                    b = b.font(bytes);
-                }
-                Err(e) => tracing::debug!("Skipping fallback font {path}: {e}"),
-            }
-        }
-        b
-    };
 
     app_builder
         .run_with(App::new)
@@ -496,7 +422,6 @@ impl App {
             // not user motion) run normally because `suppress_loads`
             // defaults to false. The timestamp only matters once the
             // user starts navigating.
-            last_motion_at: std::time::Instant::now(),
             current_modifiers: iced::keyboard::Modifiers::empty(),
             queue_anchor: None,
             track_pane_similar: HashMap::new(),
@@ -594,7 +519,7 @@ impl App {
             GuiMessage::KeyPress(_)
             | GuiMessage::MillerScroll { .. }
             | GuiMessage::AlphabetJump(_) => {
-                self.last_motion_at = std::time::Instant::now();
+                self.core.state.artwork.last_motion_at = Some(std::time::Instant::now());
                 self.core.state.artwork.suppress_loads = true;
             }
             GuiMessage::MillerSelect { .. } | GuiMessage::FocusMillerColumn { .. } => {
@@ -702,7 +627,7 @@ impl App {
                 // Propagate to every nav's columns so existing views update
                 // immediately, matching the TUI toggle_artwork() behaviour.
                 for nav in [&mut self.core.state.artist_nav,
-                            &mut self.core.state.genre_nav,
+                            &mut self.core.state.tag_nav,
                             &mut self.core.state.playlist_nav] {
                     for col in nav.columns.iter_mut() {
                         col.artwork_visible = new_visible;
@@ -1046,14 +971,20 @@ impl App {
             }
 
             GuiMessage::SimilarRowClick { pane_index } => {
-                use crate::app::action::BrowseAction;
                 let was_selected = self.core.state.track_pane_focused
                     && self.core.state.track_pane_index == pane_index;
                 self.core.state.track_pane_focused = true;
                 self.core.state.track_pane_index = pane_index;
                 self.core.state.category_column_focused = false;
                 if was_selected {
-                    // Already highlighted → drill into Library.
+                    // Click on already-highlighted similar row → open
+                    // the track context menu (Play / Open in Library /
+                    // Show Similar Tracks / Sonic Adventure / Artist
+                    // Bio / external search). Mirrors right-click and
+                    // matches the rule used elsewhere: clicking a row
+                    // a second time is the "act on it" gesture, but
+                    // for similar rows the action is "show me my
+                    // options" rather than a fixed drill.
                     let parent = self.core.state.focused_track().cloned();
                     let sim_idx = pane_index.saturating_sub(1);
                     let sim = parent.as_ref().and_then(|t| {
@@ -1063,16 +994,11 @@ impl App {
                             .cloned()
                     });
                     if let Some(sim) = sim {
-                        if let Some(artist_key) = sim.grandparent_rating_key.clone() {
-                            self.core.state.track_pane_focused = false;
-                            self.core.state.track_pane_index = 0;
-                            self.dispatch_sync(Action::Browse(BrowseAction::OpenInLibrary {
-                                artist_key,
-                                artist_name: sim.track_artist().to_string(),
-                                album_key: sim.parent_rating_key.clone(),
-                                album_title: sim.parent_title.clone(),
-                            }));
-                        }
+                        self.context_menu = build_floating_track_context_menu(
+                            &self.core.state,
+                            sim,
+                            self.mouse_pos,
+                        );
                     }
                 }
                 Task::none()
@@ -1084,7 +1010,7 @@ impl App {
                 // the pane was already absent, which the user did NOT
                 // ask for from a click on the pane's own X.
                 if column_index.is_none() {
-                    self.core.state.track_details = None;
+                    self.core.state.track_pane_open = false;
                     self.core.state.track_pane_focused = false;
                     self.core.state.track_pane_index = 0;
                     return Task::none();
@@ -1458,6 +1384,25 @@ impl App {
 
             GuiMessage::OpenStandaloneTrackContextMenu(track) => {
                 self.context_menu = build_track_context_menu(
+                    &self.core.state,
+                    *track,
+                    self.mouse_pos,
+                );
+                Task::none()
+            }
+
+            GuiMessage::OpenCommandPalette => {
+                // Direct entry point that doesn't depend on the
+                // keyboard subscription — invoked from the Tools →
+                // Command Palette menu item (Cmd+K). The shared
+                // palette state lives on `state.palette`; the popup
+                // overlay reads that and renders.
+                crate::ui::command_palette::open(&mut self.core.state);
+                Task::none()
+            }
+
+            GuiMessage::OpenFloatingTrackContextMenu(track) => {
+                self.context_menu = build_floating_track_context_menu(
                     &self.core.state,
                     *track,
                     self.mouse_pos,
@@ -2110,8 +2055,31 @@ impl App {
             }),
         );
 
-        let keyboard_sub = keyboard::on_key_press(|key, modifiers| {
-            super::shortcuts::to_crossterm_key_event(key, modifiers).map(GuiMessage::KeyPress)
+        // `keyboard::on_key_press` filters events whose `Status` is
+        // `Captured` — i.e. anything a focused `text_input` already
+        // consumed. That hides shortcut keys (`:` for the command
+        // palette, `/` for the filter) whenever the filter input or
+        // a popup search field happens to have focus, which is the
+        // default on most pages. Use `listen_with` directly so the
+        // subscription fires on every key press regardless of
+        // capture status.
+        //
+        // Use `modified_key` instead of `key`: iced 0.13's `key` is
+        // the unmodified logical key (e.g. `;` for the physical
+        // semicolon key), while `modified_key` has shift applied —
+        // so Shift+; arrives as `Key::Character(":")`. The shared
+        // `key_input::handle_key` matches on the post-shift
+        // character (`:`), so without this swap the palette
+        // shortcut never fired.
+        let keyboard_sub = iced::event::listen_with(|event, _status, _window| {
+            if let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                modified_key, modifiers, ..
+            }) = event {
+                super::shortcuts::to_crossterm_key_event(modified_key, modifiers)
+                    .map(GuiMessage::KeyPress)
+            } else {
+                None
+            }
         });
 
         // Resize events drive the responsive scale_factor below: any window
@@ -2466,7 +2434,58 @@ impl App {
     /// of `update` (which was 1200+ lines) so the dispatcher reads as
     /// a flat table of one-line arms.
     fn handle_key_press(&mut self, key_event: crossterm::event::KeyEvent) -> Task<GuiMessage> {
-        use crossterm::event::KeyCode;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        // Command palette captures every key while open, mirroring
+        // the TUI event loop. Returns the palette's outcome:
+        //   - Continue: keystroke consumed (typing into the query)
+        //   - Cancel: Esc / focus-out — close
+        //   - Execute(cmd): Enter on a row — close + run the command
+        if self.core.state.palette.open {
+            use crate::ui::command_palette::{handle_key as palette_key, run as palette_run, PaletteOutcome};
+            match palette_key(&mut self.core.state, key_event) {
+                PaletteOutcome::Continue => return Task::none(),
+                PaletteOutcome::Cancel => {
+                    self.core.state.palette.close();
+                    return Task::none();
+                }
+                PaletteOutcome::Execute(cmd) => {
+                    self.core.state.palette.close();
+                    let actions = palette_run(cmd, &mut self.core.state);
+                    for a in actions {
+                        self.dispatch_sync(a);
+                    }
+                    return Task::none();
+                }
+            }
+        }
+
+        // The keyboard subscription (`listen_with`) fires for every
+        // key press, even those iced's text_input widgets capture for
+        // their own input. That guarantees `:` and `/` work no matter
+        // where focus sits — but it also means raw character keys
+        // would double-process when the user is *typing into* a
+        // focused text_input (filter, search popup query, settings
+        // username field, adventure launcher search, …). Drop plain
+        // (no-modifier) printable keys in those contexts so the
+        // text_input's `on_input` is the only path that updates the
+        // edited string. Modified shortcuts (Cmd+F / Cmd+L / etc.)
+        // and non-character keys (Esc, arrows, function keys, Tab)
+        // still flow through.
+        let plain_char = matches!(key_event.code, KeyCode::Char(_))
+            && !key_event.modifiers.contains(KeyModifiers::CONTROL)
+            && !key_event.modifiers.contains(KeyModifiers::ALT)
+            && !key_event.modifiers.contains(KeyModifiers::SUPER);
+        let typing_into_text_input = self.core.state.list_filter.active
+            || self.core.state.popups.search_active
+            || self.core.state.popups.adventure_launcher.is_some()
+            || self.core.state.popups.radio_launcher.is_some()
+            || self.core.state.popups.artist_radio_picker.is_some()
+            || self.core.state.popups.input_dialog.is_some();
+        if plain_char && typing_into_text_input {
+            return Task::none();
+        }
+
         // Escape dismisses GUI-only overlays first (About, dropdown).
         // Only after both are closed does Esc flow through to the
         // shared key_input — matching the usual "modal first" UX.
@@ -2573,30 +2592,20 @@ impl App {
         use std::time::Duration as StdDuration;
 
         const TICK_MS: u64 = 100;
-        /// How long the user must be still before the lazy-art gate
-        /// reopens. Tuned by the user — short enough that the wait
-        /// feels intentional, long enough to absorb a held-down arrow
-        /// key without flapping.
-        const ART_LOAD_PAUSE: StdDuration = StdDuration::from_millis(1000);
 
-        // Lazy-art gate. While motion has been frequent, every
-        // `LoadAlbumArt` returned by the shared dispatcher has been
-        // dropped (see `dispatch_system::SystemAction::LoadAlbumArt`).
-        // Once the cursor has been still for `ART_LOAD_PAUSE`, clear
-        // the flag and re-collect the focused album column's viewport
-        // so its art loads in one batch.
-        if self.core.state.artwork.suppress_loads
-            && self.last_motion_at.elapsed() >= ART_LOAD_PAUSE
-        {
-            self.core.state.artwork.suppress_loads = false;
-            let batch = crate::app::handlers::dispatch_miller::collect_viewport_art(
-                &self.core.state,
-            );
-            if !batch.is_empty() {
-                use crate::app::action::SystemAction;
-                self.dispatch_sync(Action::System(SystemAction::LoadAlbumArt(batch)));
+        // Lazy-art gate. Shared with the TUI via
+        // `crate::app::handlers::lazy_art::settle`. While motion has
+        // been frequent, every `LoadAlbumArt` returned by the shared
+        // dispatcher has been dropped (see `dispatch_system`). Once
+        // the cursor has been still for `ART_LOAD_PAUSE_MS`, clear the
+        // flag and re-collect the focused column's viewport so its art
+        // loads in one batch.
+        if let Some(actions) = crate::app::handlers::lazy_art::settle(&mut self.core.state) {
+            for action in actions {
+                self.dispatch_sync(action);
             }
         }
+        let _ = StdDuration::from_millis(0);
 
         // Audio self-heal. Windows can refuse to expose a default
         // output device for several seconds after the previous holder
@@ -2825,7 +2834,7 @@ fn build_miller_context_menu(
             let play_action = |single: bool| -> Action {
                 use crate::app::state::BrowseCategory;
                 match state.browse_category {
-                    BrowseCategory::Genres => Action::Miller(MillerAction::PlayGenreTrackFromMiller {
+                    BrowseCategory::AlbumGenres => Action::Miller(MillerAction::PlayGenreTrackFromMiller {
                         column_index, track_index: item_index, single_track: single,
                     }),
                     BrowseCategory::Playlists => Action::Miller(MillerAction::PlayPlaylistTrackFromMiller {
@@ -3077,7 +3086,7 @@ fn build_miller_context_menu(
         }
         if state.external_search.apple_music {
             entries.push(Entry::Entry {
-                label: format!("Search Apple Music for \u{201c}{}\u{201d}", query),
+                label: "Search Apple Music for selection".to_string(),
                 actions: vec![Action::System(SystemAction::OpenExternalSearch {
                     target: crate::services::external_search::SearchTarget::AppleMusic,
                     query: Some(query.clone()),
@@ -3086,7 +3095,7 @@ fn build_miller_context_menu(
         }
         if state.external_search.spotify {
             entries.push(Entry::Entry {
-                label: format!("Search Spotify for \u{201c}{}\u{201d}", query),
+                label: "Search Spotify for selection".to_string(),
                 actions: vec![Action::System(SystemAction::OpenExternalSearch {
                     target: crate::services::external_search::SearchTarget::Spotify,
                     query: Some(query.clone()),
@@ -3095,7 +3104,7 @@ fn build_miller_context_menu(
         }
         if state.external_search.youtube {
             entries.push(Entry::Entry {
-                label: format!("Search YouTube for \u{201c}{}\u{201d}", query),
+                label: "Search YouTube for selection".to_string(),
                 actions: vec![Action::System(SystemAction::OpenExternalSearch {
                     target: crate::services::external_search::SearchTarget::YouTube,
                     query: Some(query),
@@ -3277,99 +3286,120 @@ fn build_queue_context_menu(
 /// Add to queue, Show Similar Tracks, Show Similar Albums, Related
 /// Artists, Show Artist Bio, Open in Library, Sonic Adventure.
 fn build_track_context_menu(
-    _state: &AppState,
+    state: &AppState,
     track: crate::plex::models::Track,
     mouse_pos: (f32, f32),
 ) -> Option<super::widgets::context_menu::ContextMenuState> {
-    use crate::app::action::{DataAction, QueueAction, SearchAction};
+    build_track_context_menu_inner(state, track, mouse_pos, false)
+}
+
+/// Variant used for tracks that are intrinsically "floating" — i.e.
+/// not anchored in the user's current Miller-drill context. The
+/// Sonically-Similar list inside the track-details pane is the
+/// canonical example: the rows there are recommendations the Plex API
+/// returned, not items the user navigated to. Those tracks always get
+/// "Open in Library" near the top of the menu, regardless of what
+/// view the user happens to be in.
+fn build_floating_track_context_menu(
+    state: &AppState,
+    track: crate::plex::models::Track,
+    mouse_pos: (f32, f32),
+) -> Option<super::widgets::context_menu::ContextMenuState> {
+    build_track_context_menu_inner(state, track, mouse_pos, true)
+}
+
+/// Thin renderer that maps the shared `track_context::ContextEntry`
+/// list onto the GUI's `context_menu::Entry` widget. Adding or
+/// reordering entries is a one-line edit in
+/// `crate::services::track_context::track_context_entries` — no GUI
+/// or TUI duplication.
+fn build_track_context_menu_inner(
+    state: &AppState,
+    track: crate::plex::models::Track,
+    mouse_pos: (f32, f32),
+    floating: bool,
+) -> Option<super::widgets::context_menu::ContextMenuState> {
+    use crate::app::action::{BrowseAction, DataAction, QueueAction, SearchAction, SystemAction};
+    use crate::services::track_context::{track_context_entries, ContextKind};
     use super::widgets::context_menu::{ContextMenuState, Entry};
 
     let mut entries: Vec<Entry> = Vec::new();
-    let track_key = track.rating_key.clone();
-    let track_label = format!("{} - {}", track.artist_name(), track.title);
-    let album_key = track.parent_rating_key.clone();
-    let album_label = track.parent_title.clone();
-    let artist_key = track.grandparent_rating_key.clone();
-    let artist_name = track.artist_name().to_string();
-
-    entries.push(Entry::Entry {
-        label: "Play track".to_string(),
-        actions: vec![Action::Queue(QueueAction::PlayTrack(track.clone()))],
-    });
-    entries.push(Entry::Entry {
-        label: "Play next in queue".to_string(),
-        actions: vec![Action::Queue(QueueAction::EnqueueTracksNext(vec![track.clone()]))],
-    });
-    entries.push(Entry::Entry {
-        label: "Add to end of queue".to_string(),
-        actions: vec![Action::Queue(QueueAction::EnqueueTrack(track.clone()))],
-    });
-    entries.push(Entry::Sep);
-
-    entries.push(Entry::Custom {
-        label: "Show Similar Tracks".to_string(),
-        message: super::message::GuiMessage::ShowSimilarPopup(vec![
-            Action::Data(DataAction::LoadSimilarTracks {
-                rating_key: track_key.clone(),
-                title: track_label.clone(),
-            }),
-        ]),
-    });
-    if let (Some(ak), Some(al)) = (album_key.clone(), album_label.clone()) {
-        if !al.is_empty() {
-            entries.push(Entry::Custom {
-                label: "Show Similar Albums".to_string(),
-                message: super::message::GuiMessage::ShowSimilarPopup(vec![
-                    Action::Data(DataAction::LoadSimilarAlbums {
-                        rating_key: ak,
-                        title: al,
-                    }),
-                ]),
-            });
-        }
-    }
-    if let Some(ak) = artist_key.clone() {
-        if !artist_name.is_empty() {
-            entries.push(Entry::Custom {
-                label: "Related Artists".to_string(),
-                message: super::message::GuiMessage::ShowRelatedPopup(vec![
-                    Action::Data(DataAction::LoadRelated {
-                        artist_key: ak,
-                        title: artist_name.clone(),
-                    }),
-                ]),
-            });
-        }
-    }
-    entries.push(Entry::Entry {
-        label: "Sonic Adventure\u{2026}".to_string(),
-        actions: vec![Action::Search(SearchAction::OpenAdventureLauncherWithStart {
-            start_track: Box::new(track.clone()),
-        })],
-    });
-
-    if let Some(ak) = artist_key {
-        if !artist_name.is_empty() {
-            entries.push(Entry::Sep);
-            entries.push(Entry::Entry {
-                label: "Show Artist Bio".to_string(),
-                actions: vec![Action::Search(SearchAction::ShowArtistBio {
-                    artist_key: ak,
-                    artist_name: artist_name.clone(),
-                })],
-            });
-            if let Some(open) = open_in_library_for_track_obj(&track) {
-                entries.push(Entry::Entry {
-                    label: "Open in Library".to_string(),
-                    actions: vec![open],
-                });
+    for ce in track_context_entries(state, &track, floating) {
+        let push_action = |entries: &mut Vec<Entry>, action: Action| {
+            entries.push(Entry::Entry { label: ce.label.clone(), actions: vec![action] });
+        };
+        match ce.kind {
+            ContextKind::Separator => entries.push(Entry::Sep),
+            ContextKind::PlayTrack => push_action(
+                &mut entries, Action::Queue(QueueAction::PlayTrack(track.clone()))),
+            ContextKind::PlayTrackAndFollowing => {
+                // The GUI doesn't have a built-in "play this and the
+                // rest of the focused list" action — for now, treat
+                // it as PlayTrack. (When the focused-list lookup
+                // moves into a shared dispatch action, both UIs can
+                // route here directly.)
+                push_action(&mut entries, Action::Queue(QueueAction::PlayTrack(track.clone())));
             }
+            ContextKind::PlayNextInQueue => push_action(
+                &mut entries,
+                Action::Queue(QueueAction::EnqueueTracksNext(vec![track.clone()])),
+            ),
+            ContextKind::AddToEndOfQueue => push_action(
+                &mut entries, Action::Queue(QueueAction::EnqueueTrack(track.clone()))),
+            ContextKind::OpenInLibrary => {
+                if let Some(ak) = track.grandparent_rating_key.clone() {
+                    push_action(&mut entries, Action::Browse(BrowseAction::OpenInLibrary {
+                        artist_key: ak,
+                        artist_name: track.artist_name().to_string(),
+                        album_key: track.parent_rating_key.clone(),
+                        album_title: track.parent_title.clone(),
+                    }));
+                }
+            }
+            ContextKind::SonicAdventure => push_action(
+                &mut entries,
+                Action::Search(SearchAction::OpenAdventureLauncherWithStart {
+                    start_track: Box::new(track.clone()),
+                }),
+            ),
+            ContextKind::ArtistBio { artist_key, artist_name } => push_action(
+                &mut entries,
+                Action::Search(SearchAction::ShowArtistBio { artist_key, artist_name }),
+            ),
+            ContextKind::SearchExternal(target) => push_action(
+                &mut entries,
+                Action::System(SystemAction::OpenExternalSearch { target, query: None }),
+            ),
+            ContextKind::ShowSimilarTracks { rating_key, title } => entries.push(Entry::Custom {
+                label: ce.label.clone(),
+                message: super::message::GuiMessage::ShowSimilarPopup(vec![
+                    Action::Data(DataAction::LoadSimilarTracks { rating_key, title }),
+                ]),
+            }),
+            ContextKind::ShowSimilarAlbums { rating_key, title } => entries.push(Entry::Custom {
+                label: ce.label.clone(),
+                message: super::message::GuiMessage::ShowSimilarPopup(vec![
+                    Action::Data(DataAction::LoadSimilarAlbums { rating_key, title }),
+                ]),
+            }),
+            ContextKind::ShowRelatedArtists { artist_key, title } => entries.push(Entry::Custom {
+                label: ce.label.clone(),
+                message: super::message::GuiMessage::ShowRelatedPopup(vec![
+                    Action::Data(DataAction::LoadRelated { artist_key, title }),
+                ]),
+            }),
         }
     }
 
+    // Trim a trailing separator (e.g. no artist bio because the
+    // track had no grandparent_rating_key).
+    while matches!(entries.last(), Some(Entry::Sep)) {
+        entries.pop();
+    }
     if entries.is_empty() {
         return None;
     }
+
     Some(ContextMenuState {
         x: mouse_pos.0,
         y: mouse_pos.1,
@@ -3539,32 +3569,16 @@ fn helpers_for_grouped_album(
 /// the requested character class. Pure lookup — does NOT mutate state.
 ///
 /// - `'a'..='z'`: first item whose sort key starts with that letter.
-/// - `'0'`: first item whose sort key starts with a digit.
-/// - `'%'`: first item whose sort key starts with a non-alphanumeric
+/// - `'0'`: first item whose sort key starts with an ASCII digit.
+/// - `'%'`: first item whose sort key starts with an ASCII non-alphanumeric
 ///   character (a "symbol").
+/// - `'文'`: first item whose sort key starts with a non-ASCII character
+///   (CJK, Cyrillic, Greek, etc. — anything past `z` in code-point order).
 ///
 /// Returns `None` for the Folders category (which uses a different nav)
 /// or when the focused nav has no columns / no matching items.
 fn alphabet_target_index(state: &AppState, ch: char) -> Option<usize> {
-    use crate::app::handlers::helpers::sort_key;
-    use crate::app::state::BrowseCategory;
-
-    if state.browse_category == BrowseCategory::Folders {
-        return None;
-    }
-    let target = ch.to_ascii_lowercase();
-    let pred: Box<dyn Fn(&str) -> bool> = match target {
-        '0' => Box::new(|t: &str| sort_key(t).chars().next().map_or(false, |c| c.is_ascii_digit())),
-        '%' => Box::new(|t: &str| sort_key(t).chars().next().map_or(false, |c| !c.is_ascii_alphanumeric())),
-        c if c.is_ascii_alphabetic() => Box::new(move |t: &str| {
-            sort_key(t).chars().next().map_or(false, |first| first.to_ascii_lowercase() == c)
-        }),
-        _ => return None,
-    };
-
-    let nav = state.browse_nav()?;
-    let root = nav.columns.first()?;
-    root.items.iter().position(|it| pred(it.title()))
+    crate::app::handlers::helpers::alphabet_target_index(state, ch)
 }
 
 fn miller_click_actions(
@@ -3590,10 +3604,10 @@ fn miller_click_actions(
     // guard below preserves the same behaviour when the click is
     // also moving focus to a new column.
     // Snapshot whether anything is open rightward of the clicked
-    // column BEFORE we mutate nav. `track_details` is set by an
+    // column BEFORE we mutate nav. `track_pane_open` is set by an
     // explicit Enter/double-click on a Track and counts as a
     // rightward open thing for the auto-drill rule.
-    let pane_open = state.track_details.is_some();
+    let pane_open = state.track_pane_open;
     let (item, track_obj, grouped_album_col, auto_drill) = {
         let Some(nav) = state.browse_nav_mut() else { return Vec::new() };
         let had_child = column_index + 1 < nav.columns.len() || pane_open;
@@ -3634,10 +3648,10 @@ fn miller_click_actions(
     // Auto-drill on a non-Track item swaps the rightward column to
     // that item's child — but the track-details pane has no logical
     // re-target (the new column doesn't pick out a single track),
-    // so close it. The Track match arm below will re-set
-    // `track_details` via OpenTrackDetails.
+    // so close it. The Track match arm below reopens it via
+    // OpenTrackDetails when applicable.
     if auto_drill && !matches!(item, BrowseItem::Track { .. }) {
-        state.track_details = None;
+        state.track_pane_open = false;
         state.track_pane_focused = false;
         state.track_pane_index = 0;
     }
@@ -3667,7 +3681,7 @@ fn miller_click_actions(
                 // pushes to `artist_nav`) leaves the genre column
                 // unchanged and silently breaks drill-down.
                 let action = match state.browse_category {
-                    crate::app::state::BrowseCategory::Genres => {
+                    crate::app::state::BrowseCategory::AlbumGenres => {
                         MillerAction::LoadGenreTracksForMiller { album_key: key.clone() }
                     }
                     _ => MillerAction::LoadAlbumTracksForMiller { album_key: key.clone() },
@@ -3676,15 +3690,15 @@ fn miller_click_actions(
             }
         }
         BrowseItem::Track { .. } => {
-            // Tracks are terminal: instead of drilling further or
-            // playing, opening a track-details pane to the right of
-            // the Miller columns. The pane is replaced (not stacked)
-            // by each new track click.
+            // Tracks are terminal: clicking opens the track-details
+            // pane. The pane is a derived view of the focused Track
+            // row — the OpenTrackDetails action carries no payload.
+            // Note: clicking already moved selection to this row via
+            // `col.selected_index = item_index` above, so by the time
+            // the dispatcher runs, `focused_track()` returns this row.
             arm_drill = false;
-            match track_obj {
-                Some(t) => vec![Action::Browse(crate::app::action::BrowseAction::OpenTrackDetails(t))],
-                None => Vec::new(),
-            }
+            let _ = track_obj;
+            vec![Action::Browse(crate::app::action::BrowseAction::OpenTrackDetails)]
         }
         BrowseItem::Playlist { key, .. } => vec![Action::Miller(
             MillerAction::LoadPlaylistTracksForMiller { playlist_key: key.clone() },
@@ -3729,9 +3743,11 @@ fn miller_click_actions(
             // `LoadCategoryTracks` which doesn't change the genre
             // column at all, so the user always saw the merged
             // "all genres" list regardless of which tab they clicked.
-            vec![Action::Browse(crate::app::action::BrowseAction::DrillGenreCategory {
-                category_key: key.clone(),
-            })]
+            // Tag-style drilling no longer goes through a category
+            // column — the section IS the category. Drilling into a
+            // GenreCategory item is a no-op now.
+            let _ = key;
+            vec![]
         }
     };
 

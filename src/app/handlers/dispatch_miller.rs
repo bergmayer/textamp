@@ -390,48 +390,33 @@ pub async fn dispatch(
         // ================================================================
 
         MillerAction::LoadGenreAlbumsForMiller { genre_key } => {
-            // Load albums for genre and add as new column in genre_nav
+            // Load albums for the selected tag in the active section,
+            // and push a new column into tag_nav.
             let auto_drill = std::mem::take(&mut state.auto_drill_pending);
-            state.genre_nav.loading = true;
+            state.tag_nav.loading = true;
 
             if let Some(lib_key) = &state.active_library.clone() {
-                // For "All" tab, keys are prefixed ("lib:", "art:", "alb:", "mood:", "style:").
-                // Parse the prefix to determine which API to call, or fall back to genre_content_type.
-                let albums_result = if let Some(stripped) = genre_key.strip_prefix("lib:") {
-                    client.get_genre_albums(lib_key, stripped).await
-                } else if let Some(stripped) = genre_key.strip_prefix("art:") {
-                    client.get_artist_genre_albums(lib_key, stripped).await
-                } else if let Some(stripped) = genre_key.strip_prefix("alb:") {
-                    client.get_album_genre_albums(lib_key, stripped).await
-                } else if let Some(stripped) = genre_key.strip_prefix("mood:") {
-                    client.get_mood_albums(lib_key, stripped).await
-                } else if let Some(stripped) = genre_key.strip_prefix("style:") {
-                    client.get_style_albums(lib_key, stripped).await
-                } else {
-                    // No prefix — use genre_content_type (for non-All tabs)
-                    match state.library.genre_content_type {
-                        crate::app::state::GenreContentType::ArtistGenres => {
-                            client.get_artist_genre_albums(lib_key, &genre_key).await
-                        }
-                        crate::app::state::GenreContentType::AlbumGenres => {
-                            client.get_album_genre_albums(lib_key, &genre_key).await
-                        }
-                        crate::app::state::GenreContentType::Moods => {
-                            client.get_mood_albums(lib_key, &genre_key).await
-                        }
-                        crate::app::state::GenreContentType::Styles => {
-                            client.get_style_albums(lib_key, &genre_key).await
-                        }
-                        _ => {
-                            client.get_genre_albums(lib_key, &genre_key).await
-                        }
+                use crate::app::state::BrowseCategory;
+                let albums_result = match state.browse_category {
+                    BrowseCategory::AlbumGenres | BrowseCategory::ArtistGenres => {
+                        client.get_genre_albums(lib_key, &genre_key).await
                     }
+                    BrowseCategory::Moods => client.get_mood_albums(lib_key, &genre_key).await,
+                    BrowseCategory::Styles => client.get_style_albums(lib_key, &genre_key).await,
+                    BrowseCategory::Decades => client.get_decade_albums(lib_key, &genre_key).await,
+                    BrowseCategory::Years => client.get_year_albums(lib_key, &genre_key).await,
+                    BrowseCategory::Collections => client.get_collection_albums(lib_key, &genre_key).await,
+                    BrowseCategory::Countries => client.get_country_albums(lib_key, &genre_key).await,
+                    BrowseCategory::Labels => client.get_label_albums(lib_key, &genre_key).await,
+                    BrowseCategory::Formats => client.get_format_albums(lib_key, &genre_key).await,
+                    BrowseCategory::Studios => client.get_studio_albums(lib_key, &genre_key).await,
+                    _ => client.get_genre_albums(lib_key, &genre_key).await,
                 };
 
                 match albums_result {
                     Ok(albums) => {
                         let items = BrowseItem::from_albums(&albums, &state.library.album_display_artist);
-                        let genre_name = state.genre_nav.focused()
+                        let genre_name = state.tag_nav.focused()
                             .and_then(|c| c.selected_item())
                             .map(|item| item.title().to_string())
                             .unwrap_or_default();
@@ -442,13 +427,13 @@ pub async fn dispatch(
                         };
                         let mut col = BrowseColumn::new(title, items);
                         col.artwork_visible = state.artwork.default_visible;
-                        state.genre_nav.drill_column(col, auto_drill);
+                        state.tag_nav.drill_column(col, auto_drill);
 
                         // Preload all album art for the newly pushed column
                         if state.artwork.default_visible {
-                            let art_batch = collect_art_to_load(state.genre_nav.columns.last(), &state.artwork.grid_cache, &state.artwork.grid_pending);
+                            let art_batch = collect_art_to_load(state.tag_nav.columns.last(), &state.artwork.grid_cache, &state.artwork.grid_pending);
                             if !art_batch.is_empty() {
-                                state.genre_nav.loading = false;
+                                state.tag_nav.loading = false;
                                 return Ok(vec![SystemAction::LoadAlbumArt(art_batch).into()]);
                             }
                         }
@@ -458,16 +443,16 @@ pub async fn dispatch(
                     }
                 }
             }
-            state.genre_nav.loading = false;
+            state.tag_nav.loading = false;
         }
 
         MillerAction::LoadGenreTracksForMiller { album_key } => {
             // Load tracks for album and add as new column in genre_nav
             let auto_drill = std::mem::take(&mut state.auto_drill_pending);
-            state.genre_nav.loading = true;
+            state.tag_nav.loading = true;
 
             // Get album name from the focused item for the column title
-            let album_name = state.genre_nav.focused()
+            let album_name = state.tag_nav.focused()
                 .and_then(|c| c.selected_item())
                 .map(|item| item.title().to_string())
                 .unwrap_or_default();
@@ -483,17 +468,17 @@ pub async fn dispatch(
                     // Store full tracks for playback (includes media info)
                     let mut col = BrowseColumn::new_with_tracks(title, items, tracks);
                     col.play_album = Some((album_key.clone(), album_name.clone()));
-                    state.genre_nav.drill_column(col, auto_drill);
+                    state.tag_nav.drill_column(col, auto_drill);
                 }
                 Err(e) => {
                     state.set_error(format!("Failed to load tracks: {}", e));
                 }
             }
-            state.genre_nav.loading = false;
+            state.tag_nav.loading = false;
         }
 
         MillerAction::PlayGenreTrackFromMiller { column_index, track_index, single_track } => {
-            if let Some(col) = state.genre_nav.columns.get(column_index) {
+            if let Some(col) = state.tag_nav.columns.get(column_index) {
                 let tracks = collect_tracks_from_column(col, track_index, single_track);
                 if !tracks.is_empty() {
                     helpers::queue_and_play(event_tx, state, client, audio, tracks, 0).await;
@@ -706,8 +691,8 @@ pub async fn dispatch(
                     let items = BrowseItem::from_tracks(&tracks);
 
                     // Determine which nav owns the focused track column
-                    let nav = if state.browse_category == BrowseCategory::Genres {
-                        &mut state.genre_nav
+                    let nav = if state.browse_category.is_tag_section() {
+                        &mut state.tag_nav
                     } else {
                         &mut state.artist_nav
                     };

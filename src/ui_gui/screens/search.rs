@@ -5,12 +5,13 @@
 //! `handlers::key_input::handle_key` (the same path the TUI uses). Step 7
 //! adds the modal-overlay chrome and tabbed result segmentation.
 
-use iced::widget::{column, container, scrollable, text, Column};
+use iced::widget::{column, container, scrollable, Column};
 use iced::{Element, Length};
 
 use crate::app::AppState;
 use crate::ui_gui::message::GuiMessage;
 
+use crate::ui_gui::widgets::text;
 pub fn view(state: &AppState) -> Element<'_, GuiMessage> {
     let query = text(format!("Query: {}", state.search.query)).size(14);
 

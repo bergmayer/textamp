@@ -262,19 +262,23 @@ pub enum SearchAction {
 #[derive(Debug, Clone)]
 pub enum BrowseAction {
     LoadStations,
-    LoadGenres,
-    LoadArtistGenres,
-    LoadAlbumGenres,
-    LoadMoods,
-    LoadStyles,
-    LoadGenreAlbums,
-    RefreshGenreView,
-    CycleGenreTab,
-    SetGenreTab(crate::app::state::GenreTab),
-    DrillGenreCategory { category_key: String },
-    /// GUI: open the track-details pane for the given track. Replaces
-    /// any existing details pane (no stacking). The TUI ignores this.
-    OpenTrackDetails(Track),
+    /// Load tag-list data for a tag-style section (album genres, artist
+    /// genres, moods, styles, decades, years, collections, countries,
+    /// labels, formats, studios). The handler maps the section to the
+    /// matching Plex client method.
+    LoadTagList(crate::app::state::BrowseCategory),
+    /// Load albums for the currently-selected tag in the active tag
+    /// section (column 0 → column 1 drill).
+    LoadTagAlbums,
+    /// Populate the root column of `tag_nav` with the current section's
+    /// tag list. Re-run on section switch.
+    RefreshTagView,
+    /// Open the track-details pane. The pane is a derived view of
+    /// the currently-focused row, so this action carries no Track
+    /// payload — the renderer reads `state.focused_track()` every
+    /// frame. The handler simply flips `state.track_pane_open` to
+    /// true and gives keyboard focus to the pane.
+    OpenTrackDetails,
     /// GUI: close the track-details pane.
     CloseTrackDetails,
     /// "Open in Library": switch to the Library category, drill into
@@ -351,6 +355,16 @@ pub enum SettingsAction {
     /// per-service flag onto `AppState::external_search` and persists
     /// the change to the config file. Sent by Settings checkboxes.
     ToggleExternalSearchService(crate::services::external_search::SearchTarget),
+    /// Toggle whether a top-level browse section is shown in the
+    /// leftmost browse column. Updates both `AppState::hidden_sections`
+    /// and `UiConfig::hidden_sections` (persisted).
+    ToggleSectionVisibility(crate::app::state::BrowseCategory),
+    /// TUI-only: flip the Library Miller-column layout between
+    /// shrinking (every column compressed to fit) and scrolling
+    /// (each column at half-screen width, viewport scrolls as the
+    /// user drills). Persisted via `UiConfig::miller_layout`. Bound
+    /// to `\` in the browse view and a checkbox in Settings.
+    ToggleMillerLayout,
     /// Persist the (library, playlist) -> view-toggles mapping. Sent
     /// when the user changes a playlist tracks column's "Group by
     /// album" or "Show album artwork" toggles. Settings disk-saver

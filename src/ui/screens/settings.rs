@@ -79,9 +79,45 @@ fn render_content(frame: &mut Frame, state: &AppState, area: Rect) {
     match state.settings_state.section {
         SettingsSection::Account => render_account_content(frame, state, area, inner),
         SettingsSection::Textamp => render_textamp_content(frame, state, area, inner),
+        SettingsSection::Sections => render_sections_content(frame, state, area, inner),
         SettingsSection::Cache => render_account_content(frame, state, area, inner),
         SettingsSection::About => render_about_content(frame, state, area, inner),
     }
+}
+
+/// Render the "Sections" tab — a checkbox per BrowseCategory letting
+/// the user hide/show each section in the leftmost browse column.
+fn render_sections_content(frame: &mut Frame, state: &AppState, _outer: Rect, area: Rect) {
+    let t = theme();
+    let is_focused = state.settings_state.focus == SettingsFocus::Content;
+    let cats = crate::app::state::BrowseCategory::all();
+
+    let mut lines: Vec<ratatui::text::Line> = vec![
+        ratatui::text::Line::from(ratatui::text::Span::styled(
+            "Show in left column:",
+            Style::default().fg(t.colors.fg_accent),
+        )),
+        ratatui::text::Line::from(""),
+    ];
+
+    for (idx, cat) in cats.iter().enumerate() {
+        let visible = !state.hidden_sections.contains(cat);
+        let check = if visible { "\u{2611}" } else { "\u{2610}" };
+        let is_selected = is_focused && idx == state.settings_state.item_index;
+        let style = if is_selected {
+            Style::default().fg(t.colors.selection_text).bg(t.colors.bg_selection)
+        } else {
+            Style::default().fg(t.colors.fg_primary)
+        };
+        let arrow = if is_selected { "\u{25b8} " } else { "  " };
+        lines.push(ratatui::text::Line::from(vec![
+            ratatui::text::Span::styled(arrow, style),
+            ratatui::text::Span::styled(format!("{} {}", check, cat.display_label()), style),
+        ]));
+    }
+
+    let para = ratatui::widgets::Paragraph::new(lines).style(Style::default().bg(t.colors.bg_primary));
+    frame.render_widget(para, area);
 }
 
 fn render_account_content(frame: &mut Frame, state: &AppState, outer: Rect, area: Rect) {
@@ -267,7 +303,7 @@ fn render_account_content(frame: &mut Frame, state: &AppState, outer: Rect, area
             ("Albums",    state.library.albums.len(),     false, Some(RefreshCategory::Albums),    Some("albums")),
             ("Tracks",    state.library.all_tracks.len(), state.library.all_tracks.is_empty(), Some(RefreshCategory::AllTracks), Some("tracks")),
             ("Playlists", state.library.playlists.len(),  false, Some(RefreshCategory::Playlists), Some("playlist tracks")),
-            ("Genres",    state.library.genres.len(),     false, Some(RefreshCategory::Genres),    Some("genres")),
+            ("Genres",    state.library.album_genres.len(),     false, Some(RefreshCategory::AlbumGenres),    Some("genres")),
             ("Moods",     state.library.moods.len(),      false, Some(RefreshCategory::Moods),     None),
             ("Styles",    state.library.styles.len(),     false, Some(RefreshCategory::Styles),    None),
             ("Stations",  state.stations.len(),           false, Some(RefreshCategory::Stations),  Some("stations")),

@@ -1,12 +1,13 @@
 //! Library picker popup (F3).
 
-use iced::widget::{button, column, container, text, Column};
+use iced::widget::{button, column, container, Column};
 use iced::{Alignment, Background, Border, Color, Element, Length, Theme};
 
 use crate::app::action::{Action, SearchAction, SettingsAction};
 use crate::app::AppState;
 use crate::ui_gui::message::GuiMessage;
 
+use crate::ui_gui::widgets::text;
 pub fn view<'a>(state: &'a AppState) -> Element<'a, GuiMessage> {
     let mut rows: Vec<Element<'a, GuiMessage>> = Vec::new();
     for (i, lib) in state.libraries.iter().enumerate() {

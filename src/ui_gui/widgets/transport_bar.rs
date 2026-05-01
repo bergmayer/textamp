@@ -3,9 +3,10 @@
 //! Reads everything it needs from `AppState` — no widget-owned state. All
 //! controls emit `Action`s via `GuiMessage::Action(...)`.
 
-use iced::widget::{button, column, container, row, slider, text, Space};
+use iced::widget::{button, column, container, row, slider, Space};
 use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Theme, Vector};
 
+use crate::ui_gui::widgets::text;
 use crate::app::action::PlaybackAction;
 use crate::app::{Action, AppState};
 use crate::app::state::PlayStatus;
@@ -116,13 +117,13 @@ pub fn primary_action_button<'a>(
     label: impl Into<String>,
     on_press: crate::ui_gui::message::GuiMessage,
 ) -> iced::widget::Button<'a, crate::ui_gui::message::GuiMessage> {
-    use iced::widget::{button, text};
+    use iced::widget::{button};
     use iced::Length;
     // Wrapping::None keeps action labels (e.g. "Artist Radio - <long
     // artist name>") on a single line; the surrounding column header
     // clips overflow rather than letting the button wrap into a
     // multi-line lozenge.
-    button(text(label.into()).size(15).wrapping(text::Wrapping::None))
+    button(text(label.into()).size(15).wrapping(iced::widget::text::Wrapping::None))
         .padding([4, 18])
         .width(Length::Shrink)
         .height(Length::Fixed(28.0))

@@ -1165,6 +1165,44 @@ pub struct QueueSnapshot {
     pub radio_state_snapshot: Option<RadioState>,
 }
 
+/// TUI-only: how the Library screen's Miller columns share the
+/// horizontal space when more than two are open. The GUI ignores this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MillerLayoutMode {
+    /// Every visible column shrinks to fit. The whole stack is always
+    /// on screen.
+    #[default]
+    Shrinking,
+    /// Every column keeps its starting width (half the inner area).
+    /// The stack extends past the screen and the viewport scrolls as
+    /// the user drills deeper. A scroll indicator hints at off-screen
+    /// columns.
+    Scrolling,
+}
+
+impl MillerLayoutMode {
+    pub fn name(&self) -> &'static str {
+        match self {
+            MillerLayoutMode::Shrinking => "shrinking",
+            MillerLayoutMode::Scrolling => "scrolling",
+        }
+    }
+
+    pub fn from_config(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "scrolling" | "scroll" => MillerLayoutMode::Scrolling,
+            _ => MillerLayoutMode::Shrinking,
+        }
+    }
+
+    pub fn toggled(&self) -> Self {
+        match self {
+            MillerLayoutMode::Shrinking => MillerLayoutMode::Scrolling,
+            MillerLayoutMode::Scrolling => MillerLayoutMode::Shrinking,
+        }
+    }
+}
+
 /// Artwork rendering mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ArtworkMode {
@@ -1308,13 +1346,19 @@ pub struct ArtworkState {
     pub default_visible: bool,
     pub mode: ArtworkMode,
     /// When true, `SystemAction::LoadAlbumArt` returns immediately
-    /// without reading the disk cache or starting fetches. The GUI
-    /// raises this while the user is rapidly navigating (keyboard
-    /// scroll, mouse wheel) so the per-key disk I/O doesn't stall the
-    /// UI. Once motion has been still for ~1 second the GUI clears
-    /// the flag and re-collects the viewport batch. The TUI never
-    /// sets it — its behaviour is unchanged.
+    /// without reading the disk cache or starting fetches. Both
+    /// front-ends raise this while the user is rapidly navigating
+    /// (keyboard scroll, mouse wheel, alphabet jumps) so the per-key
+    /// disk I/O doesn't stall the UI. Once motion has been still for
+    /// `ART_LOAD_PAUSE_MS` (1 s), the front-end's tick handler clears
+    /// the flag and re-collects the viewport batch.
     pub suppress_loads: bool,
+
+    /// Wall-clock instant of the most recent rapid-navigation gesture.
+    /// `suppress_loads` clears once `last_motion_at.elapsed() >=
+    /// ART_LOAD_PAUSE_MS`. `None` until the first motion event so the
+    /// initial render isn't held back.
+    pub last_motion_at: Option<std::time::Instant>,
 }
 
 impl Default for ArtworkState {
@@ -1329,9 +1373,15 @@ impl Default for ArtworkState {
             default_visible: false,
             mode: ArtworkMode::default(),
             suppress_loads: false,
+            last_motion_at: None,
         }
     }
 }
+
+/// Idle threshold after which the lazy-art gate reopens. Tuned by the
+/// user — short enough that the wait feels intentional, long enough to
+/// absorb a held-down arrow key without flapping.
+pub const ART_LOAD_PAUSE_MS: u64 = 1000;
 
 /// Remote player control state.
 #[derive(Debug, Default)]
@@ -1448,21 +1498,34 @@ pub struct LibraryData {
     pub artist_aliases: std::collections::HashMap<String, std::collections::HashSet<String>>,
     pub album_display_artist: std::collections::HashMap<String, String>,
 
-    // Genres, Artist Genres, Album Genres, Moods, and Styles
-    pub genres: Vec<Genre>,
+    // Tag-style lists (each is its own top-level section).
+    // The legacy `genres` field has been dropped — Album Genres and
+    // Library Genres hit the same Plex endpoint, so we only keep
+    // album_genres.
     pub artist_genres: Vec<Genre>,
     pub album_genres: Vec<Genre>,
     pub moods: Vec<Genre>,
     pub styles: Vec<Genre>,
-    pub genres_loading: bool,
+    pub decades: Vec<Genre>,
+    pub years: Vec<Genre>,
+    pub collections: Vec<Genre>,
+    pub countries: Vec<Genre>,
+    pub labels: Vec<Genre>,
+    pub formats: Vec<Genre>,
+    pub studios: Vec<Genre>,
     pub artist_genres_loading: bool,
     pub album_genres_loading: bool,
     pub moods_loading: bool,
     pub styles_loading: bool,
-    pub genres_index: usize,
-    pub genre_content_type: GenreContentType,
-    pub genre_albums: Vec<Album>,
-    pub genre_albums_index: usize,
+    pub decades_loading: bool,
+    pub years_loading: bool,
+    pub collections_loading: bool,
+    pub countries_loading: bool,
+    pub labels_loading: bool,
+    pub formats_loading: bool,
+    pub studios_loading: bool,
+    pub tag_albums: Vec<Album>,
+    pub tag_albums_index: usize,
 
     // Library sub-mode for Alt+S cycling
     pub library_sub_mode: LibrarySubMode,
@@ -1547,8 +1610,13 @@ pub struct AppState {
     // Category column (column 0 in Browse view)
     /// Whether the category selector column has keyboard focus.
     pub category_column_focused: bool,
-    /// Selected index in the category column (0=Library, 1=Playlists, 2=Genres, 3=Folders).
+    /// Selected index in the category column. Maps into the rows
+    /// returned by `category_rows()`, which respects `hidden_sections`.
     pub category_column_index: usize,
+    /// Sections the user has hidden from the leftmost browse column
+    /// (persisted via UiConfig). Hidden sections still exist in code
+    /// but are filtered out of `category_rows()`.
+    pub hidden_sections: Vec<BrowseCategory>,
 
     // Library data (artists, albums, playlists, genres, etc.)
     pub library: LibraryData,
@@ -1623,7 +1691,11 @@ pub struct AppState {
 
     // Miller column navigation for browse categories
     pub artist_nav: BrowseNavigationState,
-    pub genre_nav: BrowseNavigationState,
+    /// Shared nav state for all tag-style sections (album genres, artist
+    /// genres, moods, styles, decades, years, collections, countries,
+    /// labels, formats, studios). Reset when the user switches between
+    /// these sections.
+    pub tag_nav: BrowseNavigationState,
     pub playlist_nav: BrowseNavigationState,
 
     // Playlist tracks cache (playlist_key -> cached tracks with timestamp)
@@ -1658,6 +1730,19 @@ pub struct AppState {
 
     // Theme
     pub theme: ThemeName,
+
+    /// TUI-only: how the Library Miller columns share horizontal space.
+    /// `Shrinking` (default) compresses every column to fit.
+    /// `Scrolling` keeps each column at half-screen width and scrolls
+    /// the viewport horizontally as the user drills.
+    pub miller_layout: MillerLayoutMode,
+
+    /// TUI-only: horizontal scroll offset (in columns) for the
+    /// Library screen when `miller_layout == Scrolling`. Counts
+    /// columns *of the active nav* that are scrolled off the left
+    /// edge. The renderer keeps the focused column on screen by
+    /// adjusting this each frame.
+    pub miller_scroll_col: usize,
 
     // Sonic Adventure state
     pub adventure: AdventureState,
@@ -1727,10 +1812,8 @@ pub struct AppState {
     /// Whether the visualizer tab bar is focused (for arrow key navigation)
     pub visualizer_tab_focused: bool,
 
-    // Genre tab (All / Library / Artist / Album / Mood / Style)
-    pub genre_tab: GenreTab,
-    /// Whether the genre tab bar itself is focused (for arrow key navigation)
-    pub genre_tab_focused: bool,
+    // (Genre tab system removed — each tag type is now its own
+    // top-level section in the browse category column.)
 
     // Cache management
     pub cache_mgmt: CacheManagement,
@@ -1778,15 +1861,20 @@ pub struct AppState {
     // Scroll pins and cooldowns
     pub scroll: ScrollPins,
 
-    /// Track-details pane. The pane behaves like a Miller column: it
-    /// only opens after the user explicitly drills into a track
-    /// (Enter / double-click on a Track row), which fires
-    /// `BrowseAction::OpenTrackDetails` and stamps the track here.
-    /// The renderer further requires the focused row to still match
-    /// — see `pane_track()` — so navigating to a different row hides
-    /// the pane until the user explicitly drills again. Cleared by
-    /// Ctrl+W ("close current column").
-    pub track_details: Option<crate::plex::models::Track>,
+    /// Whether the track-details pane is currently open. The pane is
+    /// a *derived view* of `focused_track()` — it never stores its own
+    /// Track, so it can't drift out of sync with the column selection.
+    /// Past versions held the track as state, which led to a class of
+    /// "pane shows the wrong track after Up/Down" bugs.
+    ///
+    /// Open: explicit drill (Enter / Right / click) on a Track row.
+    /// Close: Ctrl+W, Esc inside the pane, navigating away from the
+    /// Browse view, or any other "rightward column close" gesture.
+    /// While open, the pane content automatically follows whichever
+    /// Track row is focused; if focus moves to a non-Track row the
+    /// pane simply renders nothing for that frame and reappears when
+    /// a Track is focused again.
+    pub track_pane_open: bool,
 
     /// Per-service "external search enabled" toggles, mirrored from
     /// `config.ui.enable_*_search`. Renderers (palette / context menu
@@ -2161,6 +2249,7 @@ impl AppState {
             focus: Focus::Left,
             category_column_focused: true,
             category_column_index: 0,
+            hidden_sections: BrowseCategory::hidden_by_default().to_vec(),
             library: LibraryData::default(),
             similar: SimilarViewState::default(),
             related: RelatedViewState::default(),
@@ -2191,7 +2280,7 @@ impl AppState {
             subfolder_preload_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             keep_subfolder_cache: false,
             artist_nav: BrowseNavigationState::new(),
-            genre_nav: BrowseNavigationState::new(),
+            tag_nav: BrowseNavigationState::new(),
             playlist_nav: BrowseNavigationState::new(),
             playlist_tracks_cache: HashMap::new(),
             artwork: ArtworkState::default(),
@@ -2205,6 +2294,8 @@ impl AppState {
             stations_loading: false,
             station_children_cache: std::collections::HashMap::new(),
             theme: ThemeName::default(),
+            miller_layout: MillerLayoutMode::default(),
+            miller_scroll_col: 0,
             adventure: AdventureState::default(),
             dj: DjState::default(),
             now_playing_focus: NowPlayingFocus::default(),
@@ -2221,8 +2312,6 @@ impl AppState {
             loading_tick: 0,
             visualizer_tab: VisualizerTab::default(),
             visualizer_tab_focused: false,
-            genre_tab: GenreTab::default(),
-            genre_tab_focused: false,
             cache_mgmt: CacheManagement::default(),
             waveform: WaveformState::default(),
             spectrogram: SpectrogramState::default(),
@@ -2238,7 +2327,7 @@ impl AppState {
             library_cache_stats: None,
             waveform_cache_stats: None,
             scroll: ScrollPins::default(),
-            track_details: None,
+            track_pane_open: false,
             external_search: ExternalSearchSettings::default(),
             playlist_views: HashMap::new(),
         }
@@ -2252,12 +2341,57 @@ impl AppState {
     ///
     /// `state.category_column_index` indexes into the returned vec.
     pub fn category_rows(&self) -> Vec<CategoryRow> {
-        let mut rows = Vec::with_capacity(3 + self.library.playlists.len());
+        let hidden = &self.hidden_sections;
+        let mut rows = Vec::with_capacity(BrowseCategory::all().len() + self.library.playlists.len() + 2);
+
+        let mut category_count = 0;
         for &c in BrowseCategory::top_rows() {
+            if c == BrowseCategory::Playlists { continue; }
+            if hidden.contains(&c) { continue; }
             rows.push(CategoryRow::Category(c));
+            category_count += 1;
         }
-        for i in 0..self.library.playlists.len() {
-            rows.push(CategoryRow::Playlist(i));
+
+        if !hidden.contains(&BrowseCategory::Playlists) {
+            // Filter out the auto-everything "All Music" playlist, then
+            // partition the rest into "pinned" (hearted or named
+            // "Recently Added") and "unpinned". Stable order within
+            // each partition preserves Plex's playlist ordering.
+            let pinned_keys = ['\u{2764}', '\u{2661}', '\u{1f90d}', '\u{2665}'];
+            let mut pinned: Vec<usize> = Vec::new();
+            let mut rest: Vec<usize> = Vec::new();
+            for i in 0..self.library.playlists.len() {
+                let title = self.library.playlists[i].title.as_str();
+                let trimmed = title.trim();
+                if trimmed.eq_ignore_ascii_case("all music") {
+                    continue;
+                }
+                let is_pinned = trimmed.eq_ignore_ascii_case("recently added")
+                    || pinned_keys.iter().any(|k| title.contains(*k));
+                if is_pinned {
+                    pinned.push(i);
+                } else {
+                    rest.push(i);
+                }
+            }
+
+            // Divider after the categories block (above the playlists)
+            // — only when there's at least one category and at least
+            // one playlist to render.
+            if category_count > 0 && (!pinned.is_empty() || !rest.is_empty()) {
+                rows.push(CategoryRow::Divider);
+            }
+            for i in &pinned {
+                rows.push(CategoryRow::Playlist(*i));
+            }
+            // Second divider between the pinned playlists and the
+            // alphabetical remainder, but only if both sides exist.
+            if !pinned.is_empty() && !rest.is_empty() {
+                rows.push(CategoryRow::Divider);
+            }
+            for i in &rest {
+                rows.push(CategoryRow::Playlist(*i));
+            }
         }
         rows
     }
@@ -2267,9 +2401,10 @@ impl AppState {
     pub fn browse_nav(&self) -> Option<&BrowseNavigationState> {
         match self.browse_category {
             BrowseCategory::Library => Some(&self.artist_nav),
-            BrowseCategory::Genres => Some(&self.genre_nav),
             BrowseCategory::Playlists => Some(&self.playlist_nav),
             BrowseCategory::Folders => None,
+            cat if cat.is_tag_section() => Some(&self.tag_nav),
+            _ => None,
         }
     }
 
@@ -2278,9 +2413,10 @@ impl AppState {
     pub fn browse_nav_mut(&mut self) -> Option<&mut BrowseNavigationState> {
         match self.browse_category {
             BrowseCategory::Library => Some(&mut self.artist_nav),
-            BrowseCategory::Genres => Some(&mut self.genre_nav),
             BrowseCategory::Playlists => Some(&mut self.playlist_nav),
             BrowseCategory::Folders => None,
+            cat if cat.is_tag_section() => Some(&mut self.tag_nav),
+            _ => None,
         }
     }
 
@@ -2312,23 +2448,24 @@ impl AppState {
         col.tracks.get(col.selected_index)
     }
 
-    /// The track to render in the details pane. The pane is treated
-    /// like a Miller column: it only opens when the user explicitly
-    /// drills into a track (Enter / double-click), which sets
-    /// `track_details`. Selecting a track row alone is NOT enough —
-    /// otherwise drilling into a tracks column would silently open
-    /// the pane on first frame.
+    /// The track to render in the details pane.
     ///
-    /// We additionally require the focused row to still match the
-    /// drilled-into track, so navigating to a sibling track hides
-    /// the pane (the user has to Enter again to reopen).
+    /// The pane is a derived view: when `track_pane_open` is true and
+    /// a Track row is focused, this returns that focused track. The
+    /// pane content automatically follows the focused row — there is
+    /// no separately stored "the track the pane was opened on", so
+    /// the pane cannot drift out of sync with the column selection.
+    ///
+    /// Returns `None` when the pane is closed *or* when the focused
+    /// row isn't a Track (e.g. the user moved selection to an Album
+    /// or Artist row); in the latter case the renderer simply skips
+    /// the pane for that frame and it reappears when a Track row is
+    /// focused again.
     pub fn pane_track(&self) -> Option<&crate::plex::models::Track> {
-        let details = self.track_details.as_ref()?;
-        let focused = self.focused_track()?;
-        if focused.rating_key != details.rating_key {
+        if !self.track_pane_open {
             return None;
         }
-        Some(focused)
+        self.focused_track()
     }
 
     /// The album currently highlighted in the focused Miller column,
@@ -2487,12 +2624,37 @@ impl AppState {
         self.view = view;
     }
 
-    /// Set browse category, sync category_column_index, and unfocus category column.
+    /// Set browse category, sync category_column_index, and (usually)
+    /// unfocus the sections column.
+    ///
+    /// Focus rule:
+    /// - If the new category equals the current one (no real change),
+    ///   leave `category_column_focused` alone. This preserves the
+    ///   "Library is selected on launch" default, which earlier got
+    ///   stomped by startup paths that called `set_browse_category(Library)`
+    ///   even though it was already Library.
+    /// - If `auto_drill_pending` is set, this is a sections-column
+    ///   Up/Down sweep and the user is still arrow-keying through the
+    ///   sections column. Don't steal focus.
+    /// - Otherwise (an explicit Right / Enter / click drill, or a
+    ///   `Ctrl+L|P|G|O` shortcut, or palette command), unfocus the
+    ///   sections column so focus moves onto the rightward content.
     pub fn set_browse_category(&mut self, cat: BrowseCategory) {
+        let was_same = self.browse_category == cat;
+        // Peek (don't consume) — the flag is cleared at the end of the
+        // outermost dispatch step that initiated the auto-drill, so
+        // both this method and the calling dispatcher can see it.
+        let auto_drill = self.auto_drill_pending;
         self.browse_category = cat;
-        self.category_column_index = BrowseCategory::all().iter()
-            .position(|c| *c == cat).unwrap_or(0);
-        self.category_column_focused = false;
+        self.category_column_index = self.row_index_for_category(cat);
+        // Only unfocus the sections column when (a) the category
+        // actually changed, AND (b) this isn't an auto-drill (the
+        // user is sweeping selection through the sections column with
+        // Up/Down and we want the rightward content to follow without
+        // stealing keyboard focus).
+        if !was_same && !auto_drill {
+            self.category_column_focused = false;
+        }
         // Strip is Library-only; clear the focus flag whenever the
         // active category changes so it can't strand on a hidden strip.
         self.alphabet_strip_focused = false;
@@ -2501,13 +2663,27 @@ impl AppState {
         self.select_mode = false;
     }
 
+    /// Resolve a category to the row index it occupies in
+    /// `category_rows()` — the canonical sections-column ordering.
+    /// `BrowseCategory::all()` is *not* the right index source: it
+    /// includes `Playlists` and reorders things relative to what the
+    /// renderer iterates (`BrowseCategory::top_rows()` minus
+    /// `hidden_sections`). Using `all()` to set
+    /// `category_column_index` was the source of teleporting-cursor
+    /// bugs as the user arrowed through the sections column.
+    fn row_index_for_category(&self, cat: BrowseCategory) -> usize {
+        self.category_rows()
+            .iter()
+            .position(|r| matches!(r, CategoryRow::Category(c) if *c == cat))
+            .unwrap_or(0)
+    }
+
     /// Focus the category column, syncing category_column_index to match
     /// the active browse_category so the highlight is always correct.
     /// Single-focus rule: also drops pane focus so only one surface
     /// paints as focused.
     pub fn focus_category_column(&mut self) {
-        self.category_column_index = BrowseCategory::all().iter()
-            .position(|c| *c == self.browse_category).unwrap_or(0);
+        self.category_column_index = self.row_index_for_category(self.browse_category);
         self.category_column_focused = true;
         self.alphabet_strip_focused = false;
         self.select_mode = false;
@@ -2721,29 +2897,64 @@ impl AppState {
         match self.browse_category {
             BrowseCategory::Library => self.library.artists.len(),
             BrowseCategory::Playlists => self.library.playlists.len(),
-            BrowseCategory::Genres => self.current_genre_list().len(),
             BrowseCategory::Folders => 0, // Handled separately via folder_state
+            cat if cat.is_tag_section() => self.tag_list_for(cat).len(),
+            _ => 0,
         }
     }
 
-    /// Get the current genre list based on content type.
-    pub fn current_genre_list(&self) -> &[Genre] {
-        match self.library.genre_content_type {
-            GenreContentType::Genres => &self.library.genres,
-            GenreContentType::ArtistGenres => &self.library.artist_genres,
-            GenreContentType::AlbumGenres => &self.library.album_genres,
-            GenreContentType::Moods => &self.library.moods,
-            GenreContentType::Styles => &self.library.styles,
+    /// Return the tag-list backing storage for a tag section.
+    pub fn tag_list_for(&self, cat: BrowseCategory) -> &[Genre] {
+        match cat {
+            BrowseCategory::AlbumGenres => &self.library.album_genres,
+            BrowseCategory::ArtistGenres => &self.library.artist_genres,
+            BrowseCategory::Moods => &self.library.moods,
+            BrowseCategory::Styles => &self.library.styles,
+            BrowseCategory::Decades => &self.library.decades,
+            BrowseCategory::Years => &self.library.years,
+            BrowseCategory::Collections => &self.library.collections,
+            BrowseCategory::Countries => &self.library.countries,
+            BrowseCategory::Labels => &self.library.labels,
+            BrowseCategory::Formats => &self.library.formats,
+            BrowseCategory::Studios => &self.library.studios,
+            _ => &[],
         }
     }
 
-    /// Get the current category index.
+    /// Whether the tag list for the active section is empty (used to
+    /// decide whether to dispatch a load action when entering it).
+    pub fn current_tag_list_is_empty(&self) -> bool {
+        self.tag_list_for(self.browse_category).is_empty()
+    }
+
+    /// Whether the tag list for the active section is currently loading.
+    pub fn current_tag_loading(&self) -> bool {
+        match self.browse_category {
+            BrowseCategory::AlbumGenres => self.library.album_genres_loading,
+            BrowseCategory::ArtistGenres => self.library.artist_genres_loading,
+            BrowseCategory::Moods => self.library.moods_loading,
+            BrowseCategory::Styles => self.library.styles_loading,
+            BrowseCategory::Decades => self.library.decades_loading,
+            BrowseCategory::Years => self.library.years_loading,
+            BrowseCategory::Collections => self.library.collections_loading,
+            BrowseCategory::Countries => self.library.countries_loading,
+            BrowseCategory::Labels => self.library.labels_loading,
+            BrowseCategory::Formats => self.library.formats_loading,
+            BrowseCategory::Studios => self.library.studios_loading,
+            _ => false,
+        }
+    }
+
+    /// Get the current category index. For tag sections, reads the
+    /// selected_index of the tag_nav root column.
     pub fn category_index(&self) -> usize {
         match self.browse_category {
             BrowseCategory::Library => self.list_state.artists_index,
             BrowseCategory::Playlists => self.list_state.playlists_index,
-            BrowseCategory::Genres => self.library.genres_index,
-            BrowseCategory::Folders => 0, // Handled separately via folder_state
+            BrowseCategory::Folders => 0,
+            cat if cat.is_tag_section() => self
+                .tag_nav.columns.first().map(|c| c.selected_index).unwrap_or(0),
+            _ => 0,
         }
     }
 
@@ -2752,8 +2963,13 @@ impl AppState {
         match self.browse_category {
             BrowseCategory::Library => self.list_state.artists_index = idx,
             BrowseCategory::Playlists => self.list_state.playlists_index = idx,
-            BrowseCategory::Genres => self.library.genres_index = idx,
-            BrowseCategory::Folders => {}, // Handled separately via folder_state
+            BrowseCategory::Folders => {},
+            cat if cat.is_tag_section() => {
+                if let Some(c) = self.tag_nav.columns.first_mut() {
+                    c.selected_index = idx;
+                }
+            }
+            _ => {}
         }
     }
 
@@ -2768,9 +2984,13 @@ impl AppState {
                 self.library.playlists.get(self.list_state.playlists_index)
                     .map(|p| p.rating_key.clone())
             }
-            BrowseCategory::Genres => self.current_genre_list().get(self.library.genres_index)
-                .map(|g| g.effective_key().to_string()),
-            BrowseCategory::Folders => None, // Handled separately via folder_state
+            BrowseCategory::Folders => None,
+            cat if cat.is_tag_section() => {
+                let list = self.tag_list_for(cat);
+                let idx = self.category_index();
+                list.get(idx).map(|g| g.effective_key().to_string())
+            }
+            _ => None,
         }
     }
 
@@ -2785,9 +3005,13 @@ impl AppState {
                 self.library.playlists.get(self.list_state.playlists_index)
                     .map(|p| p.title.clone())
             }
-            BrowseCategory::Genres => self.current_genre_list().get(self.library.genres_index)
-                .map(|g| g.title.clone()),
-            BrowseCategory::Folders => None, // Handled separately via folder_state
+            BrowseCategory::Folders => None,
+            cat if cat.is_tag_section() => {
+                let list = self.tag_list_for(cat);
+                let idx = self.category_index();
+                list.get(idx).map(|g| g.title.clone())
+            }
+            _ => None,
         }
     }
 
@@ -2873,51 +3097,6 @@ impl VisualizerTab {
     }
 }
 
-/// Genre tab for the genre category tab bar.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum GenreTab {
-    /// Merged list of all genre types with suffixes
-    #[default]
-    All,
-    /// Library genres (actual tags from music files)
-    Library,
-    /// Artist-level genres (Plex-generated)
-    Artist,
-    /// Album-level genres (Plex-generated)
-    Album,
-    /// Moods (Plex analysis-based)
-    Mood,
-    /// Styles (Plex analysis-based)
-    Style,
-}
-
-cyclic_enum!(GenreTab, All, Library, Artist, Album, Mood, Style);
-
-impl GenreTab {
-    pub fn name(&self) -> &'static str {
-        match self {
-            GenreTab::All => "genres",
-            GenreTab::Library => "library genres",
-            GenreTab::Artist => "artist genres",
-            GenreTab::Album => "album genres",
-            GenreTab::Mood => "moods",
-            GenreTab::Style => "styles",
-        }
-    }
-
-    /// Convert to the underlying GenreContentType (None for All tab).
-    pub fn to_content_type(&self) -> Option<GenreContentType> {
-        match self {
-            GenreTab::All => None,
-            GenreTab::Library => Some(GenreContentType::Genres),
-            GenreTab::Artist => Some(GenreContentType::ArtistGenres),
-            GenreTab::Album => Some(GenreContentType::AlbumGenres),
-            GenreTab::Mood => Some(GenreContentType::Moods),
-            GenreTab::Style => Some(GenreContentType::Styles),
-        }
-    }
-}
-
 /// Search tab in unified search view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SearchTab {
@@ -2956,12 +3135,28 @@ impl SearchTab {
 }
 
 /// Browse category type (what's shown in left panel).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Each variant other than Library / Playlists / Folders is a "tag"
+/// section: a flat list of values fetched from Plex (album genres,
+/// moods, decades, etc.) that drills into albums. They all share the
+/// `tag_nav` state, which is reset when the user switches between
+/// them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum BrowseCategory {
     Library,
     Playlists,
-    Genres,
     Folders,
+    AlbumGenres,
+    ArtistGenres,
+    Moods,
+    Styles,
+    Decades,
+    Years,
+    Collections,
+    Countries,
+    Labels,
+    Formats,
+    Studios,
 }
 
 impl BrowseCategory {
@@ -2969,8 +3164,18 @@ impl BrowseCategory {
         &[
             BrowseCategory::Library,
             BrowseCategory::Playlists,
-            BrowseCategory::Genres,
             BrowseCategory::Folders,
+            BrowseCategory::AlbumGenres,
+            BrowseCategory::ArtistGenres,
+            BrowseCategory::Moods,
+            BrowseCategory::Styles,
+            BrowseCategory::Decades,
+            BrowseCategory::Years,
+            BrowseCategory::Collections,
+            BrowseCategory::Countries,
+            BrowseCategory::Labels,
+            BrowseCategory::Formats,
+            BrowseCategory::Studios,
         ]
     }
 
@@ -2981,8 +3186,18 @@ impl BrowseCategory {
     pub fn top_rows() -> &'static [BrowseCategory] {
         &[
             BrowseCategory::Library,
-            BrowseCategory::Genres,
             BrowseCategory::Folders,
+            BrowseCategory::AlbumGenres,
+            BrowseCategory::ArtistGenres,
+            BrowseCategory::Moods,
+            BrowseCategory::Styles,
+            BrowseCategory::Decades,
+            BrowseCategory::Years,
+            BrowseCategory::Collections,
+            BrowseCategory::Countries,
+            BrowseCategory::Labels,
+            BrowseCategory::Formats,
+            BrowseCategory::Studios,
         ]
     }
 
@@ -2990,18 +3205,70 @@ impl BrowseCategory {
         match self {
             BrowseCategory::Library => "library",
             BrowseCategory::Playlists => "playlists",
-            BrowseCategory::Genres => "genres",
             BrowseCategory::Folders => "folders",
+            BrowseCategory::AlbumGenres => "album genres",
+            BrowseCategory::ArtistGenres => "artist genres",
+            BrowseCategory::Moods => "moods",
+            BrowseCategory::Styles => "styles",
+            BrowseCategory::Decades => "decades",
+            BrowseCategory::Years => "years",
+            BrowseCategory::Collections => "collections",
+            BrowseCategory::Countries => "countries",
+            BrowseCategory::Labels => "labels",
+            BrowseCategory::Formats => "formats",
+            BrowseCategory::Studios => "studios",
         }
     }
 
-    pub fn shortcut(&self) -> char {
+    /// Display label for the category column (capitalized).
+    pub fn display_label(&self) -> &'static str {
         match self {
-            BrowseCategory::Library => 'l',
-            BrowseCategory::Playlists => 'p',
-            BrowseCategory::Genres => 'g',
-            BrowseCategory::Folders => 'o',
+            BrowseCategory::Library => "Library",
+            BrowseCategory::Playlists => "Playlists",
+            BrowseCategory::Folders => "Folders",
+            BrowseCategory::AlbumGenres => "Album Genres",
+            BrowseCategory::ArtistGenres => "Artist Genres",
+            BrowseCategory::Moods => "Moods",
+            BrowseCategory::Styles => "Styles",
+            BrowseCategory::Decades => "Decades",
+            BrowseCategory::Years => "Years",
+            BrowseCategory::Collections => "Collections",
+            BrowseCategory::Countries => "Countries",
+            BrowseCategory::Labels => "Labels",
+            BrowseCategory::Formats => "Formats",
+            BrowseCategory::Studios => "Studios",
         }
+    }
+
+    /// True if this section is one of the tag-style sections (i.e.
+    /// uses `tag_nav` and a flat list of strings → albums).
+    pub fn is_tag_section(&self) -> bool {
+        matches!(
+            self,
+            BrowseCategory::AlbumGenres
+                | BrowseCategory::ArtistGenres
+                | BrowseCategory::Moods
+                | BrowseCategory::Styles
+                | BrowseCategory::Decades
+                | BrowseCategory::Years
+                | BrowseCategory::Collections
+                | BrowseCategory::Countries
+                | BrowseCategory::Labels
+                | BrowseCategory::Formats
+                | BrowseCategory::Studios
+        )
+    }
+
+    /// Sections hidden by default — sparsely populated in most Plex
+    /// libraries. Users can toggle visibility from the Settings panel.
+    pub fn hidden_by_default() -> &'static [BrowseCategory] {
+        &[
+            BrowseCategory::Collections,
+            BrowseCategory::Countries,
+            BrowseCategory::Labels,
+            BrowseCategory::Formats,
+            BrowseCategory::Studios,
+        ]
     }
 }
 
@@ -3015,6 +3282,9 @@ impl BrowseCategory {
 pub enum CategoryRow {
     Category(BrowseCategory),
     Playlist(usize),
+    /// A horizontal-rule separator row. Renders as chrome (no
+    /// selection, skipped by Up/Down navigation, ignored by mouse).
+    Divider,
 }
 
 /// TUI command-palette overlay state. `open == false` means we're in
@@ -3129,6 +3399,28 @@ pub enum PaletteCommandKind {
     /// Close the focused Miller column (and any cols to its
     /// right). Same effect as the Ctrl+W shortcut.
     CloseColumn,
+    /// Open the Sonic Adventure launcher pre-seeded with the
+    /// focused track as the starting song. Context-aware: surfaced
+    /// when a Track row is focused (or a similar-track row is
+    /// highlighted in the track-details pane). Distinct from the
+    /// generic "Sonic Adventure" entry, which opens the launcher
+    /// with no starting track and asks the user to pick one.
+    SonicAdventureFromFocusedTrack,
+    /// Generic Sonic Adventure entry-point — opens the launcher
+    /// with no preselected starting track, so the user picks one
+    /// inside the dialog. Always available via the static registry,
+    /// menu bar, and keyboard shortcut.
+    SonicAdventure,
+    /// Carries a single shared `track_context::ContextKind` plus the
+    /// track it targets. The palette materializer builds these from
+    /// the shared `track_context_entries` list so the contextual
+    /// section stays in lockstep with the GUI's right-click menu —
+    /// adding or reordering entries in `services::track_context` is
+    /// the only edit needed.
+    FromTrackContext {
+        kind: crate::services::track_context::ContextKind,
+        track: Box<crate::plex::models::Track>,
+    },
 }
 
 impl PaletteState {
@@ -3153,31 +3445,6 @@ pub enum LibrarySubMode {
 
 cyclic_enum!(LibrarySubMode, Normal, AllByArtist, AllShuffled);
 
-
-/// Genre content type - genres, normalized genres, moods, or styles.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum GenreContentType {
-    #[default]
-    Genres,
-    ArtistGenres,
-    AlbumGenres,
-    Moods,
-    Styles,
-}
-
-cyclic_enum!(GenreContentType, Genres, ArtistGenres, AlbumGenres, Moods, Styles);
-
-impl GenreContentType {
-    pub fn name(&self) -> &'static str {
-        match self {
-            GenreContentType::Genres => "genres",
-            GenreContentType::ArtistGenres => "artist genres",
-            GenreContentType::AlbumGenres => "album genres",
-            GenreContentType::Moods => "moods",
-            GenreContentType::Styles => "styles",
-        }
-    }
-}
 
 /// Sort mode for the play queue in Now Playing view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -3391,6 +3658,10 @@ pub struct AdventureLauncherState {
     pub track_count_input: String,
     pub scroll_pin: Option<usize>,
     pub search_tab: SearchTab,
+    /// Bumped each time the user changes the query. The async track
+    /// search uses this as a debounce token: stale callbacks (queued
+    /// before the user kept typing) are dropped without applying.
+    pub search_version: u64,
 }
 
 /// List selection states for different views.
@@ -3420,6 +3691,7 @@ pub enum SettingsSection {
     #[default]
     Account,
     Textamp,
+    Sections,
     Cache,
     About,
 }
@@ -3429,6 +3701,7 @@ impl SettingsSection {
         &[
             SettingsSection::Account,
             SettingsSection::Textamp,
+            SettingsSection::Sections,
             SettingsSection::Cache,
             SettingsSection::About,
         ]
@@ -3438,6 +3711,7 @@ impl SettingsSection {
         match self {
             SettingsSection::Account => "account",
             SettingsSection::Textamp => "textamp",
+            SettingsSection::Sections => "sections",
             SettingsSection::Cache => "cache",
             SettingsSection::About => "about",
         }
@@ -3446,7 +3720,8 @@ impl SettingsSection {
     pub fn next(&self) -> Self {
         match self {
             SettingsSection::Account => SettingsSection::Textamp,
-            SettingsSection::Textamp => SettingsSection::Cache,
+            SettingsSection::Textamp => SettingsSection::Sections,
+            SettingsSection::Sections => SettingsSection::Cache,
             SettingsSection::Cache => SettingsSection::About,
             SettingsSection::About => SettingsSection::Account,
         }
@@ -3456,7 +3731,8 @@ impl SettingsSection {
         match self {
             SettingsSection::Account => SettingsSection::About,
             SettingsSection::Textamp => SettingsSection::Account,
-            SettingsSection::Cache => SettingsSection::Textamp,
+            SettingsSection::Sections => SettingsSection::Textamp,
+            SettingsSection::Cache => SettingsSection::Sections,
             SettingsSection::About => SettingsSection::Cache,
         }
     }
@@ -3544,11 +3820,17 @@ pub enum RefreshCategory {
     AlbumArtists,
     Albums,
     Playlists,
-    Genres,
     ArtistGenres,
     AlbumGenres,
     Moods,
     Styles,
+    Decades,
+    Years,
+    Collections,
+    Countries,
+    Labels,
+    Formats,
+    Studios,
     Stations,
     AllTracks,
     Folders,
@@ -3562,11 +3844,17 @@ impl RefreshCategory {
             RefreshCategory::AlbumArtists,
             RefreshCategory::Albums,
             RefreshCategory::Playlists,
-            RefreshCategory::Genres,
             RefreshCategory::ArtistGenres,
             RefreshCategory::AlbumGenres,
             RefreshCategory::Moods,
             RefreshCategory::Styles,
+            RefreshCategory::Decades,
+            RefreshCategory::Years,
+            RefreshCategory::Collections,
+            RefreshCategory::Countries,
+            RefreshCategory::Labels,
+            RefreshCategory::Formats,
+            RefreshCategory::Studios,
             RefreshCategory::Stations,
             RefreshCategory::AllTracks,
             RefreshCategory::Folders,
@@ -3595,15 +3883,39 @@ impl RefreshCategory {
             RefreshCategory::AlbumArtists => "Album Artists",
             RefreshCategory::Albums => "Albums",
             RefreshCategory::Playlists => "Playlists",
-            RefreshCategory::Genres => "Genres",
             RefreshCategory::ArtistGenres => "Artist Genres",
             RefreshCategory::AlbumGenres => "Album Genres",
             RefreshCategory::Moods => "Moods",
             RefreshCategory::Styles => "Styles",
+            RefreshCategory::Decades => "Decades",
+            RefreshCategory::Years => "Years",
+            RefreshCategory::Collections => "Collections",
+            RefreshCategory::Countries => "Countries",
+            RefreshCategory::Labels => "Labels",
+            RefreshCategory::Formats => "Formats",
+            RefreshCategory::Studios => "Studios",
             RefreshCategory::Stations => "Stations",
             RefreshCategory::AllTracks => "All Tracks",
             RefreshCategory::Folders => "Folders",
         }
+    }
+
+    /// Map a tag-style BrowseCategory to its RefreshCategory.
+    pub fn for_tag_section(cat: BrowseCategory) -> Option<RefreshCategory> {
+        Some(match cat {
+            BrowseCategory::AlbumGenres => RefreshCategory::AlbumGenres,
+            BrowseCategory::ArtistGenres => RefreshCategory::ArtistGenres,
+            BrowseCategory::Moods => RefreshCategory::Moods,
+            BrowseCategory::Styles => RefreshCategory::Styles,
+            BrowseCategory::Decades => RefreshCategory::Decades,
+            BrowseCategory::Years => RefreshCategory::Years,
+            BrowseCategory::Collections => RefreshCategory::Collections,
+            BrowseCategory::Countries => RefreshCategory::Countries,
+            BrowseCategory::Labels => RefreshCategory::Labels,
+            BrowseCategory::Formats => RefreshCategory::Formats,
+            BrowseCategory::Studios => RefreshCategory::Studios,
+            _ => return None,
+        })
     }
 }
 

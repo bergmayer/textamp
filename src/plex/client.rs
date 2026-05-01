@@ -813,6 +813,169 @@ impl PlexClient {
     }
 
     // ========================================================================
+    // Decade / Year / Collection / Country / Label / Format / Studio Methods
+    //
+    // All follow the same shape as get_moods / get_mood_albums:
+    // tag list at /library/sections/{lib}/{tag}?type=9, drill-in at
+    // /library/sections/{lib}/all?type=9&{tag}={id}. Plex returns the same
+    // Directory shape for all of them, so we reuse the Genre model.
+    // ========================================================================
+
+    pub async fn get_decades(&self, library_key: &str) -> Result<Vec<Genre>, ApiError> {
+        use super::models::GenresResponse;
+        let path = format!("{}/{}/decade?type={}", EP_LIBRARY_SECTIONS, library_key, TYPE_ALBUM);
+        let response: GenresResponse = self.get(&path).await?;
+        Ok(response.media_container.directory)
+    }
+
+    pub async fn get_decade_albums(
+        &self,
+        library_key: &str,
+        decade_filter: &str,
+    ) -> Result<Vec<Album>, ApiError> {
+        if decade_filter.is_empty() {
+            return Err(ApiError::ParseError("Empty decade filter".to_string()));
+        }
+        let decade_id = Self::extract_filter_id(decade_filter, "decade=");
+        let encoded = urlencoding::encode(decade_id);
+        let path = format!("{}/{}/all?type={}&decade={}", EP_LIBRARY_SECTIONS, library_key, TYPE_ALBUM, encoded);
+        let response: AlbumsResponse = self.get(&path).await?;
+        Ok(response.media_container.metadata)
+    }
+
+    pub async fn get_years(&self, library_key: &str) -> Result<Vec<Genre>, ApiError> {
+        use super::models::GenresResponse;
+        let path = format!("{}/{}/year?type={}", EP_LIBRARY_SECTIONS, library_key, TYPE_ALBUM);
+        let response: GenresResponse = self.get(&path).await?;
+        Ok(response.media_container.directory)
+    }
+
+    pub async fn get_year_albums(
+        &self,
+        library_key: &str,
+        year_filter: &str,
+    ) -> Result<Vec<Album>, ApiError> {
+        if year_filter.is_empty() {
+            return Err(ApiError::ParseError("Empty year filter".to_string()));
+        }
+        let year_id = Self::extract_filter_id(year_filter, "year=");
+        let encoded = urlencoding::encode(year_id);
+        let path = format!("{}/{}/all?type={}&year={}", EP_LIBRARY_SECTIONS, library_key, TYPE_ALBUM, encoded);
+        let response: AlbumsResponse = self.get(&path).await?;
+        Ok(response.media_container.metadata)
+    }
+
+    pub async fn get_collections(&self, library_key: &str) -> Result<Vec<Genre>, ApiError> {
+        use super::models::GenresResponse;
+        let path = format!("{}/{}/collection?type={}", EP_LIBRARY_SECTIONS, library_key, TYPE_ALBUM);
+        let response: GenresResponse = self.get(&path).await?;
+        Ok(response.media_container.directory)
+    }
+
+    pub async fn get_collection_albums(
+        &self,
+        library_key: &str,
+        collection_filter: &str,
+    ) -> Result<Vec<Album>, ApiError> {
+        if collection_filter.is_empty() {
+            return Err(ApiError::ParseError("Empty collection filter".to_string()));
+        }
+        let collection_id = Self::extract_filter_id(collection_filter, "collection=");
+        let encoded = urlencoding::encode(collection_id);
+        let path = format!("{}/{}/all?type={}&collection={}", EP_LIBRARY_SECTIONS, library_key, TYPE_ALBUM, encoded);
+        let response: AlbumsResponse = self.get(&path).await?;
+        Ok(response.media_container.metadata)
+    }
+
+    pub async fn get_countries(&self, library_key: &str) -> Result<Vec<Genre>, ApiError> {
+        use super::models::GenresResponse;
+        let path = format!("{}/{}/country?type={}", EP_LIBRARY_SECTIONS, library_key, TYPE_ALBUM);
+        let response: GenresResponse = self.get(&path).await?;
+        Ok(response.media_container.directory)
+    }
+
+    pub async fn get_country_albums(
+        &self,
+        library_key: &str,
+        country_filter: &str,
+    ) -> Result<Vec<Album>, ApiError> {
+        if country_filter.is_empty() {
+            return Err(ApiError::ParseError("Empty country filter".to_string()));
+        }
+        let country_id = Self::extract_filter_id(country_filter, "country=");
+        let encoded = urlencoding::encode(country_id);
+        let path = format!("{}/{}/all?type={}&country={}", EP_LIBRARY_SECTIONS, library_key, TYPE_ALBUM, encoded);
+        let response: AlbumsResponse = self.get(&path).await?;
+        Ok(response.media_container.metadata)
+    }
+
+    pub async fn get_labels(&self, library_key: &str) -> Result<Vec<Genre>, ApiError> {
+        use super::models::GenresResponse;
+        let path = format!("{}/{}/label?type={}", EP_LIBRARY_SECTIONS, library_key, TYPE_ALBUM);
+        let response: GenresResponse = self.get(&path).await?;
+        Ok(response.media_container.directory)
+    }
+
+    pub async fn get_label_albums(
+        &self,
+        library_key: &str,
+        label_filter: &str,
+    ) -> Result<Vec<Album>, ApiError> {
+        if label_filter.is_empty() {
+            return Err(ApiError::ParseError("Empty label filter".to_string()));
+        }
+        let label_id = Self::extract_filter_id(label_filter, "label=");
+        let encoded = urlencoding::encode(label_id);
+        let path = format!("{}/{}/all?type={}&label={}", EP_LIBRARY_SECTIONS, library_key, TYPE_ALBUM, encoded);
+        let response: AlbumsResponse = self.get(&path).await?;
+        Ok(response.media_container.metadata)
+    }
+
+    pub async fn get_formats(&self, library_key: &str) -> Result<Vec<Genre>, ApiError> {
+        use super::models::GenresResponse;
+        let path = format!("{}/{}/format?type={}", EP_LIBRARY_SECTIONS, library_key, TYPE_ALBUM);
+        let response: GenresResponse = self.get(&path).await?;
+        Ok(response.media_container.directory)
+    }
+
+    pub async fn get_format_albums(
+        &self,
+        library_key: &str,
+        format_filter: &str,
+    ) -> Result<Vec<Album>, ApiError> {
+        if format_filter.is_empty() {
+            return Err(ApiError::ParseError("Empty format filter".to_string()));
+        }
+        let format_id = Self::extract_filter_id(format_filter, "format=");
+        let encoded = urlencoding::encode(format_id);
+        let path = format!("{}/{}/all?type={}&format={}", EP_LIBRARY_SECTIONS, library_key, TYPE_ALBUM, encoded);
+        let response: AlbumsResponse = self.get(&path).await?;
+        Ok(response.media_container.metadata)
+    }
+
+    pub async fn get_studios(&self, library_key: &str) -> Result<Vec<Genre>, ApiError> {
+        use super::models::GenresResponse;
+        let path = format!("{}/{}/studio?type={}", EP_LIBRARY_SECTIONS, library_key, TYPE_ALBUM);
+        let response: GenresResponse = self.get(&path).await?;
+        Ok(response.media_container.directory)
+    }
+
+    pub async fn get_studio_albums(
+        &self,
+        library_key: &str,
+        studio_filter: &str,
+    ) -> Result<Vec<Album>, ApiError> {
+        if studio_filter.is_empty() {
+            return Err(ApiError::ParseError("Empty studio filter".to_string()));
+        }
+        let studio_id = Self::extract_filter_id(studio_filter, "studio=");
+        let encoded = urlencoding::encode(studio_id);
+        let path = format!("{}/{}/all?type={}&studio={}", EP_LIBRARY_SECTIONS, library_key, TYPE_ALBUM, encoded);
+        let response: AlbumsResponse = self.get(&path).await?;
+        Ok(response.media_container.metadata)
+    }
+
+    // ========================================================================
     // Folder Browsing Methods
     // ========================================================================
 

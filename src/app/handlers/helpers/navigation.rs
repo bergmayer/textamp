@@ -139,10 +139,10 @@ pub fn adjust_list_index(state: &mut AppState, delta: isize) {
                         }
                     }
                     RightPanelMode::CategoryAlbums => {
-                        let len = state.library.genre_albums.len();
+                        let len = state.library.tag_albums.len();
                         if len > 0 {
-                            let idx = state.library.genre_albums_index as isize + delta;
-                            state.library.genre_albums_index = idx.clamp(0, len as isize - 1) as usize;
+                            let idx = state.library.tag_albums_index as isize + delta;
+                            state.library.tag_albums_index = idx.clamp(0, len as isize - 1) as usize;
                         }
                     }
                     RightPanelMode::Empty => {}
@@ -212,8 +212,8 @@ pub fn set_list_index(state: &mut AppState, index: isize) {
                         };
                     }
                     RightPanelMode::CategoryAlbums => {
-                        let len = state.library.genre_albums.len();
-                        state.library.genre_albums_index = if index == isize::MAX {
+                        let len = state.library.tag_albums.len();
+                        state.library.tag_albums_index = if index == isize::MAX {
                             len.saturating_sub(1)
                         } else {
                             (index as usize).min(len.saturating_sub(1))

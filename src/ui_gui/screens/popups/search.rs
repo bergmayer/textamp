@@ -7,7 +7,7 @@
 //! end up in the same state as if the user had drilled there
 //! manually.
 
-use iced::widget::{button, column, container, row, scrollable, text, text_input, Column, Space};
+use iced::widget::{button, column, container, row, scrollable, text_input, Column, Space};
 use iced::{Alignment, Background, Border, Color, Element, Length, Theme};
 
 use crate::app::action::{Action, SearchAction};
@@ -16,6 +16,7 @@ use crate::app::AppState;
 use crate::ui_gui::message::{GuiMessage, StatePopupKind};
 use crate::ui_gui::widgets::transport_bar::popout_button_style;
 
+use crate::ui_gui::widgets::text;
 const POPUP_WIDTH: f32 = 640.0;
 const RESULTS_HEIGHT: f32 = 420.0;
 

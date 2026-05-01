@@ -11,6 +11,34 @@ pub mod tab_strip;
 pub mod transport_bar;
 pub mod waveform_canvas;
 
+/// Drop-in replacement for `iced::widget::text` that always uses
+/// `Shaping::Advanced`.
+///
+/// iced 0.13 defaults `Text` widgets to `Shaping::Basic`, which —
+/// per the iced docs — performs "no shaping and no font fallback" and
+/// "will not display complex scripts properly nor try to find missing
+/// glyphs in your system fonts". With our default font (.SF NS / SF
+/// Pro on macOS, Segoe UI on Windows) being Latin-only, that means
+/// every CJK title, emoji, and dingbat in user-sourced metadata
+/// renders as the primary font's `.notdef` glyph (the boxy tofu the
+/// user kept reporting). Advanced shaping is what triggers the whole
+/// cosmic-text fallback chain we wired up — without it, the chain
+/// never runs.
+///
+/// Every `text(...)` call in `src/ui_gui/` should resolve to this
+/// wrapper, not `iced::widget::text`. Files do that by importing
+/// `text` from `crate::ui_gui::widgets` (this module) instead of
+/// from `iced::widget::*`.
+pub fn text<'a, Theme, Renderer>(
+    content: impl iced::widget::text::IntoFragment<'a>,
+) -> iced::widget::Text<'a, Theme, Renderer>
+where
+    Theme: iced::widget::text::Catalog + 'a,
+    Renderer: iced::advanced::text::Renderer,
+{
+    iced::widget::text(content).shaping(iced::widget::text::Shaping::Advanced)
+}
+
 /// Sanitize user-facing strings so iced/cosmic-text/swash can render
 /// them without falling through to the LastResort font (the boxy
 /// "tofu" the user keeps reporting on playlist titles).
@@ -39,40 +67,38 @@ pub mod waveform_canvas;
 /// that only allocates when a substitution actually happens.
 pub fn safe_text(input: &str) -> std::borrow::Cow<'_, str> {
     use std::borrow::Cow;
-    // Single pass: borrow until we hit the first codepoint that
-    // needs to change, then upgrade to an owned String seeded with
-    // the prefix we've already validated.
+    // First pass: shared sanitizer (control / format / private-use /
+    // variation selectors). Common case is Borrowed (no allocation).
+    let stripped = crate::util::sanitize_display_text(input);
+    // Second pass: GUI-specific font substitutions (e.g. U+2764
+    // HEAVY BLACK HEART → U+2665 BLACK HEART SUIT, because cosmic-
+    // text can't render U+2764 from Apple Color Emoji).
     let mut owned: Option<String> = None;
-    for (idx, c) in input.char_indices() {
-        let strip = needs_strip(c);
-        let sub = needs_substitute(c);
-        if !strip && sub.is_none() {
-            if let Some(buf) = owned.as_mut() {
-                buf.push(c);
-            }
+    for (idx, c) in stripped.char_indices() {
+        if let Some(replacement) = needs_substitute(c) {
+            let buf = owned.get_or_insert_with(|| {
+                let mut b = String::with_capacity(stripped.len());
+                b.push_str(&stripped[..idx]);
+                b
+            });
+            buf.push(replacement);
             continue;
         }
-        let buf = owned.get_or_insert_with(|| {
-            let mut b = String::with_capacity(input.len());
-            b.push_str(&input[..idx]);
-            b
-        });
-        if let Some(replacement) = sub {
-            buf.push(replacement);
+        if let Some(buf) = owned.as_mut() {
+            buf.push(c);
         }
-        // strip-only: skip the char.
     }
-    match owned {
-        Some(s) => Cow::Owned(s),
-        None => Cow::Borrowed(input),
+    match (owned, stripped) {
+        (Some(s), _) => Cow::Owned(s),
+        (None, Cow::Owned(s)) => Cow::Owned(s),
+        (None, Cow::Borrowed(s)) => {
+            // Map borrow back to the original input slice (same bytes).
+            // sanitize_display_text returns Borrowed only when nothing
+            // changed, so input == s.
+            let _ = s;
+            Cow::Borrowed(input)
+        }
     }
-}
-
-fn needs_strip(c: char) -> bool {
-    let cp = c as u32;
-    matches!(cp,
-        0xFE00..=0xFE0F | 0x200D | 0xE0020..=0xE007F
-    )
 }
 
 fn needs_substitute(c: char) -> Option<char> {

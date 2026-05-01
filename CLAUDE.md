@@ -4,9 +4,11 @@
 
 Build only the binaries whose code your change actually affects:
 
-- **Shared core** (`src/app/`, `src/audio/`, `src/plex/`, `src/services/`, `src/config/`, `src/util/`, `src/lib.rs`, `src/miller.rs`, `Cargo.toml`): build BOTH the TUI (`cargo build --release --bin textamp`) and the GUI (`bash dev/win-build.sh` on Windows, or `cargo build --release --bin textamp-gui --features gui` on Linux). The TUI and GUI must stay equivalent in features and functionality, so anything in the shared core has to compile cleanly for both front-ends.
+- **Shared core** (`src/app/`, `src/audio/`, `src/plex/`, `src/services/`, `src/config/`, `src/util/`, `src/lib.rs`, `src/miller.rs`, `Cargo.toml`): build BOTH the TUI (`cargo build --release --bin textamp`) and the GUI (`bash dev/win-build.sh` on Windows, or `cargo build --release --bin textamp-gui --features gui,native-menus` on macOS / Linux). The TUI and GUI must stay equivalent in features and functionality, so anything in the shared core has to compile cleanly for both front-ends.
 - **TUI only** (`src/ui/`, `src/bin/textamp_tui.rs`): build just `cargo build --release --bin textamp`.
-- **GUI only** (`src/ui_gui/`, `src/bin/textamp_gui.rs`): build just the GUI for the platform you're iterating on (`bash dev/win-build.sh` for Windows, or `cargo build --release --bin textamp-gui --features gui` for Linux). Do not also build the other platform's GUI unless the user asks.
+- **GUI only** (`src/ui_gui/`, `src/bin/textamp_gui.rs`): build just the GUI for the platform you're iterating on (`bash dev/win-build.sh` for Windows, or `cargo build --release --bin textamp-gui --features gui,native-menus` for macOS / Linux). Do not also build the other platform's GUI unless the user asks.
+
+**IMPORTANT — always include `native-menus`** when building the GUI on macOS. Without it, the menu attaches to the window instead of using macOS's global menu bar. The `native-menus` feature pulls in `muda`, which provides the platform-correct menu (global on macOS, Win32 HMENU on Windows, GTK on Linux). The Linux fallback path that omits it exists only for environments without GTK3 — never strip it on macOS.
 
 Do not say "done" until every required build succeeds.
 

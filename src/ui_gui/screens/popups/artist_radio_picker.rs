@@ -1,12 +1,13 @@
 //! Artist radio picker (multi-artist blend DJ picker).
 
-use iced::widget::{button, column, container, row, scrollable, text, Column, Space};
+use iced::widget::{button, column, container, row, scrollable, Column, Space};
 use iced::{Alignment, Background, Border, Color, Element, Length, Theme};
 
 use crate::app::state::{ArtistRadioPickerState, ArtistRadioPickerStep};
 use crate::ui_gui::message::{GuiMessage, StatePopupKind};
 use crate::ui_gui::widgets::transport_bar::popout_button_style;
 
+use crate::ui_gui::widgets::text;
 pub fn view<'a>(p: &'a ArtistRadioPickerState) -> Element<'a, GuiMessage> {
     let title = match p.step {
         ArtistRadioPickerStep::EnterCount  => "How many artists to blend?",

@@ -116,7 +116,7 @@ pub async fn dispatch(
                 };
 
                 // Genre/mood/style data
-                cache_data.genres = state.library.genres.clone();
+                cache_data.genres = state.library.album_genres.clone();
                 cache_data.artist_genres = state.library.artist_genres.clone();
                 cache_data.album_genres = state.library.album_genres.clone();
                 cache_data.moods = state.library.moods.clone();
@@ -510,7 +510,7 @@ pub async fn dispatch(
                         let bg_key = key;
                         let bg_thumb = thumb_path;
                         tokio::spawn(async move {
-                            match client.fetch_artwork(&bg_thumb, 300).await {
+                            match client.fetch_artwork(&bg_thumb, 600).await {
                                 Ok(data) => {
                                     let cache = crate::plex::ArtworkCache::default();
                                     cache.save(&bg_key, &data);
@@ -535,7 +535,7 @@ pub async fn dispatch(
                 let client = client.clone();
 
                 tokio::spawn(async move {
-                    match client.fetch_artwork(&thumb_path, 300).await {
+                    match client.fetch_artwork(&thumb_path, 600).await {
                         Ok(data) => {
                             // Save to disk cache
                             let cache = crate::plex::ArtworkCache::default();

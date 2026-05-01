@@ -4,12 +4,13 @@
 //! source-of-truth text for both UIs). Rendered as a scrollable monospace
 //! block so the columnar layout reads the same way it does in the TUI.
 
-use iced::widget::{column, container, scrollable, text};
+use iced::widget::{column, container, scrollable};
 use iced::{Background, Border, Color, Element, Font, Length, Theme};
 
 use crate::app::AppState;
 use crate::ui_gui::message::GuiMessage;
 
+use crate::ui_gui::widgets::text;
 const HELP_TEXT: &str = r#"
 VIEWS
   Ctrl+L  Library         Ctrl+P  Playlists       Ctrl+G  Genres

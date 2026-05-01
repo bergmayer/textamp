@@ -443,7 +443,7 @@ pub async fn dispatch(
                 View::Browse => {
                     let nav = match state.browse_category {
                         BrowseCategory::Library => Some(&state.artist_nav),
-                        BrowseCategory::Genres => Some(&state.genre_nav),
+                        cat if cat.is_tag_section() => Some(&state.tag_nav),
                         BrowseCategory::Playlists => Some(&state.playlist_nav),
                         _ => None,
                     };
@@ -513,7 +513,7 @@ pub async fn dispatch(
                     // Miller columns: get selected track + all following
                     let nav = match state.browse_category {
                         BrowseCategory::Library => Some(&state.artist_nav),
-                        BrowseCategory::Genres => Some(&state.genre_nav),
+                        cat if cat.is_tag_section() => Some(&state.tag_nav),
                         BrowseCategory::Playlists => Some(&state.playlist_nav),
                         _ => None,
                     };
@@ -592,7 +592,7 @@ pub async fn dispatch(
                 View::Browse => {
                     let nav = match state.browse_category {
                         BrowseCategory::Library => Some(&state.artist_nav),
-                        BrowseCategory::Genres => Some(&state.genre_nav),
+                        cat if cat.is_tag_section() => Some(&state.tag_nav),
                         BrowseCategory::Playlists => Some(&state.playlist_nav),
                         _ => None,
                     };
@@ -648,7 +648,7 @@ pub async fn dispatch(
                     // Miller columns: get selected track + all following
                     let nav = match state.browse_category {
                         BrowseCategory::Library => Some(&state.artist_nav),
-                        BrowseCategory::Genres => Some(&state.genre_nav),
+                        cat if cat.is_tag_section() => Some(&state.tag_nav),
                         BrowseCategory::Playlists => Some(&state.playlist_nav),
                         _ => None,
                     };
