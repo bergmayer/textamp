@@ -215,7 +215,8 @@ fn apply_key_to_state(state: &mut AppState, key: KeyEvent) {
                             BrowseCategory::AlbumGenres => {
                                 state.library.tag_albums_index = state.library.tag_albums_index.saturating_sub(1);
                             }
-                            BrowseCategory::Folders => {}
+                            // Other tag sections + Folders are no-ops in this dev harness.
+                            _ => {}
                         }
                     } else {
                         state.list_state.tracks_index = state.list_state.tracks_index.saturating_sub(1);
@@ -236,7 +237,7 @@ fn apply_key_to_state(state: &mut AppState, key: KeyEvent) {
                                 let max = state.library.album_genres.len().saturating_sub(1);
                                 state.library.tag_albums_index = (state.library.tag_albums_index + 1).min(max);
                             }
-                            BrowseCategory::Folders => {}
+                            _ => {}
                         }
                     } else {
                         let max = state.library.selected_album_tracks.len().saturating_sub(1);

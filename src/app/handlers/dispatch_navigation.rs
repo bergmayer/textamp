@@ -21,7 +21,7 @@ pub async fn dispatch(
     let mut follow_ups = vec![];
 
     // Deactivate inline filter on view or category change
-    if matches!(action, NavigationAction::SetView(_) | NavigationAction::SetCategory(_)) && state.list_filter.active {
+    if matches!(action, NavigationAction::SetView(_) | NavigationAction::SetCategory { .. }) && state.list_filter.active {
         state.list_filter.deactivate();
     }
 
@@ -73,7 +73,7 @@ pub async fn dispatch(
                 state.set_view(View::Browse);
             }
         }
-        NavigationAction::SetCategory(category) => {
+        NavigationAction::SetCategory { category, preserve_sections_focus } => {
             // Picking a category implies "show me that part of the
             // library", so always switch to the Browse view too.
             // Without this, the View menu / Ctrl+L|P|G|O shortcuts
@@ -83,17 +83,13 @@ pub async fn dispatch(
                 state.set_view(View::Browse);
             }
 
-            // Auto-drill (sections-column Up/Down sweep) sets
-            // `auto_drill_pending` to communicate "don't take focus
-            // off the sections column — the user is still arrow-keying
-            // through it". Right / Enter / click / palette leave it
-            // false and the dispatcher steals focus as usual.
-            //
-            // We peek (don't take) so `set_browse_category` (called
-            // below) can see the same flag, and clear it at the end
-            // of the dispatch.
-            let auto_drill = state.auto_drill_pending;
-            if !auto_drill {
+            // `preserve_sections_focus` is true on a sections-column
+            // arrow-key sweep — the user is still navigating with the
+            // keyboard in the sections column, the rightward content
+            // should follow without focus stealing. Click / Enter /
+            // palette / shortcut paths set it to false so the action
+            // transfers focus to the new category's content.
+            if !preserve_sections_focus {
                 state.category_column_focused = false;
             }
 
@@ -106,7 +102,7 @@ pub async fn dispatch(
                         }
                     }
                 }
-                state.set_browse_category(category);
+                state.set_browse_category(category, preserve_sections_focus);
                 state.focus = Focus::Left;
                 // Clear right panel
                 state.library.right_panel_mode = RightPanelMode::Empty;
@@ -144,10 +140,6 @@ pub async fn dispatch(
                     _ => {}
                 }
             }
-            // Single sink for `auto_drill_pending` on this dispatch
-            // chain. After this point the flag is dead; subsequent
-            // actions (and the next keypress) start clean.
-            state.auto_drill_pending = false;
         }
         NavigationAction::ToggleFocus => {
             state.focus = match state.focus {
@@ -221,7 +213,7 @@ mod tests {
     async fn next_view_browse_to_queue() {
         let (tx, _rx, mut state, mut client) = setup();
         state.view = View::Browse;
-        state.set_browse_category(BrowseCategory::Library);
+        state.set_browse_category(BrowseCategory::Library, false);
 
         dispatch(&tx, NavigationAction::NextView.into(), &mut state, &mut client).await.unwrap();
         assert_eq!(state.view, View::Queue);
@@ -249,7 +241,7 @@ mod tests {
     async fn prev_view_library_to_now_playing() {
         let (tx, _rx, mut state, mut client) = setup();
         state.view = View::Browse;
-        state.set_browse_category(BrowseCategory::Library);
+        state.set_browse_category(BrowseCategory::Library, false);
 
         dispatch(&tx, NavigationAction::PrevView.into(), &mut state, &mut client).await.unwrap();
         assert_eq!(state.view, View::NowPlaying);
@@ -268,10 +260,10 @@ mod tests {
     async fn set_category_changes_and_resets_focus() {
         let (tx, _rx, mut state, mut client) = setup();
         state.view = View::Browse;
-        state.set_browse_category(BrowseCategory::Library);
+        state.set_browse_category(BrowseCategory::Library, false);
         state.focus = Focus::Right;
 
-        dispatch(&tx, NavigationAction::SetCategory(BrowseCategory::AlbumGenres).into(), &mut state, &mut client).await.unwrap();
+        dispatch(&tx, NavigationAction::set_category(BrowseCategory::AlbumGenres).into(), &mut state, &mut client).await.unwrap();
         assert_eq!(state.browse_category, BrowseCategory::AlbumGenres);
         assert_eq!(state.focus, Focus::Left);
     }
@@ -280,10 +272,10 @@ mod tests {
     async fn set_category_same_is_noop() {
         let (tx, _rx, mut state, mut client) = setup();
         state.view = View::Browse;
-        state.set_browse_category(BrowseCategory::Library);
+        state.set_browse_category(BrowseCategory::Library, false);
         state.focus = Focus::Right; // keep right focus
 
-        dispatch(&tx, NavigationAction::SetCategory(BrowseCategory::Library).into(), &mut state, &mut client).await.unwrap();
+        dispatch(&tx, NavigationAction::set_category(BrowseCategory::Library).into(), &mut state, &mut client).await.unwrap();
         // Category didn't change, so focus should remain Right
         assert_eq!(state.focus, Focus::Right);
     }

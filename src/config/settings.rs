@@ -247,18 +247,24 @@ pub struct UiConfig {
     #[serde(default = "default_hidden_sections")]
     pub hidden_sections: Vec<crate::app::state::BrowseCategory>,
 
-    /// TUI-only: how the Library screen's Miller columns share the
-    /// horizontal space when more than two are open.
+    /// How the Library screen's Miller columns share the horizontal
+    /// space when more than two are open.
     /// - `"shrinking"` (default): every visible column shrinks to fit.
-    /// - `"scrolling"`: every column keeps its starting width (half the
-    ///   inner area), the layout extends past the screen, and the
+    /// - `"scrolling"`: every column keeps its starting width (half
+    ///   the inner area), the layout extends past the screen, and the
     ///   viewport scrolls as the user drills deeper. A horizontal
     ///   scroll indicator hints at off-screen columns.
-    #[serde(default = "default_miller_layout")]
-    pub miller_layout: String,
-}
+    #[serde(default)]
+    pub miller_layout: crate::app::state::MillerLayoutMode,
 
-fn default_miller_layout() -> String { "shrinking".to_string() }
+    /// TUI-only: tall-monitor split view. When true, the Library
+    /// screen renders in the top half of the window and the Now
+    /// Playing screen in the bottom half. Tab-toggling between views
+    /// becomes irrelevant. Off by default; toggle with `|` or via the
+    /// command palette.
+    #[serde(default)]
+    pub tall_mode: bool,
+}
 
 fn default_hidden_sections() -> Vec<crate::app::state::BrowseCategory> {
     crate::app::state::BrowseCategory::hidden_by_default().to_vec()
@@ -313,7 +319,8 @@ impl Default for UiConfig {
             enable_youtube_search: default_enable_search_service(),
             library_view_settings: std::collections::HashMap::new(),
             hidden_sections: default_hidden_sections(),
-            miller_layout: default_miller_layout(),
+            miller_layout: crate::app::state::MillerLayoutMode::default(),
+            tall_mode: false,
         }
     }
 }

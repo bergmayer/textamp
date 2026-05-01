@@ -26,6 +26,13 @@ const ALPHABET_STRIP_FONT: f32 = 15.0;
 /// below this width.
 const MIN_MILLER_COL_WIDTH: f32 = 260.0;
 
+/// Floor on per-column width in scrolling mode. Mirrors the
+/// `MIN_COL_WIDTH` floor in the TUI ribbon math — windows smaller
+/// than `2 × min` would render unusably narrow columns. Above this
+/// floor each column gets exactly half the viewport so two columns
+/// fit on screen, matching the TUI's `RIBBON_VISIBLE = 2` rule.
+const SCROLL_MILLER_COL_MIN: f32 = 280.0;
+
 pub fn view<'a>(
     state: &'a AppState,
     viewport_width_logical: f32,
@@ -45,14 +52,28 @@ pub fn view<'a>(
     let artist_shuffled = artist_col0.map_or(false, |c| c.sort_mode == ColumnSortMode::Shuffled);
     let artist_descending = artist_col0.map_or(false, |c| !c.sort_ascending);
     let show_strip = matches!(state.browse_category, BrowseCategory::Library) && !artist_shuffled;
-    let strip_reserved = if show_strip { ALPHABET_STRIP_WIDTH + 4.0 } else { 0.0 };
-    // The track-details pane is purely a function of the currently
-    // focused Miller column: when its highlighted row is a Track, we
-    // show the pane and feed it that track's full data. Navigating to
-    // a non-track column (artists/albums/etc.) hides the pane
-    // automatically — no stale "last clicked track" lingering on the
-    // right while the left columns moved on.
     let details_track = focused_track(state);
+
+    // Scrolling Miller mode: the entire body becomes a single
+    // horizontal ribbon — sections col, every miller col, and the
+    // track-details pane all sized to half the viewport, all
+    // scrolling together. The alphabet strip is embedded inside the
+    // artist column's slot (sharing its half-screen width) so it
+    // scrolls with the artist col it belongs to instead of as
+    // separate chrome.
+    if state.miller_layout == crate::app::state::MillerLayoutMode::Scrolling {
+        return view_scrolling(
+            state,
+            viewport_width_logical,
+            scroll_info,
+            track_pane_similar,
+            show_strip,
+            artist_descending,
+            details_track,
+        );
+    }
+
+    let strip_reserved = if show_strip { ALPHABET_STRIP_WIDTH + 4.0 } else { 0.0 };
     // Equal-width column model: cat col, every miller col, and the
     // track-details pane all get the same proportion of the row.
     // Strip is fixed-width chrome. For the visible-window math we
@@ -83,6 +104,151 @@ pub fn view<'a>(
     // No outer padding — the alphabet strip is supposed to span the
     // full vertical extent between the menu bar and transport bar.
     container(body)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
+/// Scrolling-mode body: every browse element (sections col, every
+/// miller col, the track-details pane) sits at a fixed `col_w =
+/// viewport / 2` slot inside one horizontal scrollable. The alphabet
+/// strip is embedded inside the artist col's slot rather than living
+/// in its own slot, so the strip scrolls with the artist col it
+/// belongs to. Mirrors the TUI's Niri-style ribbon layout.
+fn view_scrolling<'a>(
+    state: &'a AppState,
+    viewport_width_logical: f32,
+    scroll_info: impl Fn(usize) -> (f32, f32) + Copy + 'a,
+    track_pane_similar: &'a std::collections::HashMap<String, Vec<Track>>,
+    show_strip: bool,
+    artist_descending: bool,
+    details_track: Option<&'a Track>,
+) -> Element<'a, GuiMessage> {
+    use iced::widget::scrollable;
+    // Reserve a sliver for the horizontal scrollbar and a touch of
+    // breathing room at the right; everything else is split in half.
+    let col_w = ((viewport_width_logical - 20.0) / 2.0).max(SCROLL_MILLER_COL_MIN);
+
+    // Slot 0: sections column.
+    let mut slots: Vec<Element<'a, GuiMessage>> = vec![
+        container(category_column(state))
+            .width(Length::Fixed(col_w))
+            .height(Length::Fill)
+            .into(),
+    ];
+
+    // Slots 1..N: miller columns of the active nav. The first slot
+    // (Library + artist col 0) hosts the embedded alphabet strip.
+    if let Some(nav) = state.browse_nav() {
+        let column_offset = if state.browse_category == BrowseCategory::Playlists { 1 } else { 0 };
+        if nav.columns.len() > column_offset {
+            let other_owns_focus = state.category_column_focused || state.track_pane_focused;
+            let focused_logical = nav.focused_column.saturating_sub(column_offset);
+            let focused = if other_owns_focus { usize::MAX } else { focused_logical };
+
+            let live_query: Option<&str> = if state.list_filter.active
+                && state.list_filter.category == state.browse_category
+                && !state.list_filter.query.trim().is_empty()
+            {
+                Some(state.list_filter.query.trim())
+            } else {
+                None
+            };
+            let n_visible_cols = nav.columns.len() - column_offset;
+            let mut column_matches: Vec<Option<Vec<usize>>> = if let Some(q) = live_query {
+                use crate::services::{filter_with_priority, DEFAULT_MAX_RESULTS};
+                (0..n_visible_cols).map(|logical_idx| {
+                    let abs_idx = logical_idx + column_offset;
+                    let col = &nav.columns[abs_idx];
+                    let r = filter_with_priority(&col.items, q, |it| it.title(), DEFAULT_MAX_RESULTS);
+                    Some(r.matched_indices)
+                }).collect()
+            } else {
+                (0..n_visible_cols).map(|_| None).collect()
+            };
+
+            let grid_cache = &state.artwork.grid_cache;
+            for logical_idx in 0..n_visible_cols {
+                let abs_idx = logical_idx + column_offset;
+                let col = &nav.columns[abs_idx];
+                let filter_matched: Option<Vec<usize>> = column_matches[logical_idx].take();
+                let (scroll_y, vp_h) = scroll_info(abs_idx);
+
+                // Strip is embedded with the artist col 0 on Library:
+                // the strip steals ALPHABET_STRIP_WIDTH from the slot,
+                // leaving the rest for the miller column itself.
+                let embed_strip = show_strip
+                    && state.browse_category == BrowseCategory::Library
+                    && logical_idx == 0;
+                let inner_col_w = if embed_strip {
+                    (col_w - ALPHABET_STRIP_WIDTH - 4.0).max(80.0)
+                } else {
+                    col_w
+                };
+
+                let miller = miller_column::view(
+                    abs_idx,
+                    col,
+                    logical_idx == focused,
+                    grid_cache,
+                    filter_matched,
+                    scroll_y,
+                    vp_h,
+                    inner_col_w,
+                    |click| GuiMessage::MillerSelect {
+                        column_index: click.column_index,
+                        item_index: click.item_index,
+                        activate: click.activate,
+                    },
+                );
+
+                let slot: Element<'a, GuiMessage> = if embed_strip {
+                    let row = Row::new()
+                        .spacing(4)
+                        .height(Length::Fill)
+                        .push(alphabet_strip(artist_descending))
+                        .push(
+                            container(miller)
+                                .width(Length::Fill)
+                                .height(Length::Fill),
+                        );
+                    container(row)
+                        .width(Length::Fixed(col_w))
+                        .height(Length::Fill)
+                        .into()
+                } else {
+                    container(miller)
+                        .width(Length::Fixed(col_w))
+                        .height(Length::Fill)
+                        .into()
+                };
+                slots.push(slot);
+            }
+        }
+    }
+
+    // Last slot: track-details pane, when a track is focused.
+    if let Some(track) = details_track {
+        slots.push(
+            container(track_details_pane(track, state, track_pane_similar))
+                .width(Length::Fixed(col_w))
+                .height(Length::Fill)
+                .into(),
+        );
+    }
+
+    let row = Row::with_children(slots)
+        .spacing(4)
+        .height(Length::Fill);
+
+    let scroller = scrollable(row)
+        .id(browse_h_scroll_id())
+        .direction(crate::ui_gui::widgets::fat_horizontal_scrollbar())
+        .style(crate::ui_gui::widgets::chunky_scrollable_style)
+        .width(Length::Fill)
+        .height(Length::Fill);
+
+    container(scroller)
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
@@ -417,7 +583,7 @@ fn category_column(state: &AppState) -> Element<'_, GuiMessage> {
                 .width(Length::Fill)
                 .padding([4, 8])
                 .on_press(GuiMessage::Action(Action::Navigation(
-                    NavigationAction::SetCategory(cat),
+                    NavigationAction::set_category(cat),
                 )))
                 .style(move |theme: &Theme, status: button::Status| {
                     let p = theme.extended_palette();
@@ -580,6 +746,9 @@ fn content_columns<'a>(
     scroll_info: impl Fn(usize) -> (f32, f32) + Copy + 'a,
 ) -> Element<'a, GuiMessage> {
     // Folders use `FolderNavigationState`; render via folder_columns.
+    // Note: scrolling Miller mode is handled at the top-level `view`
+    // function, which builds the entire body as one horizontal
+    // ribbon — this path is never entered in that mode.
     if state.browse_category == BrowseCategory::Folders {
         return folder_columns(state, content_width);
     }
@@ -695,6 +864,16 @@ fn content_columns<'a>(
             .height(Length::Fill)
             .into()
     }
+}
+
+/// Stable scrollable Id for the horizontal Miller-column ribbon, so
+/// `App::update` can `snap_to` the right edge whenever a new column
+/// drills in or focus moves — keeping the focused column pinned to
+/// the right of the viewport.
+pub fn browse_h_scroll_id() -> iced::widget::scrollable::Id {
+    use std::sync::OnceLock;
+    static ID: OnceLock<iced::widget::scrollable::Id> = OnceLock::new();
+    ID.get_or_init(|| iced::widget::scrollable::Id::new("browse-h-scroll")).clone()
 }
 
 fn folder_columns(state: &AppState, content_width: f32) -> Element<'_, GuiMessage> {

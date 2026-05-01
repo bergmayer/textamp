@@ -60,8 +60,22 @@ pub enum NavigationAction {
     SetView(View),
     NextView,
     PrevView,
-    SetCategory(BrowseCategory),
+    /// Switch the active browse category. `preserve_sections_focus`
+    /// is true when the user is sweeping through the leftmost
+    /// sections column with arrow keys — the dispatcher updates the
+    /// content area for the new category but leaves keyboard focus
+    /// on the sections column. Click / Enter / palette / shortcut
+    /// drills set it to false so focus follows the action.
+    SetCategory { category: BrowseCategory, preserve_sections_focus: bool },
     ToggleFocus,
+}
+
+impl NavigationAction {
+    /// Convenience for the common "click / palette / shortcut" path
+    /// that should transfer focus to the new category's content.
+    pub fn set_category(category: BrowseCategory) -> Self {
+        Self::SetCategory { category, preserve_sections_focus: false }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -92,28 +106,36 @@ pub enum DataAction {
     ListBottom,
 }
 
+/// Drilling actions all carry a `replace_child: bool`. Set to
+/// `true` when the action should overwrite the existing rightward
+/// column instead of pushing a fresh one — the keyboard auto-drill
+/// (Up/Down with a child column already open) sets this so the
+/// user's cursor sweep updates the visible child without growing the
+/// stack. Click drills, Enter drills, and palette drills set it to
+/// `false`.
 #[derive(Debug, Clone)]
 pub enum MillerAction {
-    LoadArtistAlbumsForMiller { artist_key: String },
-    LoadAlbumTracksForMiller { album_key: String },
-    LoadArtistAllTracksForMiller { artist_key: String },
-    LoadAllAlbumsForMiller,
+    LoadArtistAlbumsForMiller { artist_key: String, replace_child: bool },
+    LoadAlbumTracksForMiller { album_key: String, replace_child: bool },
+    LoadArtistAllTracksForMiller { artist_key: String, replace_child: bool },
+    LoadAllAlbumsForMiller { replace_child: bool },
     PlayTrackFromMiller { column_index: usize, track_index: usize, single_track: bool },
-    LoadGenreAlbumsForMiller { genre_key: String },
-    LoadGenreTracksForMiller { album_key: String },
+    LoadGenreAlbumsForMiller { genre_key: String, replace_child: bool },
+    LoadGenreTracksForMiller { album_key: String, replace_child: bool },
     PlayGenreTrackFromMiller { column_index: usize, track_index: usize, single_track: bool },
-    LoadPlaylistTracksForMiller { playlist_key: String },
+    LoadPlaylistTracksForMiller { playlist_key: String, replace_child: bool },
     /// Fetch the next page of a lazy-loaded playlist tracks column.
     /// `offset` is how many tracks the column already has; the server
-    /// returns the next chunk after that.
+    /// returns the next chunk after that. Not a drill — extends the
+    /// existing column in place.
     LoadMorePlaylistTracks { playlist_key: String, offset: u32 },
     PlayPlaylistTrackFromMiller { column_index: usize, track_index: usize, single_track: bool },
     RefreshAlbumTracks { album_key: String },
-    LoadCompilationsForMiller,
-    LoadCompilationAlbumsForMiller { artist_key: String, artist_name: String },
-    LoadCompilationAllTracksForMiller { artist_key: String, artist_name: String },
-    LoadAllCompilationTracksForMiller,
-    LoadAllLibraryTracksForMiller,
+    LoadCompilationsForMiller { replace_child: bool },
+    LoadCompilationAlbumsForMiller { artist_key: String, artist_name: String, replace_child: bool },
+    LoadCompilationAllTracksForMiller { artist_key: String, artist_name: String, replace_child: bool },
+    LoadAllCompilationTracksForMiller { replace_child: bool },
+    LoadAllLibraryTracksForMiller { replace_child: bool },
 }
 
 #[derive(Debug, Clone)]
@@ -268,8 +290,10 @@ pub enum BrowseAction {
     /// matching Plex client method.
     LoadTagList(crate::app::state::BrowseCategory),
     /// Load albums for the currently-selected tag in the active tag
-    /// section (column 0 → column 1 drill).
-    LoadTagAlbums,
+    /// section (column 0 → column 1 drill). `replace_child` mirrors
+    /// the MillerAction convention: `true` for keyboard auto-drill,
+    /// `false` for click / Enter / palette.
+    LoadTagAlbums { replace_child: bool },
     /// Populate the root column of `tag_nav` with the current section's
     /// tag list. Re-run on section switch.
     RefreshTagView,
@@ -296,7 +320,10 @@ pub enum BrowseAction {
 #[derive(Debug, Clone)]
 pub enum FolderAction {
     LoadFolderRoot,
-    NavigateIntoFolder(String),
+    /// Drill into a folder. `replace_child` mirrors the MillerAction
+    /// convention: `true` for keyboard auto-drill, `false` for click /
+    /// Enter / palette.
+    NavigateIntoFolder { folder_key: String, replace_child: bool },
     PlayFolderTracks,
     PlayFolderTrack { track_index: usize },
     RefreshSubfolder(String),
@@ -365,6 +392,10 @@ pub enum SettingsAction {
     /// user drills). Persisted via `UiConfig::miller_layout`. Bound
     /// to `\` in the browse view and a checkbox in Settings.
     ToggleMillerLayout,
+    /// TUI-only: flip the tall-monitor split view (Library on top
+    /// half, Now Playing on bottom half). Persisted via
+    /// `UiConfig::tall_mode`. Bound to `|` and to a palette command.
+    ToggleTallMode,
     /// Persist the (library, playlist) -> view-toggles mapping. Sent
     /// when the user changes a playlist tracks column's "Group by
     /// album" or "Show album artwork" toggles. Settings disk-saver

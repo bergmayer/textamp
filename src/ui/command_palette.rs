@@ -41,6 +41,7 @@ fn static_entries() -> Vec<StaticEntry> {
         StaticEntry { label: "Now Playing",    hint: "^N",  command: PaletteCommandKind::GotoNowPlaying },
         StaticEntry { label: "Help",           hint: "F1",  command: PaletteCommandKind::OpenHelp },
         StaticEntry { label: "Settings",       hint: "F2",  command: PaletteCommandKind::OpenSettings },
+        StaticEntry { label: "Tall Mode (split Library + Now Playing)", hint: "|", command: PaletteCommandKind::ToggleTallMode },
         StaticEntry { label: "Refresh",        hint: "F5",  command: PaletteCommandKind::Refresh },
         StaticEntry { label: "Find / Search",  hint: "^F",  command: PaletteCommandKind::OpenSearch },
         StaticEntry { label: "Filter",         hint: "/",   command: PaletteCommandKind::ToggleFilter },
@@ -301,9 +302,9 @@ pub fn materialize_entries(state: &AppState) -> Vec<PaletteEntry> {
 pub fn run(cmd: PaletteCommandKind, state: &mut AppState) -> Vec<Action> {
     match cmd {
         PaletteCommandKind::Quit            => vec![SystemAction::Quit.into()],
-        PaletteCommandKind::GotoLibrary     => vec![NavigationAction::SetCategory(BrowseCategory::Library).into()],
-        PaletteCommandKind::GotoGenres      => vec![NavigationAction::SetCategory(BrowseCategory::AlbumGenres).into()],
-        PaletteCommandKind::GotoFolders     => vec![NavigationAction::SetCategory(BrowseCategory::Folders).into()],
+        PaletteCommandKind::GotoLibrary     => vec![NavigationAction::set_category(BrowseCategory::Library).into()],
+        PaletteCommandKind::GotoGenres      => vec![NavigationAction::set_category(BrowseCategory::AlbumGenres).into()],
+        PaletteCommandKind::GotoFolders     => vec![NavigationAction::set_category(BrowseCategory::Folders).into()],
         PaletteCommandKind::GotoQueue       => vec![NavigationAction::SetView(View::Queue).into()],
         PaletteCommandKind::GotoNowPlaying  => vec![NavigationAction::SetView(View::NowPlaying).into()],
         PaletteCommandKind::OpenHelp        => vec![NavigationAction::SetView(View::Help).into()],
@@ -314,6 +315,7 @@ pub fn run(cmd: PaletteCommandKind, state: &mut AppState) -> Vec<Action> {
         PaletteCommandKind::SaveQueue       => vec![QueueAction::PromptSavePlaylist.into()],
         PaletteCommandKind::ClearQueue      => vec![QueueAction::ClearQueue.into()],
         PaletteCommandKind::ToggleFilter    => vec![SearchAction::ActivateListFilter.into()],
+        PaletteCommandKind::ToggleTallMode  => vec![SettingsAction::ToggleTallMode.into()],
         PaletteCommandKind::Refresh         => vec![SystemAction::RefreshCategory(RefreshCategory::Artists).into()],
         PaletteCommandKind::PlayPause       => vec![PlaybackAction::TogglePlayPause.into()],
         PaletteCommandKind::NextTrack       => vec![PlaybackAction::Next.into()],

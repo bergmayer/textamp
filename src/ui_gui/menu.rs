@@ -64,6 +64,8 @@ pub mod ids {
     pub const VIEW_REVERSE_SORT:     u32 = 2017;
     pub const VIEW_GROUP_BY_ALBUM:   u32 = 2018;
     pub const VIEW_TOGGLE_COVER_ART: u32 = 2019;
+    pub const VIEW_SCROLLING_LAYOUT: u32 = 2020;
+    pub const VIEW_TALL_MODE:        u32 = 2021;
 
     // ── Playback ───────────────────────────────────────────────────────
     pub const PB_PLAY_PAUSE: u32 = 3000;
@@ -213,6 +215,9 @@ pub fn build() -> muda::Menu {
         &MenuItem::with_id(ids::VIEW_GROUP_BY_ALBUM,  "Group by Album",              true, None),
         &PredefinedMenuItem::separator(),
         &MenuItem::with_id(ids::VIEW_TOGGLE_COVER_ART, "Toggle Cover Art",           true, None),
+        &PredefinedMenuItem::separator(),
+        &MenuItem::with_id(ids::VIEW_SCROLLING_LAYOUT, "Toggle Scrolling Layout",    true, accel(Modifiers::empty(), Code::Backslash)),
+        &MenuItem::with_id(ids::VIEW_TALL_MODE,        "Toggle Tall Mode",           true, accel(Modifiers::SHIFT, Code::Backslash)),
     ]).ok();
     menu.append(&view).ok();
 
@@ -342,10 +347,10 @@ pub fn menu_event_for_id(id: &str) -> Option<GuiMessage> {
         ids::VIEW_BROWSE         => GuiMessage::Action(Action::Navigation(NavigationAction::SetView(View::Browse))),
         ids::VIEW_QUEUE          => GuiMessage::Action(Action::Navigation(NavigationAction::SetView(View::Queue))),
         ids::VIEW_NOW_PLAYING    => GuiMessage::Action(Action::Navigation(NavigationAction::SetView(View::NowPlaying))),
-        ids::VIEW_LIBRARY        => GuiMessage::Action(Action::Navigation(NavigationAction::SetCategory(BrowseCategory::Library))),
-        ids::VIEW_PLAYLISTS      => GuiMessage::Action(Action::Navigation(NavigationAction::SetCategory(BrowseCategory::Playlists))),
-        ids::VIEW_GENRES         => GuiMessage::Action(Action::Navigation(NavigationAction::SetCategory(BrowseCategory::AlbumGenres))),
-        ids::VIEW_FOLDERS        => GuiMessage::Action(Action::Navigation(NavigationAction::SetCategory(BrowseCategory::Folders))),
+        ids::VIEW_LIBRARY        => GuiMessage::Action(Action::Navigation(NavigationAction::set_category(BrowseCategory::Library))),
+        ids::VIEW_PLAYLISTS      => GuiMessage::Action(Action::Navigation(NavigationAction::set_category(BrowseCategory::Playlists))),
+        ids::VIEW_GENRES         => GuiMessage::Action(Action::Navigation(NavigationAction::set_category(BrowseCategory::AlbumGenres))),
+        ids::VIEW_FOLDERS        => GuiMessage::Action(Action::Navigation(NavigationAction::set_category(BrowseCategory::Folders))),
         ids::VIEW_SIMILAR        => GuiMessage::MenuKeyClick(ctrl_char_key('m')),
         ids::VIEW_RELATED        => GuiMessage::MenuKeyClick(ctrl_char_key('r')),
         ids::VIEW_OPEN_IN_LIBRARY=> GuiMessage::MenuKeyClick(ctrl_char_key('j')),
@@ -359,6 +364,8 @@ pub fn menu_event_for_id(id: &str) -> Option<GuiMessage> {
         ids::VIEW_REVERSE_SORT   => GuiMessage::Action(Action::Search(SearchAction::ReverseFocusedSortDirection)),
         ids::VIEW_GROUP_BY_ALBUM => GuiMessage::Action(Action::Search(SearchAction::ToggleFocusedColumnGrouping)),
         ids::VIEW_TOGGLE_COVER_ART => GuiMessage::ToggleCoverArt,
+        ids::VIEW_SCROLLING_LAYOUT => GuiMessage::Action(Action::Settings(SettingsAction::ToggleMillerLayout)),
+        ids::VIEW_TALL_MODE        => GuiMessage::Action(Action::Settings(SettingsAction::ToggleTallMode)),
 
         // ── Playback ────────────────────────────────────────────────────
         ids::PB_PLAY_PAUSE => GuiMessage::Action(Action::Playback(PlaybackAction::TogglePlayPause)),

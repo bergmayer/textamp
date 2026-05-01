@@ -95,7 +95,7 @@ pub enum FolderEvent {
     },
     SubfolderRefreshed { folder_key: String, cached_folder: crate::plex::CachedFolder },
     FolderRootLoaded { library_key: String, lib_title: String, items: Vec<crate::plex::models::FolderItem> },
-    FolderContentsLoaded { folder_key: String, items: Vec<crate::plex::models::FolderItem>, folder_path: Option<String>, item_path: Option<String> },
+    FolderContentsLoaded { folder_key: String, items: Vec<crate::plex::models::FolderItem>, folder_path: Option<String>, item_path: Option<String>, replace_child: bool },
     FolderLoadFailed(String),
     FolderRefreshLoaded { folder_key: String, items: Vec<crate::plex::models::FolderItem>, folder_path: Option<String> },
     FolderPathDiscovered { folder_key: String, path: String },

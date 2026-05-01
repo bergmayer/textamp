@@ -34,7 +34,7 @@ pub fn refresh_current_view(state: &mut AppState) -> Vec<Action> {
             // Check if parent column's selected item is the "__all_library__" AllTracks entry
             if let Some(parent_col) = state.artist_nav.columns.get(state.artist_nav.focused_column - 1) {
                 if let Some(item) = parent_col.selected_item() {
-                    if matches!(item, crate::app::state::BrowseItem::AllTracks { ref artist_key, .. } if artist_key == "__all_library__") {
+                    if matches!(item, crate::app::state::BrowseItem::AllTracks { scope: crate::app::state::AllTracksScope::Library, .. }) {
                         state.set_status("Refreshing all tracks...".to_string());
                         return vec![SystemAction::RefreshCategory(RefreshCategory::AllTracks).into()];
                     }

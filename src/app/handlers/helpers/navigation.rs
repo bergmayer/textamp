@@ -445,7 +445,7 @@ mod tests {
         let mut state = AppState::new();
         state.view = View::Browse;
         state.focus = Focus::Left;
-        state.set_browse_category(BrowseCategory::Library);
+        state.set_browse_category(BrowseCategory::Library, false);
         state.library.artists = vec![make_artist("1", "A"), make_artist("2", "B"), make_artist("3", "C")];
         state.list_state.artists_index = 0;
 

@@ -17,6 +17,7 @@ pub mod artist_alias_service;
 pub mod external_search;
 pub mod track_context;
 mod adventure;
+mod browse_drill;
 mod cache_service;
 mod folder_service;
 mod library_service;
@@ -28,6 +29,7 @@ mod search_filter_service;
 
 
 pub use adventure::{generate_adventure, generate_adventure_for_library};
+pub use browse_drill::{plan_drill, ClickContext, DrillPlan};
 pub use cache_service::{CacheDataSources, CacheSaveConditions, CacheService, CACHE_IDLE_THRESHOLD_SECS, CACHE_SAVE_INTERVAL_SECS};
 pub use folder_service::{FolderColumn, FolderItem, FolderItemType, FolderNavigationState, FolderService};
 pub use library_service::LibraryService;

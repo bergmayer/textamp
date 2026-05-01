@@ -66,16 +66,68 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     let t = theme();
     frame.render_widget(Block::default().style(Style::default().bg(t.colors.bg_primary)), frame.area());
 
-    match state.view {
-        View::Auth => render_auth(frame, state),
-        View::Browse => render_browse(frame, state),
-        View::Queue => render_queue_and_visualizer(frame, state),
-        View::NowPlaying => render_queue_and_visualizer(frame, state),
-        View::Search => render_search(frame, state),
-        View::Similar => render_similar(frame, state),
-        View::Related => render_related(frame, state),
-        View::Help => render_help(frame, state),
-        View::Settings => render_settings(frame, state),
+    // Tall mode: split the frame vertically — Library on top half,
+    // Now Playing on bottom half. Only applies when the user is on a
+    // view that would normally be one of those two; popups / Help /
+    // Settings / Auth still render full-screen because their layouts
+    // assume the whole frame.
+    let tall_eligible = matches!(
+        state.view,
+        View::Browse | View::Queue | View::NowPlaying | View::Settings | View::Help
+    );
+    if state.tall_mode && tall_eligible {
+        use ratatui::layout::{Constraint, Direction, Layout};
+        // Tall split is 40 / 60 — Library on top (40%), Now Playing
+        // on bottom (60%). Now-playing gets the larger share because
+        // its visualizer / queue / artwork need vertical room more
+        // than the library's Miller columns do (which use horizontal
+        // ribbon scrolling). 1-row separator between halves; only
+        // the bottom half paints the transport bar.
+        let split = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Percentage(40),
+                Constraint::Length(1),       // separator row
+                Constraint::Min(5),          // bottom half (60% minus 1 row)
+            ])
+            .split(frame.area());
+
+        // Register the split for mouse hit-testing — clicks crossing
+        // the separator switch the active view (top = Browse, bottom
+        // = NowPlaying).
+        state.hit_regions.borrow_mut().tall_mode_split = Some(crate::ui::hit_regions::TallModeSplit {
+            top: split[0],
+            bottom: split[2],
+        });
+
+        // Top half: whichever view the user is on. Settings / Help
+        // get the top half so the Now Playing visualizer stays visible
+        // below; Browse / Queue / NowPlaying behave as before.
+        match state.view {
+            View::Settings => screens::settings::render(frame, state, split[0]),
+            View::Help => screens::help::render(frame, state, split[0]),
+            _ => render_browse_in(frame, state, split[0], true),
+        }
+
+        // Separator: a horizontal rule across the full width.
+        let sep_text = "\u{2500}".repeat(split[1].width as usize);
+        frame.render_widget(
+            Paragraph::new(sep_text).style(Style::default().fg(t.colors.border)),
+            split[1],
+        );
+        render_queue_and_visualizer_in(frame, state, split[2], false);
+    } else {
+        match state.view {
+            View::Auth => render_auth(frame, state),
+            View::Browse => render_browse(frame, state),
+            View::Queue => render_queue_and_visualizer(frame, state),
+            View::NowPlaying => render_queue_and_visualizer(frame, state),
+            View::Search => render_search(frame, state),
+            View::Similar => render_similar(frame, state),
+            View::Related => render_related(frame, state),
+            View::Help => render_help(frame, state),
+            View::Settings => render_settings(frame, state),
+        }
     }
 
     // Render search popup if active (floating dialog)
@@ -145,9 +197,20 @@ fn render_auth(frame: &mut Frame, state: &AppState) {
 }
 
 fn render_browse(frame: &mut Frame, state: &AppState) {
+    render_browse_in(frame, state, frame.area(), false);
+}
+
+fn render_browse_in(frame: &mut Frame, state: &AppState, area: Rect, skip_transport: bool) {
     use crate::app::state::BrowseCategory;
 
-    let layout = AppLayout::new(frame.area());
+    // In tall mode the top half doesn't paint its own transport bar
+    // — give those 2 rows back to the content so the column stack
+    // gets to use them, and let the caller paint a separator.
+    let layout = if skip_transport {
+        AppLayout::without_transport(area)
+    } else {
+        AppLayout::new(area)
+    };
 
     // Full area for all columns (combine left + right panels)
     let full_area = Rect {
@@ -267,7 +330,16 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
         }
     } else { 0 };
     let ribbon_start = if scrolling_browse {
-        (ribbon_focused + 1).saturating_sub(RIBBON_VISIBLE)
+        let focus_anchored = (ribbon_focused + 1).saturating_sub(RIBBON_VISIBLE);
+        if state.miller_scroll_manual && ribbon_total > RIBBON_VISIBLE {
+            // User has manually positioned the scrollbar. Honour
+            // `miller_scroll_col` until the next keystroke clears
+            // the manual flag.
+            let max_start = ribbon_total.saturating_sub(RIBBON_VISIBLE);
+            state.miller_scroll_col.min(max_start)
+        } else {
+            focus_anchored
+        }
     } else { 0 };
     let ribbon_end = if scrolling_browse {
         (ribbon_start + RIBBON_VISIBLE).min(ribbon_total)
@@ -606,10 +678,23 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
             height: 1,
         };
         frame.render_widget(Paragraph::new(thumb_text).style(thumb_style), thumb_area);
+
+        // Register the rail for click + drag hit-testing. The mouse
+        // handler maps clicks anywhere on the rail to a ribbon-slot
+        // scroll position; dragging the thumb pans continuously.
+        state.hit_regions.borrow_mut().miller_h_scrollbar = Some(crate::ui::hit_regions::MillerHScrollbar {
+            rail: rail_area,
+            thumb_x: full_area.x + filled_x as u16,
+            thumb_w: filled_w as u16,
+            total: ribbon_total,
+            visible: RIBBON_VISIBLE,
+        });
     }
 
     // Chrome: tab bar, transport, command bar
-    render_transport(frame, state, layout.transport);
+    if !skip_transport {
+        render_transport(frame, state, layout.transport);
+    }
 }
 
 /// Combined Queue / Now Playing — matches the GUI's layout where the
@@ -620,9 +705,17 @@ fn render_browse(frame: &mut Frame, state: &AppState) {
 /// same screen so users don't have to flip between two screens to
 /// see what's playing AND what's coming up.
 fn render_queue_and_visualizer(frame: &mut Frame, state: &AppState) {
+    render_queue_and_visualizer_in(frame, state, frame.area(), false);
+}
+
+fn render_queue_and_visualizer_in(frame: &mut Frame, state: &AppState, area_param: Rect, skip_transport: bool) {
     use ratatui::layout::{Constraint, Direction, Layout};
 
-    let layout = FullScreenLayout::new(frame.area());
+    let layout = if skip_transport {
+        FullScreenLayout::without_transport(area_param)
+    } else {
+        FullScreenLayout::new(area_param)
+    };
     let area = layout.content;
 
     // 50/50 vertical split: queue/sidebar/artwork on top, visualizer
@@ -637,7 +730,9 @@ fn render_queue_and_visualizer(frame: &mut Frame, state: &AppState) {
 
     screens::now_playing::render_queue_mode(frame, state, split[0]);
     screens::now_playing::render_visualizer_panel(frame, state, split[1]);
-    render_transport(frame, state, layout.transport);
+    if !skip_transport {
+        render_transport(frame, state, layout.transport);
+    }
 }
 
 fn render_search(frame: &mut Frame, state: &AppState) {
@@ -1072,17 +1167,28 @@ fn is_two_row_column(
 /// Sizing logic:
 /// - `art_width` is capped at 60% of inner width, leaves at least 8
 ///   cells for the title/year on the right, and floors at 8 cells.
-/// - `art_row_height` derives from `art_width / 2` so the cover stays
-///   roughly square (cells are ~2:1 height:width), capped at 16 cells
-///   so it doesn't dominate on very wide columns, and clamped to the
-///   inner area so it never overflows.
+/// - `art_row_height` is sized so at least `TARGET_ROWS` (3) album
+///   rows fit on the canonical screen height (full-screen 15"
+///   MacBook Air in Ghostty). Also capped at `art_width / 2` so the
+///   cover stays roughly square on narrow columns (cells are ~2:1
+///   height:width), and clamped to a 6-cell floor.
 pub(crate) fn compute_art_grid_row(inner_width: u16, inner_height: u16) -> (u16, u16) {
+    const TARGET_ROWS: u16 = 3;
+    // Hard cap on row height — the row count is the limiting factor,
+    // not the column width. Without this cap, wide columns settled on
+    // rows ~22 cells tall and only 2 albums fit on the canonical
+    // screen (full-screen 15" MacBook Air in Ghostty). 11 cells is
+    // tuned so 3 covers fit on a typical Ghostty session of ~36
+    // inner rows; taller terminals get 4+, narrower ones still get
+    // ≥ 1 with the lower bound below.
+    const MAX_ROW_H: u16 = 11;
     let max_art = ((inner_width as u32 * 3 / 5) as u16).max(20);
     let art_width = max_art.min(inner_width.saturating_sub(8)).max(8);
-    let art_row_height = (art_width / 2)
-        .max(6)
-        .min(16)
-        .min(inner_height.saturating_sub(1).max(1));
+    let height_bound = (inner_height / TARGET_ROWS).max(1);
+    let art_row_height = height_bound
+        .min(art_width / 2)
+        .min(MAX_ROW_H)
+        .max(6);
     (art_row_height, art_width)
 }
 
@@ -1453,6 +1559,11 @@ fn render_track_details_pane(
     // pane has keyboard focus and `track_pane_index == 0`. Anchored
     // to the right side of the row so it lines up with the GUI's
     // primary-action button on its track-details pane.
+    //
+    // The Play row is pinned at the top of the pane; everything else
+    // (artwork, metadata, similar list) renders in the scrollable
+    // region below it. This keeps the primary action one keystroke
+    // away even when the user has scrolled deep into similar tracks.
     let play_label = " ▶  Play Track ";
     let play_w = (play_label.chars().count() as u16).min(inner.width);
     let play_x = inner.x + inner.width.saturating_sub(play_w);
@@ -1478,44 +1589,53 @@ fn render_track_details_pane(
         play_area,
     );
 
-    // Artwork box: square in visual cells (terminal cells are ~2:1
-    // height:width, so width = 2 * height for a square look).
-    let art_max_w = inner.width;
-    let art_max_h = inner.height.saturating_sub(8);
-    let art_w = art_max_w.min(art_max_h.saturating_mul(2)).max(8);
-    let art_h = (art_w / 2).max(4).min(art_max_h);
-    let art_x = inner.x + inner.width.saturating_sub(art_w) / 2;
-    let art_y = inner.y + 2;
-    let art_area = Rect {
-        x: art_x,
-        y: art_y,
-        width: art_w,
-        height: art_h,
-    };
-
-    let mut rendered = false;
-    if let Some(album_key) = track.parent_rating_key.as_deref() {
-        if let Some(data) = state.artwork.grid_cache.get(album_key) {
-            rendered = super::artwork::render_grid_image(frame, art_area, album_key, data);
-        }
+    // Scrollable body region below the pinned Play row. Reserve the
+    // rightmost column for the scrollbar so content doesn't bleed
+    // under it.
+    let body_y = inner.y + 1;
+    let body_h = inner.height.saturating_sub(1);
+    if body_h == 0 {
+        // No room for a body; register hit regions and return.
+        let mut hr = state.hit_regions.borrow_mut();
+        hr.track_pane = Some(crate::ui::hit_regions::TrackPaneRegions {
+            outer: area,
+            play_button: play_area,
+            similar_rows: Vec::new(),
+            close_x: close_x_rect,
+        });
+        return;
     }
-    if !rendered {
-        // Centred "(no cover)" placeholder.
-        let label = "(no cover)";
-        let lw = label.chars().count() as u16;
-        let cx = art_area.x + art_area.width.saturating_sub(lw) / 2;
-        let cy = art_area.y + art_area.height / 2;
-        frame.render_widget(
-            Paragraph::new(label).style(Style::default().fg(t.colors.fg_muted)),
-            Rect { x: cx, y: cy, width: lw, height: 1 },
-        );
-    }
+    let scrollbar_w: u16 = if body_h >= 4 { 1 } else { 0 };
+    let body_w = inner.width.saturating_sub(scrollbar_w);
 
-    // Metadata block below artwork. One row per field; each field
-    // middle-truncated to the inner width so long titles don't bleed
-    // past the pane's edge.
-    let info_y = art_area.y + art_area.height + 1;
-    let max_w = inner.width as usize;
+    // Artwork: scale to roughly half the body height so similar
+    // tracks have room below it. In tall mode the body is short
+    // (~6-10 rows), so a quarter of that gives a small but
+    // recognisable thumbnail. Cap at 12 cells on tall panes so the
+    // artwork never dominates.
+    let art_max_h_by_body = (body_h / 2).max(2);
+    let art_max_h_cap: u16 = 12;
+    let art_max_h = art_max_h_by_body.min(art_max_h_cap);
+    let art_max_w = body_w;
+    let art_w = art_max_w.min(art_max_h.saturating_mul(2)).max(4);
+    let art_h = (art_w / 2).max(2).min(art_max_h);
+
+    // Build the list of content rows. Each entry is `(content_y,
+    // render_fn)` where `content_y` is the row offset inside the
+    // virtual body buffer (0 = first row of body, just below Play).
+    // Total content height = `content_h`. Items whose `content_y`
+    // is outside [scroll, scroll + body_h) are skipped.
+    //
+    // Layout (content coords):
+    //   row 0       : (blank — separates Play from artwork)
+    //   1..1+art_h  : artwork
+    //   1+art_h     : (blank)
+    //   2+art_h..   : metadata lines
+    //   ...         : (blank)
+    //   ...         : "Sonically Similar" header
+    //   ...         : similar rows
+
+    let max_w = body_w as usize;
     let mut lines: Vec<(Style, String)> = Vec::new();
 
     // Title (bold/accent).
@@ -1574,98 +1694,202 @@ fn render_track_details_pane(
         ));
     }
 
-    let info_max_lines = lines.len() as u16;
-    for (i, (style, text)) in lines.iter().enumerate() {
-        let row = info_y + i as u16;
-        if row >= inner.y + inner.height { break; }
-        let line_area = Rect {
-            x: inner.x,
-            y: row,
-            width: inner.width,
-            height: 1,
-        };
-        frame.render_widget(
-            Paragraph::new(text.as_str()).style(*style),
-            line_area,
-        );
+    // ── Compute virtual content layout ──────────────────────────────
+    // Content rows are addressed in body-relative coordinates (0 = the
+    // first row of the body region, just below the pinned Play row).
+    // Layout: blank, artwork, blank, metadata lines, blank, "Sonically
+    // Similar" header, similar rows (or placeholder).
+    let art_top: u16 = 1;                      // 1-row gap after Play
+    let art_bot: u16 = art_top + art_h;        // exclusive
+    let info_top: u16 = art_bot + 1;           // 1-row gap after art
+    let info_bot: u16 = info_top + lines.len() as u16;
+    let header_y: u16 = info_bot + 1;          // 1-row gap after info
+    let list_y: u16 = header_y + 1;
+    let similar_data = state.track_pane_similar.get(&track.rating_key);
+    let similar_count: u16 = similar_data
+        .map(|v| if v.is_empty() { 1 } else { v.len() as u16 })
+        .unwrap_or(1); // "Loading…" placeholder occupies 1 row
+    let content_h: u16 = list_y + similar_count;
+
+    // Auto-scroll: when the pane has focus and the user has highlighted
+    // a similar row that lives outside the visible window, slide the
+    // window so the row is on screen. Selection at index 0 (Play) is
+    // pinned at the top and never affects scroll.
+    let selected_content_y: Option<u16> = if pane_focused && pane_idx > 0 {
+        // similar_y(i) = list_y + i (where i = pane_idx - 1)
+        Some(list_y + (pane_idx as u16 - 1))
+    } else {
+        None
+    };
+    let max_scroll = content_h.saturating_sub(body_h);
+    let scroll: u16 = match selected_content_y {
+        Some(target) if target < 0_u16.saturating_add(0) => 0,
+        Some(target) if target >= body_h => {
+            let want = target.saturating_sub(body_h - 1);
+            want.min(max_scroll)
+        }
+        _ => 0,
+    };
+
+    // Helper: convert content_y → screen_y, returning None if the row
+    // is clipped (above or below the body window).
+    let to_screen = |cy: u16| -> Option<u16> {
+        if cy < scroll { return None; }
+        let off = cy - scroll;
+        if off >= body_h { return None; }
+        Some(body_y + off)
+    };
+
+    // Artwork: render only if any of its rows fall in the visible
+    // window. ratatui-image draws into a single sub-rect, so we just
+    // clamp the rect to the visible band.
+    let art_x = inner.x + body_w.saturating_sub(art_w) / 2;
+    let visible_art_top = art_top.max(scroll);
+    let visible_art_bot = art_bot.min(scroll + body_h);
+    if visible_art_top < visible_art_bot {
+        let screen_top = body_y + (visible_art_top - scroll);
+        // Only call the image renderer when the full artwork fits;
+        // partial slices look ugly with cell-quantised glyphs. Show
+        // the (no cover) placeholder when partially clipped.
+        let mut rendered_art = false;
+        if visible_art_top == art_top && visible_art_bot == art_bot {
+            let art_area = Rect {
+                x: art_x,
+                y: screen_top,
+                width: art_w,
+                height: art_h,
+            };
+            if let Some(album_key) = track.parent_rating_key.as_deref() {
+                if let Some(data) = state.artwork.grid_cache.get(album_key) {
+                    rendered_art = super::artwork::render_grid_image(frame, art_area, album_key, data);
+                }
+            }
+            if !rendered_art {
+                let label = "(no cover)";
+                let lw = label.chars().count() as u16;
+                let cx = art_area.x + art_area.width.saturating_sub(lw) / 2;
+                let cy = art_area.y + art_area.height / 2;
+                frame.render_widget(
+                    Paragraph::new(label).style(Style::default().fg(t.colors.fg_muted)),
+                    Rect { x: cx, y: cy, width: lw, height: 1 },
+                );
+            }
+        } else {
+            // Partially clipped — paint a blank-ish slice so any
+            // previous frame's glyphs don't bleed through.
+            for r in visible_art_top..visible_art_bot {
+                let sy = body_y + (r - scroll);
+                frame.render_widget(
+                    Paragraph::new("").style(Style::default().bg(t.colors.bg_primary)),
+                    Rect { x: inner.x, y: sy, width: body_w, height: 1 },
+                );
+            }
+        }
     }
 
-    // Sonically Similar list — populated lazily by the Tick handler
-    // via `DataAction::LoadTrackPaneSimilar`. While the cache is
-    // empty for this track, render a "Loading…" placeholder; once
-    // populated, list each similar track on its own row. Rows are
-    // clickable + keyboard-navigable when the pane has focus
-    // (track_pane_index 1..=N highlights the matching row).
-    let mut similar_rows: Vec<(Rect, usize)> = Vec::new();
-    let similar_y = info_y + info_max_lines + 1;
-    if similar_y < inner.y + inner.height {
-        let header_area = Rect {
-            x: inner.x,
-            y: similar_y,
-            width: inner.width,
-            height: 1,
-        };
+    // Metadata lines.
+    for (i, (style, text)) in lines.iter().enumerate() {
+        let cy = info_top + i as u16;
+        if let Some(sy) = to_screen(cy) {
+            frame.render_widget(
+                Paragraph::new(text.as_str()).style(*style),
+                Rect { x: inner.x, y: sy, width: body_w, height: 1 },
+            );
+        }
+    }
+
+    // "Sonically Similar" header.
+    if let Some(sy) = to_screen(header_y) {
         frame.render_widget(
             Paragraph::new("Sonically Similar").style(
                 Style::default()
                     .fg(t.colors.fg_accent)
                     .add_modifier(ratatui::style::Modifier::BOLD),
             ),
-            header_area,
+            Rect { x: inner.x, y: sy, width: body_w, height: 1 },
         );
+    }
 
-        let list_y = similar_y + 1;
-        let list_max_rows = (inner.y + inner.height).saturating_sub(list_y);
+    // Similar rows (or placeholder).
+    let mut similar_rows: Vec<(Rect, usize)> = Vec::new();
+    match similar_data {
+        Some(list) if list.is_empty() => {
+            if let Some(sy) = to_screen(list_y) {
+                frame.render_widget(
+                    Paragraph::new("(no similar tracks found)")
+                        .style(Style::default().fg(t.colors.fg_muted)),
+                    Rect { x: inner.x, y: sy, width: body_w, height: 1 },
+                );
+            }
+        }
+        Some(list) => {
+            for (i, sim) in list.iter().enumerate() {
+                let cy = list_y + i as u16;
+                let sy = match to_screen(cy) { Some(v) => v, None => continue };
+                let label = format!(
+                    "\u{2022} {} \u{2014} {}",
+                    sim.title,
+                    sim.track_artist(),
+                );
+                let truncated = truncate_middle(&label, max_w);
+                let row_focused = pane_focused && pane_idx == i + 1;
+                let style = if row_focused {
+                    Style::default()
+                        .fg(t.colors.selection_text)
+                        .bg(t.colors.bg_selection)
+                } else {
+                    Style::default().fg(t.colors.fg_primary)
+                };
+                let row_area = Rect {
+                    x: inner.x,
+                    y: sy,
+                    width: body_w,
+                    height: 1,
+                };
+                frame.render_widget(
+                    Paragraph::new(truncated).style(style),
+                    row_area,
+                );
+                similar_rows.push((row_area, i));
+            }
+        }
+        None => {
+            if let Some(sy) = to_screen(list_y) {
+                frame.render_widget(
+                    Paragraph::new("Loading\u{2026}")
+                        .style(Style::default().fg(t.colors.fg_muted)),
+                    Rect { x: inner.x, y: sy, width: body_w, height: 1 },
+                );
+            }
+        }
+    }
 
-        match state.track_pane_similar.get(&track.rating_key) {
-            Some(list) if list.is_empty() => {
-                if list_max_rows > 0 {
-                    frame.render_widget(
-                        Paragraph::new("(no similar tracks found)")
-                            .style(Style::default().fg(t.colors.fg_muted)),
-                        Rect { x: inner.x, y: list_y, width: inner.width, height: 1 },
-                    );
-                }
-            }
-            Some(list) => {
-                for (i, sim) in list.iter().take(list_max_rows as usize).enumerate() {
-                    let row = list_y + i as u16;
-                    let label = format!(
-                        "\u{2022} {} \u{2014} {}",
-                        sim.title,
-                        sim.track_artist(),
-                    );
-                    let truncated = truncate_middle(&label, max_w);
-                    let row_focused = pane_focused && pane_idx == i + 1;
-                    let style = if row_focused {
-                        Style::default()
-                            .fg(t.colors.selection_text)
-                            .bg(t.colors.bg_selection)
-                    } else {
-                        Style::default().fg(t.colors.fg_primary)
-                    };
-                    let row_area = Rect {
-                        x: inner.x,
-                        y: row,
-                        width: inner.width,
-                        height: 1,
-                    };
-                    frame.render_widget(
-                        Paragraph::new(truncated).style(style),
-                        row_area,
-                    );
-                    similar_rows.push((row_area, i));
-                }
-            }
-            None => {
-                if list_max_rows > 0 {
-                    frame.render_widget(
-                        Paragraph::new("Loading\u{2026}")
-                            .style(Style::default().fg(t.colors.fg_muted)),
-                        Rect { x: inner.x, y: list_y, width: inner.width, height: 1 },
-                    );
-                }
-            }
+    // Vertical scrollbar on the right edge of the body when content
+    // overflows the visible region. Mirrors the column scrollbar
+    // style used elsewhere in the TUI.
+    if scrollbar_w > 0 && content_h > body_h {
+        use crate::ui::widgets::scrollbar::calc_thumb;
+        let (thumb_size, thumb_pos) = calc_thumb(
+            content_h as usize,
+            body_h as usize,
+            scroll as usize,
+            body_h as usize,
+        );
+        let bar_x = inner.x + body_w;
+        for r in 0..body_h {
+            let sy = body_y + r;
+            let in_thumb = (r as usize) >= thumb_pos
+                && (r as usize) < thumb_pos + thumb_size;
+            let glyph = if in_thumb { "\u{2588}" } else { "\u{2502}" };
+            let style = if in_thumb {
+                Style::default().fg(t.colors.fg_accent)
+            } else {
+                Style::default().fg(t.colors.border)
+            };
+            frame.render_widget(
+                Paragraph::new(glyph).style(style),
+                Rect { x: bar_x, y: sy, width: 1, height: 1 },
+            );
         }
     }
 
@@ -2515,12 +2739,16 @@ fn render_album_art_grid(
         return;
     }
 
-    // Check if there's a spacer between item at `idx` and the next item
-    // (spacer appears after the last consecutive one-row item before an art item)
+    // Spacer between consecutive items of *different* row-height
+    // class — drops a blank row at the boundary between art-height
+    // album rows and one-row pinned action rows. Works in either
+    // direction (one-row first or art first), so flipping the order
+    // of pinned rows to the bottom of the column still gets the
+    // visual separator.
     let has_spacer_after = |idx: usize| -> bool {
         idx + 1 < total_items
             && is_one_row(items_with_indices[idx].1)
-            && !is_one_row(items_with_indices[idx + 1].1)
+                != is_one_row(items_with_indices[idx + 1].1)
     };
 
     // Compute how many items are visible from a given scroll offset
@@ -2630,7 +2858,7 @@ fn render_album_art_grid(
                 BrowseItem::Album { key, .. } => Some(key.as_str()),
                 BrowseItem::Artist { key, .. } => Some(key.as_str()),
                 BrowseItem::ArtistRadio { artist_key, .. } => Some(artist_key.as_str()),
-                BrowseItem::AllTracks { artist_key, .. } => Some(artist_key.as_str()),
+                BrowseItem::AllTracks { scope, .. } => scope.artist_key(),
                 _ => None,
             };
             if let Some(key) = art_key {

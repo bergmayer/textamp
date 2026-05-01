@@ -333,8 +333,12 @@ pub fn get_artist_for_bio(state: &crate::app::state::AppState) -> Option<(String
                             BrowseItem::Artist { key, title, .. } => {
                                 return Some((key.clone(), title.clone()));
                             }
-                            BrowseItem::AllTracks { artist_key, artist_name, .. } => {
-                                return Some((artist_key.clone(), artist_name.clone()));
+                            BrowseItem::AllTracks { scope, .. } => {
+                                if let (Some(artist_key), Some(artist_name)) =
+                                    (scope.artist_key(), scope.artist_name())
+                                {
+                                    return Some((artist_key.to_string(), artist_name.to_string()));
+                                }
                             }
                             BrowseItem::ArtistRadio { artist_key, artist_name, .. } => {
                                 return Some((artist_key.clone(), artist_name.clone()));

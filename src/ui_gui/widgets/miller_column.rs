@@ -660,8 +660,10 @@ fn art_key_for(item: &BrowseItem) -> Option<&str> {
         BrowseItem::CompilationTracks { artist_key, .. } => Some(artist_key.as_str()),
         // All Tracks is a virtual album for the artist — render it
         // album-style with the artist's thumbnail (preloaded under
-        // `artist_key` by `collect_art_to_load`).
-        BrowseItem::AllTracks { artist_key, .. } => Some(artist_key.as_str()),
+        // `artist_key` by `collect_art_to_load`). The library- and
+        // all-comps scopes have no per-artist key, so the row falls
+        // back to the placeholder block.
+        BrowseItem::AllTracks { scope, .. } => scope.artist_key(),
         _ => None,
     }
 }
@@ -721,7 +723,10 @@ fn label_for(item: &BrowseItem, show_track_artist: bool) -> String {
             // header of the playlist's tracks column when it opens.
             sanitize(title)
         }
-        BrowseItem::AllTracks { artist_name, .. } => format!("All Tracks - {}", sanitize(artist_name)),
+        BrowseItem::AllTracks { scope, .. } => match scope.artist_name() {
+            Some(name) => format!("All Tracks - {}", sanitize(name)),
+            None => "All Tracks".to_string(),
+        },
         BrowseItem::AllArtists => "All Artists".to_string(),
         BrowseItem::ArtistRadio { artist_name, .. } => format!("Artist Radio - {}", sanitize(artist_name)),
         BrowseItem::Compilations => "Compilations".to_string(),

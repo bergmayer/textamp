@@ -1,5 +1,6 @@
 //! Utility functions.
 
+pub mod help_text;
 mod lockfile;
 mod logging;
 pub mod paths;

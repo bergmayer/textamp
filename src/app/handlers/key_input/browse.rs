@@ -45,16 +45,22 @@ pub(super) fn handle_browse_keys(key: event::KeyEvent, state: &mut AppState) -> 
             KeyCode::Backspace => {
                 return vec![SearchAction::DeleteListFilterChar.into()];
             }
-            // Up/Down/Enter navigate filtered results
-            KeyCode::Up if focused_on_filter_column => {
+            // Up/Down navigate the filter results unconditionally.
+            // Even when focus has wandered off to a child column,
+            // pressing Up returns to the filter column AND moves
+            // selection in one step — instead of the previous
+            // two-step where the first Up only re-focused and you
+            // had to press Up again to actually navigate.
+            KeyCode::Up => {
+                if !focused_on_filter_column {
+                    truncate_filter_right_columns(state);
+                }
                 return vec![SearchAction::FilteredListUp.into()];
             }
-            KeyCode::Up if !focused_on_filter_column => {
-                // Move focus back to the filter column so user can navigate results
-                truncate_filter_right_columns(state);
-                return vec![];
-            }
-            KeyCode::Down if focused_on_filter_column => {
+            KeyCode::Down => {
+                if !focused_on_filter_column {
+                    truncate_filter_right_columns(state);
+                }
                 return vec![SearchAction::FilteredListDown.into()];
             }
             // Enter on the filter input opens the global Search
@@ -194,7 +200,7 @@ pub(super) fn handle_browse_keys(key: event::KeyEvent, state: &mut AppState) -> 
                         vec![FolderAction::LoadFolderRoot.into()]
                     }
                     cat if cat.is_tag_section() => {
-                        vec![BrowseAction::LoadTagAlbums.into()]
+                        vec![BrowseAction::LoadTagAlbums { replace_child: false }.into()]
                     }
                     _ => vec![],
                 }
@@ -361,15 +367,18 @@ fn drill_section_row(state: &mut AppState, take_focus: bool) -> Vec<Action> {
     let Some(row) = rows.get(state.category_column_index).copied() else {
         return vec![];
     };
-    if !take_focus {
+    let auto_drill = !take_focus;
+    if auto_drill {
         note_motion_for_lazy_art(state);
-        state.auto_drill_pending = true;
     } else {
         state.category_column_focused = false;
     }
     match row {
         CategoryRow::Category(cat) => {
-            vec![NavigationAction::SetCategory(cat).into()]
+            vec![NavigationAction::SetCategory {
+                category: cat,
+                preserve_sections_focus: auto_drill,
+            }.into()]
         }
         CategoryRow::Playlist(i) => {
             let Some(p) = state.library.playlists.get(i) else { return vec![] };
@@ -383,7 +392,7 @@ fn drill_section_row(state: &mut AppState, take_focus: bool) -> Vec<Action> {
             // moved it, otherwise Down past the categories block
             // would teleport the cursor on every keypress.
             let row_idx = state.category_column_index;
-            state.set_browse_category(BrowseCategory::Playlists);
+            state.set_browse_category(BrowseCategory::Playlists, auto_drill);
             state.category_column_index = row_idx;
             if let Some(col) = state.playlist_nav.columns.get_mut(0) {
                 if let Some(idx) = col.items.iter().position(|it| it.key() == key.as_str()) {
@@ -395,7 +404,10 @@ fn drill_section_row(state: &mut AppState, take_focus: bool) -> Vec<Action> {
             }
             state.playlist_nav.truncate_right();
             state.library.selected_album_title = title;
-            vec![MillerAction::LoadPlaylistTracksForMiller { playlist_key: key }.into()]
+            vec![MillerAction::LoadPlaylistTracksForMiller {
+                playlist_key: key,
+                replace_child: auto_drill,
+            }.into()]
         }
         CategoryRow::Divider => vec![],
     }
@@ -651,7 +663,10 @@ pub(super) fn handle_folder_browse_keys(key: event::KeyEvent, state: &mut AppSta
                 if let Some(item) = folder_state.selected_item().cloned() {
                     match item.item_type {
                         FolderItemType::Folder => {
-                            return vec![FolderAction::NavigateIntoFolder(item.key).into()];
+                            return vec![FolderAction::NavigateIntoFolder {
+                                folder_key: item.key,
+                                replace_child: false,
+                            }.into()];
                         }
                         FolderItemType::Track if key.code == KeyCode::Enter => {
                             // Enter: play this track + all following tracks (replaces queue)
@@ -772,8 +787,7 @@ pub(super) fn handle_artist_browse_keys(key: event::KeyEvent, state: &mut AppSta
         // click would do.
         if (is_up_down || is_letter_jump) && had_child {
             note_motion_for_lazy_art(state);
-            state.auto_drill_pending = true;
-            let mut drill = drill_actions_for_focused_artist_item(state, false);
+            let mut drill = drill_actions_for_focused_artist_item(state, false, true);
             actions.append(&mut drill);
             return actions;
         }
@@ -792,7 +806,7 @@ pub(super) fn handle_artist_browse_keys(key: event::KeyEvent, state: &mut AppSta
     // Handle Enter/Right - drill down into containers; Enter plays tracks
     if matches!(key.code, KeyCode::Enter | KeyCode::Right) {
         let allow_radio = key.code == KeyCode::Enter;
-        return drill_actions_for_focused_artist_item(state, allow_radio);
+        return drill_actions_for_focused_artist_item(state, allow_radio, false);
     }
 
     vec![]
@@ -835,43 +849,51 @@ fn had_open_dependent(
 pub(super) fn drill_actions_for_focused_artist_item(
     state: &mut AppState,
     allow_radio: bool,
+    replace_child: bool,
 ) -> Vec<Action> {
     use crate::app::state::BrowseItem;
     let Some(item) = state.artist_nav.selected_item().cloned() else { return vec![] };
     match item {
         BrowseItem::Artist { key, title, .. } => {
             state.library.selected_artist_name = title;
-            vec![MillerAction::LoadArtistAlbumsForMiller { artist_key: key }.into()]
+            vec![MillerAction::LoadArtistAlbumsForMiller { artist_key: key, replace_child }.into()]
         }
         BrowseItem::Album { key, title, .. } => {
             state.library.selected_album_title = title;
-            vec![MillerAction::LoadAlbumTracksForMiller { album_key: key }.into()]
+            vec![MillerAction::LoadAlbumTracksForMiller { album_key: key, replace_child }.into()]
         }
-        BrowseItem::AllArtists => vec![MillerAction::LoadAllAlbumsForMiller.into()],
+        BrowseItem::AllArtists => vec![MillerAction::LoadAllAlbumsForMiller { replace_child }.into()],
         BrowseItem::ArtistRadio { artist_key, artist_name, .. } if allow_radio => {
             vec![RadioAction::StartPlexRadio { key: artist_key, title: artist_name }.into()]
         }
         BrowseItem::ArtistRadio { .. } => vec![],
-        BrowseItem::AllTracks { artist_key, artist_name, .. } => {
-            if artist_key == "__all_library__" {
-                state.library.selected_album_title = "All Tracks".to_string();
-                vec![MillerAction::LoadAllLibraryTracksForMiller.into()]
-            } else if artist_key == "__all_comp__" {
-                state.library.selected_album_title = "All Tracks".to_string();
-                vec![MillerAction::LoadAllCompilationTracksForMiller.into()]
-            } else if let Some(real_key) = artist_key.strip_prefix("__comp_tracks:") {
-                vec![MillerAction::LoadCompilationAllTracksForMiller {
-                    artist_key: real_key.to_string(),
-                    artist_name,
-                }.into()]
-            } else {
-                state.library.selected_album_title = format!("All tracks by {}", artist_name);
-                vec![MillerAction::LoadArtistAllTracksForMiller { artist_key }.into()]
+        BrowseItem::AllTracks { scope, .. } => {
+            use crate::app::state::AllTracksScope;
+            match scope {
+                AllTracksScope::Library => {
+                    state.library.selected_album_title = "All Tracks".to_string();
+                    vec![MillerAction::LoadAllLibraryTracksForMiller { replace_child }.into()]
+                }
+                AllTracksScope::AllCompilations => {
+                    state.library.selected_album_title = "All Tracks".to_string();
+                    vec![MillerAction::LoadAllCompilationTracksForMiller { replace_child }.into()]
+                }
+                AllTracksScope::CompilationsByArtist { artist_key, artist_name } => {
+                    vec![MillerAction::LoadCompilationAllTracksForMiller {
+                        artist_key,
+                        artist_name,
+                        replace_child,
+                    }.into()]
+                }
+                AllTracksScope::Artist { artist_key, artist_name } => {
+                    state.library.selected_album_title = format!("All tracks by {}", artist_name);
+                    vec![MillerAction::LoadArtistAllTracksForMiller { artist_key, replace_child }.into()]
+                }
             }
         }
-        BrowseItem::Compilations => vec![MillerAction::LoadCompilationsForMiller.into()],
+        BrowseItem::Compilations => vec![MillerAction::LoadCompilationsForMiller { replace_child }.into()],
         BrowseItem::CompilationTracks { artist_key, artist_name } => {
-            vec![MillerAction::LoadCompilationAlbumsForMiller { artist_key, artist_name }.into()]
+            vec![MillerAction::LoadCompilationAlbumsForMiller { artist_key, artist_name, replace_child }.into()]
         }
         BrowseItem::Track { .. } => {
             // The pane is a passive viewer that follows the focused
@@ -884,7 +906,7 @@ pub(super) fn drill_actions_for_focused_artist_item(
             //     tracks / Play. Right is the explicit "cross to
             //     the next column" gesture; with the pane already
             //     visible, that next column is the pane itself.
-            if state.auto_drill_pending {
+            if replace_child {
                 vec![]
             } else if state.track_pane_open {
                 state.track_pane_focused = true;
@@ -919,8 +941,7 @@ pub(super) fn handle_genre_browse_keys(key: event::KeyEvent, state: &mut AppStat
     if let Some(mut actions) = handle_browse_nav_keys(key, &mut state.tag_nav) {
         if (is_up_down || is_letter_jump) && had_child {
             note_motion_for_lazy_art(state);
-            state.auto_drill_pending = true;
-            let mut drill = drill_actions_for_focused_genre_item(state);
+            let mut drill = drill_actions_for_focused_genre_item(state, true);
             actions.append(&mut drill);
             return actions;
         }
@@ -936,14 +957,17 @@ pub(super) fn handle_genre_browse_keys(key: event::KeyEvent, state: &mut AppStat
 
     // Handle Enter/Right - drill into containers; Enter plays tracks
     if matches!(key.code, KeyCode::Enter | KeyCode::Right) {
-        return drill_actions_for_focused_genre_item(state);
+        return drill_actions_for_focused_genre_item(state, false);
     }
 
     vec![]
 }
 
 /// Drill action for the currently-selected genre_nav row.
-pub(super) fn drill_actions_for_focused_genre_item(state: &mut AppState) -> Vec<Action> {
+pub(super) fn drill_actions_for_focused_genre_item(
+    state: &mut AppState,
+    replace_child: bool,
+) -> Vec<Action> {
     use crate::app::state::BrowseItem;
     let Some(item) = state.tag_nav.selected_item().cloned() else { return vec![] };
     match item {
@@ -953,7 +977,7 @@ pub(super) fn drill_actions_for_focused_genre_item(state: &mut AppState) -> Vec<
             vec![]
         }
         BrowseItem::Genre { key, .. } => {
-            vec![MillerAction::LoadGenreAlbumsForMiller { genre_key: key }.into()]
+            vec![MillerAction::LoadGenreAlbumsForMiller { genre_key: key, replace_child }.into()]
         }
         BrowseItem::Album { key, title, .. } => {
             if let Some(col) = state.tag_nav.focused() {
@@ -965,12 +989,12 @@ pub(super) fn drill_actions_for_focused_genre_item(state: &mut AppState) -> Vec<
                 }
             }
             state.library.selected_album_title = title;
-            vec![MillerAction::LoadGenreTracksForMiller { album_key: key }.into()]
+            vec![MillerAction::LoadGenreTracksForMiller { album_key: key, replace_child }.into()]
         }
         BrowseItem::Track { .. } => {
             // See artist drill helper — passive viewer; opens
             // without taking focus, second drill enters the pane.
-            if state.auto_drill_pending {
+            if replace_child {
                 vec![]
             } else if state.track_pane_open {
                 state.track_pane_focused = true;
@@ -1005,8 +1029,7 @@ pub(super) fn handle_playlist_browse_keys(key: event::KeyEvent, state: &mut AppS
     if let Some(mut actions) = handle_browse_nav_keys(key, &mut state.playlist_nav) {
         if (is_up_down || is_letter_jump) && had_child {
             note_motion_for_lazy_art(state);
-            state.auto_drill_pending = true;
-            let mut drill = drill_actions_for_focused_playlist_item(state);
+            let mut drill = drill_actions_for_focused_playlist_item(state, true);
             actions.append(&mut drill);
             return actions;
         }
@@ -1022,7 +1045,7 @@ pub(super) fn handle_playlist_browse_keys(key: event::KeyEvent, state: &mut AppS
 
     // Handle Enter/Right - drill into containers; Enter plays tracks
     if matches!(key.code, KeyCode::Enter | KeyCode::Right) {
-        return drill_actions_for_focused_playlist_item(state);
+        return drill_actions_for_focused_playlist_item(state, false);
     }
 
     vec![]
@@ -1031,27 +1054,35 @@ pub(super) fn handle_playlist_browse_keys(key: event::KeyEvent, state: &mut AppS
 /// Drill action for the currently-selected folder_nav row. Folder
 /// rows navigate into the folder; track rows are NOT auto-drilled
 /// (auto-drill should never start playback as a side-effect).
-pub(super) fn drill_actions_for_focused_folder_item(state: &mut AppState) -> Vec<Action> {
+pub(super) fn drill_actions_for_focused_folder_item(
+    state: &mut AppState,
+    replace_child: bool,
+) -> Vec<Action> {
     use crate::services::FolderItemType;
     let item = state.folder_state.as_ref()
         .and_then(|fs| fs.selected_item())
         .cloned();
     if let Some(item) = item {
         if item.item_type == FolderItemType::Folder {
-            state.auto_drill_pending = true;
-            return vec![FolderAction::NavigateIntoFolder(item.key).into()];
+            return vec![FolderAction::NavigateIntoFolder {
+                folder_key: item.key,
+                replace_child,
+            }.into()];
         }
     }
     vec![]
 }
 
 /// Drill action for the currently-selected playlist_nav row.
-pub(super) fn drill_actions_for_focused_playlist_item(state: &mut AppState) -> Vec<Action> {
+pub(super) fn drill_actions_for_focused_playlist_item(
+    state: &mut AppState,
+    replace_child: bool,
+) -> Vec<Action> {
     use crate::app::state::BrowseItem;
     let Some(item) = state.playlist_nav.selected_item().cloned() else { return vec![] };
     match item {
         BrowseItem::Playlist { key, .. } => {
-            vec![MillerAction::LoadPlaylistTracksForMiller { playlist_key: key }.into()]
+            vec![MillerAction::LoadPlaylistTracksForMiller { playlist_key: key, replace_child }.into()]
         }
         BrowseItem::Album { key, title, .. } => {
             if let Some(col) = state.playlist_nav.focused() {
@@ -1063,12 +1094,12 @@ pub(super) fn drill_actions_for_focused_playlist_item(state: &mut AppState) -> V
                 }
             }
             state.library.selected_album_title = title;
-            vec![MillerAction::LoadAlbumTracksForMiller { album_key: key }.into()]
+            vec![MillerAction::LoadAlbumTracksForMiller { album_key: key, replace_child }.into()]
         }
         BrowseItem::Track { .. } => {
             // See artist drill helper — passive viewer; opens
             // without taking focus, second drill enters the pane.
-            if state.auto_drill_pending {
+            if replace_child {
                 vec![]
             } else if state.track_pane_open {
                 state.track_pane_focused = true;

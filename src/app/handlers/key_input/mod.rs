@@ -83,6 +83,16 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
     state.scroll.browse_click_time = None;
     state.scroll.browse_last_click = None;
 
+    // Any keystroke re-engages focus-anchored ribbon scrolling: the
+    // user has switched modalities from mouse-scrolling to
+    // keyboard-driving, so the manual scroll position becomes stale.
+    // TUI-only state — the GUI uses iced's scrollable, which manages
+    // its own offset, so the gate matches the field declaration.
+    #[cfg(feature = "tui")]
+    {
+        state.miller_scroll_manual = false;
+    }
+
     // Track modifier bar display.
     // Alt+/ or Ctrl+/ toggles the contextual shortcut bar on/off.
     // Any non-modifier key immediately dismisses it.
@@ -238,6 +248,19 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
         (KeyModifiers::ALT,     KeyCode::F(4))      => true,
         _ => false,
     };
+    // Contexts where global single-character shortcuts (`?`, `,`) and
+    // function keys (F1, F2) need to defer to a text-input or popup
+    // handler that owns the keystroke. The dialog handlers above
+    // (input dialog, confirm dialog) already returned by now, so
+    // they're not in this list.
+    let in_text_capture = state.list_filter.active
+        || state.palette.open
+        || state.popups.search_active
+        || state.popups.radio_launcher.is_some()
+        || state.popups.adventure_launcher.is_some()
+        || state.popups.artist_radio_picker.is_some()
+        || state.popups.library_picker_active
+        || state.settings_state.editing_credential.is_some();
     match (key.modifiers, key.code) {
         _ if is_quit_keypress => {
             // Quit immediately. The previous confirmation dialog was
@@ -298,7 +321,7 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
             if state.view == View::Browse && state.browse_category == BrowseCategory::AlbumGenres {
                 return vec![];
             }
-            state.set_browse_category(BrowseCategory::AlbumGenres);
+            state.set_browse_category(BrowseCategory::AlbumGenres, false);
             reset_right_panel(state);
             return vec![
                 BrowseAction::RefreshTagView.into(),
@@ -320,7 +343,7 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
                 return vec![];
             }
             // Not in library view - switch to it and reset right panel
-            state.set_browse_category(BrowseCategory::Library);
+            state.set_browse_category(BrowseCategory::Library, false);
             reset_right_panel(state);
             let tier1 = crate::app::state::RefreshCategory::Artists;
             if state.library.artists.is_empty() {
@@ -341,7 +364,7 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
         }
         (KeyModifiers::CONTROL, KeyCode::Char('o')) => {
             // Ctrl+O = Folders category
-            state.set_browse_category(BrowseCategory::Folders);
+            state.set_browse_category(BrowseCategory::Folders, false);
             reset_right_panel(state);
             let staleness = SystemAction::CheckStaleness(crate::app::state::RefreshCategory::Folders).into();
             if state.folder_state.is_none() {
@@ -350,25 +373,39 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
             return vec![NavigationAction::SetView(View::Browse).into(), staleness];
         }
 
-        // Global function keys - work from any screen
-        (_, KeyCode::F(1)) => {
-            if state.view != View::Help {
-                return vec![NavigationAction::SetView(View::Help).into()];
-            }
+        // Global function keys — work from every screen as toggles.
+        //
+        // F1 / `?`  open Help; pressing the same key again from Help
+        // returns to Browse.
+        // F2 / `,`  open Settings; pressing again from Settings
+        // returns to Browse (mirrors Esc).
+        //
+        // The `in_text_capture` precondition lets these globals defer
+        // to popups / inline filters / credential editors that need
+        // the literal `?` or `,` keystroke. (See the let-binding just
+        // above this match.)
+        (_, KeyCode::F(1)) | (_, KeyCode::Char('?')) if !in_text_capture => {
+            return if state.view == View::Help {
+                state.help_scroll = 0;
+                vec![NavigationAction::SetView(View::Browse).into()]
+            } else {
+                vec![NavigationAction::SetView(View::Help).into()]
+            };
         }
-        (_, KeyCode::F(2)) => {
-            if state.view != View::Settings {
-                return vec![SettingsAction::OpenSettings.into()];
-            }
+        (_, KeyCode::F(2)) if !in_text_capture => {
+            return if state.view == View::Settings {
+                vec![NavigationAction::SetView(View::Browse).into()]
+            } else {
+                vec![SettingsAction::OpenSettings.into()]
+            };
         }
-        // `,` mirrors the macOS Cmd+, "Preferences" convention as a
-        // single-key shortcut (no modifier). Lives alongside `:`,
-        // `/`, `?`, `Tab` in the bottom-right hint strip. GUI keeps
-        // F2 (its menu bar already provides Settings via that path).
-        (m, KeyCode::Char(',')) if m.is_empty() => {
-            if state.view != View::Settings {
-                return vec![SettingsAction::OpenSettings.into()];
-            }
+        // `,` mirrors the macOS Cmd+, "Preferences" convention.
+        (m, KeyCode::Char(',')) if m.is_empty() && !in_text_capture => {
+            return if state.view == View::Settings {
+                vec![NavigationAction::SetView(View::Browse).into()]
+            } else {
+                vec![SettingsAction::OpenSettings.into()]
+            };
         }
         // `\` toggles the TUI's Miller-column layout between
         // shrinking (default) and scrolling, scoped to the Library
@@ -378,6 +415,12 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
             if state.view == View::Browse {
                 return vec![SettingsAction::ToggleMillerLayout.into()];
             }
+        }
+        // `|` toggles tall-mode split view: Library on top half, Now
+        // Playing on bottom half. The pipe glyph reads as a layout
+        // separator. Lives next to `\` in the hint strip.
+        (_, KeyCode::Char('|')) => {
+            return vec![SettingsAction::ToggleTallMode.into()];
         }
         (_, KeyCode::F(3)) => {
             // F3 = Quick library switcher
@@ -1148,7 +1191,7 @@ pub(crate) fn navigate_to_album(state: &mut AppState) -> Vec<Action> {
     state.library.selected_album_title = album_title;
     state.library.selected_artist_name = artist_name;
     state.set_view(View::Browse);
-    state.set_browse_category(BrowseCategory::Library);
+    state.set_browse_category(BrowseCategory::Library, false);
 
     // Select the artist in the Miller column
     if let Some(idx) = state.artist_nav.columns.first()
@@ -1165,7 +1208,7 @@ pub(crate) fn navigate_to_album(state: &mut AppState) -> Vec<Action> {
         state.list_state.artists_index = idx;
     }
 
-    vec![MillerAction::LoadArtistAlbumsForMiller { artist_key }.into()]
+    vec![MillerAction::LoadArtistAlbumsForMiller { artist_key, replace_child: false }.into()]
 }
 
 /// Get album context from the selected folder track: (album_key, artist_key, album_title, artist_name).

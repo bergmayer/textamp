@@ -1223,13 +1223,29 @@ pub async fn dispatch(
             }
             follow_ups.push(SettingsAction::SaveSettings.into());
         }
+        SettingsAction::ToggleTallMode => {
+            state.tall_mode = !state.tall_mode;
+            config.ui.tall_mode = state.tall_mode;
+            state.set_status(format!(
+                "tall mode: {}",
+                if state.tall_mode { "on" } else { "off" }
+            ));
+            follow_ups.push(SettingsAction::SaveSettings.into());
+        }
         SettingsAction::ToggleMillerLayout => {
             state.miller_layout = state.miller_layout.toggled();
-            // Reset scroll offset so the freshly-toggled layout
-            // starts at column 0 — going back into Shrinking with a
-            // stale offset would also leave it dangling.
-            state.miller_scroll_col = 0;
-            config.ui.miller_layout = state.miller_layout.name().to_string();
+            // TUI ribbon scroll state is reset on every layout toggle
+            // so a freshly-toggled mode starts at column 0 — a stale
+            // offset would dangle out of bounds. The GUI's iced
+            // scrollable manages its own offset, so the gate is
+            // strictly TUI.
+            #[cfg(feature = "tui")]
+            {
+                state.miller_scroll_col = 0;
+                state.miller_scroll_manual = false;
+                state.miller_h_drag_grab = None;
+            }
+            config.ui.miller_layout = state.miller_layout;
             state.set_status(format!("miller layout: {}", state.miller_layout.name()));
             follow_ups.push(SettingsAction::SaveSettings.into());
         }
@@ -1246,7 +1262,7 @@ pub async fn dispatch(
                     .find(|c| !state.hidden_sections.contains(c))
                     .copied()
                     .unwrap_or(crate::app::state::BrowseCategory::Library);
-                state.set_browse_category(fallback);
+                state.set_browse_category(fallback, false);
             }
             config.ui.hidden_sections = state.hidden_sections.clone();
             follow_ups.push(SettingsAction::SaveSettings.into());

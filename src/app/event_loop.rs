@@ -93,9 +93,11 @@ impl EventLoop {
         // Restore artwork mode preference
         state.artwork.mode = crate::app::state::ArtworkMode::from_config(&self.config.ui.artwork_mode);
 
-        // Restore Miller column layout preference (TUI only; the GUI
-        // ignores the field). Default = Shrinking.
-        state.miller_layout = crate::app::state::MillerLayoutMode::from_config(&self.config.ui.miller_layout);
+        // Restore Miller column layout preference. Default = Shrinking.
+        state.miller_layout = self.config.ui.miller_layout;
+
+        // Restore tall-mode preference.
+        state.tall_mode = self.config.ui.tall_mode;
 
         // Mirror the per-service "external search enabled" toggles
         // from config onto AppState so the palette / context menus /

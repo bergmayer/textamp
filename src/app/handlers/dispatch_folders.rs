@@ -172,7 +172,7 @@ pub async fn dispatch(
                 });
             }
         }
-        FolderAction::NavigateIntoFolder(folder_key) => {
+        FolderAction::NavigateIntoFolder { folder_key, replace_child } => {
             // Get the filesystem path from the selected folder item in the current column
             let item_path = state.folder_state.as_ref()
                 .and_then(|fs| fs.focused())
@@ -191,9 +191,8 @@ pub async fn dispatch(
                 let items_for_discovery = if needs_path_discovery { Some(cached_folder.items.clone()) } else { None };
                 if let Some(ref mut folder_state) = state.folder_state {
                     let new_column = FolderColumn::new(Some(folder_key.clone()), folder_title, cached_folder.items.clone());
-                    if state.auto_drill_pending {
+                    if replace_child {
                         folder_state.replace_child_column(new_column);
-                        state.auto_drill_pending = false;
                     } else {
                         folder_state.push_column(new_column);
                     }
@@ -241,6 +240,7 @@ pub async fn dispatch(
                 let client = client.clone();
                 let fk = folder_key;
                 let ip = item_path;
+                let rc = replace_child;
                 tokio::spawn(async move {
                     match client.get_folder_contents(&fk).await {
                         Ok(response) => {
@@ -251,6 +251,7 @@ pub async fn dispatch(
                                 items,
                                 folder_path,
                                 item_path: ip,
+                                replace_child: rc,
                             }.into()).await;
                         }
                         Err(e) => {

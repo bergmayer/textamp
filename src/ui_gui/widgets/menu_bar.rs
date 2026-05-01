@@ -215,14 +215,14 @@ fn items_for(menu: TopMenu, state: &AppState) -> Vec<Item> {
             entry("Queue",       "Ctrl+U", Action::Navigation(NavigationAction::SetView(View::Queue))),
             entry("Now Playing", "Ctrl+N", Action::Navigation(NavigationAction::SetView(View::NowPlaying))),
             Item::Sep,
-            entry_with("Library",     "Ctrl+L", Action::Navigation(NavigationAction::SetCategory(BrowseCategory::Library)),   connected),
+            entry_with("Library",     "Ctrl+L", Action::Navigation(NavigationAction::set_category(BrowseCategory::Library)),   connected),
             // Playlists no longer has an accelerator: Ctrl+P / Cmd+P
             // now opens the command palette. The leftmost browse
             // column lists every playlist directly, so a dedicated
             // shortcut to a "Playlists view" is no longer needed.
-            entry_with("Playlists",   "",       Action::Navigation(NavigationAction::SetCategory(BrowseCategory::Playlists)), connected),
-            entry_with("Genres",      "Ctrl+G", Action::Navigation(NavigationAction::SetCategory(BrowseCategory::AlbumGenres)),    connected),
-            entry_with("Folders",     "Ctrl+O", Action::Navigation(NavigationAction::SetCategory(BrowseCategory::Folders)),   connected),
+            entry_with("Playlists",   "",       Action::Navigation(NavigationAction::set_category(BrowseCategory::Playlists)), connected),
+            entry_with("Genres",      "Ctrl+G", Action::Navigation(NavigationAction::set_category(BrowseCategory::AlbumGenres)),    connected),
+            entry_with("Folders",     "Ctrl+O", Action::Navigation(NavigationAction::set_category(BrowseCategory::Folders)),   connected),
             Item::Sep,
             // Similar / Related / Open-in-Library / Artist Bio resolve
             // their target from the current selection, so they only

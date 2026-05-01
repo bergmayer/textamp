@@ -54,7 +54,7 @@ impl Tab {
     fn action(self) -> Vec<Action> {
         match self {
             Tab::Library => vec![
-                Action::Navigation(NavigationAction::SetCategory(BrowseCategory::Library)),
+                Action::Navigation(NavigationAction::set_category(BrowseCategory::Library)),
                 Action::Navigation(NavigationAction::SetView(View::Browse)),
             ],
             // The unified Now Playing screen uses View::Queue under

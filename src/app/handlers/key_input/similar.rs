@@ -126,7 +126,7 @@ pub(in crate::app::handlers) fn activate_similar_item(state: &mut AppState) -> V
                 state.library.selected_album_title = album.title.clone();
                 state.library.selected_artist_name = album.artist_name().to_string();
                 state.set_view(View::Browse);
-                state.set_browse_category(crate::app::state::BrowseCategory::Library);
+                state.set_browse_category(crate::app::state::BrowseCategory::Library, false);
                 if let Some(ref artist_key) = album.parent_rating_key {
                     // Select artist in Miller column 0
                     if let Some(pos) = state.artist_nav.columns.first()
@@ -138,7 +138,7 @@ pub(in crate::app::handlers) fn activate_similar_item(state: &mut AppState) -> V
                     }
                     state.artist_nav.focused_column = 0;
                     state.artist_nav.truncate_right();
-                    return vec![MillerAction::LoadArtistAlbumsForMiller { artist_key: artist_key.clone() }.into()];
+                    return vec![MillerAction::LoadArtistAlbumsForMiller { artist_key: artist_key.clone(), replace_child: false }.into()];
                 }
                 // No parent artist key — try All Artists
                 if let Some(col) = state.artist_nav.columns.first_mut() {
@@ -146,7 +146,7 @@ pub(in crate::app::handlers) fn activate_similar_item(state: &mut AppState) -> V
                 }
                 state.artist_nav.focused_column = 0;
                 state.artist_nav.truncate_right();
-                vec![MillerAction::LoadAllAlbumsForMiller.into()]
+                vec![MillerAction::LoadAllAlbumsForMiller { replace_child: false }.into()]
             } else {
                 vec![]
             }
@@ -164,7 +164,7 @@ pub(in crate::app::handlers) fn activate_similar_item(state: &mut AppState) -> V
             if let Some(artist) = state.similar.artists.get(idx).cloned() {
                 let artist_key = artist.rating_key.clone();
                 state.set_view(View::Browse);
-                state.set_browse_category(crate::app::state::BrowseCategory::Library);
+                state.set_browse_category(crate::app::state::BrowseCategory::Library, false);
                 // Select artist in Miller column 0
                 if let Some(pos) = state.artist_nav.columns.first()
                     .and_then(|col| col.items.iter().position(|i| i.key() == artist_key.as_str()))
@@ -175,7 +175,7 @@ pub(in crate::app::handlers) fn activate_similar_item(state: &mut AppState) -> V
                 }
                 state.artist_nav.focused_column = 0;
                 state.artist_nav.truncate_right();
-                vec![MillerAction::LoadArtistAlbumsForMiller { artist_key }.into()]
+                vec![MillerAction::LoadArtistAlbumsForMiller { artist_key, replace_child: false }.into()]
             } else {
                 vec![]
             }

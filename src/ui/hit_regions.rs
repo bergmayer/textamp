@@ -84,6 +84,19 @@ pub struct HitRegions {
     /// Related popup (outer rect).
     pub related_content: Option<RelatedRegions>,
 
+    /// Tall-mode split: top half (library / browse) and bottom half
+    /// (now-playing / queue). Populated only when `state.tall_mode` is
+    /// active and the current view is tall-eligible. Used by the
+    /// mouse handler to flip the active view (`Browse` ↔ `NowPlaying`)
+    /// when the user clicks across the boundary.
+    pub tall_mode_split: Option<TallModeSplit>,
+
+    /// Niri-style horizontal scrollbar at the bottom of the Browse
+    /// view in scrolling Miller-column mode. Populated when there
+    /// are more ribbon slots than fit on screen; the mouse handler
+    /// translates click / drag positions into a manual ribbon
+    /// scroll position.
+    pub miller_h_scrollbar: Option<MillerHScrollbar>,
 }
 
 impl HitRegions {
@@ -94,6 +107,31 @@ impl HitRegions {
 }
 
 // ── Sub-structs ─────────────────────────────────────────────────────────────
+
+/// Tall-mode vertical split: where the boundary between the two halves
+/// lives in the current frame. The top half includes everything up to
+/// (but excluding) the separator row; the bottom half is below the
+/// separator and includes the transport bar.
+#[derive(Debug, Clone)]
+pub struct TallModeSplit {
+    pub top: Rect,
+    pub bottom: Rect,
+}
+
+/// Horizontal scrollbar for the scrolling Miller-column ribbon.
+/// `rail` is the full clickable strip (one row tall, full content
+/// width). The thumb visually highlights the segment
+/// `[thumb_x, thumb_x + thumb_w)` inside the rail.
+#[derive(Debug, Clone)]
+pub struct MillerHScrollbar {
+    pub rail: Rect,
+    pub thumb_x: u16,
+    pub thumb_w: u16,
+    /// Total ribbon slots — used to map a click x-position into a
+    /// ribbon scroll offset (`(rel_x * total) / rail.width`).
+    pub total: usize,
+    pub visible: usize,
+}
 
 /// Confirm dialog regions (Yes/No buttons).
 #[derive(Debug, Clone)]

@@ -555,7 +555,7 @@ pub fn handle_app_event(
             state.library.albums = albums;
             state.library.albums_total = state.library.albums.len() as u32;
             // Now push the column (same as the sync path in dispatch_miller)
-            vec![MillerAction::LoadAllAlbumsForMiller.into()]
+            vec![MillerAction::LoadAllAlbumsForMiller { replace_child: false }.into()]
         }
         Event::Data(DataEvent::SimilarAlbumsLoaded(albums)) => {
             state.similar.albums = albums;
@@ -901,7 +901,7 @@ pub fn handle_app_event(
             }
             vec![]
         }
-        Event::Folder(FolderEvent::FolderContentsLoaded { folder_key, items, folder_path, item_path }) => {
+        Event::Folder(FolderEvent::FolderContentsLoaded { folder_key, items, folder_path, item_path, replace_child }) => {
             use crate::plex::CachedFolder;
             use crate::services::FolderColumn;
             use super::dispatch_folders::{derive_path_from_children, backfill_parent_path, spawn_path_discovery};
@@ -930,9 +930,8 @@ pub fn handle_app_event(
                     .any(|col| col.key.as_ref() == Some(&folder_key));
                 if !already_exists {
                     let new_column = FolderColumn::new(Some(folder_key), folder_title, items);
-                    if state.auto_drill_pending {
+                    if replace_child {
                         folder_state.replace_child_column(new_column);
-                        state.auto_drill_pending = false;
                     } else {
                         folder_state.push_column(new_column);
                     }
@@ -1196,12 +1195,11 @@ pub fn handle_app_event(
                         let is_all_artists = col0.selected_item()
                             .map_or(false, |i| matches!(i, BrowseItem::AllArtists));
                         if is_all_artists {
-                            let mut items = vec![BrowseItem::AllTracks {
-                                artist_key: "__all_library__".to_string(),
-                                artist_name: "All Artists".to_string(),
+                            let mut items: Vec<BrowseItem> = BrowseItem::from_albums(&state.library.albums, &state.library.album_display_artist);
+                            items.push(BrowseItem::AllTracks {
+                                scope: crate::app::state::AllTracksScope::Library,
                                 thumb: None,
-                            }];
-                            items.extend(BrowseItem::from_albums(&state.library.albums, &state.library.album_display_artist));
+                            });
                             let old_idx = state.artist_nav.columns[1].selected_index;
                             state.artist_nav.columns[1].items = items;
                             state.artist_nav.columns[1].selected_index = old_idx.min(
@@ -1348,9 +1346,15 @@ pub fn handle_app_event(
                 }
             }
 
-            // Album art loading: lazy-load only for visible items in the focused column
-            // Limit concurrent in-flight requests to avoid overwhelming the Plex transcoder
-            // Album art loading: lazy-load for columns with artwork_visible
+            // Album art loading: lazy-load for visible items across
+            // EVERY column with `artwork_visible`, not just the
+            // focused one. The user expects album artwork to start
+            // populating the moment they pause on an artist row —
+            // before they've drilled into the album column itself —
+            // so the artist's albums column (focused +1) and any
+            // already-open art columns to its right all get a turn.
+            // Cap concurrent in-flight requests to avoid overwhelming
+            // the Plex transcoder.
             if state.view == crate::app::state::View::Browse
                 && state.artwork.grid_pending.len() < 4
             {
@@ -1360,52 +1364,72 @@ pub fn handle_app_event(
                     cat if cat.is_tag_section() => &state.tag_nav,
                     _ => &state.artist_nav,
                 };
-                if let Some(col) = nav.focused().filter(|c| c.artwork_visible) {
+                let max_batch = 4usize.saturating_sub(state.artwork.grid_pending.len());
+                let mut to_load: Vec<(String, String)> = Vec::new();
+                // Iterate art-visible columns starting from the
+                // focused one and walking outward, so the column the
+                // user is staring at gets first claim on the budget.
+                let focused_idx = nav.focused_column;
+                let mut col_order: Vec<usize> = Vec::with_capacity(nav.columns.len());
+                col_order.push(focused_idx);
+                for d in 1..=nav.columns.len() {
+                    if focused_idx + d < nav.columns.len() {
+                        col_order.push(focused_idx + d);
+                    }
+                    if focused_idx >= d {
+                        col_order.push(focused_idx - d);
+                    }
+                }
+                'cols: for ci in col_order {
+                    let col = match nav.columns.get(ci) { Some(c) => c, None => continue };
+                    if !col.artwork_visible { continue; }
                     let total_items = col.items.len();
-                    if total_items > 0 {
-                        // Compute visible range using same formula as render_album_art_grid
-                        let inner_height = state.terminal_height.saturating_sub(4) as usize;
-                        let target_visible = 3usize.max((total_items).min(5));
-                        let row_height = if target_visible > 0 { (inner_height / target_visible).max(3) } else { 3 };
-                        let visible_rows = if row_height > 0 { (inner_height / row_height).max(1) } else { 1 };
-                        let scroll_offset = crate::services::NavigationService::calc_scroll_offset(
-                            col.selected_index, visible_rows, total_items,
-                        );
-                        let end = (scroll_offset + visible_rows).min(total_items);
-
-                        let max_batch = 4usize.saturating_sub(state.artwork.grid_pending.len());
-                        let mut to_load: Vec<(String, String)> = Vec::new();
-                        for item in &col.items[scroll_offset..end] {
-                            if to_load.len() >= max_batch { break; }
-                            match item {
-                                BrowseItem::Album { key, thumb: Some(thumb), .. } => {
-                                    if !state.artwork.grid_cache.contains_key(key)
-                                        && !state.artwork.grid_pending.contains(key)
-                                    {
-                                        to_load.push((key.clone(), thumb.clone()));
-                                    }
+                    if total_items == 0 { continue; }
+                    // Same visible-window math as the renderer, used
+                    // here as a heuristic for "what the user is most
+                    // likely about to see". Keeping it consistent with
+                    // the TUI's `render_album_art_grid` formula avoids
+                    // wasted prefetches on rows that are off-screen.
+                    let inner_height = state.terminal_height.saturating_sub(4) as usize;
+                    let target_visible = 3usize.max((total_items).min(5));
+                    let row_height = if target_visible > 0 { (inner_height / target_visible).max(3) } else { 3 };
+                    let visible_rows = if row_height > 0 { (inner_height / row_height).max(1) } else { 1 };
+                    let scroll_offset = crate::services::NavigationService::calc_scroll_offset(
+                        col.selected_index, visible_rows, total_items,
+                    );
+                    let end = (scroll_offset + visible_rows).min(total_items);
+                    for item in &col.items[scroll_offset..end] {
+                        if to_load.len() >= max_batch { break 'cols; }
+                        match item {
+                            BrowseItem::Album { key, thumb: Some(thumb), .. } => {
+                                if !state.artwork.grid_cache.contains_key(key)
+                                    && !state.artwork.grid_pending.contains(key)
+                                {
+                                    to_load.push((key.clone(), thumb.clone()));
                                 }
-                                BrowseItem::AllTracks { artist_key, thumb: Some(thumb), .. } => {
+                            }
+                            BrowseItem::AllTracks { scope, thumb: Some(thumb) } => {
+                                if let Some(artist_key) = scope.artist_key() {
                                     if !state.artwork.grid_cache.contains_key(artist_key)
                                         && !state.artwork.grid_pending.contains(artist_key)
                                     {
-                                        to_load.push((artist_key.clone(), thumb.clone()));
+                                        to_load.push((artist_key.to_string(), thumb.clone()));
                                     }
                                 }
-                                BrowseItem::Artist { key, thumb: Some(thumb), .. } => {
-                                    if !state.artwork.grid_cache.contains_key(key)
-                                        && !state.artwork.grid_pending.contains(key)
-                                    {
-                                        to_load.push((key.clone(), thumb.clone()));
-                                    }
-                                }
-                                _ => {}
                             }
-                        }
-                        if !to_load.is_empty() {
-                            return vec![SystemAction::LoadAlbumArt(to_load).into()];
+                            BrowseItem::Artist { key, thumb: Some(thumb), .. } => {
+                                if !state.artwork.grid_cache.contains_key(key)
+                                    && !state.artwork.grid_pending.contains(key)
+                                {
+                                    to_load.push((key.clone(), thumb.clone()));
+                                }
+                            }
+                            _ => {}
                         }
                     }
+                }
+                if !to_load.is_empty() {
+                    return vec![SystemAction::LoadAlbumArt(to_load).into()];
                 }
             }
 
@@ -1867,7 +1891,6 @@ pub fn handle_app_event(
             // playlist nav (root is column 0). Force focus to 0 first
             // so `push_column`'s `truncate_right` drops any stale
             // child columns from a previous selection before pushing.
-            state.auto_drill_pending = false;
             state.playlist_nav.focused_column = 0;
 
             let playlist_name = state.playlist_nav.focused()
@@ -1921,7 +1944,6 @@ pub fn handle_app_event(
                 return vec![];
             }
 
-            state.auto_drill_pending = false;
             state.playlist_nav.focused_column = 0;
 
             let playlist_name = state.playlist_nav.focused()

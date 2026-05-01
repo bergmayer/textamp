@@ -141,7 +141,7 @@ fn render_tab_strip(frame: &mut Frame, state: &AppState, area: Rect) {
     // `,` = open Settings (mirrors macOS Cmd+,). Mirrors classic vim
     // chrome — same row as the Library / Now Playing tabs, on the
     // right edge.
-    let palette_hint = " :  /  ?  \u{21e5}  ,  \\ ";
+    let palette_hint = " :  /  ?  \u{21e5}  ,  \\  | ";
 
     // Active tab uses an inverted (selection-style) background so the
     // selected/unselected distinction is obvious in every theme — in

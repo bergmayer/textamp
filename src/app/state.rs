@@ -219,6 +219,69 @@ impl Notification {
 // Miller Column Navigation for Browse Views
 // ============================================================================
 
+/// What `BrowseItem::AllTracks` is offering "All" of. Mirrors the
+/// distinct loaders in `MillerAction` (Library / Compilations /
+/// per-compilation-artist / per-artist) so the click-drill match is
+/// exhaustive at compile time and impossible to misroute.
+#[derive(Debug, Clone)]
+pub enum AllTracksScope {
+    /// Every track in the library — pinned at the top of the merged
+    /// "All Albums" column.
+    Library,
+    /// Every compilation track — pinned at the top of the merged
+    /// Compilations album view.
+    AllCompilations,
+    /// Every compilation track by a specific artist — pinned at the
+    /// top of that artist's compilation-album column.
+    CompilationsByArtist {
+        artist_key: String,
+        artist_name: String,
+    },
+    /// Every track by a specific artist — pinned at the top of that
+    /// artist's albums column.
+    Artist {
+        artist_key: String,
+        artist_name: String,
+    },
+}
+
+impl AllTracksScope {
+    /// Stable identifier used by `BrowseItem::key()`. Sentinel
+    /// strings preserve uniqueness for the global scopes; per-artist
+    /// scopes use the artist's Plex rating key directly (which is
+    /// also the artwork-cache key).
+    pub fn key(&self) -> &str {
+        match self {
+            AllTracksScope::Library => "__all_library__",
+            AllTracksScope::AllCompilations => "__all_comp__",
+            AllTracksScope::CompilationsByArtist { artist_key, .. } => artist_key,
+            AllTracksScope::Artist { artist_key, .. } => artist_key,
+        }
+    }
+
+    /// Display name of the underlying artist, when this row is
+    /// scoped to one. `None` for the library-wide and all-comps
+    /// scopes (their column titles read "All Tracks" or
+    /// "Compilations" with no artist suffix).
+    pub fn artist_name(&self) -> Option<&str> {
+        match self {
+            AllTracksScope::Library | AllTracksScope::AllCompilations => None,
+            AllTracksScope::CompilationsByArtist { artist_name, .. }
+            | AllTracksScope::Artist { artist_name, .. } => Some(artist_name),
+        }
+    }
+
+    /// Plex artist rating-key when this row is scoped to one. Used
+    /// by the artwork loader to cache per-artist thumbs.
+    pub fn artist_key(&self) -> Option<&str> {
+        match self {
+            AllTracksScope::Library | AllTracksScope::AllCompilations => None,
+            AllTracksScope::CompilationsByArtist { artist_key, .. }
+            | AllTracksScope::Artist { artist_key, .. } => Some(artist_key),
+        }
+    }
+}
+
 /// Item type in a browse column.
 #[derive(Debug, Clone)]
 pub enum BrowseItem {
@@ -261,10 +324,15 @@ pub enum BrowseItem {
         title: String,
         track_count: Option<u32>,
     },
-    /// "All Tracks" entry - shows all tracks by an artist.
+    /// "All Tracks" entry. The `scope` discriminates which "all"
+    /// the row represents — every artist in the library, every
+    /// compilation, every compilation by a particular artist, or
+    /// every track by a particular artist. Was previously
+    /// overloaded onto a single `artist_key: String` with sentinel
+    /// prefixes (`__all_library__`, `__all_comp__`, `__comp_tracks:`),
+    /// which silently misrouted on typos.
     AllTracks {
-        artist_key: String,
-        artist_name: String,
+        scope: AllTracksScope,
         thumb: Option<String>,
     },
     /// "All Artists" entry - pinned at top of artist list, drills into all albums.
@@ -294,7 +362,7 @@ impl BrowseItem {
             BrowseItem::Genre { key, .. } => key,
             BrowseItem::GenreCategory { key, .. } => key,
             BrowseItem::Playlist { key, .. } => key,
-            BrowseItem::AllTracks { artist_key, .. } => artist_key,
+            BrowseItem::AllTracks { scope, .. } => scope.key(),
             BrowseItem::AllArtists => "__all_artists__",
             BrowseItem::ArtistRadio { artist_key, .. } => artist_key,
             BrowseItem::Compilations => "__compilations__",
@@ -1165,9 +1233,12 @@ pub struct QueueSnapshot {
     pub radio_state_snapshot: Option<RadioState>,
 }
 
-/// TUI-only: how the Library screen's Miller columns share the
-/// horizontal space when more than two are open. The GUI ignores this.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// How the Library screen's Miller columns share the horizontal
+/// space when more than two are open. The GUI honours this in its
+/// scrolling-mode renderer; the TUI uses it for the Niri-style
+/// ribbon. Serialised lowercase in `config.toml` for human edits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum MillerLayoutMode {
     /// Every visible column shrinks to fit. The whole stack is always
     /// on screen.
@@ -1185,13 +1256,6 @@ impl MillerLayoutMode {
         match self {
             MillerLayoutMode::Shrinking => "shrinking",
             MillerLayoutMode::Scrolling => "scrolling",
-        }
-    }
-
-    pub fn from_config(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "scrolling" | "scroll" => MillerLayoutMode::Scrolling,
-            _ => MillerLayoutMode::Shrinking,
         }
     }
 
@@ -1731,18 +1795,39 @@ pub struct AppState {
     // Theme
     pub theme: ThemeName,
 
+    /// TUI-only: tall-monitor split view. When true, the Library
+    /// (Browse) screen renders in the top half and the Now Playing
+    /// screen renders in the bottom half — both at once, instead of
+    /// the usual Tab-toggled single view.
+    pub tall_mode: bool,
+
     /// TUI-only: how the Library Miller columns share horizontal space.
     /// `Shrinking` (default) compresses every column to fit.
     /// `Scrolling` keeps each column at half-screen width and scrolls
     /// the viewport horizontally as the user drills.
     pub miller_layout: MillerLayoutMode,
 
-    /// TUI-only: horizontal scroll offset (in columns) for the
-    /// Library screen when `miller_layout == Scrolling`. Counts
-    /// columns *of the active nav* that are scrolled off the left
-    /// edge. The renderer keeps the focused column on screen by
-    /// adjusting this each frame.
+    /// TUI-only: manual horizontal scroll offset (in ribbon slots)
+    /// for the Library screen when `miller_layout == Scrolling`.
+    /// Only consulted when `miller_scroll_manual` is true — otherwise
+    /// the renderer auto-anchors the ribbon to the focused column.
+    /// The GUI uses iced's `scrollable` for the same job and never
+    /// touches this field, so it's gated out of pure-GUI builds.
+    #[cfg(feature = "tui")]
     pub miller_scroll_col: usize,
+    /// TUI-only: when true, the user has manually positioned the
+    /// horizontal scrollbar (via click or drag) and the renderer
+    /// should honour `miller_scroll_col` instead of auto-following
+    /// the focused column. Cleared on any keystroke so keyboard
+    /// navigation snaps the ribbon back to focus.
+    #[cfg(feature = "tui")]
+    pub miller_scroll_manual: bool,
+    /// TUI-only: active horizontal-scrollbar drag. `Some(g)` means the
+    /// user is dragging the scrollbar thumb; `g` is the grab offset
+    /// in cells from the left edge of the thumb to the mouse click
+    /// position so the thumb tracks the cursor instead of jumping.
+    #[cfg(feature = "tui")]
+    pub miller_h_drag_grab: Option<u16>,
 
     // Sonic Adventure state
     pub adventure: AdventureState,
@@ -1831,10 +1916,6 @@ pub struct AppState {
     /// always present so render/dispatch code doesn't need feature
     /// gates; the GUI just never sets `open = true`.
     pub palette: PaletteState,
-
-    /// Auto-drill flag: when true, the next load action replaces the child column
-    /// instead of pushing a new one, and does not change focus.
-    pub auto_drill_pending: bool,
 
     // Marquee scroll animation state (RefCell for interior mutability during render)
     pub marquee: std::cell::RefCell<MarqueeState>,
@@ -2294,8 +2375,14 @@ impl AppState {
             stations_loading: false,
             station_children_cache: std::collections::HashMap::new(),
             theme: ThemeName::default(),
+            tall_mode: false,
             miller_layout: MillerLayoutMode::default(),
+            #[cfg(feature = "tui")]
             miller_scroll_col: 0,
+            #[cfg(feature = "tui")]
+            miller_scroll_manual: false,
+            #[cfg(feature = "tui")]
+            miller_h_drag_grab: None,
             adventure: AdventureState::default(),
             dj: DjState::default(),
             now_playing_focus: NowPlayingFocus::default(),
@@ -2317,7 +2404,6 @@ impl AppState {
             spectrogram: SpectrogramState::default(),
             list_filter: ListFilterState::default(),
             palette: PaletteState::default(),
-            auto_drill_pending: false,
             marquee: std::cell::RefCell::new(MarqueeState::default()),
             marquee_subtitle: std::cell::RefCell::new(MarqueeState::default()),
             #[cfg(feature = "tui")]
@@ -2633,18 +2719,14 @@ impl AppState {
     ///   "Library is selected on launch" default, which earlier got
     ///   stomped by startup paths that called `set_browse_category(Library)`
     ///   even though it was already Library.
-    /// - If `auto_drill_pending` is set, this is a sections-column
+    /// - If `preserve_sections_focus` is set, this is a sections-column
     ///   Up/Down sweep and the user is still arrow-keying through the
     ///   sections column. Don't steal focus.
     /// - Otherwise (an explicit Right / Enter / click drill, or a
     ///   `Ctrl+L|P|G|O` shortcut, or palette command), unfocus the
     ///   sections column so focus moves onto the rightward content.
-    pub fn set_browse_category(&mut self, cat: BrowseCategory) {
+    pub fn set_browse_category(&mut self, cat: BrowseCategory, preserve_sections_focus: bool) {
         let was_same = self.browse_category == cat;
-        // Peek (don't consume) — the flag is cleared at the end of the
-        // outermost dispatch step that initiated the auto-drill, so
-        // both this method and the calling dispatcher can see it.
-        let auto_drill = self.auto_drill_pending;
         self.browse_category = cat;
         self.category_column_index = self.row_index_for_category(cat);
         // Only unfocus the sections column when (a) the category
@@ -2652,7 +2734,7 @@ impl AppState {
         // user is sweeping selection through the sections column with
         // Up/Down and we want the rightward content to follow without
         // stealing keyboard focus).
-        if !was_same && !auto_drill {
+        if !was_same && !preserve_sections_focus {
             self.category_column_focused = false;
         }
         // Strip is Library-only; clear the focus flag whenever the
@@ -3341,6 +3423,9 @@ pub enum PaletteCommandKind {
     SaveQueue,
     ClearQueue,
     ToggleFilter,
+    /// TUI-only: flip the tall-monitor split view (Library on top
+    /// half, Now Playing on bottom half).
+    ToggleTallMode,
     Refresh,
     PlayPause,
     NextTrack,

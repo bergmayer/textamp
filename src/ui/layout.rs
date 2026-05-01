@@ -69,6 +69,26 @@ impl AppLayout {
             transport: main_chunks[1],
         }
     }
+
+    /// Tall-mode variant: no transport bar — content fills the whole
+    /// area. The caller paints a 1-row separator between halves
+    /// instead.
+    pub fn without_transport(area: Rect) -> Self {
+        let content_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(30),
+                Constraint::Min(40),
+            ])
+            .split(area);
+        Self {
+            left_panel: content_chunks[0],
+            right_panel: content_chunks[1],
+            // Zero-size rect — `render_transport` is gated and won't
+            // be called, but the field has to exist for the struct.
+            transport: Rect { x: area.x, y: area.y + area.height, width: 0, height: 0 },
+        }
+    }
 }
 
 /// Layout for full-screen views (now playing queue, help, search).
@@ -92,6 +112,15 @@ impl FullScreenLayout {
         Self {
             content: chunks[0],
             transport: chunks[1],
+        }
+    }
+
+    /// Tall-mode variant: no transport bar — content fills the whole
+    /// area.
+    pub fn without_transport(area: Rect) -> Self {
+        Self {
+            content: area,
+            transport: Rect { x: area.x, y: area.y + area.height, width: 0, height: 0 },
         }
     }
 }

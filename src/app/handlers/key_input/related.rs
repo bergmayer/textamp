@@ -90,7 +90,7 @@ pub(in crate::app::handlers) fn activate_related_item(state: &mut AppState) -> V
     };
 
     state.set_view(View::Browse);
-    state.set_browse_category(crate::app::state::BrowseCategory::Library);
+    state.set_browse_category(crate::app::state::BrowseCategory::Library, false);
     state.library.selected_artist_name = artist_name;
 
     if let Some(album_key_val) = album_key {
@@ -107,5 +107,5 @@ pub(in crate::app::handlers) fn activate_related_item(state: &mut AppState) -> V
     }
     state.artist_nav.focused_column = 0;
     state.artist_nav.truncate_right();
-    vec![MillerAction::LoadArtistAlbumsForMiller { artist_key: nav_artist_key }.into()]
+    vec![MillerAction::LoadArtistAlbumsForMiller { artist_key: nav_artist_key, replace_child: false }.into()]
 }

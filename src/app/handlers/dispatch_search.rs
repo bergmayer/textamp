@@ -173,26 +173,52 @@ pub async fn dispatch(
             state.list_filter.selected = 0;
         }
         SearchAction::FilteredListUp => {
-            if state.list_filter.selected > 0 {
-                state.list_filter.selected -= 1;
-                if let Some(ref results) = state.list_filter.results {
-                    if let Some(&item_idx) = results.matched_indices.get(state.list_filter.selected) {
-                        super::key_input::update_filter_column_selection(state, item_idx);
-                    }
-                }
-                super::key_input::truncate_filter_right_columns(state);
+            // Wrap-around at the top: pressing Up on the first match
+            // jumps to the last match. Mirrors the search-dropdown
+            // convention. Without this the user sees Up "do nothing"
+            // when the column is already at `matched_indices[0]`,
+            // which reads as broken.
+            //
+            // Also: always sync the underlying column's
+            // `selected_index` to `matched_indices[selected]`, even
+            // when the cursor was already there. If the column had
+            // drifted (e.g. the user clicked an unfiltered row before
+            // the filter narrowed the visible set), this re-anchors
+            // the visible highlight on the filtered cursor.
+            let len = state.list_filter.results.as_ref()
+                .map(|r| r.matched_indices.len())
+                .unwrap_or(0);
+            if len == 0 {
+                return Ok(follow_ups);
             }
+            state.list_filter.selected = if state.list_filter.selected == 0 {
+                len - 1
+            } else {
+                state.list_filter.selected - 1
+            };
+            if let Some(ref results) = state.list_filter.results {
+                if let Some(&item_idx) = results.matched_indices.get(state.list_filter.selected) {
+                    super::key_input::update_filter_column_selection(state, item_idx);
+                }
+            }
+            super::key_input::truncate_filter_right_columns(state);
         }
         SearchAction::FilteredListDown => {
+            // Wrap-around at the bottom: Down on the last match
+            // jumps to the first.
+            let len = state.list_filter.results.as_ref()
+                .map(|r| r.matched_indices.len())
+                .unwrap_or(0);
+            if len == 0 {
+                return Ok(follow_ups);
+            }
+            state.list_filter.selected = (state.list_filter.selected + 1) % len;
             if let Some(ref results) = state.list_filter.results {
-                if state.list_filter.selected + 1 < results.matched_indices.len() {
-                    state.list_filter.selected += 1;
-                    if let Some(&item_idx) = results.matched_indices.get(state.list_filter.selected) {
-                        super::key_input::update_filter_column_selection(state, item_idx);
-                    }
-                    super::key_input::truncate_filter_right_columns(state);
+                if let Some(&item_idx) = results.matched_indices.get(state.list_filter.selected) {
+                    super::key_input::update_filter_column_selection(state, item_idx);
                 }
             }
+            super::key_input::truncate_filter_right_columns(state);
         }
         SearchAction::SelectFilteredItem => {
             if let Some(ref results) = state.list_filter.results.clone() {
@@ -890,7 +916,7 @@ fn select_search_result(state: &mut AppState) -> Vec<Action> {
                 state.search.query.clear();
 
                 state.popups.search_active = false;
-                state.set_browse_category(BrowseCategory::Library);
+                state.set_browse_category(BrowseCategory::Library, false);
                 state.set_view(View::Browse);
 
                 // Find artist in artist_nav and select it
@@ -899,11 +925,11 @@ fn select_search_result(state: &mut AppState) -> Vec<Action> {
                         col.selected_index = pos;
                         state.artist_nav.focused_column = 0;
                         state.artist_nav.truncate_right();
-                        return vec![crate::app::action::MillerAction::LoadArtistAlbumsForMiller { artist_key }.into()];
+                        return vec![crate::app::action::MillerAction::LoadArtistAlbumsForMiller { artist_key, replace_child: false }.into()];
                     }
                 }
                 // Artist not in nav (cache empty?) — load from scratch
-                return vec![crate::app::action::MillerAction::LoadArtistAlbumsForMiller { artist_key }.into()];
+                return vec![crate::app::action::MillerAction::LoadArtistAlbumsForMiller { artist_key, replace_child: false }.into()];
             }
         }
         SearchTab::Albums => {
@@ -913,7 +939,7 @@ fn select_search_result(state: &mut AppState) -> Vec<Action> {
                 state.search.query.clear();
 
                 state.popups.search_active = false;
-                state.set_browse_category(BrowseCategory::Library);
+                state.set_browse_category(BrowseCategory::Library, false);
                 state.set_view(View::Browse);
                 state.search.pending_album_key = Some(album_key);
 
@@ -925,10 +951,10 @@ fn select_search_result(state: &mut AppState) -> Vec<Action> {
                             col.selected_index = pos;
                             state.artist_nav.focused_column = 0;
                             state.artist_nav.truncate_right();
-                            return vec![crate::app::action::MillerAction::LoadArtistAlbumsForMiller { artist_key: ak.clone() }.into()];
+                            return vec![crate::app::action::MillerAction::LoadArtistAlbumsForMiller { artist_key: ak.clone(), replace_child: false }.into()];
                         }
                     }
-                    return vec![crate::app::action::MillerAction::LoadArtistAlbumsForMiller { artist_key: ak.clone() }.into()];
+                    return vec![crate::app::action::MillerAction::LoadArtistAlbumsForMiller { artist_key: ak.clone(), replace_child: false }.into()];
                 }
                 // No parent artist key — try All Artists column
                 state.library.selected_artist_name = "All Artists".to_string();
@@ -938,7 +964,7 @@ fn select_search_result(state: &mut AppState) -> Vec<Action> {
                     state.artist_nav.focused_column = 0;
                     state.artist_nav.truncate_right();
                 }
-                return vec![crate::app::action::MillerAction::LoadAllAlbumsForMiller.into()];
+                return vec![crate::app::action::MillerAction::LoadAllAlbumsForMiller { replace_child: false }.into()];
             }
         }
         SearchTab::Tracks => {
@@ -971,7 +997,7 @@ fn select_search_result(state: &mut AppState) -> Vec<Action> {
                 state.search.query.clear();
 
                 state.popups.search_active = false;
-                state.set_browse_category(BrowseCategory::Playlists);
+                state.set_browse_category(BrowseCategory::Playlists, false);
                 state.set_view(View::Browse);
 
                 // Find playlist in playlist_nav and select it
@@ -980,10 +1006,10 @@ fn select_search_result(state: &mut AppState) -> Vec<Action> {
                         col.selected_index = pos;
                         state.playlist_nav.focused_column = 0;
                         state.playlist_nav.truncate_right();
-                        return vec![crate::app::action::MillerAction::LoadPlaylistTracksForMiller { playlist_key }.into()];
+                        return vec![crate::app::action::MillerAction::LoadPlaylistTracksForMiller { playlist_key, replace_child: false }.into()];
                     }
                 }
-                return vec![crate::app::action::MillerAction::LoadPlaylistTracksForMiller { playlist_key }.into()];
+                return vec![crate::app::action::MillerAction::LoadPlaylistTracksForMiller { playlist_key, replace_child: false }.into()];
             }
         }
         SearchTab::Genres => {
@@ -995,7 +1021,7 @@ fn select_search_result(state: &mut AppState) -> Vec<Action> {
                 state.popups.search_active = false;
                 // Search results' genre list comes from album_genres, so
                 // open the Album Genres section.
-                state.set_browse_category(BrowseCategory::AlbumGenres);
+                state.set_browse_category(BrowseCategory::AlbumGenres, false);
                 state.set_view(View::Browse);
 
                 // Populate column 0 with the album-genre list, with the
@@ -1011,7 +1037,7 @@ fn select_search_result(state: &mut AppState) -> Vec<Action> {
                 state.tag_nav.focused_column = 0;
                 state.library.selected_album_title = format!("genre: {}", genre_title);
 
-                return vec![crate::app::action::MillerAction::LoadGenreAlbumsForMiller { genre_key }.into()];
+                return vec![crate::app::action::MillerAction::LoadGenreAlbumsForMiller { genre_key, replace_child: false }.into()];
             }
         }
         _ => {}

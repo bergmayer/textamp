@@ -134,6 +134,20 @@ pub fn fat_vertical_scrollbar() -> iced::widget::scrollable::Direction {
     )
 }
 
+/// Horizontal scrollbar tuned to feel like a normal always-shown
+/// scrollbar — used by the Browse view's scrolling Miller-column
+/// mode so the user can pan through nav columns wider than the
+/// viewport. Pair with `chunky_scrollable_style`.
+pub fn fat_horizontal_scrollbar() -> iced::widget::scrollable::Direction {
+    use iced::widget::scrollable::{Direction, Scrollbar};
+    Direction::Horizontal(
+        Scrollbar::default()
+            .width(16)
+            .scroller_width(14)
+            .margin(1),
+    )
+}
+
 /// Custom scrollable style: keep the rail subtle but render the
 /// scroller in a strong, plainly-visible colour so the dragger
 /// reads as a chunky bar rather than a thin line. Matches the

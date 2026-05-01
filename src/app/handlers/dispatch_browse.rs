@@ -93,13 +93,13 @@ pub async fn dispatch(
                 }
             }
         }
-        BrowseAction::LoadTagAlbums => {
+        BrowseAction::LoadTagAlbums { replace_child } => {
             // Drill from column 0 (tag list) into column 1 (albums for that tag).
             let section = state.browse_category;
             if !section.is_tag_section() {
                 return Ok(follow_ups);
             }
-            let auto_drill = std::mem::take(&mut state.auto_drill_pending);
+            let auto_drill = replace_child;
             let lib_key = match state.active_library.clone() {
                 Some(k) => k,
                 None => return Ok(follow_ups),
@@ -209,7 +209,7 @@ pub async fn dispatch(
             }
             state.library.selected_artist_name = artist_name;
             state.set_view(crate::app::state::View::Browse);
-            state.set_browse_category(crate::app::state::BrowseCategory::Library);
+            state.set_browse_category(crate::app::state::BrowseCategory::Library, false);
 
             if state.artist_nav.columns.is_empty() {
                 let items = state.build_artist_root_items();
@@ -232,7 +232,7 @@ pub async fn dispatch(
                 state.list_state.artists_index = idx;
             }
 
-            follow_ups.push(MillerAction::LoadArtistAlbumsForMiller { artist_key }.into());
+            follow_ups.push(MillerAction::LoadArtistAlbumsForMiller { artist_key, replace_child: false }.into());
         }
     }
     Ok(follow_ups)

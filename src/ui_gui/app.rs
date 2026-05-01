@@ -501,6 +501,44 @@ impl App {
     }
 
     fn update(&mut self, message: GuiMessage) -> Task<GuiMessage> {
+        // Browse-ribbon snap-to-right.
+        //
+        // Multiple input paths can shift the ribbon's visible window
+        // — click drills (`MillerSelect`), keyboard auto-drill
+        // (`KeyPress`), palette-driven category switches, dispatcher
+        // follow-ups that push columns asynchronously, and
+        // `OpenInLibrary` jumps from the queue. Rather than emitting
+        // a `RibbonChanged` event from each of those producer sites
+        // (which would require touching every dispatcher arm that
+        // grows/replaces a column), we observe the effect: snapshot
+        // the ribbon's visible signature before the dispatch and
+        // compare it after. Anything that actually changed what the
+        // ribbon should render — category, column count, focused
+        // column, or which chrome owns focus — flips the tuple, and
+        // the snap fires.
+        //
+        // The snap pins the focused / freshly-drilled column at the
+        // right edge of the iced scrollable, matching the TUI's
+        // Niri-style ribbon.
+        let prev_sig = browse_ribbon_signature(&self.core.state);
+        let task = self.update_inner(message);
+        let new_sig = browse_ribbon_signature(&self.core.state);
+        if prev_sig != new_sig
+            && self.core.state.miller_layout
+                == crate::app::state::MillerLayoutMode::Scrolling
+            && self.core.state.view == View::Browse
+        {
+            use iced::widget::scrollable::{snap_to, RelativeOffset};
+            let snap = snap_to(
+                super::screens::browse::browse_h_scroll_id(),
+                RelativeOffset { x: 1.0, y: 0.0 },
+            );
+            return Task::batch(vec![task, snap]);
+        }
+        task
+    }
+
+    fn update_inner(&mut self, message: GuiMessage) -> Task<GuiMessage> {
         // Lazy-art motion gate. Only rapid-fire navigation gestures
         // raise `suppress_loads` — the cases where the user is moving
         // the cursor faster than artwork can load:
@@ -739,7 +777,7 @@ impl App {
                 // top no matter which path got us here.
                 let resets_columns = matches!(
                     &action,
-                    Action::Navigation(NavigationAction::SetCategory(_))
+                    Action::Navigation(NavigationAction::SetCategory { .. })
                         | Action::Navigation(NavigationAction::SetView(_))
                 );
                 let prev = self.core.state.view;
@@ -823,39 +861,23 @@ impl App {
                     }
                 }
 
-                let actions = miller_click_actions(&mut self.core.state, column_index, item_index, activate);
-                let had_drill = !actions.is_empty();
-                // Snapshot focused_column BEFORE dispatching drill
-                // actions so we can detect whether a synchronous
-                // push_column inside `miller_click_actions` (e.g. the
-                // local grouped-album drill that returns an empty
-                // actions vec) advanced focus to the new child.
-                let pre_dispatch_focus = self
-                    .core
-                    .state
-                    .browse_nav()
-                    .map(|n| n.focused_column);
-                for a in actions {
+                let plan = crate::services::plan_drill(
+                    &mut self.core.state,
+                    crate::services::ClickContext { column_index, item_index, activate },
+                );
+                for a in plan.actions {
                     self.dispatch_sync(a);
                 }
-                let post_dispatch_focus = self
-                    .core
-                    .state
-                    .browse_nav()
-                    .map(|n| n.focused_column);
-                let focus_advanced = pre_dispatch_focus != post_dispatch_focus
-                    && post_dispatch_focus.map_or(false, |i| i > column_index);
 
                 // Drilling via `push_column` advances the Miller focus
                 // to the newly-added child column. The user expects
                 // focus to follow the mouse instead, so the column
                 // they clicked stays highlighted as the focused one.
-                // Snap it back whenever we drilled — either via an
-                // async action (`had_drill`) or synchronously (the
-                // grouped-album path that does push_column locally
-                // and returns an empty actions vec, detected via
-                // `focus_advanced`).
-                if had_drill || focus_advanced {
+                // Snap it back whenever the click drilled — async via
+                // the action stream or synchronously (the grouped-
+                // album path that pushes a local column and returns
+                // no actions; both are reported via `plan.did_drill`).
+                if plan.did_drill {
                     if let Some(nav) = self.core.state.browse_nav_mut() {
                         if column_index < nav.columns.len() {
                             nav.focused_column = column_index;
@@ -1058,7 +1080,7 @@ impl App {
                         .and_then(|fs| fs.columns.get(column_index))
                         .and_then(|c| c.items.get(row_index))
                         .map(|it| it.key.clone());
-                    key.map(|k| Action::Folders(FolderAction::NavigateIntoFolder(k)))
+                    key.map(|k| Action::Folders(FolderAction::NavigateIntoFolder { folder_key: k, replace_child: false }))
                 } else {
                     Some(Action::Folders(FolderAction::PlayFolderTrack { track_index: row_index }))
                 };
@@ -1419,7 +1441,7 @@ impl App {
                 // by clicking the row inside the Playlists category
                 // column — but skipping the "first click on Playlists,
                 // second click on the row" two-step.
-                self.dispatch_sync(Action::Navigation(NavigationAction::SetCategory(
+                self.dispatch_sync(Action::Navigation(NavigationAction::set_category(
                     BrowseCategory::Playlists,
                 )));
                 if let Some(col) = self.core.state.playlist_nav.columns.get_mut(0) {
@@ -1433,7 +1455,7 @@ impl App {
                 self.core.state.playlist_nav.truncate_right();
                 self.core.state.library.selected_album_title = title;
                 self.dispatch_sync(Action::Miller(
-                    MillerAction::LoadPlaylistTracksForMiller { playlist_key },
+                    MillerAction::LoadPlaylistTracksForMiller { playlist_key, replace_child: false },
                 ));
                 self.scroll_state.clear();
                 self.center_all_columns_into_view()
@@ -1703,7 +1725,7 @@ impl App {
                 // selected_index in artist_nav.columns[0] BEFORE the
                 // drill so the parent-column highlight matches the
                 // artist whose albums are being shown.
-                self.dispatch_sync(Action::Navigation(NavigationAction::SetCategory(BrowseCategory::Library)));
+                self.dispatch_sync(Action::Navigation(NavigationAction::set_category(BrowseCategory::Library)));
                 self.dispatch_sync(Action::Navigation(NavigationAction::SetView(View::Browse)));
                 if let Some(col) = self.core.state.artist_nav.columns.get_mut(0) {
                     if let Some(pos) = col.items.iter().position(|i| i.key() == artist_key.as_str()) {
@@ -1726,7 +1748,7 @@ impl App {
                 {
                     self.core.state.library.selected_artist_name = name;
                 }
-                self.dispatch_sync(Action::Miller(MillerAction::LoadArtistAlbumsForMiller { artist_key }));
+                self.dispatch_sync(Action::Miller(MillerAction::LoadArtistAlbumsForMiller { artist_key, replace_child: false }));
                 Task::none()
             }
 
@@ -1782,34 +1804,66 @@ impl App {
             (self.core.config.ui.window.width as f32).max(600.0)
         };
 
-        // View routing by `state.view` mirrors the TUI structure.
-        let body: Element<'_, GuiMessage> = match self.core.state.view {
-            View::Auth => super::screens::auth::view(&self.core.state),
-            View::Browse => {
-                let scroll_state = &self.scroll_state;
-                super::screens::browse::view(
-                    &self.core.state,
-                    viewport_w_logical,
-                    move |idx| match scroll_state.get(&idx) {
-                        Some(s) => (s.offset_y, s.bounds_h),
-                        None => (0.0, 0.0),
-                    },
-                    &self.track_pane_similar,
-                )
-            }
-            View::Queue | View::NowPlaying => super::screens::queue::view(
+        // Per-screen renderers, used directly or stacked in tall mode.
+        let scroll_state_ref = &self.scroll_state;
+        let browse_view = || -> Element<'_, GuiMessage> {
+            super::screens::browse::view(
+                &self.core.state,
+                viewport_w_logical,
+                move |idx| match scroll_state_ref.get(&idx) {
+                    Some(s) => (s.offset_y, s.bounds_h),
+                    None => (0.0, 0.0),
+                },
+                &self.track_pane_similar,
+            )
+        };
+        let queue_view = || -> Element<'_, GuiMessage> {
+            super::screens::queue::view(
                 &self.core.state,
                 self.queue_drag.map(|(src, _)| src),
                 self.is_stations_open(),
                 self.is_dj_modes_open(),
                 self.is_remix_tools_open(),
                 &self.vectorscope,
-            ),
-            View::Similar => super::screens::similar::view(&self.core.state),
-            View::Related => super::screens::related::view(&self.core.state),
-            View::Help => super::screens::help::view(&self.core.state),
-            View::Settings => super::screens::settings::view(&self.core.state, self.core.config.ui.ui_scale),
-            View::Search => super::screens::search::view(&self.core.state),
+            )
+        };
+
+        // Tall mode: split the body 40 / 60 vertically — Library /
+        // Settings / Help on top, Queue + Now Playing on bottom.
+        // Mirrors the TUI's `state.tall_mode` behaviour. Auth stays
+        // full-screen; Search / Similar / Related are full-screen
+        // popups so they keep the whole body too.
+        let tall_eligible = matches!(
+            self.core.state.view,
+            View::Browse | View::Queue | View::NowPlaying | View::Settings | View::Help
+        );
+        let body: Element<'_, GuiMessage> = if self.core.state.tall_mode && tall_eligible {
+            let top: Element<'_, GuiMessage> = match self.core.state.view {
+                View::Settings => super::screens::settings::view(&self.core.state, self.core.config.ui.ui_scale),
+                View::Help => super::screens::help::view(&self.core.state),
+                _ => browse_view(),
+            };
+            let bottom = queue_view();
+            // 40 / 60 vertical split. iced doesn't have percentage
+            // length, so use FillPortion(2) / FillPortion(3).
+            iced::widget::column![
+                container(top).width(Length::Fill).height(Length::FillPortion(2)),
+                container(bottom).width(Length::Fill).height(Length::FillPortion(3)),
+            ]
+            .spacing(0)
+            .into()
+        } else {
+            // View routing by `state.view` mirrors the TUI structure.
+            match self.core.state.view {
+                View::Auth => super::screens::auth::view(&self.core.state),
+                View::Browse => browse_view(),
+                View::Queue | View::NowPlaying => queue_view(),
+                View::Similar => super::screens::similar::view(&self.core.state),
+                View::Related => super::screens::related::view(&self.core.state),
+                View::Help => super::screens::help::view(&self.core.state),
+                View::Settings => super::screens::settings::view(&self.core.state, self.core.config.ui.ui_scale),
+                View::Search => super::screens::search::view(&self.core.state),
+            }
         };
 
         let transport = super::widgets::transport_bar::view(&self.core.state);
@@ -2760,6 +2814,34 @@ fn state_browse_category_is_folders(state: &AppState) -> bool {
     matches!(state.browse_category, crate::app::state::BrowseCategory::Folders)
 }
 
+/// Compact "what's the user looking at on the Browse ribbon" snapshot,
+/// used by `update()` to decide whether the horizontal Miller-column
+/// scrollable should snap to its right edge after a dispatch. Any
+/// change in category, nav column count, focused column, or which
+/// chrome (cat col / track-details pane) owns focus counts as a
+/// ribbon move and triggers the snap.
+fn browse_ribbon_signature(
+    state: &AppState,
+) -> (
+    crate::app::state::BrowseCategory,
+    usize, // nav.columns.len()
+    usize, // nav.focused_column
+    bool,  // category_column_focused
+    bool,  // track_pane_focused
+) {
+    let (n, f) = state
+        .browse_nav()
+        .map(|nav| (nav.columns.len(), nav.focused_column))
+        .unwrap_or((0, 0));
+    (
+        state.browse_category,
+        n,
+        f,
+        state.category_column_focused,
+        state.track_pane_focused,
+    )
+}
+
 /// Build the search query for an external-music-service search of the
 /// right-clicked row. Mirrors the formats produced by
 /// `build_external_search_query` (palette path) — "Artist - Album"
@@ -2799,8 +2881,8 @@ fn external_search_query_for_item(
         }
         BrowseItem::Artist { title, .. } => Some(title.clone()),
         BrowseItem::Playlist { title, .. } => Some(title.clone()),
-        BrowseItem::AllTracks { artist_name, .. } if !artist_name.is_empty() =>
-            Some(artist_name.clone()),
+        BrowseItem::AllTracks { scope, .. } =>
+            scope.artist_name().map(str::to_string),
         _ => None,
     }
 }
@@ -2831,12 +2913,19 @@ fn build_miller_context_menu(
         BrowseItem::Track { .. } => {
             // Pick the right play action for the active browse category.
             // Each category has its own nav state and matching dispatcher.
+            // All tag sections (AlbumGenres, ArtistGenres, Moods,
+            // Styles, Decades, Years) share `tag_nav` and the
+            // `PlayGenreTrackFromMiller` dispatcher — special-casing
+            // only `AlbumGenres` would silently break album-track
+            // playback for the others.
             let play_action = |single: bool| -> Action {
                 use crate::app::state::BrowseCategory;
-                match state.browse_category {
-                    BrowseCategory::AlbumGenres => Action::Miller(MillerAction::PlayGenreTrackFromMiller {
+                if state.browse_category.is_tag_section() {
+                    return Action::Miller(MillerAction::PlayGenreTrackFromMiller {
                         column_index, track_index: item_index, single_track: single,
-                    }),
+                    });
+                }
+                match state.browse_category {
                     BrowseCategory::Playlists => Action::Miller(MillerAction::PlayPlaylistTrackFromMiller {
                         column_index, track_index: item_index, single_track: single,
                     }),
@@ -3556,15 +3645,6 @@ fn open_in_library_for_album(
     }))
 }
 
-/// Local re-export of the shared `helpers::drill_grouped_album` so the
-/// GUI's `miller_click_actions` doesn't have to re-import the long path.
-fn helpers_for_grouped_album(
-    col: &crate::app::state::BrowseColumn,
-    album_idx: usize,
-) -> Option<crate::app::state::BrowseColumn> {
-    crate::app::handlers::helpers::drill_grouped_album(col, album_idx)
-}
-
 /// Find the row index in the root browse column whose sort key matches
 /// the requested character class. Pure lookup — does NOT mutate state.
 ///
@@ -3581,179 +3661,4 @@ fn alphabet_target_index(state: &AppState, ch: char) -> Option<usize> {
     crate::app::handlers::helpers::alphabet_target_index(state, ch)
 }
 
-fn miller_click_actions(
-    state: &mut AppState,
-    column_index: usize,
-    item_index: usize,
-    activate: bool,
-) -> Vec<Action> {
-    use crate::app::action::{MillerAction, RadioAction};
-    use crate::app::state::BrowseItem;
-
-    // Any click inside a Miller column implies focus has moved out of
-    // the leftmost category column — clear that flag so the column
-    // focus indicator paints the right column.
-    let category_was_focused = state.category_column_focused;
-    state.category_column_focused = false;
-
-    // Move selection + focus, then clone the item (and any siblings
-    // we'll need) so the rest of the function can re-borrow `state`
-    // without conflicting. Plain clicks select only — they don't
-    // drill. Drill happens on `activate` (double-click) or via the
-    // shared `Enter` / `Right` keyboard handlers. The `prev_focus`
-    // guard below preserves the same behaviour when the click is
-    // also moving focus to a new column.
-    // Snapshot whether anything is open rightward of the clicked
-    // column BEFORE we mutate nav. `track_pane_open` is set by an
-    // explicit Enter/double-click on a Track and counts as a
-    // rightward open thing for the auto-drill rule.
-    let pane_open = state.track_pane_open;
-    let (item, track_obj, grouped_album_col, auto_drill) = {
-        let Some(nav) = state.browse_nav_mut() else { return Vec::new() };
-        let had_child = column_index + 1 < nav.columns.len() || pane_open;
-        let Some(col) = nav.columns.get_mut(column_index) else { return Vec::new() };
-        col.selected_index = item_index;
-        nav.focused_column = column_index;
-        // Plain click anywhere is selection-only by default. Stale
-        // child cols are truncated. EXCEPTION: when something
-        // rightward is already open, clicking a sibling re-fills
-        // the rightward child from the new selection — the user
-        // has already committed to the drill.
-        let auto_drill = !activate && had_child;
-        if !activate {
-            nav.columns.truncate(column_index + 1);
-        }
-        let _ = category_was_focused;
-        if !activate && !auto_drill {
-            return Vec::new();
-        }
-        let item = nav.columns.get(column_index)
-            .and_then(|c| c.items.get(item_index)).cloned();
-        // For a Track click in any nav, we need the matching full
-        // Track object from the parallel `tracks` array.
-        let track_obj = nav.columns.get(column_index)
-            .and_then(|c| c.tracks.get(item_index).cloned());
-        // For a Playlist+grouped Album click, build the new tracks
-        // column locally so we don't have to hit the API.
-        let grouped_album_col = if state.browse_category == crate::app::state::BrowseCategory::Playlists {
-            let c = state.playlist_nav.columns.get(column_index);
-            c.and_then(|c| if c.grouped_by_album { helpers_for_grouped_album(c, item_index) } else { None })
-        } else {
-            None
-        };
-        (item, track_obj, grouped_album_col, auto_drill)
-    };
-    let Some(item) = item else { return Vec::new() };
-
-    // Auto-drill on a non-Track item swaps the rightward column to
-    // that item's child — but the track-details pane has no logical
-    // re-target (the new column doesn't pick out a single track),
-    // so close it. The Track match arm below reopens it via
-    // OpenTrackDetails when applicable.
-    if auto_drill && !matches!(item, BrowseItem::Track { .. }) {
-        state.track_pane_open = false;
-        state.track_pane_focused = false;
-        state.track_pane_index = 0;
-    }
-    let _ = auto_drill;
-
-    let mut arm_drill = true;
-    let actions: Vec<Action> = match &item {
-        BrowseItem::Artist { key, .. } => vec![Action::Miller(
-            MillerAction::LoadArtistAlbumsForMiller { artist_key: key.clone() },
-        )],
-        BrowseItem::Album { key, title, .. } => {
-            // In the Playlists category with `grouped_by_album` set,
-            // an Album row is a synthetic group of the playlist's own
-            // tracks — drilling fetches them locally rather than
-            // hitting the API. Mirrors the TUI mouse handler.
-            if let Some(new_col) = grouped_album_col {
-                state.playlist_nav.push_column(new_col);
-                arm_drill = false;
-                Vec::new()
-            } else {
-                state.library.selected_album_title = title.clone();
-                // Per-category dispatch: each nav has its own loader
-                // because the loader pushes the new tracks column
-                // onto the matching `*_nav.columns`. Genres in
-                // particular needs `LoadGenreTracksForMiller` —
-                // dispatching `LoadAlbumTracksForMiller` (which
-                // pushes to `artist_nav`) leaves the genre column
-                // unchanged and silently breaks drill-down.
-                let action = match state.browse_category {
-                    crate::app::state::BrowseCategory::AlbumGenres => {
-                        MillerAction::LoadGenreTracksForMiller { album_key: key.clone() }
-                    }
-                    _ => MillerAction::LoadAlbumTracksForMiller { album_key: key.clone() },
-                };
-                vec![Action::Miller(action)]
-            }
-        }
-        BrowseItem::Track { .. } => {
-            // Tracks are terminal: clicking opens the track-details
-            // pane. The pane is a derived view of the focused Track
-            // row — the OpenTrackDetails action carries no payload.
-            // Note: clicking already moved selection to this row via
-            // `col.selected_index = item_index` above, so by the time
-            // the dispatcher runs, `focused_track()` returns this row.
-            arm_drill = false;
-            let _ = track_obj;
-            vec![Action::Browse(crate::app::action::BrowseAction::OpenTrackDetails)]
-        }
-        BrowseItem::Playlist { key, .. } => vec![Action::Miller(
-            MillerAction::LoadPlaylistTracksForMiller { playlist_key: key.clone() },
-        )],
-        BrowseItem::Genre { key, .. } => vec![Action::Miller(
-            MillerAction::LoadGenreAlbumsForMiller { genre_key: key.clone() },
-        )],
-        BrowseItem::AllTracks { artist_key, artist_name, .. } => {
-            if artist_key == "__all_library__" {
-                vec![Action::Miller(MillerAction::LoadAllLibraryTracksForMiller)]
-            } else if artist_key == "__all_comp__" {
-                vec![Action::Miller(MillerAction::LoadAllCompilationTracksForMiller)]
-            } else if let Some(real_key) = artist_key.strip_prefix("__comp_tracks:") {
-                vec![Action::Miller(MillerAction::LoadCompilationAllTracksForMiller {
-                    artist_key: real_key.to_string(),
-                    artist_name: artist_name.clone(),
-                })]
-            } else {
-                vec![Action::Miller(MillerAction::LoadArtistAllTracksForMiller { artist_key: artist_key.clone() })]
-            }
-        }
-        BrowseItem::AllArtists => vec![Action::Miller(MillerAction::LoadAllAlbumsForMiller)],
-        BrowseItem::Compilations => vec![Action::Miller(MillerAction::LoadCompilationsForMiller)],
-        BrowseItem::CompilationTracks { artist_key, artist_name } => vec![Action::Miller(
-            MillerAction::LoadCompilationAlbumsForMiller {
-                artist_key: artist_key.clone(),
-                artist_name: artist_name.clone(),
-            },
-        )],
-        BrowseItem::ArtistRadio { artist_key, artist_name, .. } => {
-            arm_drill = false;
-            vec![Action::Radio(RadioAction::StartPlexRadio {
-                key: artist_key.clone(),
-                title: artist_name.clone(),
-            })]
-        }
-        BrowseItem::GenreCategory { key, .. } => {
-            // Drill from column 0's category row (All / Library /
-            // Artist / Album / Mood / Style) into column 1 filled
-            // with the matching genre list. Mirrors the TUI mouse
-            // handler — the GUI used to misroute this to
-            // `LoadCategoryTracks` which doesn't change the genre
-            // column at all, so the user always saw the merged
-            // "all genres" list regardless of which tab they clicked.
-            // Tag-style drilling no longer goes through a category
-            // column — the section IS the category. Drilling into a
-            // GenreCategory item is a no-op now.
-            let _ = key;
-            vec![]
-        }
-    };
-
-    if arm_drill && !actions.is_empty() {
-        state.auto_drill_pending = true;
-    }
-    actions
-}
 
