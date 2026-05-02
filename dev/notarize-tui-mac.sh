@@ -148,10 +148,9 @@ PY
 chmod +x "$APP_BUNDLE/Contents/MacOS/textamp"
 
 # Launcher script — the bundle's CFBundleExecutable. Finder runs
-# this; it opens Terminal.app and execs the actual TUI binary
-# inside the freshly-created tab. `exec` replaces the shell so
-# Cmd+W on the TUI's own quit reaps the tab cleanly instead of
-# falling back to a second prompt.
+# this; it opens a terminal host and execs the actual TUI binary
+# inside it. Prefers Ghostty when present (truecolor and sixel
+# defaults) and falls back to Terminal.app otherwise.
 cat > "$APP_BUNDLE/Contents/MacOS/launch" <<'LAUNCH'
 #!/bin/bash
 # Resolve the bundle's MacOS dir from the running script — works
@@ -160,11 +159,33 @@ cat > "$APP_BUNDLE/Contents/MacOS/launch" <<'LAUNCH'
 DIR="$(cd "$(dirname "$0")" && pwd)"
 BIN="$DIR/textamp"
 
-# Tell Terminal.app to open a new window/tab and run the TUI. Single
-# quotes around $BIN survive the AppleScript double-quoting; the
-# `exec` replaces the host shell so the Terminal tab closes (or
-# stays open per user preference) when textamp exits, instead of
-# leaving an idle bash prompt.
+# Prefer Ghostty if installed. Spotlight finds it wherever the user
+# placed it; the standard install paths are checked as a fallback in
+# case Spotlight is disabled.
+GHOSTTY_APP="$(mdfind \
+    "kMDItemCFBundleIdentifier == 'com.mitchellh.ghostty'" 2>/dev/null \
+    | head -n1)"
+if [ -z "$GHOSTTY_APP" ]; then
+    for cand in "/Applications/Ghostty.app" "$HOME/Applications/Ghostty.app"; do
+        if [ -d "$cand" ]; then
+            GHOSTTY_APP="$cand"
+            break
+        fi
+    done
+fi
+
+if [ -n "$GHOSTTY_APP" ] && [ -d "$GHOSTTY_APP" ]; then
+    # `open -na` opens a new Ghostty instance and detaches from our
+    # process, so the launcher exits cleanly while Ghostty stays
+    # running. `--args -e <bin>` is passed through to ghostty(1),
+    # which runs the binary in a new window.
+    open -na "$GHOSTTY_APP" --args -e "$BIN"
+    exit 0
+fi
+
+# Fall back to Terminal.app. `exec` replaces the host shell so the
+# tab closes (or stays open per user preference) when textamp
+# exits, instead of leaving an idle bash prompt.
 osascript >/dev/null <<EOF
 tell application "Terminal"
     activate
