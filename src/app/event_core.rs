@@ -1,12 +1,11 @@
-//! Platform-neutral event payloads.
+//! Application event payloads.
 //!
 //! Every event body carried by the application channel lives here. This
-//! module imports nothing from ratatui / crossterm / iced so it compiles
-//! identically under every UI feature flag.
+//! module imports nothing from ratatui or crossterm so it stays decoupled
+//! from the rendering layer.
 //!
-//! The top-level `Event` enum in `crate::app::event` wraps these payloads.
-//! Under `feature = "tui"`, `Event` also carries crossterm input variants
-//! (`Key`, `Mouse`, `Resize`); under `feature = "gui"` it does not.
+//! The top-level `Event` enum in `crate::app::event` wraps these payloads
+//! and adds the terminal input variants (`Key`, `Mouse`, `Resize`).
 
 use crate::plex::models::{Album, Artist, Genre, Hub, Library, Playlist, PlexServer, Station, Track, SearchResults};
 use crate::services::WaveformData;

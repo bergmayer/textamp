@@ -2,38 +2,12 @@
 name = "textamp"
 version = "1.0.0"
 edition = "2021"
-description = "A keyboard-driven Plex Music client for terminal and desktop"
+description = "A keyboard-driven Plex Music client for the terminal"
 license = "Unlicense"
 authors = ["John Bergmayer"]
-keywords = ["plex", "music", "tui", "gui", "plexamp"]
-categories = ["command-line-utilities", "multimedia::audio", "gui"]
+keywords = ["plex", "music", "tui", "plexamp"]
+categories = ["command-line-utilities", "multimedia::audio"]
 
-[features]
-default = ["tui"]
-
-# Terminal UI (`textamp` binary): ratatui renderer.
-#
-# Note: the `crossterm` keyboard/mouse event types are a core always-on
-# dependency because the action-builder helpers (`navigate_to_album`,
-# `get_similar_action`, etc.) are shared between the TUI key input layer
-# and the GUI shortcut layer. They both accept the same `KeyEvent` input.
-tui = ["dep:ratatui", "dep:ratatui-image", "dep:tui-input", "dep:fuzzy-matcher"]
-
-# Desktop GUI (`textamp-gui` binary): iced renderer.
-gui = ["dep:iced", "dep:raw-window-handle"]
-
-# Native OS menu bars via `muda`:
-# - macOS: global menu bar
-# - Windows: window-attached Win32 HMENU
-# - Linux: window-attached GTK menu (requires system GTK3:
-#   apt `libgtk-3-dev`, pacman `gtk3`, dnf `gtk3-devel`)
-# Environments without GTK can build with `--no-default-features
-# --features tui,gui` for an in-window software menu fallback.
-native-menus = ["gui", "dep:muda"]
-
-# ============================================================================
-# Always-on dependencies (shared by both front-ends).
-# ============================================================================
 [dependencies]
 
 # Async runtime
@@ -47,11 +21,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 
-# Image decoding (album art — used by both UIs)
+# Image decoding (album art)
 image = "0.25"
 base64 = "0.22"
 
-# Audio playback (rodio spawns OS threads; compatible with both UIs)
+# Audio playback
 rodio = { version = "0.21", features = ["symphonia-all"] }
 
 # Audio decoding for waveform generation
@@ -97,77 +71,33 @@ unicode-width = "0.2"
 # Open URLs in default browser
 open = "5"
 
-# Crossterm's key/mouse event types are always available — the shared
-# action-builder helpers (e.g. `navigate_to_album`) accept them and are
-# called by both the TUI key handler and the GUI shortcut translator.
-# The crate is tiny (~200 KB) and cross-platform.
+# Terminal input events (key/mouse)
 crossterm = "0.28"
 
-# Cross-platform advisory file locking (process lock so TUI and GUI cannot
-# run simultaneously against the shared cache).
+# Cross-platform advisory file locking (process lock on the shared cache).
 fs4 = "0.9"
 
-# ============================================================================
-# TUI-only dependencies (feature = "tui").
-# ============================================================================
+# Terminal UI
+ratatui = "0.29"
+ratatui-image = { version = "9", default-features = false, features = ["crossterm", "image-defaults"] }
 
-ratatui = { version = "0.29", optional = true }
-ratatui-image = { version = "9", default-features = false, features = ["crossterm", "image-defaults"], optional = true }
-
-# TUI command-palette: typed text input + fuzzy-match against the
-# command registry. Both crates are TUI-only.
-tui-input = { version = "0.10", optional = true }
-fuzzy-matcher = { version = "0.3", optional = true }
-
-# ============================================================================
-# GUI-only dependencies (feature = "gui").
-# ============================================================================
-
-# Iced 0.13 is the widely-tested stable release at the time of writing.
-# Upgrading to 0.14 requires migration to the `iced::application()` builder;
-# that can be taken as a follow-up.
-iced = { version = "0.13", optional = true, features = ["tokio", "image", "canvas", "advanced", "svg", "lazy"] }
-
-# muda provides native menu bars (macOS global bar, Win32 HMENU, GTK).
-muda = { version = "0.16", optional = true }
-
-# For passing the window handle into muda's `init_for_*` functions.
-raw-window-handle = { version = "0.6", optional = true }
-
-# ============================================================================
-# Binary targets.
-# ============================================================================
+# Command-palette: typed text input + fuzzy-match against the command registry.
+tui-input = "0.10"
+fuzzy-matcher = "0.3"
 
 [[bin]]
 name = "textamp"
 path = "src/bin/textamp_tui.rs"
-required-features = ["tui"]
 
-[[bin]]
-name = "textamp-gui"
-path = "src/bin/textamp_gui.rs"
-required-features = ["gui"]
-
-# Development helpers (TUI only).
 [[bin]]
 name = "textamp-debug"
 path = "src/bin/debug.rs"
-required-features = ["tui"]
 
 [[bin]]
 name = "textamp-test-tui"
 path = "src/bin/test_tui.rs"
-required-features = ["tui"]
 
 [profile.release]
 lto = true
 strip = true
 opt-level = 3
-
-# Local patch of iced_widget — bumps the hard-coded 2 px minimum
-# scroller height in the scrollable widget up to 40 px so the dragger
-# stays grabbable on tall content (10k+-row libraries, where iced's
-# default would otherwise collapse the dragger to a 2 px sliver).
-# See vendor/iced_widget/src/scrollable.rs around line 1611.
-[patch.crates-io]
-iced_widget = { path = "vendor/iced_widget" }

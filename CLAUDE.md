@@ -2,15 +2,7 @@
 
 ## Build Requirements
 
-Build only the binaries whose code your change actually affects:
-
-- **Shared core** (`src/app/`, `src/audio/`, `src/plex/`, `src/services/`, `src/config/`, `src/util/`, `src/lib.rs`, `src/miller.rs`, `Cargo.toml`): build BOTH the TUI (`cargo build --release --bin textamp`) and the GUI (`bash dev/win-build.sh` on Windows, or `cargo build --release --bin textamp-gui --features gui,native-menus` on macOS / Linux). The TUI and GUI must stay equivalent in features and functionality, so anything in the shared core has to compile cleanly for both front-ends.
-- **TUI only** (`src/ui/`, `src/bin/textamp_tui.rs`): build just `cargo build --release --bin textamp`.
-- **GUI only** (`src/ui_gui/`, `src/bin/textamp_gui.rs`): build just the GUI for the platform you're iterating on (`bash dev/win-build.sh` for Windows, or `cargo build --release --bin textamp-gui --features gui,native-menus` for macOS / Linux). Do not also build the other platform's GUI unless the user asks.
-
-**IMPORTANT — always include `native-menus`** when building the GUI on macOS. Without it, the menu attaches to the window instead of using macOS's global menu bar. The `native-menus` feature pulls in `muda`, which provides the platform-correct menu (global on macOS, Win32 HMENU on Windows, GTK on Linux). The Linux fallback path that omits it exists only for environments without GTK3 — never strip it on macOS.
-
-Do not say "done" until every required build succeeds.
+Build with `cargo build --release --bin textamp`. Do not say "done" until the build succeeds with zero warnings.
 
 ## UI Consistency
 
@@ -24,14 +16,14 @@ Clicking an item to highlight it should never recenter/scroll the view. Use the 
 
 ## Architecture
 
-### Layer Separation (Critical for Portability)
+### Layer Separation
 
-The codebase is designed for cross-platform portability. Each layer has clear boundaries:
+The UI is separate from the application logic. Each layer has clear boundaries:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                      UI Layer (replaceable)                  │
-│  src/ui/ - Ratatui TUI (could be SwiftUI, Svelte, etc.)    │
+│                         UI Layer                             │
+│  src/ui/ - ratatui renderer (pure render-from-state)        │
 └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -54,8 +46,12 @@ The codebase is designed for cross-platform portability. Each layer has clear bo
 └───────────────┘   └─────────────────┘   └───────────────────┘
 ```
 
+The UI layer only consumes state; it never owns or mutates it. App-core
+modules never import from `src/ui/`. Keeping this boundary clean is the
+point of the separation.
+
 ### Plex Module (`src/plex/`)
-The unified Plex integration layer. **This is the portable core for other platforms.**
+The unified Plex integration layer. **No UI or audio imports.**
 
 Structure:
 - `mod.rs` - PlexService facade combining client + cache + preloading
@@ -67,20 +63,11 @@ Structure:
 - `constants.rs` - API endpoints, headers, type IDs
 - `error.rs` - Error types
 
-Key features:
-- **No UI or audio imports** - fully portable
-- Aggressive caching with TTL-based expiration
-- Waveform cache with size limits and pruning
-- Can be compiled as a library for FFI to Swift/Kotlin
-
-Backward compatibility: `src/lib.rs` provides `api::` and `cache::` aliases that redirect to `plex::`.
-
 ### Audio (`src/audio/`)
 - `AudioBackend` trait defines the interface
-- `RodioBackend` implements it for desktop (rodio/symphonia)
+- `RodioBackend` implements it via rodio/symphonia
 - `DummyBackend` for testing without audio hardware
 - **No API or UI imports**
-- To port: implement `AudioBackend` for platform (AVFoundation, Web Audio)
 
 ### Services (`src/services/`)
 - Reusable business logic, **UI-agnostic**
@@ -91,9 +78,8 @@ Backward compatibility: `src/lib.rs` provides `api::` and `cache::` aliases that
 - Pure functions where possible, easily testable
 
 ### UI (`src/ui/`)
-- Pure rendering from state
-- Only imports data models from Plex (not the client)
-- Can be replaced entirely for different platforms
+- Pure rendering from state — no mutation
+- Imports data models from Plex (not the client)
 
 ### App Core (`src/app/`)
 - `AppState` - single source of truth
@@ -133,17 +119,6 @@ Run tests with: `cargo test`
 
 The `PlaybackService` has unit tests demonstrating testable service design.
 Use `DummyBackend` for testing without audio hardware.
-
-## Porting Guidelines
-
-When porting to a new platform:
-
-1. **Keep**: `src/plex/`, `src/services/` (compile as library)
-2. **Replace**: `src/ui/` with platform UI (SwiftUI, Svelte, etc.)
-3. **Implement**: `AudioBackend` trait for platform audio
-4. **Adapt**: `src/app/` event loop to platform patterns (may need significant changes)
-
-The Plex module and services layers should work with minimal changes.
 
 ## File Locations
 

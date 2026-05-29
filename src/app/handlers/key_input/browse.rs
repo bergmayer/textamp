@@ -63,22 +63,18 @@ pub(super) fn handle_browse_keys(key: event::KeyEvent, state: &mut AppState) -> 
                 }
                 return vec![SearchAction::FilteredListDown.into()];
             }
-            // Enter on the filter input opens the global Search
-            // popup pre-seeded with the same query — same behaviour
-            // as the GUI tab-strip's submit_filter_msg. Right-arrow
-            // still selects the filtered item without leaving the
-            // current column flow.
-            KeyCode::Enter => {
-                let q = state.list_filter.query.trim().to_string();
-                if q.is_empty() {
-                    return vec![];
-                }
-                return vec![
-                    SearchAction::OpenSearchPopup.into(),
-                    SearchAction::SetSearchQuery(q).into(),
-                ];
-            }
-            KeyCode::Right if focused_on_filter_column => {
+            // Enter and Right on the filter column drill into the
+            // highlighted filtered row in one step:
+            // `SelectFilteredItem` syncs the column's selected_index
+            // to the filter's match (the column may have drifted),
+            // deactivates the filter, then dispatches the same drill
+            // action a normal Enter would. Without this, Enter falls
+            // through to the column's own handler and drills using a
+            // stale `selected_index` (or, with filter results still
+            // racing in, no drill at all), producing the user-visible
+            // "first Enter undoes the filter, second Enter drills"
+            // glitch.
+            KeyCode::Enter | KeyCode::Right if focused_on_filter_column => {
                 return vec![SearchAction::SelectFilteredItem.into()];
             }
             // Typing appends to filter query (only unmodified chars)
@@ -761,8 +757,6 @@ pub(super) fn handle_folder_browse_keys(key: event::KeyEvent, state: &mut AppSta
 
 /// Handle Artist browsing with dynamic Miller columns.
 pub(super) fn handle_artist_browse_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
-    use crate::app::state::BrowseItem;
-
     // Handle common navigation keys
     let is_up_down = matches!(key.code, KeyCode::Up | KeyCode::Down);
     let is_letter_jump = matches!(key.code, KeyCode::Char(c) if c.is_ascii_alphabetic())
@@ -925,8 +919,6 @@ pub(super) fn drill_actions_for_focused_artist_item(
 
 /// Handle Genre browsing with dynamic Miller columns
 pub(super) fn handle_genre_browse_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
-    use crate::app::state::BrowseItem;
-
     // Left/Backspace at root column → return to category column
     if matches!(key.code, KeyCode::Left | KeyCode::Backspace) && !state.tag_nav.can_go_left() {
         state.focus_category_column();
@@ -1013,8 +1005,6 @@ pub(super) fn drill_actions_for_focused_genre_item(
 
 /// Handle Playlist browsing with dynamic Miller columns
 pub(super) fn handle_playlist_browse_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
-    use crate::app::state::BrowseItem;
-
     // Left/Backspace at root column → return to category column
     if matches!(key.code, KeyCode::Left | KeyCode::Backspace) && !state.playlist_nav.can_go_left() {
         state.focus_category_column();
@@ -1048,28 +1038,6 @@ pub(super) fn handle_playlist_browse_keys(key: event::KeyEvent, state: &mut AppS
         return drill_actions_for_focused_playlist_item(state, false);
     }
 
-    vec![]
-}
-
-/// Drill action for the currently-selected folder_nav row. Folder
-/// rows navigate into the folder; track rows are NOT auto-drilled
-/// (auto-drill should never start playback as a side-effect).
-pub(super) fn drill_actions_for_focused_folder_item(
-    state: &mut AppState,
-    replace_child: bool,
-) -> Vec<Action> {
-    use crate::services::FolderItemType;
-    let item = state.folder_state.as_ref()
-        .and_then(|fs| fs.selected_item())
-        .cloned();
-    if let Some(item) = item {
-        if item.item_type == FolderItemType::Folder {
-            return vec![FolderAction::NavigateIntoFolder {
-                folder_key: item.key,
-                replace_child,
-            }.into()];
-        }
-    }
     vec![]
 }
 

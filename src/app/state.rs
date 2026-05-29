@@ -1807,26 +1807,21 @@ pub struct AppState {
     /// the viewport horizontally as the user drills.
     pub miller_layout: MillerLayoutMode,
 
-    /// TUI-only: manual horizontal scroll offset (in ribbon slots)
-    /// for the Library screen when `miller_layout == Scrolling`.
-    /// Only consulted when `miller_scroll_manual` is true — otherwise
-    /// the renderer auto-anchors the ribbon to the focused column.
-    /// The GUI uses iced's `scrollable` for the same job and never
-    /// touches this field, so it's gated out of pure-GUI builds.
-    #[cfg(feature = "tui")]
+    /// Manual horizontal scroll offset (in ribbon slots) for the Library
+    /// screen when `miller_layout == Scrolling`. Only consulted when
+    /// `miller_scroll_manual` is true — otherwise the renderer
+    /// auto-anchors the ribbon to the focused column.
     pub miller_scroll_col: usize,
-    /// TUI-only: when true, the user has manually positioned the
-    /// horizontal scrollbar (via click or drag) and the renderer
-    /// should honour `miller_scroll_col` instead of auto-following
-    /// the focused column. Cleared on any keystroke so keyboard
-    /// navigation snaps the ribbon back to focus.
-    #[cfg(feature = "tui")]
+    /// When true, the user has manually positioned the horizontal
+    /// scrollbar (via click or drag) and the renderer should honour
+    /// `miller_scroll_col` instead of auto-following the focused
+    /// column. Cleared on any keystroke so keyboard navigation snaps
+    /// the ribbon back to focus.
     pub miller_scroll_manual: bool,
-    /// TUI-only: active horizontal-scrollbar drag. `Some(g)` means the
-    /// user is dragging the scrollbar thumb; `g` is the grab offset
-    /// in cells from the left edge of the thumb to the mouse click
-    /// position so the thumb tracks the cursor instead of jumping.
-    #[cfg(feature = "tui")]
+    /// Active horizontal-scrollbar drag. `Some(g)` means the user is
+    /// dragging the scrollbar thumb; `g` is the grab offset in cells
+    /// from the left edge of the thumb to the mouse click position so
+    /// the thumb tracks the cursor instead of jumping.
     pub miller_h_drag_grab: Option<u16>,
 
     // Sonic Adventure state
@@ -1924,8 +1919,6 @@ pub struct AppState {
 
     /// Hit-test region registry (RefCell for interior mutability during render).
     /// Populated each frame by render code, consumed by mouse_input handlers.
-    /// TUI only — the GUI uses Iced's own hit-testing.
-    #[cfg(feature = "tui")]
     pub hit_regions: std::cell::RefCell<crate::ui::hit_regions::HitRegions>,
 
     // Library switch loading state
@@ -2377,11 +2370,8 @@ impl AppState {
             theme: ThemeName::default(),
             tall_mode: false,
             miller_layout: MillerLayoutMode::default(),
-            #[cfg(feature = "tui")]
             miller_scroll_col: 0,
-            #[cfg(feature = "tui")]
             miller_scroll_manual: false,
-            #[cfg(feature = "tui")]
             miller_h_drag_grab: None,
             adventure: AdventureState::default(),
             dj: DjState::default(),
@@ -2406,7 +2396,6 @@ impl AppState {
             palette: PaletteState::default(),
             marquee: std::cell::RefCell::new(MarqueeState::default()),
             marquee_subtitle: std::cell::RefCell::new(MarqueeState::default()),
-            #[cfg(feature = "tui")]
             hit_regions: std::cell::RefCell::new(crate::ui::hit_regions::HitRegions::default()),
             library_loading: false,
             remote: RemoteControl::default(),
@@ -2522,8 +2511,7 @@ impl AppState {
 
     /// The track currently highlighted in the focused Miller column,
     /// if any. Used by the right-side track details pane: the pane
-    /// shows iff this returns `Some`. Mirrors the GUI helper of the
-    /// same name in `ui_gui::screens::browse`.
+    /// shows iff this returns `Some`.
     pub fn focused_track(&self) -> Option<&crate::plex::models::Track> {
         let nav = self.browse_nav()?;
         let col = nav.columns.get(nav.focused_column)?;

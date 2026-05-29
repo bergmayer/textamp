@@ -3,7 +3,7 @@
 use crate::app::event::*;
 use crate::app::{Action, AppState, Event};
 use crate::app::action::{MillerAction, SystemAction};
-use crate::app::state::{BrowseCategory, BrowseColumn, BrowseItem};
+use crate::app::state::{BrowseColumn, BrowseItem};
 use crate::plex::PlexClient;
 use crate::plex::models::Track;
 use crate::audio::AudioPlayer;

@@ -86,12 +86,7 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
     // Any keystroke re-engages focus-anchored ribbon scrolling: the
     // user has switched modalities from mouse-scrolling to
     // keyboard-driving, so the manual scroll position becomes stale.
-    // TUI-only state — the GUI uses iced's scrollable, which manages
-    // its own offset, so the gate matches the field declaration.
-    #[cfg(feature = "tui")]
-    {
-        state.miller_scroll_manual = false;
-    }
+    state.miller_scroll_manual = false;
 
     // Track modifier bar display.
     // Alt+/ or Ctrl+/ toggles the contextual shortcut bar on/off.
@@ -355,8 +350,7 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
             // Ctrl+P / Cmd+P = open the command palette. Playlists no
             // longer has a dedicated shortcut — they're listed as
             // individual rows in the leftmost browse column, so the
-            // category itself doesn't need a hot-key. Match the muda
-            // menu accelerator wired in `src/ui_gui/menu.rs`.
+            // category itself doesn't need a hot-key.
             if !state.palette.open && state.view != View::Auth {
                 crate::ui::command_palette::open(state);
             }
@@ -384,12 +378,31 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
         // to popups / inline filters / credential editors that need
         // the literal `?` or `,` keystroke. (See the let-binding just
         // above this match.)
-        (_, KeyCode::F(1)) | (_, KeyCode::Char('?')) if !in_text_capture => {
+        (_, KeyCode::F(1))
+        | (KeyModifiers::CONTROL, KeyCode::Char('h'))
+        | (KeyModifiers::CONTROL, KeyCode::Char('H'))
+            if !in_text_capture =>
+        {
             return if state.view == View::Help {
                 state.help_scroll = 0;
                 vec![NavigationAction::SetView(View::Browse).into()]
             } else {
                 vec![NavigationAction::SetView(View::Help).into()]
+            };
+        }
+        // `?` opens the search popup — grouped with the other
+        // single-symbol shortcuts in the bottom bar (`:`, `/`, `?`,
+        // …). Reads as "ask the library a question." Help stays on
+        // F1 and the palette's "Help" entry.
+        (m, KeyCode::Char('?'))
+            if !m.contains(KeyModifiers::CONTROL)
+                && !m.contains(KeyModifiers::ALT)
+                && !in_text_capture =>
+        {
+            return if state.popups.search_active {
+                vec![SearchAction::CloseSearchPopup.into()]
+            } else {
+                vec![SearchAction::OpenSearchPopup.into()]
             };
         }
         (_, KeyCode::F(2)) if !in_text_capture => {
@@ -634,7 +647,7 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
     // runs BEFORE the view-specific dispatch so filtering works
     // on Queue / Now Playing / Similar / etc., not just Browse.
     if state.list_filter.active {
-        if let Some(actions) = handle_filter_input(key, state) {
+        if let Some(actions) = handle_filter_input(key) {
             return actions;
         }
         // Fall through for keys we don't handle here (Tab, etc.).
@@ -777,7 +790,7 @@ fn toggle_select_mode_on_focused_list(state: &mut AppState, shift: bool) -> bool
 /// Process a key while the inline filter is active. Returns `Some`
 /// when the key was consumed, `None` to fall through to the view's
 /// own handler (e.g. Tab to switch panes, F-keys, etc.).
-fn handle_filter_input(key: event::KeyEvent, state: &mut AppState) -> Option<Vec<Action>> {
+fn handle_filter_input(key: event::KeyEvent) -> Option<Vec<Action>> {
     use crate::app::action::SearchAction;
     if key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::ALT) {
         return None;
@@ -785,21 +798,11 @@ fn handle_filter_input(key: event::KeyEvent, state: &mut AppState) -> Option<Vec
     match key.code {
         KeyCode::Esc => Some(vec![SearchAction::DeactivateListFilter.into()]),
         KeyCode::Backspace => Some(vec![SearchAction::DeleteListFilterChar.into()]),
-        KeyCode::Enter => {
-            let q = state.list_filter.query.trim().to_string();
-            if q.is_empty() {
-                Some(vec![])
-            } else {
-                Some(vec![
-                    SearchAction::OpenSearchPopup.into(),
-                    SearchAction::SetSearchQuery(q).into(),
-                ])
-            }
-        }
         KeyCode::Char(c) => Some(vec![SearchAction::AppendListFilterChar(c).into()]),
-        // Up/Down/Left/Right/Tab fall through to the view's handler
-        // so the user can keep navigating the filtered list while
-        // continuing to type.
+        // Up/Down/Left/Right/Tab/Enter fall through to the view's
+        // handler so the user can keep typing into the filter while
+        // navigating the filtered list AND activate (drill / play)
+        // the highlighted row with Enter.
         _ => None,
     }
 }
@@ -869,6 +872,11 @@ fn handle_artist_bio_popup_keys(key: event::KeyEvent, state: &mut AppState) -> V
     match key.code {
         KeyCode::Esc | KeyCode::F(4) => {
             state.popups.artist_bio = None;
+            // Bio popup overlays the Now Playing artwork when shown
+            // from that view; dropping the protocol forces a fresh
+            // image placement on the next render so the terminal
+            // re-displays the cover that the popup hid.
+            crate::ui::screens::now_playing::clear_artwork_cache();
         }
         KeyCode::Up => {
             if let Some(ref mut popup) = state.popups.artist_bio {

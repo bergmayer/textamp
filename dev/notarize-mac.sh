@@ -1,52 +1,39 @@
 #!/usr/bin/env bash
-# End-to-end macOS packaging for textamp-gui — build, bundle, sign,
-# notarize, staple, ship. No Xcode, no Swift, no Apple developer
-# tools beyond `codesign`, `xcrun notarytool`, and `xcrun stapler`
-# (all installed by the Command Line Tools `xcode-select --install`).
+# Package textamp as a Finder-launchable, signed, notarized .app
+# bundle. The TUI needs a terminal host, so the bundle's entry point
+# is a launcher script that opens one (Ghostty if installed, else
+# Terminal.app) and execs the embedded binary inside it.
 #
-# What it does, in order:
-#   1.  cargo build --release the GUI binary (skipped if up-to-date).
-#   2.  Generate a multi-resolution AppIcon.icns from icon.jpg.
-#   3.  Stage Textamp.app under /tmp (NOT the Desktop — iCloud Desktop
-#       sync injects a `com.apple.fileprovider.fpfs#P` xattr that
-#       codesign rejects as "detritus").
-#   4.  Sign the inner binary with Developer ID + hardened runtime +
-#       timestamp + entitlements, then sign the bundle wrapper.
-#   5.  Verify signature, run a pre-notary spctl check (will say
-#       "Unnotarized" — expected at this stage).
-#   6.  ditto-zip the bundle and submit to notarytool with --wait.
-#       Bails out if the submission fails review.
-#   7.  staple the ticket so Gatekeeper can validate offline.
-#   8.  Re-zip the stapled bundle for distribution.
-#   9.  Move the signed+stapled .app onto ~/Desktop (overwriting any
-#       prior copy) and leave the distribution zip alongside it.
+# What it does:
+#   1. cargo build --release the binary.
+#   2. Generate AppIcon.icns from icon.jpg.
+#   3. Stage Textamp.app under /tmp:
+#        Contents/MacOS/launch    — bash launcher (CFBundleExecutable)
+#        Contents/MacOS/textamp   — the actual binary
+#        Contents/Resources/      — AppIcon.icns
+#        Contents/Info.plist
+#   4. Sign launcher + binary + bundle (hardened runtime, timestamp,
+#      entitlements).
+#   5. Submit to notarytool and wait, then staple the ticket.
+#   6. Zip the stapled bundle for distribution.
 #
-# Required prerequisites (one-time):
-#   • Developer ID Application certificate installed in login keychain.
-#       security find-identity -v -p codesigning
-#     should show a `Developer ID Application: <name> (TEAMID)` line.
-#   • Developer ID G2 intermediate CA installed:
-#       curl -sSLO https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
-#       security import DeveloperIDG2CA.cer -k ~/Library/Keychains/login.keychain-db
-#   • Keychain pre-authorised for codesign (otherwise the first sign
-#     blocks on a SecurityAgent dialog):
-#       security set-key-partition-list -S apple-tool:,apple: -s -k '' \
-#         ~/Library/Keychains/login.keychain-db
-#   • notarytool keychain profile created once via app-specific
-#     password from appleid.apple.com:
-#       xcrun notarytool store-credentials TEXTAMP_NOTARY \
-#         --apple-id <your-apple-id> --team-id <TEAMID> \
-#         --password <xxxx-xxxx-xxxx-xxxx>
+# Recipient experience: unzip → drag .app to /Applications →
+# double-click. No "unidentified developer" warning.
+#
+# Prerequisites (one-time):
+#   • Developer ID Application certificate in login keychain.
+#   • Developer ID G2 intermediate CA installed.
+#   • Keychain pre-authorised for codesign.
+#   • notarytool keychain profile (default name: TEXTAMP_NOTARY).
 #
 # Usage:
 #   dev/notarize-mac.sh              # full pipeline
-#   dev/notarize-mac.sh --no-notary  # sign + staple skipped, ad-hoc-style
-#   dev/notarize-mac.sh --build-only # build binary, skip everything else
-#   dev/notarize-mac.sh --clean      # rm -rf staging + dist artifacts
+#   dev/notarize-mac.sh --no-notary  # build + sign + skip notary
+#   dev/notarize-mac.sh --build-only # just build the binary
+#   dev/notarize-mac.sh --clean      # rm staging + dist artifacts
 #
 # Override defaults via env vars:
 #   SIGN_IDENTITY    — full Developer ID Application identity string.
-#                      Auto-detected when exactly one is in keychain.
 #   NOTARY_PROFILE   — keychain profile name (default: TEXTAMP_NOTARY).
 #   APP_NAME         — bundle display name (default: Textamp).
 #   BUNDLE_ID        — reverse-DNS bundle id (default: com.bergmayer.textamp).
@@ -56,12 +43,11 @@
 
 set -euo pipefail
 
-# ── 0. Repo paths ───────────────────────────────────────────────────────────
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
 ENTITLEMENTS="$REPO_ROOT/dev/entitlements.plist"
-BIN_PATH="$REPO_ROOT/target/release/textamp-gui"
+BIN_PATH="$REPO_ROOT/target/release/textamp"
 
 APP_NAME="${APP_NAME:-Textamp}"
 BUNDLE_ID="${BUNDLE_ID:-com.bergmayer.textamp}"
@@ -69,8 +55,6 @@ ICON_SOURCE="${ICON_SOURCE:-$REPO_ROOT/icon.jpg}"
 OUTPUT_DIR="${OUTPUT_DIR:-$HOME/Desktop}"
 NOTARY_PROFILE="${NOTARY_PROFILE:-TEXTAMP_NOTARY}"
 
-# Pull the version straight from Cargo.toml so a `cargo set-version`
-# bump propagates without a parallel edit here.
 APP_VERSION="${APP_VERSION:-$(awk -F'"' '/^version/ { print $2; exit }' Cargo.toml)}"
 
 WORK_DIR="/tmp/textamp_pkg_workspace"
@@ -81,7 +65,6 @@ SUBMIT_ZIP="$WORK_DIR/${APP_NAME}-submit.zip"
 DIST_ZIP="$OUTPUT_DIR/${APP_NAME}.zip"
 DEST_APP="$OUTPUT_DIR/${APP_NAME}.app"
 
-# ── 1. Argument parsing ────────────────────────────────────────────────────
 MODE=full
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -100,7 +83,6 @@ if [ "$MODE" = clean ]; then
     exit 0
 fi
 
-# ── 2. Auto-detect signing identity ────────────────────────────────────────
 AUTO_IDENT="$(security find-identity -v -p codesigning \
     | awk -F'"' '/Developer ID Application:/ {print $2; exit}' || true)"
 SIGN_IDENTITY="${SIGN_IDENTITY:-${AUTO_IDENT:-}}"
@@ -122,12 +104,8 @@ echo "==> Bundle ID:   $BUNDLE_ID"
 echo "==> Profile:     $NOTARY_PROFILE  (mode=$MODE)"
 echo
 
-# ── 3. Build release binary ────────────────────────────────────────────────
-echo "==> Building textamp-gui (release, gui+native-menus)"
-cargo build --release \
-    --no-default-features \
-    --features gui,native-menus \
-    --bin textamp-gui
+echo "==> Building textamp (release)"
+cargo build --release --bin textamp
 
 if [ "$MODE" = build_only ]; then
     echo "Done. Binary at: $BIN_PATH"
@@ -136,13 +114,10 @@ fi
 
 [ -x "$BIN_PATH" ] || { echo "Error: $BIN_PATH not found after build." >&2; exit 1; }
 
-# ── 4. Build AppIcon.icns from a source image ──────────────────────────────
 echo "==> Generating AppIcon.icns from $ICON_SOURCE"
 [ -f "$ICON_SOURCE" ] || { echo "Error: ICON_SOURCE '$ICON_SOURCE' not found." >&2; exit 1; }
 rm -rf "$ICONSET_DIR" "$ICNS_PATH"
 mkdir -p "$ICONSET_DIR"
-# `sips -s format png` is critical — without it, sips writes JPEG
-# bytes into a .png file and iconutil chokes on the iconset.
 for spec in "16 16x16" "32 16x16@2x" "32 32x32" "64 32x32@2x" \
             "128 128x128" "256 128x128@2x" "256 256x256" \
             "512 256x256@2x" "512 512x512" "1024 512x512@2x"; do
@@ -153,23 +128,68 @@ done
 iconutil -c icns "$ICONSET_DIR"
 [ -f "$ICNS_PATH" ] || { echo "Error: iconutil produced no .icns." >&2; exit 1; }
 
-# ── 5. Stage the bundle in /tmp ────────────────────────────────────────────
-# We assemble entirely outside iCloud-synced folders to avoid the
-# `com.apple.fileprovider.fpfs#P` xattr that codesign rejects. Once
-# signed, we ditto the bundle to OUTPUT_DIR; codesign-validated
-# bundles tolerate the resulting iCloud xattrs.
 echo "==> Staging $APP_BUNDLE"
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
-# Bytes-only write — `cp` would inherit `com.apple.provenance` which
-# also makes codesign unhappy on stricter macOS releases.
-python3 - "$BIN_PATH" "$APP_BUNDLE/Contents/MacOS/textamp-gui" <<'PY'
+
+# Copy the binary in via a clean byte-copy to drop iCloud/file-
+# provider xattrs that codesign would later reject as "detritus".
+python3 - "$BIN_PATH" "$APP_BUNDLE/Contents/MacOS/textamp" <<'PY'
 import sys
 src, dst = sys.argv[1], sys.argv[2]
 with open(src, 'rb') as r, open(dst, 'wb') as w:
     w.write(r.read())
 PY
-chmod +x "$APP_BUNDLE/Contents/MacOS/textamp-gui"
+chmod +x "$APP_BUNDLE/Contents/MacOS/textamp"
+
+# Launcher script — the bundle's CFBundleExecutable. Finder runs
+# this; it opens a terminal host and execs the embedded binary
+# inside it. Prefers Ghostty when present (truecolor and sixel
+# defaults) and falls back to Terminal.app otherwise.
+cat > "$APP_BUNDLE/Contents/MacOS/launch" <<'LAUNCH'
+#!/bin/bash
+# Resolve the bundle's MacOS dir from the running script — works
+# regardless of where the user dragged the .app to (/Applications,
+# Desktop, ~/Downloads, etc.).
+DIR="$(cd "$(dirname "$0")" && pwd)"
+BIN="$DIR/textamp"
+
+# Prefer Ghostty if installed. Spotlight finds it wherever the user
+# placed it; the standard install paths are checked as a fallback in
+# case Spotlight is disabled.
+GHOSTTY_APP="$(mdfind \
+    "kMDItemCFBundleIdentifier == 'com.mitchellh.ghostty'" 2>/dev/null \
+    | head -n1)"
+if [ -z "$GHOSTTY_APP" ]; then
+    for cand in "/Applications/Ghostty.app" "$HOME/Applications/Ghostty.app"; do
+        if [ -d "$cand" ]; then
+            GHOSTTY_APP="$cand"
+            break
+        fi
+    done
+fi
+
+if [ -n "$GHOSTTY_APP" ] && [ -d "$GHOSTTY_APP" ]; then
+    # `open -na` opens a new Ghostty instance and detaches from our
+    # process, so the launcher exits cleanly while Ghostty stays
+    # running. `--args -e <bin>` is passed through to ghostty(1),
+    # which runs the binary in a new window.
+    open -na "$GHOSTTY_APP" --args -e "$BIN"
+    exit 0
+fi
+
+# Fall back to Terminal.app. `exec` replaces the host shell so the
+# tab closes (or stays open per user preference) when textamp
+# exits, instead of leaving an idle bash prompt.
+osascript >/dev/null <<EOF
+tell application "Terminal"
+    activate
+    do script "exec '${BIN}'"
+end tell
+EOF
+LAUNCH
+chmod +x "$APP_BUNDLE/Contents/MacOS/launch"
+
 cp "$ICNS_PATH" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 
 cat > "$APP_BUNDLE/Contents/Info.plist" <<EOF
@@ -179,7 +199,7 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<EOF
 <dict>
     <key>CFBundleDevelopmentRegion</key><string>en</string>
     <key>CFBundleDisplayName</key><string>${APP_NAME}</string>
-    <key>CFBundleExecutable</key><string>textamp-gui</string>
+    <key>CFBundleExecutable</key><string>launch</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundleIdentifier</key><string>${BUNDLE_ID}</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
@@ -195,12 +215,18 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<EOF
 </plist>
 EOF
 
-# ── 6. Sign inner binary, then bundle ──────────────────────────────────────
-echo "==> Signing inner binary (this hits Apple's TSP, ~10–60s)"
+# Sign the inner binary and the launcher script first, then wrap-
+# sign the bundle. Both must carry a signature for notarization.
+echo "==> Signing inner binary"
 codesign --force --options runtime --timestamp \
          --entitlements "$ENTITLEMENTS" \
          --sign "$SIGN_IDENTITY" \
-         "$APP_BUNDLE/Contents/MacOS/textamp-gui"
+         "$APP_BUNDLE/Contents/MacOS/textamp"
+
+echo "==> Signing launcher script"
+codesign --force --options runtime --timestamp \
+         --sign "$SIGN_IDENTITY" \
+         "$APP_BUNDLE/Contents/MacOS/launch"
 
 echo "==> Signing app bundle"
 codesign --force --options runtime --timestamp \
@@ -222,7 +248,6 @@ if [ "$MODE" = sign_only ]; then
     exit 0
 fi
 
-# ── 7. Submit & wait ───────────────────────────────────────────────────────
 echo
 echo "==> Packaging $SUBMIT_ZIP for upload"
 rm -f "$SUBMIT_ZIP"
@@ -233,7 +258,6 @@ xcrun notarytool submit "$SUBMIT_ZIP" \
       --keychain-profile "$NOTARY_PROFILE" \
       --wait
 
-# ── 8. Staple ──────────────────────────────────────────────────────────────
 echo
 echo "==> Stapling ticket"
 xcrun stapler staple "$APP_BUNDLE"
@@ -242,7 +266,6 @@ xcrun stapler validate "$APP_BUNDLE"
 echo "==> spctl post-notary (should now accept)"
 spctl --assess --type execute --verbose=2 "$APP_BUNDLE"
 
-# ── 9. Ship ────────────────────────────────────────────────────────────────
 echo
 echo "==> Copying signed+stapled bundle to $DEST_APP"
 rm -rf "$DEST_APP"

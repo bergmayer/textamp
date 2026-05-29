@@ -1,9 +1,8 @@
 //! UI-agnostic theme identifier.
 //!
-//! Lives in the app layer so `AppState` does not depend on any concrete UI
-//! (ratatui, iced). Each UI maps `ThemeName` to its own concrete palette:
-//! - TUI: `crate::ui::theme::Theme` / `ThemeColors` (ratatui styles)
-//! - GUI: `crate::ui_gui::theme` (iced Theme)
+//! Lives in the app layer so `AppState` does not depend on ratatui directly.
+//! The UI layer maps `ThemeName` to a concrete `crate::ui::theme::Theme`
+//! palette.
 
 use serde::{Deserialize, Serialize};
 

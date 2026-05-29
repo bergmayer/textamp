@@ -242,9 +242,35 @@ fn render_braille_image(frame: &mut Frame, img: &DynamicImage, area: Rect) {
         return;
     }
 
-    // Braille resolution: 2 dots wide × 4 dots tall per terminal cell
-    let pixel_w = area.width as u32 * 2;
-    let pixel_h = area.height as u32 * 4;
+    // Match the other renderers (Resize::Scale, halfblocks): preserve the
+    // source image's aspect ratio and center the result inside `area`. The
+    // miller-column art slot is ≥ 2:1 in cells (≈ square or wider in
+    // pixels, since braille is 2 dots wide × 4 dots tall per cell), so
+    // resize_exact'ing the whole slot used to horizontally stretch any
+    // square cover into a wide rectangle.
+    let (src_w, src_h) = img.dimensions();
+    if src_w == 0 || src_h == 0 {
+        return;
+    }
+    let area_px_w = area.width as u32 * 2;
+    let area_px_h = area.height as u32 * 4;
+    let (dest_px_w, dest_px_h) = if src_w * area_px_h <= src_h * area_px_w {
+        // Height-limited.
+        ((src_w * area_px_h / src_h).max(1), area_px_h)
+    } else {
+        // Width-limited.
+        (area_px_w, (src_h * area_px_w / src_w).max(1))
+    };
+    let dest_w = ((dest_px_w / 2) as u16).clamp(1, area.width);
+    let dest_h = ((dest_px_h / 4) as u16).clamp(1, area.height);
+    let area = Rect {
+        x: area.x + (area.width - dest_w) / 2,
+        y: area.y + (area.height - dest_h) / 2,
+        width: dest_w,
+        height: dest_h,
+    };
+    let pixel_w = dest_w as u32 * 2;
+    let pixel_h = dest_h as u32 * 4;
 
     let resized = img.resize_exact(pixel_w, pixel_h, image::imageops::FilterType::Triangle);
 

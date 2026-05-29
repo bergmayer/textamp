@@ -136,11 +136,12 @@ fn render_tab_strip(frame: &mut Frame, state: &AppState, area: Rect) {
     let lib_label = " library ";
     let divider = "│";
     let np_label = " now playing ";
-    // Five-key cheat sheet: `:` = command palette, `/` = filter
-    // overlay, `?` = help, `⇥` = Tab toggles Library ↔ Now Playing,
-    // `,` = open Settings (mirrors macOS Cmd+,). Mirrors classic vim
-    // chrome — same row as the Library / Now Playing tabs, on the
-    // right edge.
+    // Symbol cheat sheet: `:` = command palette, `/` = inline filter
+    // overlay, `?` = search popup, `⇥` = Tab toggles Library ↔ Now
+    // Playing, `,` = open Settings (mirrors macOS Cmd+,), `\` =
+    // toggle scrolling Miller layout, `|` = toggle tall split.
+    // Mirrors classic vim chrome — same row as the Library / Now
+    // Playing tabs, on the right edge.
     let palette_hint = " :  /  ?  \u{21e5}  ,  \\  | ";
 
     // Active tab uses an inverted (selection-style) background so the
@@ -265,31 +266,19 @@ fn build_left_content(state: &AppState) -> String {
     line
 }
 
-/// Right-side content with optional inline slider metadata.
 struct RightContent {
     text: String,
-    /// Display-column offset and width of the volume slider bar within `text` (if shown).
-    slider_bar: Option<(usize, usize)>,
 }
 
-/// Build the right side of the transport bar.
-///
-/// Matches the GUI's transport: just a `/` filter affordance and any
-/// active notification. The volume widget that used to live here is
-/// gone — volume is configured in Settings (and the OS volume keys
-/// still work).
+/// Build the right side of the transport bar: any active notification
+/// plus, when a remote player is selected, a `-> Name` indicator.
 fn build_right_content(state: &AppState) -> RightContent {
     let mut right = String::new();
-    let slider_bar = None;
 
-    // Remote output indicator (rare).
     if let crate::app::state::OutputTarget::Remote { ref player_name, .. } = state.remote.output_target {
         right.push_str(&format!("-> {} ", truncate_str(player_name, 15)));
     }
 
-    // Notifications use the right side; otherwise it's empty —
-    // the keybind cheat-sheet (`: / ?`) lives on the bottom row of
-    // the transport bar instead of competing for space here.
     if let Some(notification) = state.current_notification() {
         let icon = match notification.notification_type {
             NotificationType::Ongoing => "⟳",
@@ -298,7 +287,7 @@ fn build_right_content(state: &AppState) -> RightContent {
         right.push_str(&format!("{} {} ", icon, notification.message));
     }
 
-    RightContent { text: right, slider_bar }
+    RightContent { text: right }
 }
 
 /// Build a progress bar with filled/empty segments and position indicator.

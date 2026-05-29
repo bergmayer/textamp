@@ -160,9 +160,16 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         screens::sort_popup::render(frame, state, frame.area());
     }
 
-    // Render artist bio popup if active
+    // Render artist bio popup if active. When it's NOT active but the
+    // renderer is still holding an image, drop the protocol so the
+    // kitty/iterm2 delete-image command fires on the next terminal
+    // write — otherwise the artwork (and the bio text the diff treats
+    // as `skip` beneath it) lingers after every non-Esc dismissal
+    // path (e.g. `popups.close_all()` when another popup opens).
     if state.popups.artist_bio.is_some() {
         render_artist_bio_popup(frame, state);
+    } else if BIO_ARTWORK_RENDERER.with(|r| r.borrow().has_image()) {
+        BIO_ARTWORK_RENDERER.with(|r| r.borrow_mut().clear());
     }
 
     // Render error popup if present
@@ -1243,65 +1250,6 @@ fn count_meaningful_miller_cols(state: &AppState) -> usize {
     let effective_columns = last_meaningful + 1;
     let n = effective_columns.saturating_sub(column_offset);
     if n == 0 && nav.loading { 1 } else { n }
-}
-
-/// Render greyed-out spacer columns (dot-filled) into `area`. Used
-/// for the slots at the far-right of the screen when the
-/// track-details pane has consumed the slots that would otherwise
-/// hold real miller columns.
-fn render_spacer_columns(frame: &mut Frame, area: Rect, col_width: u16) {
-    let t = theme();
-    if area.width == 0 || area.height == 0 || col_width == 0 {
-        return;
-    }
-    let muted_border = Style::default().fg(t.colors.fg_muted);
-    let muted_bg = Style::default().bg(t.colors.bg_primary).fg(t.colors.fg_muted);
-
-    // Fit at least one slot; the last slot may be wider than
-    // `col_width` if there's leftover space (rounding from the
-    // `(full - strip - pane) / 3` divide).
-    let n_slots = ((area.width / col_width).max(1)) as u16;
-    for i in 0..n_slots {
-        let is_last = i == n_slots - 1;
-        let slot_x = area.x + i * col_width;
-        let slot_w = if is_last {
-            area.width.saturating_sub(i * col_width)
-        } else {
-            col_width
-        };
-        let slot_area = Rect {
-            x: slot_x,
-            y: area.y,
-            width: slot_w,
-            height: area.height,
-        };
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(muted_border)
-            .style(muted_bg);
-        let inner = block.inner(slot_area);
-        frame.render_widget(block, slot_area);
-
-        if inner.width > 0 && inner.height > 0 {
-            let dot_row: String = (0..inner.width)
-                .map(|x| if x % 2 == 0 { '\u{00b7}' } else { ' ' })
-                .collect();
-            for dy in 0..inner.height {
-                if dy % 2 != 0 { continue; }
-                let row_rect = Rect {
-                    x: inner.x,
-                    y: inner.y + dy,
-                    width: inner.width,
-                    height: 1,
-                };
-                frame.render_widget(
-                    Paragraph::new(dot_row.clone())
-                        .style(Style::default().fg(t.colors.fg_muted)),
-                    row_rect,
-                );
-            }
-        }
-    }
 }
 
 /// Render the vertical alphabet jump strip.

@@ -2,38 +2,27 @@
 //!
 //! The top-level `Event` enum carries everything that flows through the
 //! application's main channel. Payloads are grouped into sub-enums
-//! (`AuthEvent`, `DataEvent`, etc.) defined in `event_core` so the GUI can
-//! reuse them without pulling in any terminal types.
-//!
-//! Terminal-only input variants (`Key`, `Mouse`, `Resize`) are gated on
-//! `feature = "tui"`. Under `feature = "gui"` they don't exist, so GUI builds
-//! never see a crossterm type.
+//! (`AuthEvent`, `DataEvent`, etc.) defined in `event_core`.
 
-// Re-export sub-enums so `use crate::app::event::*` keeps working unchanged
-// for all existing handler code.
 pub use crate::app::event_core::*;
 
-#[cfg(feature = "tui")]
 use crossterm::event::{KeyEvent, MouseEvent};
 
 /// Top-level application event.
 ///
-/// Every async task and the TUI input reader deposit values of this type
-/// into the shared `mpsc::Sender<Event>`.
+/// Every async task and the terminal input reader deposit values of this
+/// type into the shared `mpsc::Sender<Event>`.
 #[derive(Debug, Clone)]
 pub enum Event {
-    // Terminal input (TUI only) -----------------------------------------
-    /// Raw terminal key press. TUI builds only.
-    #[cfg(feature = "tui")]
+    // Terminal input ----------------------------------------------------
+    /// Raw terminal key press.
     Key(KeyEvent),
-    /// Raw terminal mouse event. TUI builds only.
-    #[cfg(feature = "tui")]
+    /// Raw terminal mouse event.
     Mouse(MouseEvent),
-    /// Terminal resized to (cols, rows). TUI builds only.
-    #[cfg(feature = "tui")]
+    /// Terminal resized to (cols, rows).
     Resize(u16, u16),
 
-    // Core / portable events --------------------------------------------
+    // Core events -------------------------------------------------------
     /// Periodic tick for animations/updates.
     Tick,
     Auth(AuthEvent),

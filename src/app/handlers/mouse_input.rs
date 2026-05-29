@@ -277,6 +277,10 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
             }
             crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
                 state.popups.artist_bio = None;
+                // Bio popup overlays the Now Playing artwork when shown
+                // from that view; dropping the protocol forces a fresh
+                // image placement on the next render so the terminal
+                // re-displays the cover that the popup hid.
                 crate::ui::screens::now_playing::clear_artwork_cache();
             }
             _ => {}

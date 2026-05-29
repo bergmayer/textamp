@@ -1,48 +1,54 @@
 @echo off
-REM Top-level Windows build entry point.
-REM
-REM Default (no args): build BOTH the TUI and the GUI release.
-REM Pass --gui or --tui for one only.
-REM
-REM Usage:
-REM   build.bat            # build both
-REM   build.bat --tui      # textamp (TUI release) only
-REM   build.bat --gui      # textamp-gui (GUI release) only
-REM   build.bat --all      # alias of default
-REM   build.bat --help     # show this message
+REM Build script for textamp on Windows.
+REM Usage: build.bat [--makepackage | --clean | --help]
 
-setlocal
-set WHAT=all
-if "%~1"=="" goto run
-if /I "%~1"=="--all" goto run
-if /I "%~1"=="--tui" set WHAT=tui & goto run
-if /I "%~1"=="--gui" set WHAT=gui & goto run
-if /I "%~1"=="-h" goto help
-if /I "%~1"=="--help" goto help
-echo build.bat: unknown flag "%~1" 1>&2
-goto help
+setlocal enabledelayedexpansion
+
+set "PKG_NAME=textamp"
+set "MODE=build"
+
+:parse
+if "%~1"=="" goto :parsed
+if /I "%~1"=="--help" goto :help
+if /I "%~1"=="-h" goto :help
+if /I "%~1"=="--clean" ( set "MODE=clean" & shift & goto :parse )
+if /I "%~1"=="--makepackage" ( set "MODE=package" & shift & goto :parse )
+echo Unknown option: %~1
+goto :help
+
+:parsed
+
+if "%MODE%"=="clean" (
+    echo Cleaning build artifacts...
+    cargo clean
+    if exist dist rmdir /S /Q dist
+    echo Clean complete.
+    exit /b 0
+)
+
+echo Building %PKG_NAME% (release)...
+cargo build --release --bin textamp
+if errorlevel 1 exit /b 1
+
+echo.
+echo Build complete!
+if exist "target\release\%PKG_NAME%.exe" echo   Binary: %CD%\target\release\%PKG_NAME%.exe
+
+if "%MODE%"=="package" (
+    echo.
+    echo Packaging on Windows: please ship the .exe directly,
+    echo or install cargo-wix for MSI generation.
+)
+
+exit /b 0
 
 :help
-findstr /B /C:"REM" "%~f0"
-exit /b 2
-
-:run
-if /I "%WHAT%"=="all" goto build_all
-if /I "%WHAT%"=="tui" goto build_tui
-if /I "%WHAT%"=="gui" goto build_gui
+echo Usage: build.bat [OPTIONS]
+echo.
+echo Builds the textamp binary.
+echo.
+echo Options:
+echo   --makepackage       Placeholder (use cargo-wix or zip the binary)
+echo   --clean             Remove build artifacts
+echo   --help              Show this help message
 exit /b 0
-
-:build_all
-call :build_tui || exit /b %ERRORLEVEL%
-call :build_gui || exit /b %ERRORLEVEL%
-exit /b 0
-
-:build_tui
-echo ^>^> cargo build --release --bin textamp
-cargo build --release --bin textamp
-exit /b %ERRORLEVEL%
-
-:build_gui
-echo ^>^> cargo build --release --features "gui,native-menus" --bin textamp-gui
-cargo build --release --features "gui,native-menus" --bin textamp-gui
-exit /b %ERRORLEVEL%

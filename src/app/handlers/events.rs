@@ -1669,7 +1669,6 @@ pub fn handle_app_event(
             }
             vec![]
         }
-        #[cfg(feature = "tui")]
         Event::Mouse(mouse_event) => {
             super::mouse_input::handle_mouse(mouse_event, state)
         }

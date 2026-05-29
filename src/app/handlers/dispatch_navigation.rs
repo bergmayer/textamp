@@ -29,7 +29,6 @@ pub async fn dispatch(
         NavigationAction::SetView(view) => {
             // Clear artwork cache when leaving Similar view to force re-render
             // (Similar popup's Clear widget can corrupt terminal images)
-            #[cfg(feature = "tui")]
             if state.view == View::Similar {
                 crate::ui::screens::now_playing::clear_artwork_cache();
             }

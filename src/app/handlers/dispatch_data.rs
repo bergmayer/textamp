@@ -5,7 +5,7 @@
 
 use crate::app::event::*;
 use crate::app::{Action, AppState, Event};
-use crate::app::action::{BrowseAction, DataAction, SystemAction};
+use crate::app::action::{BrowseAction, DataAction};
 use crate::app::state::{BrowseCategory, BrowseItem, Focus, RightPanelMode, View};
 use crate::plex::PlexClient;
 use crate::plex::models::Track;
@@ -37,7 +37,6 @@ pub async fn dispatch(
 
             // Load theme from config
             state.theme = crate::app::theme::ThemeName::from_config(&config.ui.theme);
-            #[cfg(feature = "tui")]
             crate::ui::theme::set_theme(state.theme);
             tracing::info!("Loaded theme: {}", state.theme.display_name());
 

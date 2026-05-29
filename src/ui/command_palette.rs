@@ -194,8 +194,12 @@ pub fn materialize_entries(state: &AppState) -> Vec<PaletteEntry> {
     //    Disabled services are completely hidden from the palette so
     //    the toggle reads as "remove this service from the app", not
     //    just "make this entry a no-op".
+    //    Skipped when a track is focused: `track_context_entries`
+    //    above already emits the same per-service entries with
+    //    identical labels, and adding them again would duplicate
+    //    every row.
     let ext_query = crate::app::handlers::key_input::build_external_search_query(state);
-    if !ext_query.is_empty() {
+    if !ext_query.is_empty() && target_track.is_none() {
         if state.external_search.apple_music {
             out.push(PaletteEntry {
                 label: "Search Apple Music for selection".to_string(),
@@ -239,9 +243,12 @@ pub fn materialize_entries(state: &AppState) -> Vec<PaletteEntry> {
     //     style context (the entry would just take them where they
     //     are), or when the contextual section already added one for
     //     the focused track/album (avoid duplicates).
+    //   - "Sonic Adventure…" when a track is focused (the contextual
+    //     block above already added it via track_context_entries).
     let context_has_open_in_library =
         (target_track.is_some() && (not_in_library || target_is_similar))
             || (state.focused_album().is_some() && not_in_library);
+    let context_has_sonic_adventure = target_track.is_some();
     out.extend(static_entries().into_iter().filter_map(|e| {
         let is_dj_or_remix = matches!(
             e.command,
@@ -258,6 +265,11 @@ pub fn materialize_entries(state: &AppState) -> Vec<PaletteEntry> {
         }
         if matches!(e.command, PaletteCommandKind::OpenInLibrary)
             && (in_library || context_has_open_in_library)
+        {
+            return None;
+        }
+        if matches!(e.command, PaletteCommandKind::SonicAdventure)
+            && context_has_sonic_adventure
         {
             return None;
         }
@@ -336,7 +348,7 @@ pub fn run(cmd: PaletteCommandKind, state: &mut AppState) -> Vec<Action> {
             // PlayAlbumNow. Falls back to a no-op error when the
             // album list isn't loaded yet.
             let pick = state.library.albums.iter()
-                .choose(&mut rand::thread_rng())
+                .choose(&mut rand::rng())
                 .map(|a| (a.rating_key.clone(), a.title.clone()));
             match pick {
                 Some((rating_key, title)) =>

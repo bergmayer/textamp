@@ -6,8 +6,9 @@
 pub const HELP_TEXT: &str = r#"
 ESSENTIAL
   :              Command palette
-  /              Filter the focused column (type to narrow, ↑ to filtered results, enter to search)
-  ?    F1        Toggle this help
+  /              Filter the focused column (type to narrow, ↑↓ to filtered results, Enter activates)
+  ?              Search popup (same as Ctrl+F)
+  F1   Ctrl+H    Toggle this help
   Tab            Switch Library ↔ Now Playing
   Esc            Back / close
 
@@ -51,7 +52,7 @@ MULTI-SELECT  (track lists)
 
 TOOLS
   F3  Switch library    F4  Artist bio    F5  Refresh    F6  Sort
-  Ctrl+F  Search        Ctrl+M  Similar   Ctrl+R  Related
+  Ctrl+F  Search (same as `?`)        Ctrl+M  Similar   Ctrl+R  Related
   Ctrl+J  Open in library                  Ctrl+W  Close column
   Alt+F   Activate filter (same as `/`)
   Alt+R   Random album radio

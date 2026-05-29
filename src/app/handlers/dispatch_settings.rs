@@ -386,7 +386,6 @@ pub async fn dispatch(
                         // Apply selected theme
                         if let Some(theme_name) = crate::app::theme::ThemeName::all().get(idx) {
                             state.theme = *theme_name;
-                            #[cfg(feature = "tui")]
                             crate::ui::theme::set_theme(state.theme);
                             state.set_status(format!("Theme: {}", state.theme.display_name()));
 
@@ -400,27 +399,24 @@ pub async fn dispatch(
                         let mode_idx = idx - theme_count;
                         if let Some(&mode) = crate::app::state::ArtworkMode::all().get(mode_idx) {
                             state.artwork.mode = mode;
-                            #[cfg(feature = "tui")]
-                            {
-                                crate::ui::screens::now_playing::set_artwork_mode(mode);
-                                crate::ui::artwork::set_grid_artwork_mode(mode);
-                                crate::ui::set_bio_artwork_mode(mode);
+                            crate::ui::screens::now_playing::set_artwork_mode(mode);
+                            crate::ui::artwork::set_grid_artwork_mode(mode);
+                            crate::ui::set_bio_artwork_mode(mode);
 
-                                match mode {
-                                    crate::app::state::ArtworkMode::Halfblocks => {
-                                        let hb = ratatui_image::picker::ProtocolType::Halfblocks;
-                                        crate::ui::screens::now_playing::set_artwork_protocol_type(hb);
-                                        crate::ui::artwork::set_grid_protocol_type(hb);
-                                        crate::ui::set_bio_artwork_protocol_type(hb);
-                                    }
-                                    crate::app::state::ArtworkMode::Auto => {
-                                        crate::ui::screens::now_playing::restore_artwork_native_protocol();
-                                        crate::ui::artwork::restore_grid_native_protocol();
-                                        crate::ui::restore_bio_artwork_native_protocol();
-                                    }
-                                    crate::app::state::ArtworkMode::Braille => {
-                                        // Braille doesn't use picker protocol
-                                    }
+                            match mode {
+                                crate::app::state::ArtworkMode::Halfblocks => {
+                                    let hb = ratatui_image::picker::ProtocolType::Halfblocks;
+                                    crate::ui::screens::now_playing::set_artwork_protocol_type(hb);
+                                    crate::ui::artwork::set_grid_protocol_type(hb);
+                                    crate::ui::set_bio_artwork_protocol_type(hb);
+                                }
+                                crate::app::state::ArtworkMode::Auto => {
+                                    crate::ui::screens::now_playing::restore_artwork_native_protocol();
+                                    crate::ui::artwork::restore_grid_native_protocol();
+                                    crate::ui::restore_bio_artwork_native_protocol();
+                                }
+                                crate::app::state::ArtworkMode::Braille => {
+                                    // Braille doesn't use picker protocol
                                 }
                             }
 
@@ -1236,15 +1232,10 @@ pub async fn dispatch(
             state.miller_layout = state.miller_layout.toggled();
             // TUI ribbon scroll state is reset on every layout toggle
             // so a freshly-toggled mode starts at column 0 — a stale
-            // offset would dangle out of bounds. The GUI's iced
-            // scrollable manages its own offset, so the gate is
-            // strictly TUI.
-            #[cfg(feature = "tui")]
-            {
-                state.miller_scroll_col = 0;
-                state.miller_scroll_manual = false;
-                state.miller_h_drag_grab = None;
-            }
+            // offset would dangle out of bounds.
+            state.miller_scroll_col = 0;
+            state.miller_scroll_manual = false;
+            state.miller_h_drag_grab = None;
             config.ui.miller_layout = state.miller_layout;
             state.set_status(format!("miller layout: {}", state.miller_layout.name()));
             follow_ups.push(SettingsAction::SaveSettings.into());
