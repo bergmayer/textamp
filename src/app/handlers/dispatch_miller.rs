@@ -297,7 +297,11 @@ pub async fn dispatch(
                     let title = format!("tracks \u{2014} {}", state.library.selected_album_title);
                     // Store full tracks for playback (includes media info)
                     let mut col = BrowseColumn::new_with_tracks(title, items, tracks);
-                    col.play_album = Some((album_key.clone(), state.library.selected_album_title.clone()));
+                    col.play_all_row = Some(crate::app::state::PlayAllRow::Album {
+                        rating_key: album_key.clone(),
+                        title: state.library.selected_album_title.clone(),
+                    });
+                    col.on_play_row = true;
                     state.artist_nav.drill_column(col, auto_drill);
 
                     // Auto-select track if pending from search navigation
@@ -328,12 +332,11 @@ pub async fn dispatch(
                     let items = BrowseItem::from_tracks(&tracks);
                     let title = format!("tracks ({})", tracks.len());
                     // Store full tracks for playback (includes media info).
-                    // Set play_all_label so the GUI header renders a
-                    // "Play All Tracks" button alongside the column,
-                    // matching the "Play Album" button on per-album
-                    // tracks columns.
                     let mut col = BrowseColumn::new_with_tracks(title, items, tracks);
-                    col.play_all_label = Some("Play All Tracks".to_string());
+                    col.play_all_row = Some(crate::app::state::PlayAllRow::AllTracks {
+                        label: "Play all tracks".to_string(),
+                    });
+                    col.on_play_row = true;
                     state.artist_nav.drill_column(col, auto_drill);
                 }
                 Err(e) => {
@@ -475,7 +478,11 @@ pub async fn dispatch(
                     };
                     // Store full tracks for playback (includes media info)
                     let mut col = BrowseColumn::new_with_tracks(title, items, tracks);
-                    col.play_album = Some((album_key.clone(), album_name.clone()));
+                    col.play_all_row = Some(crate::app::state::PlayAllRow::Album {
+                        rating_key: album_key.clone(),
+                        title: album_name.clone(),
+                    });
+                    col.on_play_row = true;
                     state.tag_nav.drill_column(col, auto_drill);
                 }
                 Err(e) => {
@@ -654,7 +661,10 @@ pub async fn dispatch(
                 let items = BrowseItem::from_tracks(&tracks);
                 let title = format!("tracks ({})", tracks.len());
                 let mut col = BrowseColumn::new_with_tracks(title, items, tracks);
-                col.play_all_label = Some("Play Compilation Tracks".to_string());
+                col.play_all_row = Some(crate::app::state::PlayAllRow::AllTracks {
+                    label: "Play compilation tracks".to_string(),
+                });
+                col.on_play_row = true;
                 state.artist_nav.drill_column(col, auto_drill);
             }
         }
@@ -673,7 +683,10 @@ pub async fn dispatch(
             let items = BrowseItem::from_tracks(&tracks);
             let title = format!("tracks ({})", tracks.len());
             let mut col = BrowseColumn::new_with_tracks(title, items, tracks);
-            col.play_all_label = Some("Play All Compilation Tracks".to_string());
+            col.play_all_row = Some(crate::app::state::PlayAllRow::AllTracks {
+                label: "Play all compilation tracks".to_string(),
+            });
+            col.on_play_row = true;
             state.artist_nav.drill_column(col, auto_drill);
         }
 
@@ -695,7 +708,10 @@ pub async fn dispatch(
             let items = BrowseItem::from_tracks(&state.library.all_tracks);
             let title = format!("tracks ({})", state.library.all_tracks.len());
             let mut col = BrowseColumn::new_with_tracks(title, items, state.library.all_tracks.clone());
-            col.play_all_label = Some("Play All Library Tracks".to_string());
+            col.play_all_row = Some(crate::app::state::PlayAllRow::AllTracks {
+                label: "Play all library tracks".to_string(),
+            });
+            col.on_play_row = true;
             state.artist_nav.drill_column(col, auto_drill);
         }
 

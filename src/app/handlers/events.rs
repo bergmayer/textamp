@@ -1909,11 +1909,11 @@ pub fn handle_app_event(
             };
             let items = crate::app::state::BrowseItem::from_tracks(&tracks);
             let mut col = crate::app::state::BrowseColumn::new_with_tracks(title, items, tracks);
-            // GUI: render a "Play Playlist" button alongside the
-            // header (same affordance as Play Album on a tracks
-            // column). play_all_label means "play `col.tracks`
-            // directly" — exactly the right semantics for a playlist.
-            col.play_all_label = Some("Play Playlist".to_string());
+            col.play_all_row = Some(crate::app::state::PlayAllRow::Playlist {
+                rating_key: playlist_key.clone(),
+                title: playlist_name.clone(),
+            });
+            col.on_play_row = true;
             state.playlist_nav.push_column(col);
             vec![]
         }
@@ -1967,7 +1967,11 @@ pub fn handle_app_event(
             };
             let items = crate::app::state::BrowseItem::from_tracks(&tracks);
             let mut col = crate::app::state::BrowseColumn::new_with_tracks(title, items, tracks);
-            col.play_all_label = Some("Play Playlist".to_string());
+            col.play_all_row = Some(crate::app::state::PlayAllRow::Playlist {
+                rating_key: playlist_key.clone(),
+                title: playlist_name.clone(),
+            });
+            col.on_play_row = true;
             // Apply this playlist's saved view toggles, if any. The
             // mirror lives on `state.playlist_views` (sync'd from
             // `config.ui.library_view_settings` at boot and on every

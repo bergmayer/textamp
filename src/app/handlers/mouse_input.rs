@@ -1181,6 +1181,36 @@ fn cycle_column_sort(state: &mut AppState, col_idx: usize) -> Vec<Action> {
     vec![]
 }
 
+/// Detect a click on the synthetic "▶ Play …" row pinned at the top
+/// of an album / playlist / all-tracks column. Returns
+/// `Some(col_idx)` when the click maps to that row. The caller
+/// dispatches the matching `QueueAction::Play…` and skips the
+/// regular miller hit-test so the click isn't double-handled as a
+/// click on item 0 below the play row.
+fn play_row_hit_test(
+    click_col: u16,
+    click_row: u16,
+    nav: &BrowseNavigationState,
+    state: &AppState,
+) -> Option<usize> {
+    let regions = state.hit_regions.borrow().miller_columns.clone()?;
+    for col_region in &regions.columns {
+        let col_idx = col_region.col_idx;
+        let col = nav.columns.get(col_idx)?;
+        if col.play_all_row.is_none() {
+            continue;
+        }
+        if click_col < col_region.area.x || click_col >= col_region.area.right() {
+            continue;
+        }
+        // The play row is the first inner line of the column.
+        if click_row == col_region.inner.y {
+            return Some(col_idx);
+        }
+    }
+    None
+}
+
 /// Hit-test a click against Miller column layout for BrowseNavigationState.
 /// Returns Some((col_idx, item_idx, scroll_offset)) if the click maps to an item.
 /// item_idx is always an index into the full col.items list (mapped through
@@ -1226,8 +1256,16 @@ fn miller_hit_test(
             return None;
         }
 
-        let inner_y = col_region.inner.y;
-        let inner_height = col_region.inner.height;
+        // Synthetic "▶ Play …" row pinned at the top of tracks
+        // columns occupies the first inner line. Shift the item
+        // area down by one so a click on the play row is *not*
+        // mistaken for item 0, and clicks below the play row map
+        // to their real positions. The dedicated
+        // `play_row_hit_test` runs ahead of this function and
+        // catches play-row clicks before we get here.
+        let play_row_shift = col.play_all_row.is_some() as u16;
+        let inner_y = col_region.inner.y + play_row_shift;
+        let inner_height = col_region.inner.height.saturating_sub(play_row_shift);
 
         if click_row < inner_y || click_row >= inner_y + inner_height {
             return None;
@@ -1764,6 +1802,46 @@ fn handle_browse_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
                 return cycle_column_sort(state, col_idx);
             }
 
+            // Click on the synthetic "▶ Play …" row: focus the
+            // column, park the cursor on the play row, and play
+            // the album / playlist / track list. Single click acts
+            // as a button — there's no two-step "select then drill"
+            // here because the row's whole purpose is the action.
+            if let Some(col_idx) = play_row_hit_test(click_col, click_row, nav, state) {
+                let nav_mut = match state.browse_category {
+                    BrowseCategory::Library => &mut state.artist_nav,
+                    cat if cat.is_tag_section() => &mut state.tag_nav,
+                    BrowseCategory::Playlists => &mut state.playlist_nav,
+                    _ => return vec![],
+                };
+                nav_mut.focused_column = col_idx;
+                let Some(col) = nav_mut.columns.get_mut(col_idx) else {
+                    return vec![];
+                };
+                col.on_play_row = true;
+                let Some(row) = col.play_all_row.clone() else {
+                    return vec![];
+                };
+                let tracks = col.tracks.clone();
+                state.category_column_focused = false;
+                state.track_pane_focused = false;
+                use crate::app::state::PlayAllRow;
+                let action: Action = match row {
+                    PlayAllRow::Album { rating_key, title } => {
+                        QueueAction::PlayAlbumNow { rating_key, title }.into()
+                    }
+                    PlayAllRow::Playlist { rating_key, title } => {
+                        QueueAction::PlayPlaylistNow {
+                            playlist_key: rating_key,
+                            title,
+                        }
+                        .into()
+                    }
+                    PlayAllRow::AllTracks { .. } => QueueAction::PlayTracksNow(tracks).into(),
+                };
+                return vec![action];
+            }
+
             if let Some((col_idx, item_idx, scroll_offset)) = miller_hit_test(click_col, click_row, nav, state) {
                 // Double-click detection: same (col_idx, item_idx) clicked twice within 400ms.
                 // Checked BEFORE column-focus changes, since a drill from the first click
@@ -1817,6 +1895,13 @@ fn handle_browse_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
                     if state.list_filter.active {
                         state.list_filter.deactivate();
                     }
+                }
+
+                // Click on an item below the play row → the cursor
+                // is explicitly moving to an item, so the synthetic
+                // play row should release the highlight.
+                if let Some(col) = nav.columns.get_mut(col_idx) {
+                    col.on_play_row = false;
                 }
 
                 let col_sel = nav.columns.get(col_idx).map(|c| c.selected_index).unwrap_or(0);

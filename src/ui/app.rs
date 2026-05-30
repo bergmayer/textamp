@@ -2123,7 +2123,7 @@ fn render_browse_miller_columns(
                 .title_style(Style::default().fg(title_color));
         }
 
-        let inner = block.inner(col_area);
+        let full_inner = block.inner(col_area);
         frame.render_widget(block, col_area);
 
         // Tiny "x" close affordance in the top-right corner of every
@@ -2144,6 +2144,53 @@ fn render_browse_miller_columns(
             };
             frame.render_widget(Paragraph::new("\u{2715}").style(style), close_x);
         }
+
+        // Synthetic "▶ Play album / playlist" row pinned above the
+        // real items on any tracks column flagged with `play_all_row`.
+        // Eats the top inner line; the remainder of the column
+        // renders into `inner` below as before. The cursor parks on
+        // this row by default (`col.on_play_row`); ↓ drops it to
+        // `items[0]`, ↑ from `items[0]` brings it back.
+        let inner = if col.play_all_row.is_some() && full_inner.height > 0 {
+            let play_row_rect = Rect {
+                x: full_inner.x,
+                y: full_inner.y,
+                width: full_inner.width,
+                height: 1,
+            };
+            let label = col.play_all_row.as_ref().map(|p| p.label()).unwrap_or("Play");
+            // Highlight when the column is focused AND the cursor is
+            // on the play row. Otherwise paint as a regular header
+            // affordance — still legible, just not selected.
+            let highlighted = is_focused && col.on_play_row;
+            let style = if highlighted {
+                Style::default()
+                    .bg(t.colors.bg_selection)
+                    .fg(t.colors.selection_text)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(t.colors.fg_accent)
+            };
+            let max_w = play_row_rect.width.saturating_sub(3) as usize;
+            let shown = if label.chars().count() > max_w {
+                let truncated: String = label.chars().take(max_w.saturating_sub(1)).collect();
+                format!("{}\u{2026}", truncated)
+            } else {
+                label.to_string()
+            };
+            frame.render_widget(
+                Paragraph::new(format!("\u{25B6} {}", shown)).style(style),
+                play_row_rect,
+            );
+            Rect {
+                x: full_inner.x,
+                y: full_inner.y + 1,
+                width: full_inner.width,
+                height: full_inner.height - 1,
+            }
+        } else {
+            full_inner
+        };
 
         if col.items.is_empty() {
             let empty = Paragraph::new("(empty)")
@@ -2265,7 +2312,12 @@ fn render_browse_miller_columns(
                     .skip(scroll_offset)
                     .take(visible_item_count)
                     .map(|(orig_idx, item)| {
-                        let is_selected = orig_idx == selected_idx;
+                        // When the cursor parks on the synthetic
+                        // Play row, no real item should render as
+                        // "selected" — the play row owns the
+                        // highlight until ↓ pulls the cursor down
+                        // into the items.
+                        let is_selected = orig_idx == selected_idx && !col.on_play_row;
                         // Multi-select: row is in `col.selected_set`.
                         // Drives a visual "●" prefix and an accent
                         // tint, mirroring the queue track-list style.

@@ -179,7 +179,11 @@ pub fn drill_grouped_album(col: &crate::app::state::BrowseColumn, album_idx: usi
         .unwrap_or_else(|| "tracks".to_string());
     let mut new_col = BrowseColumn::new_with_tracks(title, items, tracks);
     if let Some(item) = album_item {
-        new_col.play_album = Some((item.key().to_string(), item.title().to_string()));
+        new_col.play_all_row = Some(crate::app::state::PlayAllRow::Album {
+            rating_key: item.key().to_string(),
+            title: item.title().to_string(),
+        });
+        new_col.on_play_row = true;
     }
     Some(new_col)
 }

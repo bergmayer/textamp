@@ -24,6 +24,13 @@ NAVIGATE
   PgUp/Dn  Home/End   Big jumps
   A–Z            Jump to first item starting with that letter (shift+letter to first item with that as second letter)
 
+PLAY-ALBUM ROW  (tracks columns)
+  After drilling into an album or playlist the cursor parks on a
+  pinned "▶ Play album / Play playlist" row at the top of the
+  column. Enter plays the whole album / playlist; ↓ drops to the
+  first track; ↑ from the first track jumps back to the play row.
+  Click the row to play; click an item below to select it.
+
 VIEWS  (Ctrl+key)
   L  Library     G  Genres        O  Folders
   U  Queue       N  Now Playing

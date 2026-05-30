@@ -164,6 +164,27 @@ pub async fn dispatch(
                 cat if cat.is_tag_section() => state.tag_nav.focused_column,
                 _ => 0,
             };
+            // Activating the filter implies the user wants to browse
+            // items, not stay parked on the synthetic Play row —
+            // otherwise FilteredListUp/Down would shift the
+            // underlying `selected_index` while the highlight stays
+            // glued to the play row, looking broken.
+            let filter_col_idx = state.list_filter.column;
+            if let Some(nav) = state.browse_nav_mut() {
+                if let Some(col) = nav.columns.get_mut(filter_col_idx) {
+                    col.on_play_row = false;
+                }
+            }
+            // Same reason as on_play_row above — any transient
+            // "focus is somewhere other than the nav stack" flag
+            // would force the scrolling Miller ribbon to anchor
+            // on a fixed slot (sections / artists / pane), hiding
+            // any column the user drills into from the filter.
+            // Once the filter input has keyboard focus, none of
+            // these flags should still be set.
+            state.category_column_focused = false;
+            state.alphabet_strip_focused = false;
+            state.track_pane_focused = false;
         }
         SearchAction::DeactivateListFilter => {
             state.list_filter.active = false;
@@ -221,14 +242,68 @@ pub async fn dispatch(
             super::key_input::truncate_filter_right_columns(state);
         }
         SearchAction::SelectFilteredItem => {
-            if let Some(ref results) = state.list_filter.results.clone() {
-                if let Some(&item_idx) = results.matched_indices.get(state.list_filter.selected) {
-                    super::key_input::update_filter_column_selection(state, item_idx);
-                    // Deactivate filter before drill-down (new column clears filter)
-                    state.list_filter.deactivate();
-                    let drilldown_actions = super::key_input::get_filter_drilldown_actions(state);
-                    follow_ups.extend(drilldown_actions);
+            // Pick the item to drill: prefer the current filter
+            // match (results.matched_indices[selected]); fall back
+            // to the column's current selected_index when results
+            // haven't arrived yet (30 ms debounce on a fast typist
+            // can race the keypress). Without the fallback Enter
+            // is a silent no-op and the user thinks the bind is
+            // broken.
+            let target_idx = state
+                .list_filter
+                .results
+                .as_ref()
+                .and_then(|r| r.matched_indices.get(state.list_filter.selected).copied())
+                .or_else(|| {
+                    let col_idx = state.list_filter.column;
+                    let cat = state.list_filter.category;
+                    let nav: Option<&crate::app::state::BrowseNavigationState> = match cat {
+                        BrowseCategory::Library => Some(&state.artist_nav),
+                        BrowseCategory::Playlists => Some(&state.playlist_nav),
+                        cat if cat.is_tag_section() => Some(&state.tag_nav),
+                        _ => None,
+                    };
+                    nav.and_then(|n| n.columns.get(col_idx).map(|c| c.selected_index))
+                });
+            if let Some(item_idx) = target_idx {
+                super::key_input::update_filter_column_selection(state, item_idx);
+                // Anchor `focused_column` to the filter target
+                // before dispatching the drill. Without this, the
+                // drill helper reads `selected_item()` off
+                // whatever column happened to be focused — which
+                // can be a stale child column if the user drilled
+                // past the filter column before activating the
+                // filter, and the truncation step missed it.
+                // Anchoring guarantees the drill targets the row
+                // the user just highlighted in the filter results.
+                let filter_col_idx = state.list_filter.column;
+                let filter_cat = state.list_filter.category;
+                match filter_cat {
+                    BrowseCategory::Library => {
+                        state.artist_nav.focused_column = filter_col_idx;
+                        state.artist_nav.columns.truncate(filter_col_idx + 1);
+                    }
+                    BrowseCategory::Playlists => {
+                        state.playlist_nav.focused_column = filter_col_idx;
+                        state.playlist_nav.columns.truncate(filter_col_idx + 1);
+                    }
+                    cat if cat.is_tag_section() => {
+                        state.tag_nav.focused_column = filter_col_idx;
+                        state.tag_nav.columns.truncate(filter_col_idx + 1);
+                    }
+                    BrowseCategory::Folders => {
+                        if let Some(ref mut fs) = state.folder_state {
+                            fs.focused_column = filter_col_idx;
+                            fs.columns.truncate(filter_col_idx + 1);
+                        }
+                    }
+                    _ => {}
                 }
+                // Deactivate filter before drill-down (new column clears filter)
+                state.alphabet_strip_focused = false;
+                state.list_filter.deactivate();
+                let drilldown_actions = super::key_input::get_filter_drilldown_actions(state);
+                follow_ups.extend(drilldown_actions);
             }
         }
         SearchAction::AppendListFilterChar(c) => {

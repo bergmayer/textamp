@@ -26,35 +26,71 @@ use crate::app::state::{AppState, BrowseCategory, ColumnSortMode, DjMode, Palett
 use crate::ui::theme::theme;
 use rand::seq::IteratorRandom;
 
-/// Built-in commands that don't depend on runtime data.
+/// Built-in commands that don't depend on runtime data. `aliases`
+/// are extra fuzzy-search terms that don't appear in the rendered
+/// label — typing "del", "remove", "skip", "mute", etc. should
+/// surface the matching command even though that exact word isn't
+/// in the label.
 struct StaticEntry {
     label: &'static str,
     hint: &'static str,
     command: PaletteCommandKind,
+    aliases: &'static [&'static str],
 }
 
 fn static_entries() -> Vec<StaticEntry> {
     vec![
-        StaticEntry { label: "Library",        hint: "^L",  command: PaletteCommandKind::GotoLibrary },
-        StaticEntry { label: "Genres",         hint: "^G",  command: PaletteCommandKind::GotoGenres },
-        StaticEntry { label: "Folders",        hint: "^O",  command: PaletteCommandKind::GotoFolders },
-        StaticEntry { label: "Now Playing",    hint: "^N",  command: PaletteCommandKind::GotoNowPlaying },
-        StaticEntry { label: "Help",           hint: "F1",  command: PaletteCommandKind::OpenHelp },
-        StaticEntry { label: "Settings",       hint: "F2",  command: PaletteCommandKind::OpenSettings },
-        StaticEntry { label: "Tall Mode (split Library + Now Playing)", hint: "|", command: PaletteCommandKind::ToggleTallMode },
-        StaticEntry { label: "Refresh",        hint: "F5",  command: PaletteCommandKind::Refresh },
-        StaticEntry { label: "Find / Search",  hint: "^F",  command: PaletteCommandKind::OpenSearch },
-        StaticEntry { label: "Filter",         hint: "/",   command: PaletteCommandKind::ToggleFilter },
-        StaticEntry { label: "Similar",        hint: "^M",  command: PaletteCommandKind::OpenSimilar },
-        StaticEntry { label: "Related",        hint: "^R",  command: PaletteCommandKind::OpenRelated },
-        StaticEntry { label: "Save Queue",     hint: "^S",  command: PaletteCommandKind::SaveQueue },
-        StaticEntry { label: "Clear Queue",    hint: "^X",  command: PaletteCommandKind::ClearQueue },
-        StaticEntry { label: "Play / Pause",   hint: "Spc", command: PaletteCommandKind::PlayPause },
-        StaticEntry { label: "Next Track",     hint: ">>",  command: PaletteCommandKind::NextTrack },
-        StaticEntry { label: "Previous Track", hint: "<<",  command: PaletteCommandKind::PrevTrack },
-        StaticEntry { label: "Random Album",       hint: "",    command: PaletteCommandKind::RandomAlbum },
-        StaticEntry { label: "Open in Library",    hint: "^J",  command: PaletteCommandKind::OpenInLibrary },
-        StaticEntry { label: "Sonic Adventure\u{2026}", hint: "", command: PaletteCommandKind::SonicAdventure },
+        // View navigation. Each `Goto …` entry mirrors the
+        // corresponding Ctrl+key shortcut and carries the common
+        // synonyms a user might type ("home" → Library, "tracks" →
+        // Queue, etc.).
+        StaticEntry { label: "Library",        hint: "^L",  command: PaletteCommandKind::GotoLibrary,    aliases: &["home", "browse", "artists", "albums"] },
+        StaticEntry { label: "Genres",         hint: "^G",  command: PaletteCommandKind::GotoGenres,     aliases: &["mood", "style", "tags"] },
+        StaticEntry { label: "Folders",        hint: "^O",  command: PaletteCommandKind::GotoFolders,    aliases: &["directory", "files", "tree"] },
+        StaticEntry { label: "Queue",          hint: "^U",  command: PaletteCommandKind::GotoQueue,      aliases: &["playlist", "tracks", "up next", "now playing list"] },
+        StaticEntry { label: "Now Playing",    hint: "^N",  command: PaletteCommandKind::GotoNowPlaying, aliases: &["current track", "visualizer", "spectrum", "waveform"] },
+        StaticEntry { label: "Help",           hint: "F1",  command: PaletteCommandKind::OpenHelp,       aliases: &["keyboard", "shortcuts", "keys", "manual"] },
+        StaticEntry { label: "Settings",       hint: "F2",  command: PaletteCommandKind::OpenSettings,   aliases: &["preferences", "config", "options"] },
+        StaticEntry { label: "Switch Library", hint: "F3",  command: PaletteCommandKind::SwitchLibrary,  aliases: &["change library", "library picker", "server"] },
+
+        // Layout toggles.
+        StaticEntry { label: "Tall Mode (split Library + Now Playing)", hint: "|",  command: PaletteCommandKind::ToggleTallMode,        aliases: &["split", "stacked"] },
+        StaticEntry { label: "Scrolling Miller Layout",                 hint: "\\", command: PaletteCommandKind::ToggleScrollingMiller, aliases: &["fixed", "wide", "scroll", "columns"] },
+
+        // Catalogue actions.
+        StaticEntry { label: "Refresh",        hint: "F5",  command: PaletteCommandKind::Refresh,        aliases: &["reload", "rescan"] },
+        StaticEntry { label: "Find / Search",  hint: "^F",  command: PaletteCommandKind::OpenSearch,     aliases: &["find", "search", "lookup"] },
+        StaticEntry { label: "Filter",         hint: "/",   command: PaletteCommandKind::ToggleFilter,   aliases: &["narrow", "filter list"] },
+        StaticEntry { label: "Similar",        hint: "^M",  command: PaletteCommandKind::OpenSimilar,    aliases: &["recommendations", "like this"] },
+        StaticEntry { label: "Related",        hint: "^R",  command: PaletteCommandKind::OpenRelated,    aliases: &["related artists"] },
+        StaticEntry { label: "Artist Bio",     hint: "F4",  command: PaletteCommandKind::ShowArtistBio,  aliases: &["biography", "about artist"] },
+
+        // Queue mutation. Synonyms for "delete" / "remove" / "skip"
+        // surface the right action even when the user doesn't
+        // remember the exact wording the menu uses.
+        StaticEntry { label: "Save Queue as Playlist", hint: "^S",  command: PaletteCommandKind::SaveQueue,           aliases: &["save", "export queue", "make playlist"] },
+        StaticEntry { label: "Clear Queue",            hint: "^X",  command: PaletteCommandKind::ClearQueue,          aliases: &["clear", "empty queue", "wipe queue", "reset queue"] },
+        StaticEntry { label: "Remove from Queue",      hint: "Del", command: PaletteCommandKind::RemoveFocusedFromQueue, aliases: &["delete", "del", "remove track", "drop"] },
+        StaticEntry { label: "Add to End of Queue",    hint: "^E",  command: PaletteCommandKind::EnqueueSelectionEnd,    aliases: &["enqueue", "append", "queue this"] },
+        StaticEntry { label: "Play Next in Queue",     hint: "^⇧E", command: PaletteCommandKind::EnqueueSelectionNext,   aliases: &["insert next", "queue next", "up next"] },
+        StaticEntry { label: "Move Selection Up",      hint: "⇧↑",  command: PaletteCommandKind::MoveQueueSelectionUp,   aliases: &["reorder up", "shift up", "promote"] },
+        StaticEntry { label: "Move Selection Down",    hint: "⇧↓",  command: PaletteCommandKind::MoveQueueSelectionDown, aliases: &["reorder down", "shift down", "demote"] },
+        StaticEntry { label: "Undo Queue Edit",        hint: "^Z",  command: PaletteCommandKind::UndoQueueEdit,          aliases: &["undo", "revert", "rollback"] },
+
+        // Transport controls.
+        StaticEntry { label: "Play / Pause",     hint: "Spc",  command: PaletteCommandKind::PlayPause,    aliases: &["pause", "play", "resume", "stop", "toggle play"] },
+        StaticEntry { label: "Next Track",       hint: ">",    command: PaletteCommandKind::NextTrack,    aliases: &["skip", "forward", "advance"] },
+        StaticEntry { label: "Previous Track",   hint: "<",    command: PaletteCommandKind::PrevTrack,    aliases: &["back", "rewind", "prev"] },
+        StaticEntry { label: "Volume Up",        hint: "^⇧↑",  command: PaletteCommandKind::VolumeUp,     aliases: &["louder", "raise volume"] },
+        StaticEntry { label: "Volume Down",      hint: "^⇧↓",  command: PaletteCommandKind::VolumeDown,   aliases: &["quieter", "lower volume", "softer"] },
+        StaticEntry { label: "Mute / Unmute",    hint: "",     command: PaletteCommandKind::ToggleMute,   aliases: &["silence", "mute", "unmute"] },
+        StaticEntry { label: "Seek Forward 10s", hint: "⇧→",   command: PaletteCommandKind::SeekForward,  aliases: &["fast forward", "skip ahead", "+10"] },
+        StaticEntry { label: "Seek Back 10s",    hint: "⇧←",   command: PaletteCommandKind::SeekBackward, aliases: &["rewind", "scrub back", "-10"] },
+
+        StaticEntry { label: "Random Album",       hint: "",    command: PaletteCommandKind::RandomAlbum,    aliases: &["surprise", "shuffle album", "any album"] },
+        StaticEntry { label: "Open in Library",    hint: "^J",  command: PaletteCommandKind::OpenInLibrary,  aliases: &["jump to library", "reveal", "show in library"] },
+        StaticEntry { label: "Sonic Adventure\u{2026}", hint: "", command: PaletteCommandKind::SonicAdventure, aliases: &["journey", "trip", "path", "build adventure"] },
+
         // Mirror the Now Playing sidebar buttons so the palette is a
         // first-class alternative to the GUI sidebar. Each maps to
         // either an existing PaletteCommandKind (Goto*, ClearQueue)
@@ -62,44 +98,44 @@ fn static_entries() -> Vec<StaticEntry> {
         // that view's sidebar — there's no separate popup like the
         // GUI). Each individual DJ / Remix entry is still listed
         // below for direct access.
-        StaticEntry { label: "Radio",          hint: "",    command: PaletteCommandKind::GotoNowPlaying },
-        StaticEntry { label: "DJ Modes",       hint: "",    command: PaletteCommandKind::GotoNowPlaying },
-        StaticEntry { label: "Remix Tools",    hint: "",    command: PaletteCommandKind::GotoNowPlaying },
+        StaticEntry { label: "Radio",       hint: "", command: PaletteCommandKind::GotoNowPlaying, aliases: &["stations"] },
+        StaticEntry { label: "DJ Modes",    hint: "", command: PaletteCommandKind::GotoNowPlaying, aliases: &["auto dj", "dj"] },
+        StaticEntry { label: "Remix Tools", hint: "", command: PaletteCommandKind::GotoNowPlaying, aliases: &["rebuild queue"] },
 
         // Sort cluster — typing "sort" in the palette surfaces all
         // of these together: the umbrella popup entry plus each
         // individual sort mode and the toggles. Labels share the
         // "Sort: …" prefix so fuzzy matching keeps them grouped.
-        StaticEntry { label: "View Options",               hint: "^V", command: PaletteCommandKind::OpenSort },
-        StaticEntry { label: "Close Column",               hint: "^W", command: PaletteCommandKind::CloseColumn },
-        StaticEntry { label: "Sort: Default",              hint: "",   command: PaletteCommandKind::ApplySort(ColumnSortMode::Default) },
-        StaticEntry { label: "Sort: By Artist",            hint: "",   command: PaletteCommandKind::ApplySort(ColumnSortMode::ByArtist) },
-        StaticEntry { label: "Sort: By Album",             hint: "",   command: PaletteCommandKind::ApplySort(ColumnSortMode::ByAlbum) },
-        StaticEntry { label: "Sort: By Title",             hint: "",   command: PaletteCommandKind::ApplySort(ColumnSortMode::ByTitle) },
-        StaticEntry { label: "Sort: By Duration",          hint: "",   command: PaletteCommandKind::ApplySort(ColumnSortMode::ByDuration) },
-        StaticEntry { label: "Sort: Shuffle",              hint: "",   command: PaletteCommandKind::ApplySort(ColumnSortMode::Shuffled) },
-        StaticEntry { label: "Sort: Reverse Direction",    hint: "",   command: PaletteCommandKind::ReverseSort },
-        StaticEntry { label: "Sort: Toggle Group by Album", hint: "",  command: PaletteCommandKind::ToggleGroupByAlbum },
-        StaticEntry { label: "Sort: Toggle Cover Art",     hint: "",   command: PaletteCommandKind::ToggleArtwork },
+        StaticEntry { label: "View Options",               hint: "F6", command: PaletteCommandKind::OpenSort,              aliases: &["sort", "sort popup", "arrange"] },
+        StaticEntry { label: "Close Column",               hint: "^W", command: PaletteCommandKind::CloseColumn,           aliases: &["dismiss column", "close pane"] },
+        StaticEntry { label: "Sort: Default",              hint: "",   command: PaletteCommandKind::ApplySort(ColumnSortMode::Default),    aliases: &["original order"] },
+        StaticEntry { label: "Sort: By Artist",            hint: "",   command: PaletteCommandKind::ApplySort(ColumnSortMode::ByArtist),   aliases: &[] },
+        StaticEntry { label: "Sort: By Album",             hint: "",   command: PaletteCommandKind::ApplySort(ColumnSortMode::ByAlbum),    aliases: &[] },
+        StaticEntry { label: "Sort: By Title",             hint: "",   command: PaletteCommandKind::ApplySort(ColumnSortMode::ByTitle),    aliases: &["alphabetical", "by name"] },
+        StaticEntry { label: "Sort: By Duration",          hint: "",   command: PaletteCommandKind::ApplySort(ColumnSortMode::ByDuration), aliases: &["by length", "by time"] },
+        StaticEntry { label: "Sort: Shuffle",              hint: "",   command: PaletteCommandKind::ApplySort(ColumnSortMode::Shuffled),   aliases: &["randomize", "random order"] },
+        StaticEntry { label: "Sort: Reverse Direction",    hint: "",   command: PaletteCommandKind::ReverseSort,                           aliases: &["flip order", "ascending descending"] },
+        StaticEntry { label: "Sort: Toggle Group by Album", hint: "",  command: PaletteCommandKind::ToggleGroupByAlbum,                    aliases: &["group", "cluster albums"] },
+        StaticEntry { label: "Sort: Toggle Cover Art",     hint: "",   command: PaletteCommandKind::ToggleArtwork,                         aliases: &["thumbnails", "covers", "art tiles"] },
 
-        StaticEntry { label: "Quit",           hint: "^Q",  command: PaletteCommandKind::Quit },
+        StaticEntry { label: "Quit",           hint: "^Q",  command: PaletteCommandKind::Quit, aliases: &["exit", "close", "leave"] },
 
         // DJ modes — surfaced under "DJ ..." so the now-playing
         // sidebar can prefilter the palette to just these.
-        StaticEntry { label: "DJ Stretch",     hint: "",    command: PaletteCommandKind::ToggleDj(DjMode::Stretch) },
-        StaticEntry { label: "DJ Gemini",      hint: "",    command: PaletteCommandKind::ToggleDj(DjMode::Gemini) },
-        StaticEntry { label: "DJ Freeze",      hint: "",    command: PaletteCommandKind::ToggleDj(DjMode::Freeze) },
-        StaticEntry { label: "DJ Twofer",      hint: "",    command: PaletteCommandKind::ToggleDj(DjMode::Twofer) },
-        StaticEntry { label: "DJ Contempo",    hint: "",    command: PaletteCommandKind::ToggleDj(DjMode::Contempo) },
-        StaticEntry { label: "DJ Groupie",     hint: "",    command: PaletteCommandKind::ToggleDj(DjMode::Groupie) },
+        StaticEntry { label: "DJ Stretch",  hint: "", command: PaletteCommandKind::ToggleDj(DjMode::Stretch),  aliases: &[] },
+        StaticEntry { label: "DJ Gemini",   hint: "", command: PaletteCommandKind::ToggleDj(DjMode::Gemini),   aliases: &[] },
+        StaticEntry { label: "DJ Freeze",   hint: "", command: PaletteCommandKind::ToggleDj(DjMode::Freeze),   aliases: &[] },
+        StaticEntry { label: "DJ Twofer",   hint: "", command: PaletteCommandKind::ToggleDj(DjMode::Twofer),   aliases: &[] },
+        StaticEntry { label: "DJ Contempo", hint: "", command: PaletteCommandKind::ToggleDj(DjMode::Contempo), aliases: &[] },
+        StaticEntry { label: "DJ Groupie",  hint: "", command: PaletteCommandKind::ToggleDj(DjMode::Groupie),  aliases: &[] },
 
         // Remix tools.
-        StaticEntry { label: "Remix: Gemini",        hint: "", command: PaletteCommandKind::RemixGemini },
-        StaticEntry { label: "Remix: Twofer",        hint: "", command: PaletteCommandKind::RemixTwofer },
-        StaticEntry { label: "Remix: Stretch",       hint: "", command: PaletteCommandKind::RemixStretch },
-        StaticEntry { label: "Remix: Doppelganger",  hint: "", command: PaletteCommandKind::RemixDoppelganger },
-        StaticEntry { label: "Remix: Shuffle",       hint: "", command: PaletteCommandKind::RemixShuffle },
-        StaticEntry { label: "Remix: Undo Shuffle",  hint: "", command: PaletteCommandKind::RemixUndoShuffle },
+        StaticEntry { label: "Remix: Gemini",        hint: "", command: PaletteCommandKind::RemixGemini,       aliases: &[] },
+        StaticEntry { label: "Remix: Twofer",        hint: "", command: PaletteCommandKind::RemixTwofer,       aliases: &[] },
+        StaticEntry { label: "Remix: Stretch",       hint: "", command: PaletteCommandKind::RemixStretch,      aliases: &[] },
+        StaticEntry { label: "Remix: Doppelganger",  hint: "", command: PaletteCommandKind::RemixDoppelganger, aliases: &[] },
+        StaticEntry { label: "Remix: Shuffle",       hint: "", command: PaletteCommandKind::RemixShuffle,      aliases: &["scramble", "randomize queue"] },
+        StaticEntry { label: "Remix: Undo Shuffle",  hint: "", command: PaletteCommandKind::RemixUndoShuffle,  aliases: &["unshuffle"] },
     ]
 }
 
@@ -167,6 +203,7 @@ pub fn materialize_entries(state: &AppState) -> Vec<PaletteEntry> {
                     kind: ce.kind,
                     track: track_box.clone(),
                 },
+                aliases: vec![],
             });
         }
     } else if state.focused_album().is_some() {
@@ -174,18 +211,21 @@ pub fn materialize_entries(state: &AppState) -> Vec<PaletteEntry> {
             label: "Play Album".to_string(),
             hint: String::new(),
             command: PaletteCommandKind::PlayFocusedAlbum,
+            aliases: vec!["play this".into(), "start album".into()],
         });
         if not_in_library {
             out.push(PaletteEntry {
                 label: "Open in Library".to_string(),
                 hint: "^J".to_string(),
                 command: PaletteCommandKind::OpenInLibrary,
+                aliases: vec!["jump to library".into()],
             });
         }
         out.push(PaletteEntry {
             label: "Artist Bio".to_string(),
             hint: "F4".to_string(),
             command: PaletteCommandKind::ShowArtistBio,
+            aliases: vec!["biography".into()],
         });
     }
 
@@ -205,6 +245,7 @@ pub fn materialize_entries(state: &AppState) -> Vec<PaletteEntry> {
                 label: "Search Apple Music for selection".to_string(),
                 hint: String::new(),
                 command: PaletteCommandKind::SearchAppleMusic,
+                aliases: vec!["apple".into(), "itunes".into()],
             });
         }
         if state.external_search.spotify {
@@ -212,6 +253,7 @@ pub fn materialize_entries(state: &AppState) -> Vec<PaletteEntry> {
                 label: "Search Spotify for selection".to_string(),
                 hint: String::new(),
                 command: PaletteCommandKind::SearchSpotify,
+                aliases: vec![],
             });
         }
         if state.external_search.youtube {
@@ -219,6 +261,7 @@ pub fn materialize_entries(state: &AppState) -> Vec<PaletteEntry> {
                 label: "Search YouTube for selection".to_string(),
                 hint: String::new(),
                 command: PaletteCommandKind::SearchYouTube,
+                aliases: vec!["yt".into()],
             });
         }
     }
@@ -249,6 +292,14 @@ pub fn materialize_entries(state: &AppState) -> Vec<PaletteEntry> {
         (target_track.is_some() && (not_in_library || target_is_similar))
             || (state.focused_album().is_some() && not_in_library);
     let context_has_sonic_adventure = target_track.is_some();
+    // The contextual block (track context entries OR the album-
+    // focused branch) already added "Artist Bio" / "Add to End of
+    // Queue" / "Play Next in Queue", so the static entries with
+    // the same effect would duplicate the row. The track-context
+    // path emits the queue entries; the album-focused path emits
+    // Artist Bio; either implies the static row should be hidden.
+    let context_has_artist_bio = target_track.is_some() || state.focused_album().is_some();
+    let context_has_enqueue = target_track.is_some();
     out.extend(static_entries().into_iter().filter_map(|e| {
         let is_dj_or_remix = matches!(
             e.command,
@@ -273,10 +324,24 @@ pub fn materialize_entries(state: &AppState) -> Vec<PaletteEntry> {
         {
             return None;
         }
+        if matches!(e.command, PaletteCommandKind::ShowArtistBio)
+            && context_has_artist_bio
+        {
+            return None;
+        }
+        if matches!(
+            e.command,
+            PaletteCommandKind::EnqueueSelectionEnd
+                | PaletteCommandKind::EnqueueSelectionNext
+        ) && context_has_enqueue
+        {
+            return None;
+        }
         Some(PaletteEntry {
             label: e.label.to_string(),
             hint: e.hint.to_string(),
             command: e.command,
+            aliases: e.aliases.iter().map(|s| (*s).to_string()).collect(),
         })
     }));
 
@@ -304,6 +369,7 @@ pub fn materialize_entries(state: &AppState) -> Vec<PaletteEntry> {
                 key: s.key.clone(),
                 title: s.title.clone(),
             },
+            aliases: vec!["station".into()],
         });
     }
     out
@@ -333,6 +399,39 @@ pub fn run(cmd: PaletteCommandKind, state: &mut AppState) -> Vec<Action> {
         PaletteCommandKind::NextTrack       => vec![PlaybackAction::Next.into()],
         PaletteCommandKind::PrevTrack       => vec![PlaybackAction::Previous.into()],
         PaletteCommandKind::ToggleDj(mode)  => vec![RadioAction::ToggleDjMode(mode).into()],
+        PaletteCommandKind::SwitchLibrary   => vec![SearchAction::OpenLibraryPicker.into()],
+        PaletteCommandKind::ToggleScrollingMiller => vec![SettingsAction::ToggleMillerLayout.into()],
+        PaletteCommandKind::VolumeUp        => vec![PlaybackAction::VolumeUp.into()],
+        PaletteCommandKind::VolumeDown      => vec![PlaybackAction::VolumeDown.into()],
+        PaletteCommandKind::ToggleMute      => vec![PlaybackAction::ToggleMute.into()],
+        PaletteCommandKind::SeekForward     => vec![PlaybackAction::SeekRelative(10_000).into()],
+        PaletteCommandKind::SeekBackward    => vec![PlaybackAction::SeekRelative(-10_000).into()],
+        PaletteCommandKind::UndoQueueEdit   => vec![QueueAction::UndoLastRemix.into()],
+        PaletteCommandKind::EnqueueSelectionEnd  => vec![QueueAction::EnqueueSelection.into()],
+        PaletteCommandKind::EnqueueSelectionNext => vec![QueueAction::EnqueueSelectionNext.into()],
+        PaletteCommandKind::MoveQueueSelectionUp   => vec![QueueAction::MoveSelectedTracksUp.into()],
+        PaletteCommandKind::MoveQueueSelectionDown => vec![QueueAction::MoveSelectedTracksDown.into()],
+        PaletteCommandKind::RemoveFocusedFromQueue => {
+            // Resolves the row to delete from the current view:
+            //   - Queue / Now Playing: the highlighted queue row.
+            //   - Anywhere else: no-op with a status hint (the
+            //     palette is open globally so the entry needs to
+            //     gracefully sit out when it doesn't apply).
+            // Mirrors the Del binding in
+            // `key_input::now_playing::handle_now_playing_keys`.
+            if matches!(state.view, View::Queue | View::NowPlaying) {
+                let idx = state.list_state.queue_index;
+                if idx < state.queue.tracks.len() {
+                    vec![QueueAction::RemoveFromQueue(idx).into()]
+                } else {
+                    state.set_status("Queue is empty".to_string());
+                    vec![]
+                }
+            } else {
+                state.set_status("Open Queue (Ctrl+U) to remove tracks".to_string());
+                vec![]
+            }
+        }
         PaletteCommandKind::RemixGemini     => vec![QueueAction::RemixGemini.into()],
         PaletteCommandKind::RemixTwofer     => vec![QueueAction::RemixTwofer.into()],
         PaletteCommandKind::RemixStretch    => vec![QueueAction::RemixStretch.into()],
@@ -702,7 +801,27 @@ pub fn refresh_matches(state: &mut AppState) {
         let mut scored: Vec<(i64, usize)> = entries
             .iter()
             .enumerate()
-            .filter_map(|(i, e)| matcher.fuzzy_match(&e.label, &query).map(|s| (s, i)))
+            .filter_map(|(i, e)| {
+                // Score against label AND every alias; take the
+                // best match. Aliases are penalized lightly so a
+                // direct label hit ranks above an alias-only hit
+                // of the same nominal score (otherwise "queue"
+                // could surface "Add to End of Queue" above the
+                // bare "Queue" entry just because alias matches
+                // tied with the label match).
+                let label_score = matcher.fuzzy_match(&e.label, &query);
+                let alias_score = e.aliases.iter()
+                    .filter_map(|a| matcher.fuzzy_match(a, &query))
+                    .max()
+                    .map(|s| s - 1);
+                let best = match (label_score, alias_score) {
+                    (Some(a), Some(b)) => Some(a.max(b)),
+                    (Some(a), None) => Some(a),
+                    (None, Some(b)) => Some(b),
+                    (None, None) => None,
+                };
+                best.map(|s| (s, i))
+            })
             .collect();
         scored.sort_by(|a, b| b.0.cmp(&a.0));
         scored.into_iter().map(|(_, i)| i).collect()

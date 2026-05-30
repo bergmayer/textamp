@@ -699,6 +699,34 @@ impl SortPopupState {
     }
 }
 
+/// Pinned "▶ Play …" row that sits above the real items of a tracks
+/// column. The variant decides which `QueueAction` activates when the
+/// user presses Enter / clicks on the row:
+/// - `Album`    → `PlayAlbumNow`    (server fetches every album track)
+/// - `Playlist` → `PlayPlaylistNow` (server re-fetches; catches the
+///   tail of a lazy-paged playlist the user hasn't scrolled to)
+/// - `AllTracks` → `PlayTracksNow(col.tracks.clone())` (no fetch; the
+///   column already has every track — used for artist All Tracks,
+///   compilations, library-wide All Tracks)
+#[derive(Debug, Clone)]
+pub enum PlayAllRow {
+    Album { rating_key: String, title: String },
+    Playlist { rating_key: String, title: String },
+    AllTracks { label: String },
+}
+
+impl PlayAllRow {
+    /// Label shown on the synthetic row in the column (sans the
+    /// leading "▶ " glyph, which the renderer prepends).
+    pub fn label(&self) -> &str {
+        match self {
+            PlayAllRow::Album { .. } => "Play album",
+            PlayAllRow::Playlist { .. } => "Play playlist",
+            PlayAllRow::AllTracks { label } => label,
+        }
+    }
+}
+
 /// A single column in the Miller columns browse view.
 #[derive(Debug, Clone)]
 pub struct BrowseColumn {
@@ -724,17 +752,19 @@ pub struct BrowseColumn {
     pub grouped_by_album: bool,
     /// Album group indices into tracks (replaces global track_album_groups)
     pub album_groups: Option<Vec<Vec<usize>>>,
-    /// When this column is the tracks-of-an-album column, holds the
-    /// (rating_key, title) of that album so the GUI can render a
-    /// "Play Album" action header at the top.
-    pub play_album: Option<(String, String)>,
-    /// When this column is a virtual "all tracks" view (artist's full
-    /// track list, library-wide track list, compilation tracks, …)
-    /// it has no single album_key. Storing a label here flags the
-    /// header to render a "Play {label}" button that queues every
-    /// track in `tracks` instead of fetching from the API. Mutually
-    /// exclusive with `play_album`.
-    pub play_all_label: Option<String>,
+    /// When `Some`, the column is a tracks list with a synthetic
+    /// "▶ Play …" row pinned above the real items. The TUI renders
+    /// this as the column's first row; pressing Enter on it (or
+    /// clicking it) plays the whole list. See `PlayAllRow` for the
+    /// per-variant dispatch.
+    pub play_all_row: Option<PlayAllRow>,
+    /// True when the cursor is parked on the synthetic Play row
+    /// (rather than one of the real `items`). Newly-pushed tracks
+    /// columns default to this so the user can immediately press
+    /// Enter to play the whole album / playlist. `↓` clears it and
+    /// drops focus to `items[selected_index]`; `↑` from `items[0]`
+    /// sets it again. Ignored when `play_all_row` is `None`.
+    pub on_play_row: bool,
     /// Multi-select set: indices into `items` (and `tracks`) that the
     /// user has shift- or cmd-clicked. Empty means single-selection
     /// mode (the regular `selected_index` cursor). Populated by the
@@ -783,8 +813,8 @@ impl BrowseColumn {
             artwork_visible: false,
             grouped_by_album: false,
             album_groups: None,
-            play_album: None,
-            play_all_label: None,
+            play_all_row: None,
+            on_play_row: false,
             selected_set: std::collections::BTreeSet::new(),
             selection_anchor: None,
             lazy: None,
@@ -805,8 +835,8 @@ impl BrowseColumn {
             artwork_visible: false,
             grouped_by_album: false,
             album_groups: None,
-            play_album: None,
-            play_all_label: None,
+            play_all_row: None,
+            on_play_row: false,
             selected_set: std::collections::BTreeSet::new(),
             selection_anchor: None,
             lazy: None,
@@ -3384,12 +3414,16 @@ pub struct PaletteState {
 
 /// One materialized row in the palette. The display string is owned
 /// because some rows are built from runtime data (e.g. radio station
-/// titles); the executable side is in `command`.
+/// titles); the executable side is in `command`. `aliases` carries
+/// extra fuzzy-search terms that don't appear in the rendered label
+/// — typing "del", "remove", "skip", "mute", etc. should surface the
+/// matching command even though that exact word isn't in the label.
 #[derive(Debug, Clone)]
 pub struct PaletteEntry {
     pub label: String,
     pub hint: String,
     pub command: PaletteCommandKind,
+    pub aliases: Vec<String>,
 }
 
 /// The dispatchable command attached to a palette entry. Mirror of
@@ -3494,6 +3528,31 @@ pub enum PaletteCommandKind {
         kind: crate::services::track_context::ContextKind,
         track: Box<crate::plex::models::Track>,
     },
+    /// Open the F3 library-picker popup.
+    SwitchLibrary,
+    /// Toggle scrolling Miller layout (the `\` shortcut).
+    ToggleScrollingMiller,
+    /// Remove the focused row from the play queue (Del shortcut).
+    RemoveFocusedFromQueue,
+    /// Undo the last queue edit (Ctrl+Z shortcut).
+    UndoQueueEdit,
+    /// Playback / transport controls. These mirror the keyboard
+    /// shortcuts so the palette is a complete index of the app's
+    /// functions — every action that has a key binding is reachable
+    /// by typing its name (or a synonym).
+    VolumeUp,
+    VolumeDown,
+    ToggleMute,
+    SeekForward,
+    SeekBackward,
+    /// Queue mutation helpers — context-aware (operate on the
+    /// focused row / selection in whatever view the user popped the
+    /// palette from). Mirror the Ctrl+E / Ctrl+Shift+E shortcuts and
+    /// the Shift+↑↓ reorder.
+    EnqueueSelectionEnd,
+    EnqueueSelectionNext,
+    MoveQueueSelectionUp,
+    MoveQueueSelectionDown,
 }
 
 impl PaletteState {

@@ -142,6 +142,12 @@ background refresh runs.
 | `Home` / `End` | Jump to top/bottom |
 | `A-Z` | Jump to first item starting with letter |
 
+After drilling into an album or playlist the cursor parks on a pinned
+**"▶ Play album / Play playlist"** row at the top of the tracks column.
+`Enter` plays the whole album / playlist; `↓` drops to the first track;
+`↑` from the first track jumps back to the play row. Click the row to
+play immediately.
+
 ### Categories (Ctrl+key)
 | Key | Action |
 |-----|--------|
