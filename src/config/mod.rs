@@ -23,7 +23,25 @@ pub fn load_config() -> Result<Config> {
 
     let mut config = if config_path.exists() {
         let contents = std::fs::read_to_string(&config_path)?;
-        toml::from_str(&contents)?
+        match toml::from_str(&contents) {
+            Ok(config) => config,
+            Err(e) => {
+                // A corrupt config must not brick startup. Preserve the
+                // broken file (a later settings save would otherwise
+                // overwrite it) and continue with defaults.
+                let backup = config_path.with_extension("toml.invalid");
+                let moved = std::fs::rename(&config_path, &backup).is_ok();
+                eprintln!(
+                    "Warning: {} is not valid TOML ({}). Using default settings.",
+                    config_path.display(),
+                    e.message()
+                );
+                if moved {
+                    eprintln!("The unreadable file was moved to {}.", backup.display());
+                }
+                Config::default()
+            }
+        }
     } else {
         Config::default()
     };

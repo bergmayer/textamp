@@ -5,6 +5,7 @@
 use super::constants::*;
 use super::error::ApiError;
 use super::models::{PlexServer, PlexUser};
+use crate::util::truncate_to_boundary;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -160,7 +161,7 @@ impl PlexAuth {
         }
 
         let text = response.text().await?;
-        tracing::debug!("Sign-in response: {}", &text[..text.len().min(500)]);
+        tracing::debug!("Sign-in response: {}", truncate_to_boundary(&text, 500));
 
         let data: SignInResponse = serde_json::from_str(&text)
             .map_err(|e| {
@@ -248,7 +249,7 @@ impl PlexAuth {
         }
 
         let text = response.text().await?;
-        tracing::debug!("User response: {}", &text[..text.len().min(500)]);
+        tracing::debug!("User response: {}", truncate_to_boundary(&text, 500));
 
         let user: PlexUser = serde_json::from_str(&text)
             .map_err(|e| {

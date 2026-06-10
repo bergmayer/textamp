@@ -3134,6 +3134,8 @@ fn render_artist_bio_popup(frame: &mut Frame, state: &AppState) {
 /// The first `narrow_rows` output lines are wrapped at `narrow_width`;
 /// subsequent lines are wrapped at `full_width`.
 fn wrap_bio_text(text: &str, narrow_width: usize, full_width: usize, narrow_rows: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthStr;
+
     if full_width == 0 {
         return vec![];
     }
@@ -3150,17 +3152,24 @@ fn wrap_bio_text(text: &str, narrow_width: usize, full_width: usize, narrow_rows
 
         let words: Vec<&str> = paragraph.split_whitespace().collect();
         let mut line = String::new();
+        let mut line_width = 0usize;
 
         for word in &words {
+            // Widths are terminal cells, not bytes — bios with accented or
+            // CJK text would otherwise wrap at the wrong column.
+            let word_width = UnicodeWidthStr::width(*word);
             let max_w = if lines.len() < narrow_rows { narrow_width } else { full_width };
             if line.is_empty() {
                 line.push_str(word);
-            } else if line.len() + 1 + word.len() <= max_w {
+                line_width = word_width;
+            } else if line_width + 1 + word_width <= max_w {
                 line.push(' ');
                 line.push_str(word);
+                line_width += 1 + word_width;
             } else {
                 lines.push(line);
                 line = word.to_string();
+                line_width = word_width;
             }
         }
         if !line.is_empty() {

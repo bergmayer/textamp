@@ -11,6 +11,7 @@
 use super::constants::*;
 use super::error::ApiError;
 use super::models::Track;
+use crate::util::truncate_to_boundary;
 use reqwest::Client;
 use serde::Deserialize;
 use std::time::Duration;
@@ -241,7 +242,7 @@ impl RemotePlayerClient {
             }
         }
 
-        tracing::warn!("Could not parse play queue ID from response: {}", &body[..body.len().min(200)]);
+        tracing::warn!("Could not parse play queue ID from response: {}", truncate_to_boundary(&body, 200));
         Ok(0)
     }
 

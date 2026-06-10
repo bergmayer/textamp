@@ -9,5 +9,5 @@ mod text;
 
 pub use lockfile::{LockError, ProcessLock};
 pub use logging::setup_logging;
-pub use terminal::{restore_terminal, setup_terminal};
-pub use text::{force_text_presentation, format_bytes, format_duration, pad_right, sanitize_display_text, truncate_middle, truncate_str};
+pub use terminal::{install_panic_hook, restore_terminal, setup_terminal};
+pub use text::{force_text_presentation, format_bytes, format_duration, pad_right, sanitize_display_text, truncate_middle, truncate_str, truncate_to_boundary};

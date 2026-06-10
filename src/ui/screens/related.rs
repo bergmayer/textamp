@@ -156,7 +156,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         let footer_pos = format!("{}/{}", selected_idx + 1, total);
         let footer_pos_area = Rect::new(
             popup_area.x + popup_area.width.saturating_sub(footer_pos.len() as u16 + 2),
-            popup_area.y + popup_area.height - 1,
+            popup_area.y + popup_area.height.saturating_sub(1),
             footer_pos.len() as u16 + 1,
             1,
         );

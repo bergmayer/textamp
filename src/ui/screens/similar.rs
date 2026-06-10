@@ -216,7 +216,7 @@ fn render_albums(frame: &mut Frame, state: &AppState, inner: Rect, popup_area: R
         let footer = format!("{}/{}", selected_idx + 1, total);
         let footer_area = Rect::new(
             popup_area.x + popup_area.width.saturating_sub(footer.len() as u16 + 2),
-            popup_area.y + popup_area.height - 1,
+            popup_area.y + popup_area.height.saturating_sub(1),
             footer.len() as u16 + 1,
             1,
         );
@@ -309,7 +309,7 @@ fn render_tracks(frame: &mut Frame, state: &AppState, inner: Rect, popup_area: R
         let footer = format!("{}/{}", selected_idx + 1, total);
         let footer_area = Rect::new(
             popup_area.x + popup_area.width.saturating_sub(footer.len() as u16 + 2),
-            popup_area.y + popup_area.height - 1,
+            popup_area.y + popup_area.height.saturating_sub(1),
             footer.len() as u16 + 1,
             1,
         );
@@ -395,7 +395,7 @@ fn render_artists(frame: &mut Frame, state: &AppState, inner: Rect, popup_area: 
         let footer = format!("{}/{}", selected_idx + 1, total);
         let footer_area = Rect::new(
             popup_area.x + popup_area.width.saturating_sub(footer.len() as u16 + 2),
-            popup_area.y + popup_area.height - 1,
+            popup_area.y + popup_area.height.saturating_sub(1),
             footer.len() as u16 + 1,
             1,
         );

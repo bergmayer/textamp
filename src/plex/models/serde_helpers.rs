@@ -42,42 +42,36 @@ where
             Ok(None)
         }
 
+        // Parse failures yield None rather than an error: these fields are
+        // optional metadata, and a serde error here would reject the whole
+        // MediaContainer — one odd value in one item would otherwise drop
+        // the entire artist/album/track list.
         fn visit_str<E>(self, value: &str) -> Result<Option<T>, E>
         where
             E: de::Error,
         {
-            if value.is_empty() {
-                Ok(None)
-            } else {
-                T::from_str(value).map(Some).map_err(de::Error::custom)
-            }
+            Ok(T::from_str(value).ok())
         }
 
         fn visit_u64<E>(self, value: u64) -> Result<Option<T>, E>
         where
             E: de::Error,
         {
-            T::from_str(&value.to_string())
-                .map(Some)
-                .map_err(de::Error::custom)
+            Ok(T::from_str(&value.to_string()).ok())
         }
 
         fn visit_i64<E>(self, value: i64) -> Result<Option<T>, E>
         where
             E: de::Error,
         {
-            T::from_str(&value.to_string())
-                .map(Some)
-                .map_err(de::Error::custom)
+            Ok(T::from_str(&value.to_string()).ok())
         }
 
         fn visit_f64<E>(self, value: f64) -> Result<Option<T>, E>
         where
             E: de::Error,
         {
-            T::from_str(&value.to_string())
-                .map(Some)
-                .map_err(de::Error::custom)
+            Ok(T::from_str(&value.to_string()).ok())
         }
     }
 

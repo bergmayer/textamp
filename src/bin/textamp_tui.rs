@@ -11,7 +11,7 @@ use textamp::plex::{PlexAuth, PlexClient, PlexClientInfo};
 use textamp::app::{AppState, EventLoop};
 use textamp::audio::AudioPlayer;
 use textamp::config::{self, Config};
-use textamp::util::{restore_terminal, setup_logging, setup_terminal, LockError, ProcessLock};
+use textamp::util::{install_panic_hook, restore_terminal, setup_logging, setup_terminal, LockError, ProcessLock};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -48,6 +48,10 @@ async fn run_tui_mode(verbose: bool) -> Result<()> {
     let _guard = setup_logging(verbose);
 
     tracing::info!("Starting textamp v{}", env!("CARGO_PKG_VERSION"));
+
+    // Restore the terminal if anything panics after raw mode is enabled,
+    // so the panic message is actually visible and the shell stays usable.
+    install_panic_hook();
 
     // Setup terminal
     let mut terminal = setup_terminal()?;
@@ -187,9 +191,10 @@ async fn run_app(
     // otherwise Plex will reject requests with 400 errors
     let client_info = if let Some(stored) = PlexAuth::load_token() {
         tracing::info!("Loaded stored client_identifier: {}", stored.client_identifier);
-        let mut info = PlexClientInfo::default();
-        info.client_identifier = stored.client_identifier;
-        info
+        PlexClientInfo {
+            client_identifier: stored.client_identifier,
+            ..Default::default()
+        }
     } else {
         tracing::info!("No stored auth, using new client_identifier");
         PlexClientInfo::default()

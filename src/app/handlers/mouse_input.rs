@@ -1033,6 +1033,10 @@ fn handle_volume_drag(click_col: u16, state: &mut AppState) -> Vec<Action> {
         hr.transport.as_ref().and_then(|t| t.volume_slider)
     };
     let Some(slider) = slider else { return vec![] };
+    // A resize mid-drag can shrink the slider to zero width; 0/0 is NaN.
+    if slider.width == 0 {
+        return vec![];
+    }
 
     let clamped_col = click_col.max(slider.x).min(slider.x + slider.width);
     let relative_pos = clamped_col - slider.x;
@@ -1052,6 +1056,10 @@ fn handle_transport_drag(click_col: u16, state: &AppState) -> Vec<Action> {
         let Some(seekbar) = seekbar else {
             return vec![];
         };
+        // A resize mid-drag can shrink the seekbar to zero width; 0/0 is NaN.
+        if seekbar.width == 0 {
+            return vec![];
+        }
 
         let clamped_col = click_col.max(seekbar.x).min(seekbar.x + seekbar.width);
         let relative_pos = clamped_col - seekbar.x;

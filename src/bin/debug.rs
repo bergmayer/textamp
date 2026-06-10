@@ -217,13 +217,15 @@ async fn main() -> Result<()> {
             Ok(raw) => {
                 if let Some(stations_pos) = raw.find("\"hub.music.stations\"") {
                     println!("\nFound stations context at position {}. Showing context:", stations_pos);
-                    let start = stations_pos.saturating_sub(100);
-                    let end = (stations_pos + 1000).min(raw.len());
-                    println!("{}", &raw[start..end]);
+                    let mut start = stations_pos.saturating_sub(100);
+                    while !raw.is_char_boundary(start) {
+                        start -= 1;
+                    }
+                    println!("{}", textamp::util::truncate_to_boundary(&raw[start..], 1100));
                 } else {
                     println!("No 'hub.music.stations' found in response.");
                     println!("\nFull response (first 5000 chars):");
-                    println!("{}", &raw[..raw.len().min(5000)]);
+                    println!("{}", textamp::util::truncate_to_boundary(&raw, 5000));
                     if raw.len() > 5000 {
                         println!("... ({} more bytes)", raw.len() - 5000);
                     }

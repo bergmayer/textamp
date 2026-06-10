@@ -6,6 +6,7 @@ use super::auth::PlexClientInfo;
 use super::constants::*;
 use super::error::ApiError;
 use super::models::*;
+use crate::util::truncate_to_boundary;
 use reqwest::Client;
 use std::time::Duration;
 
@@ -238,10 +239,10 @@ impl PlexClient {
         }
 
         let text = response.text().await?;
-        tracing::trace!("Response: {}", &text[..text.len().min(1000)]);
+        tracing::trace!("Response: {}", truncate_to_boundary(&text, 1000));
 
         let data: T = serde_json::from_str(&text).map_err(|e| {
-            tracing::error!("JSON parse error: {} - Response: {}", e, &text[..text.len().min(500)]);
+            tracing::error!("JSON parse error: {} - Response: {}", e, truncate_to_boundary(&text, 500));
             ApiError::ParseError(format!("JSON parse error: {}", e))
         })?;
         Ok(data)
@@ -562,7 +563,6 @@ impl PlexClient {
         _library_key: &str,
     ) -> Result<(), ApiError> {
         let server = self.require_server()?.to_string();
-        let token = self.require_token()?.to_string();
         let machine_id = self.get_server_machine_id().await?;
 
         // Plex playlist URI: single server:// URI with comma-separated ratingKeys
@@ -573,12 +573,13 @@ impl PlexClient {
             machine_id, rating_keys
         );
 
+        // Auth travels in the X-Plex-Token header (build_headers below);
+        // keeping it out of the URL keeps it out of the debug logs.
         let path = format!(
-            "{}?type=audio&title={}&smart=0&uri={}&{}={}",
+            "{}?type=audio&title={}&smart=0&uri={}",
             EP_PLAYLISTS,
             urlencoding::encode(title),
-            urlencoding::encode(&uri),
-            HEADER_PLEX_TOKEN, token
+            urlencoding::encode(&uri)
         );
 
         let url = format!("{}{}", server, path);
@@ -1088,10 +1089,10 @@ impl PlexClient {
         }
 
         let raw = self.get_raw(station_key).await?;
-        tracing::debug!("Station children raw response (first 1000 chars): {}", &raw[..raw.len().min(1000)]);
+        tracing::debug!("Station children raw response (first 1000 chars): {}", truncate_to_boundary(&raw, 1000));
 
         let response: StationsResponse = serde_json::from_str(&raw).map_err(|e| {
-            tracing::error!("Station children parse error: {} - Response: {}", e, &raw[..raw.len().min(500)]);
+            tracing::error!("Station children parse error: {} - Response: {}", e, truncate_to_boundary(&raw, 500));
             ApiError::ParseError(format!("Station children parse error: {}", e))
         })?;
 
@@ -1112,7 +1113,7 @@ impl PlexClient {
         tracing::debug!("Getting category items for: {}", category_path);
 
         let raw = self.get_raw(category_path).await?;
-        tracing::debug!("Category response (first 500 chars): {}", &raw[..raw.len().min(500)]);
+        tracing::debug!("Category response (first 500 chars): {}", truncate_to_boundary(&raw, 500));
 
         let response: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
             ApiError::ParseError(format!("Category parse error: {}", e))
@@ -1374,7 +1375,6 @@ impl PlexClient {
     /// Create station queue using the playQueue API (may not work on all servers).
     async fn create_station_queue_via_playqueue(&mut self, station_key: &str) -> Result<Vec<Track>, ApiError> {
         let server = self.require_server()?.to_string();
-        let token = self.require_token()?.to_string();
 
         let machine_id = self.get_server_machine_id().await?;
         tracing::debug!("Server machine ID: {}", machine_id);
@@ -1393,7 +1393,8 @@ impl PlexClient {
 
         tracing::debug!("PlayQueue request path: {}", path);
 
-        let url = format!("{}{}&{}={}", server, path, HEADER_PLEX_TOKEN, token);
+        // Auth travels in the X-Plex-Token header (build_headers below).
+        let url = format!("{}{}", server, path);
 
         let response = self
             .http
@@ -1410,10 +1411,10 @@ impl PlexClient {
         }
 
         let text = response.text().await?;
-        tracing::debug!("PlayQueue response (first 500 chars): {}", &text[..text.len().min(500)]);
+        tracing::debug!("PlayQueue response (first 500 chars): {}", truncate_to_boundary(&text, 500));
 
         let queue: PlayQueueResponse = serde_json::from_str(&text).map_err(|e| {
-            tracing::error!("PlayQueue parse error: {} - Response: {}", e, &text[..text.len().min(500)]);
+            tracing::error!("PlayQueue parse error: {} - Response: {}", e, truncate_to_boundary(&text, 500));
             ApiError::ParseError(format!("PlayQueue parse error: {}", e))
         })?;
 
@@ -1427,7 +1428,6 @@ impl PlexClient {
     /// freshness (tracks not recently played), and sonic analysis (Plex Pass).
     pub async fn create_radio_from_metadata(&mut self, rating_key: &str) -> Result<Vec<Track>, ApiError> {
         let server = self.require_server()?.to_string();
-        let token = self.require_token()?.to_string();
         let machine_id = self.get_server_machine_id().await?;
 
         let uri = format!(
@@ -1443,7 +1443,8 @@ impl PlexClient {
 
         tracing::debug!("Radio from metadata request: {}", path);
 
-        let url = format!("{}{}&{}={}", server, path, HEADER_PLEX_TOKEN, token);
+        // Auth travels in the X-Plex-Token header (build_headers below).
+        let url = format!("{}{}", server, path);
 
         let response = self
             .http
@@ -1460,10 +1461,10 @@ impl PlexClient {
         }
 
         let text = response.text().await?;
-        tracing::debug!("Radio PlayQueue response (first 500 chars): {}", &text[..text.len().min(500)]);
+        tracing::debug!("Radio PlayQueue response (first 500 chars): {}", truncate_to_boundary(&text, 500));
 
         let queue: PlayQueueResponse = serde_json::from_str(&text).map_err(|e| {
-            tracing::error!("Radio PlayQueue parse error: {} - Response: {}", e, &text[..text.len().min(500)]);
+            tracing::error!("Radio PlayQueue parse error: {} - Response: {}", e, truncate_to_boundary(&text, 500));
             ApiError::ParseError(format!("Radio PlayQueue parse error: {}", e))
         })?;
 
@@ -1766,7 +1767,6 @@ impl PlexClient {
     /// This includes tracks from similar artists (server-side MusicBrainz/Last.fm data).
     pub async fn create_artist_radio_queue(&mut self, artist_rating_key: &str) -> Result<Vec<Track>, ApiError> {
         let server = self.require_server()?.to_string();
-        let token = self.require_token()?.to_string();
 
         let machine_id = self.get_server_machine_id().await?;
 
@@ -1781,7 +1781,8 @@ impl PlexClient {
             urlencoding::encode(&uri)
         );
 
-        let url = format!("{}{}&{}={}", server, path, HEADER_PLEX_TOKEN, token);
+        // Auth travels in the X-Plex-Token header (build_headers below).
+        let url = format!("{}{}", server, path);
 
         tracing::debug!("Artist radio PlayQueue: POST {}", path);
 
@@ -1801,7 +1802,7 @@ impl PlexClient {
 
         let text = response.text().await?;
         let queue: PlayQueueResponse = serde_json::from_str(&text).map_err(|e| {
-            tracing::error!("Artist radio PlayQueue parse error: {} - Response: {}", e, &text[..text.len().min(500)]);
+            tracing::error!("Artist radio PlayQueue parse error: {} - Response: {}", e, truncate_to_boundary(&text, 500));
             ApiError::ParseError(format!("Artist radio PlayQueue parse error: {}", e))
         })?;
 
@@ -2092,7 +2093,7 @@ impl PlexClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            tracing::error!("Transcode decision failed: HTTP {} - {}", status, &body[..body.len().min(500)]);
+            tracing::error!("Transcode decision failed: HTTP {} - {}", status, truncate_to_boundary(&body, 500));
             return Err(ApiError::ServerError {
                 status: status.as_u16(),
                 message: format!("Transcode decision failed: HTTP {}", status),

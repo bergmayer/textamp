@@ -471,7 +471,7 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
 
     let footer_area = Rect::new(
         area.x + area.width.saturating_sub(footer.len() as u16 + 2),
-        area.y + area.height - 1,
+        area.y + area.height.saturating_sub(1),
         footer.len() as u16 + 1,
         1,
     );

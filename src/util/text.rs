@@ -47,15 +47,32 @@ pub fn format_bytes(bytes: u64) -> String {
 
 /// Truncate a string to a maximum character length, appending "..." if truncated.
 ///
-/// This function counts Unicode grapheme clusters (characters), not bytes,
+/// This function counts Unicode scalar values (chars), not bytes,
 /// so it works correctly with non-ASCII text.
 pub fn truncate_str(s: &str, max_len: usize) -> String {
     if s.chars().count() <= max_len {
         s.to_string()
+    } else if max_len < 3 {
+        // No room for an ellipsis without exceeding max_len.
+        s.chars().take(max_len).collect()
     } else {
-        let truncated: String = s.chars().take(max_len.saturating_sub(3)).collect();
+        let truncated: String = s.chars().take(max_len - 3).collect();
         format!("{}...", truncated)
     }
+}
+
+/// Clamp a string to at most `max_bytes` bytes, rounding the cut down to a
+/// UTF-8 char boundary. Unlike `&s[..n]`, this never panics on multibyte
+/// input. Intended for log snippets of server responses.
+pub fn truncate_to_boundary(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 /// Strip codepoints that have no visible glyph but cause renderers
@@ -261,6 +278,27 @@ mod tests {
     fn test_truncate_unicode() {
         // Japanese characters (each is 3 bytes but 1 char)
         assert_eq!(truncate_str("こんにちは世界", 5), "こん...");
+    }
+
+    #[test]
+    fn test_truncate_tiny_max_len() {
+        // Must never exceed max_len, even when there's no room for "..."
+        assert_eq!(truncate_str("hello", 2), "he");
+        assert_eq!(truncate_str("hello", 0), "");
+        assert_eq!(truncate_str("hello", 3), "...");
+    }
+
+    #[test]
+    fn test_truncate_to_boundary() {
+        assert_eq!(truncate_to_boundary("hello", 10), "hello");
+        assert_eq!(truncate_to_boundary("hello", 3), "hel");
+        // "é" is 2 bytes; cutting at byte 1 must back up to the boundary
+        assert_eq!(truncate_to_boundary("été", 1), "");
+        assert_eq!(truncate_to_boundary("été", 2), "é");
+        assert_eq!(truncate_to_boundary("été", 3), "ét");
+        // 3-byte chars
+        assert_eq!(truncate_to_boundary("こんにちは", 7), "こん");
+        assert_eq!(truncate_to_boundary("", 5), "");
     }
 
     #[test]

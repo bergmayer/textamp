@@ -12,6 +12,7 @@ use super::cache::TrackAudioCache;
 use super::rodio_backend::RodioBackend;
 use super::streaming::{BlockingReader, StreamingBuffer};
 use super::traits::AudioBackend;
+use crate::util::truncate_to_boundary;
 use anyhow::{anyhow, Result};
 use futures::StreamExt;
 use reqwest::header::HeaderMap;
@@ -317,7 +318,7 @@ async fn fetch_and_buffer(
                             if attempt + 1 < max_retries {
                                 let delay = backoff_secs[attempt as usize];
                                 tracing::debug!("Audio fetch got HTML response (attempt {}), retrying in {}s - Body: {}",
-                                    attempt + 1, delay, &body[..body.len().min(200)]);
+                                    attempt + 1, delay, truncate_to_boundary(&body, 200));
                                 tokio::time::sleep(Duration::from_secs(delay)).await;
                                 continue;
                             }
@@ -337,13 +338,13 @@ async fn fetch_and_buffer(
                             tokio::time::sleep(Duration::from_secs(delay)).await;
                             continue;
                         }
-                        tracing::error!("Audio fetch failed: HTTP {} - Body: {}", status, &body[..body.len().min(200)]);
+                        tracing::error!("Audio fetch failed: HTTP {} - Body: {}", status, truncate_to_boundary(&body, 200));
                         return Err(last_error);
                     }
 
                     // 4xx (except 429) - don't retry
                     let body = resp.text().await.unwrap_or_default();
-                    tracing::error!("Audio fetch failed: HTTP {} - Body: {}", status, &body[..body.len().min(200)]);
+                    tracing::error!("Audio fetch failed: HTTP {} - Body: {}", status, truncate_to_boundary(&body, 200));
                     return Err(format!("HTTP {}", status));
                 }
                 Err(e) => {
