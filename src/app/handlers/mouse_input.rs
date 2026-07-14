@@ -2647,7 +2647,7 @@ fn handle_settings_click(click_row: u16, click_col: u16, state: &mut AppState) -
 /// Map a visual row in the settings content panel to an item index.
 /// Returns None if the row is a header, blank line, or out of bounds.
 fn settings_visual_row_to_item(visual_row: usize, state: &AppState) -> Option<usize> {
-    use crate::app::state::{ConnectionState, SettingsSection};
+    use crate::app::state::SettingsSection;
 
     match state.settings_state.section {
         SettingsSection::Account => {
@@ -2673,7 +2673,7 @@ fn settings_visual_row_to_item(visual_row: usize, state: &AppState) -> Option<us
                     }
                     _ => None,
                 }
-            } else if matches!(state.connection, ConnectionState::Connected { .. }) {
+            } else if state.connection.is_authenticated() {
                 // Row 0: "Signed in as ..."
                 // Row 1: "Plex Pass: ..."
                 // Row 2: blank

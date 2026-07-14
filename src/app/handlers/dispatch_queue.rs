@@ -4,41 +4,74 @@
 
 use crate::app::event::*;
 use crate::app::{Action, AppState, Event};
-use crate::app::action::{QueueAction, DataAction};
+use crate::app::action::{AsyncError, DataAction, QueueAction, QueueLoadIntent};
 use crate::app::state::{BrowseCategory, BrowseItem, PlayStatus, PlaybackMode, QueueSortMode, SimilarMode, View};
 use crate::plex::PlexClient;
 use crate::plex::models::Track;
 use crate::audio::AudioPlayer;
 
 use anyhow::Result;
+use std::future::Future;
 use tokio::sync::mpsc;
 
 use super::helpers;
 
+fn spawn_track_load<F, Fut>(
+    event_tx: &mpsc::Sender<Event>,
+    client: &PlexClient,
+    intent: QueueLoadIntent,
+    call: F,
+)
+where
+    F: FnOnce(PlexClient) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<Vec<Track>, crate::plex::ApiError>> + Send + 'static,
+{
+    let tx = event_tx.clone();
+    let request_client = client.clone();
+    tokio::spawn(async move {
+        let result = call(request_client)
+            .await
+            .map_err(|error| AsyncError::from_api("Failed to load queue tracks", &error));
+        let _ = tx
+            .send(Event::Effect(
+                QueueAction::TracksLoaded { intent, result }.into(),
+            ))
+            .await;
+    });
+}
+
 /// Get tracks from a folder column in display order, starting from `start_index`.
 ///
 /// Uses the preloaded `all_tracks` cache for instant lookup (no API call).
-/// Falls back to API fetch if `all_tracks` is empty.
-async fn get_folder_tracks_from_index(
+/// Returns a background fetch plan if `all_tracks` is empty.
+enum FolderTrackPlan {
+    Ready(Vec<Track>),
+    Fetch {
+        folder_key: Option<String>,
+        library_key: Option<String>,
+        ordered_keys: Vec<String>,
+    },
+}
+
+fn get_folder_tracks_from_index(
     state: &AppState,
-    client: &PlexClient,
     start_index: usize,
-) -> Vec<Track> {
+) -> FolderTrackPlan {
     let folder_state = match state.folder_state.as_ref() {
         Some(fs) => fs,
-        None => return vec![],
+        None => return FolderTrackPlan::Ready(vec![]),
     };
     let col = match folder_state.focused() {
         Some(c) => c,
-        None => return vec![],
+        None => return FolderTrackPlan::Ready(vec![]),
     };
 
     // Collect rating_keys from the column in display order, starting at start_index
-    let column_keys: Vec<&str> = col.items[start_index..].iter()
-        .filter_map(|item| item.rating_key.as_deref())
+    let column_keys: Vec<String> = col.items[start_index..].iter()
+        .filter_map(|item| item.rating_key.clone())
         .collect();
     if column_keys.is_empty() {
-        return vec![];
+        return FolderTrackPlan::Ready(vec![]);
     }
 
     // Fast path: look up from preloaded all_tracks cache (no network call)
@@ -47,29 +80,45 @@ async fn get_folder_tracks_from_index(
             .map(|t| (t.rating_key.as_str(), t))
             .collect();
         let result: Vec<Track> = column_keys.iter()
-            .filter_map(|key| track_map.get(key).map(|t| (*t).clone()))
+            .filter_map(|key| track_map.get(key.as_str()).map(|t| (*t).clone()))
             .collect();
         if !result.is_empty() {
-            return result;
+            return FolderTrackPlan::Ready(result);
         }
     }
 
-    // Slow path: fetch from API if all_tracks not available
-    let tracks = if let Some(ref folder_key) = col.key {
-        client.get_folder_tracks(folder_key).await.unwrap_or_default()
-    } else if let Some(lib_key) = &state.active_library {
-        client.get_library_root_tracks(lib_key).await.unwrap_or_default()
-    } else {
-        return vec![];
-    };
+    FolderTrackPlan::Fetch {
+        folder_key: col.key.clone(),
+        library_key: state.active_library.clone(),
+        ordered_keys: column_keys,
+    }
+}
 
-    let mut track_map: std::collections::HashMap<String, Track> = tracks.into_iter()
-        .map(|t| (t.rating_key.clone(), t))
-        .collect();
-
-    column_keys.into_iter()
-        .filter_map(|key| track_map.remove(key))
-        .collect()
+fn spawn_folder_track_load(
+    event_tx: &mpsc::Sender<Event>,
+    client: &PlexClient,
+    intent: QueueLoadIntent,
+    folder_key: Option<String>,
+    library_key: Option<String>,
+    ordered_keys: Vec<String>,
+) {
+    spawn_track_load(event_tx, client, intent, move |client| async move {
+        let tracks = if let Some(folder_key) = folder_key {
+            client.get_folder_tracks(&folder_key).await?
+        } else if let Some(library_key) = library_key {
+            client.get_library_root_tracks(&library_key).await?
+        } else {
+            return Ok(vec![]);
+        };
+        let mut by_key: std::collections::HashMap<String, Track> = tracks
+            .into_iter()
+            .map(|track| (track.rating_key.clone(), track))
+            .collect();
+        Ok(ordered_keys
+            .into_iter()
+            .filter_map(|key| by_key.remove(&key))
+            .collect())
+    });
 }
 
 /// Dispatch queue actions. Returns follow-up actions.
@@ -84,12 +133,12 @@ pub async fn dispatch(
 
     match action {
         QueueAction::PlayTrack(track) => {
-            helpers::play_track(event_tx, track, state, client, audio).await;
+            helpers::play_track(event_tx, track, state, client, audio);
         }
         QueueAction::PlayTracksNow(tracks) => {
             // Play tracks immediately, replacing queue
             if !tracks.is_empty() {
-                helpers::queue_and_play(event_tx, state, client, audio, tracks, 0).await;
+                helpers::queue_and_play(event_tx, state, client, audio, tracks, 0);
             }
         }
         QueueAction::PlayTrackFromCategory(idx) => {
@@ -116,34 +165,28 @@ pub async fn dispatch(
                 state.playback_mode = PlaybackMode::Queue;
                 state.list_state.queue_index = 0;
                 audio.track_cache.flush();
-                helpers::play_current_track(event_tx, state, client, audio).await;
+                helpers::play_current_track(event_tx, state, client, audio);
             }
         }
         QueueAction::PlayAlbum { rating_key } => {
-            // Load album tracks and play them (Shift+Enter on album)
-            match client.get_album_tracks(&rating_key).await {
-                Ok(tracks) => {
-                    if !tracks.is_empty() {
-                        helpers::queue_and_play(event_tx, state, client, audio, tracks, 0).await;
-                    }
-                }
-                Err(e) => {
-                    state.set_error(format!("Failed to load album: {}", e));
-                }
-            }
+            state.queue_play_request_id = state.queue_play_request_id.wrapping_add(1);
+            let intent = QueueLoadIntent::ReplaceAndPlay {
+                request_id: state.queue_play_request_id,
+                label: None,
+            };
+            spawn_track_load(event_tx, client, intent, move |client| async move {
+                client.get_album_tracks(&rating_key).await
+            });
         }
         QueueAction::PlayArtistTracks { artist_key } => {
-            // Load all tracks by artist and play them (Shift+Enter on artist)
-            match client.get_artist_all_tracks(&artist_key).await {
-                Ok(tracks) => {
-                    if !tracks.is_empty() {
-                        helpers::queue_and_play(event_tx, state, client, audio, tracks, 0).await;
-                    }
-                }
-                Err(e) => {
-                    state.set_error(format!("Failed to load artist tracks: {}", e));
-                }
-            }
+            state.queue_play_request_id = state.queue_play_request_id.wrapping_add(1);
+            let intent = QueueLoadIntent::ReplaceAndPlay {
+                request_id: state.queue_play_request_id,
+                label: None,
+            };
+            spawn_track_load(event_tx, client, intent, move |client| async move {
+                client.get_artist_all_tracks(&artist_key).await
+            });
         }
         QueueAction::PlaySearchResult => {
             // Play the selected search result (Shift+Enter in search)
@@ -151,56 +194,20 @@ pub async fn dispatch(
             follow_ups.extend(play_actions);
         }
         QueueAction::EnqueueAlbum { rating_key, title } => {
-            // Load album tracks and append to end of queue
-            match client.get_album_tracks(&rating_key).await {
-                Ok(tracks) => {
-                    if !tracks.is_empty() {
-                        // If radio is playing, convert to queue mode first
-                        if state.playback_mode == PlaybackMode::Radio {
-                            state.queue.tracks = state.radio.tracks.clone();
-                            state.queue.index = state.radio.track_index;
-                            state.playback_mode = PlaybackMode::Queue;
-                            state.radio.clear();
-                            if let Some(idx) = state.queue.index {
-                                state.list_state.queue_index = idx;
-                            }
-                        }
-
-                        let added = tracks.len();
-                        let insert_pos = state.queue.tracks.len();
-                        state.queue.tracks.splice(insert_pos..insert_pos, tracks);
-                        state.set_status(format!("Added {} tracks from \"{}\" to queue", added, title));
-                    }
-                }
-                Err(e) => {
-                    state.set_error(format!("Failed to load album: {}", e));
-                }
-            }
+            let intent = QueueLoadIntent::Append {
+                label: format!("from \"{title}\""),
+            };
+            spawn_track_load(event_tx, client, intent, move |client| async move {
+                client.get_album_tracks(&rating_key).await
+            });
         }
         QueueAction::EnqueueArtistTracks { artist_key, artist_name } => {
-            // Load all tracks by artist and append to end of queue
-            match client.get_artist_all_tracks(&artist_key).await {
-                Ok(tracks) => {
-                    if !tracks.is_empty() {
-                        if state.playback_mode == PlaybackMode::Radio {
-                            state.queue.tracks = state.radio.tracks.clone();
-                            state.queue.index = state.radio.track_index;
-                            state.playback_mode = PlaybackMode::Queue;
-                            state.radio.clear();
-                            if let Some(idx) = state.queue.index {
-                                state.list_state.queue_index = idx;
-                            }
-                        }
-                        let added = tracks.len();
-                        let insert_pos = state.queue.tracks.len();
-                        state.queue.tracks.splice(insert_pos..insert_pos, tracks);
-                        state.set_status(format!("Added {} tracks by \"{}\" to queue", added, artist_name));
-                    }
-                }
-                Err(e) => {
-                    state.set_error(format!("Failed to load artist tracks: {}", e));
-                }
-            }
+            let intent = QueueLoadIntent::Append {
+                label: format!("by \"{artist_name}\""),
+            };
+            spawn_track_load(event_tx, client, intent, move |client| async move {
+                client.get_artist_all_tracks(&artist_key).await
+            });
         }
         QueueAction::EnqueueTrack(track) => {
             // Append a single track to end of queue
@@ -218,34 +225,24 @@ pub async fn dispatch(
             state.set_status(format!("Added \"{}\" to queue", title));
         }
         QueueAction::PlayAlbumNow { rating_key, title } => {
-            // Double-click play: load album tracks, replace queue, start playback
-            match client.get_album_tracks(&rating_key).await {
-                Ok(tracks) => {
-                    if !tracks.is_empty() {
-                        let count = tracks.len();
-                        helpers::queue_and_play(event_tx, state, client, audio, tracks, 0).await;
-                        state.set_status(format!("Playing {} tracks from \"{}\"", count, title));
-                    }
-                }
-                Err(e) => {
-                    state.set_error(format!("Failed to load album: {}", e));
-                }
-            }
+            state.queue_play_request_id = state.queue_play_request_id.wrapping_add(1);
+            let intent = QueueLoadIntent::ReplaceAndPlay {
+                request_id: state.queue_play_request_id,
+                label: Some(format!("from \"{title}\"")),
+            };
+            spawn_track_load(event_tx, client, intent, move |client| async move {
+                client.get_album_tracks(&rating_key).await
+            });
         }
         QueueAction::PlayPlaylistNow { playlist_key, title } => {
-            // Double-click play: load playlist tracks, replace queue, start playback
-            match client.get_playlist_tracks(&playlist_key).await {
-                Ok(tracks) => {
-                    if !tracks.is_empty() {
-                        let count = tracks.len();
-                        helpers::queue_and_play(event_tx, state, client, audio, tracks, 0).await;
-                        state.set_status(format!("Playing {} tracks from \"{}\"", count, title));
-                    }
-                }
-                Err(e) => {
-                    state.set_error(format!("Failed to load playlist: {}", e));
-                }
-            }
+            state.queue_play_request_id = state.queue_play_request_id.wrapping_add(1);
+            let intent = QueueLoadIntent::ReplaceAndPlay {
+                request_id: state.queue_play_request_id,
+                label: Some(format!("from \"{title}\"")),
+            };
+            spawn_track_load(event_tx, client, intent, move |client| async move {
+                client.get_playlist_tracks(&playlist_key).await
+            });
         }
         QueueAction::EnqueueSearchResult => {
             // Enqueue the selected search result (at end of queue)
@@ -264,32 +261,20 @@ pub async fn dispatch(
             state.set_view(View::Queue);
         }
         QueueAction::EnqueueAlbumNext { rating_key, title } => {
-            // Ctrl+Shift+E: Insert album tracks NEXT in queue (after current track)
-            match client.get_album_tracks(&rating_key).await {
-                Ok(tracks) => {
-                    if !tracks.is_empty() {
-                        let added = helpers::insert_tracks_next(state, tracks);
-                        state.set_status(format!("Inserted {} tracks from \"{}\" next ({} total)", added, title, state.queue.tracks.len()));
-                    }
-                }
-                Err(e) => {
-                    state.set_error(format!("Failed to load album: {}", e));
-                }
-            }
+            let intent = QueueLoadIntent::InsertNext {
+                label: format!("from \"{title}\""),
+            };
+            spawn_track_load(event_tx, client, intent, move |client| async move {
+                client.get_album_tracks(&rating_key).await
+            });
         }
         QueueAction::EnqueueArtistTracksNext { artist_key, artist_name } => {
-            // Ctrl+Shift+E: Insert artist tracks NEXT in queue (after current track)
-            match client.get_artist_all_tracks(&artist_key).await {
-                Ok(tracks) => {
-                    if !tracks.is_empty() {
-                        let added = helpers::insert_tracks_next(state, tracks);
-                        state.set_status(format!("Inserted {} tracks by \"{}\" next ({} total)", added, artist_name, state.queue.tracks.len()));
-                    }
-                }
-                Err(e) => {
-                    state.set_error(format!("Failed to load artist tracks: {}", e));
-                }
-            }
+            let intent = QueueLoadIntent::InsertNext {
+                label: format!("by \"{artist_name}\""),
+            };
+            spawn_track_load(event_tx, client, intent, move |client| async move {
+                client.get_artist_all_tracks(&artist_key).await
+            });
         }
         QueueAction::EnqueueTracksNext(tracks) => {
             // Ctrl+Shift+E: Insert tracks NEXT in queue (after current track)
@@ -300,6 +285,64 @@ pub async fn dispatch(
                     state.set_status(format!("Inserted \"{}\" next ({} total)", title, state.queue.tracks.len()));
                 } else {
                     state.set_status(format!("Inserted {} tracks next, starting with \"{}\" ({} total)", added, title, state.queue.tracks.len()));
+                }
+            }
+        }
+        QueueAction::TracksLoaded { intent, result } => {
+            if let QueueLoadIntent::ReplaceAndPlay { request_id, .. } = &intent {
+                if *request_id != state.queue_play_request_id {
+                    tracing::debug!("Ignoring stale queue play load");
+                    return Ok(follow_ups);
+                }
+            }
+            let tracks = match result {
+                Ok(tracks) => {
+                    state.connection.mark_healthy();
+                    tracks
+                }
+                Err(error) => {
+                    if error.connection_error {
+                        state.connection.mark_degraded(error.message.clone());
+                    }
+                    state.set_error(error.message);
+                    return Ok(follow_ups);
+                }
+            };
+            if tracks.is_empty() {
+                state.set_error("No tracks were returned".to_string());
+                return Ok(follow_ups);
+            }
+
+            match intent {
+                QueueLoadIntent::ReplaceAndPlay { label, .. } => {
+                    let count = tracks.len();
+                    helpers::queue_and_play(event_tx, state, client, audio, tracks, 0);
+                    if let Some(label) = label {
+                        state.set_status(format!("Playing {count} tracks {label}"));
+                    }
+                }
+                QueueLoadIntent::Append { label } => {
+                    if state.playback_mode == PlaybackMode::Radio {
+                        state.queue.tracks = state.radio.tracks.clone();
+                        state.queue.index = state.radio.track_index;
+                        state.playback_mode = PlaybackMode::Queue;
+                        state.radio.clear();
+                        if let Some(index) = state.queue.index {
+                            state.list_state.queue_index = index;
+                        }
+                    }
+                    let added = tracks.len();
+                    state.queue.tracks.extend(tracks);
+                    state.queue.original.clear();
+                    state.queue.sort_mode = QueueSortMode::QueueOrder;
+                    state.set_status(format!("Added {added} tracks {label} to queue"));
+                }
+                QueueLoadIntent::InsertNext { label } => {
+                    let added = helpers::insert_tracks_next(state, tracks);
+                    state.set_status(format!(
+                        "Inserted {added} tracks {label} next ({} total)",
+                        state.queue.tracks.len()
+                    ));
                 }
             }
         }
@@ -318,12 +361,14 @@ pub async fn dispatch(
             }
             state.list_state.queue_index = 0;
             audio.stop();
+            state.playback.request_id = audio.playback_id();
             audio.track_cache.flush();
             state.playback.status = PlayStatus::Stopped;
             // Clear artwork so stale cover art doesn't linger
             state.artwork.current_thumb = None;
             state.artwork.current_data = None;
             state.artwork.loading = false;
+            state.artwork.pending_thumb = None;
         }
         QueueAction::ToggleQueueShuffle => {
             use crate::audio::cache;
@@ -425,7 +470,7 @@ pub async fn dispatch(
                 state.list_state.queue_index = idx;
                 state.playback_mode = PlaybackMode::Queue;
                 audio.track_cache.flush();
-                helpers::play_current_track(event_tx, state, client, audio).await;
+                helpers::play_current_track(event_tx, state, client, audio);
 
                 // Trigger DJ mode processing after jump (all modes are continuous)
                 if !state.dj.inserting && state.dj.active_mode.is_some() {
@@ -487,23 +532,33 @@ pub async fn dispatch(
                     .and_then(|fs| fs.focused())
                     .map(|col| col.selected_index)
                     .unwrap_or(0);
-                let tracks_to_add = get_folder_tracks_from_index(state, client, start).await;
-                if !tracks_to_add.is_empty() {
-                    // If radio is playing, convert to queue mode
-                    if state.playback_mode == PlaybackMode::Radio {
-                        state.queue.tracks = state.radio.tracks.clone();
-                        state.queue.index = state.radio.track_index;
-                        state.playback_mode = PlaybackMode::Queue;
-                        state.radio.clear();
-                        if let Some(idx) = state.queue.index {
-                            state.list_state.queue_index = idx;
+                let intent = QueueLoadIntent::Append {
+                    label: "from folder".to_string(),
+                };
+                match get_folder_tracks_from_index(state, start) {
+                    FolderTrackPlan::Ready(tracks) if !tracks.is_empty() => {
+                        return Ok(vec![QueueAction::TracksLoaded {
+                            intent,
+                            result: Ok(tracks),
                         }
+                        .into()]);
                     }
-                    state.queue.original.clear();
-                    state.queue.sort_mode = QueueSortMode::QueueOrder;
-                    let added = tracks_to_add.len();
-                    state.queue.tracks.extend(tracks_to_add);
-                    state.set_status(format!("Added {} to queue ({} total)", added, state.queue.tracks.len()));
+                    FolderTrackPlan::Ready(_) => {}
+                    FolderTrackPlan::Fetch {
+                        folder_key,
+                        library_key,
+                        ordered_keys,
+                    } => {
+                        spawn_folder_track_load(
+                            event_tx,
+                            client,
+                            intent,
+                            folder_key,
+                            library_key,
+                            ordered_keys,
+                        );
+                        return Ok(vec![]);
+                    }
                 }
             }
 
@@ -636,9 +691,33 @@ pub async fn dispatch(
                     .and_then(|fs| fs.focused())
                     .map(|col| col.selected_index)
                     .unwrap_or(0);
-                let tracks = get_folder_tracks_from_index(state, client, start).await;
-                if !tracks.is_empty() {
-                    return Ok(vec![QueueAction::EnqueueTracksNext(tracks).into()]);
+                let intent = QueueLoadIntent::InsertNext {
+                    label: "from folder".to_string(),
+                };
+                match get_folder_tracks_from_index(state, start) {
+                    FolderTrackPlan::Ready(tracks) if !tracks.is_empty() => {
+                        return Ok(vec![QueueAction::TracksLoaded {
+                            intent,
+                            result: Ok(tracks),
+                        }
+                        .into()]);
+                    }
+                    FolderTrackPlan::Ready(_) => {}
+                    FolderTrackPlan::Fetch {
+                        folder_key,
+                        library_key,
+                        ordered_keys,
+                    } => {
+                        spawn_folder_track_load(
+                            event_tx,
+                            client,
+                            intent,
+                            folder_key,
+                            library_key,
+                            ordered_keys,
+                        );
+                        return Ok(vec![]);
+                    }
                 }
             }
 
@@ -758,21 +837,48 @@ pub async fn dispatch(
 
                     state.set_status(format!("Saving playlist \"{}\"...", name));
 
-                    match client.create_playlist(&name_clone, &track_keys, &library_key_clone).await {
-                        Ok(()) => {
-                            state.set_status(format!("Saved \"{}\" ({} tracks)", name_clone, track_count));
-                            // Refresh playlists so the new one appears
-                            return Ok(vec![DataAction::LoadPlaylists.into()]);
-                        }
-                        Err(e) => {
-                            state.set_error(format!("Failed to save playlist: {}", e));
-                        }
-                    }
+                    let tx = event_tx.clone();
+                    let mut request_client = client.clone();
+                    tokio::spawn(async move {
+                        let result = request_client
+                            .create_playlist(&name_clone, &track_keys, &library_key_clone)
+                            .await
+                            .map_err(|error| {
+                                AsyncError::from_api("Failed to save playlist", &error)
+                            });
+                        let _ = tx
+                            .send(Event::Effect(
+                                QueueAction::QueuePlaylistSaved {
+                                    name: name_clone,
+                                    track_count,
+                                    result,
+                                }
+                                .into(),
+                            ))
+                            .await;
+                    });
                 }
             } else {
                 state.set_error("No library selected".to_string());
             }
         }
+        QueueAction::QueuePlaylistSaved {
+            name,
+            track_count,
+            result,
+        } => match result {
+            Ok(()) => {
+                state.connection.mark_healthy();
+                state.set_status(format!("Saved \"{name}\" ({track_count} tracks)"));
+                return Ok(vec![DataAction::LoadPlaylists.into()]);
+            }
+            Err(error) => {
+                if error.connection_error {
+                    state.connection.mark_degraded(error.message.clone());
+                }
+                state.set_error(error.message);
+            }
+        },
         QueueAction::RemixGemini | QueueAction::RemixTwofer | QueueAction::RemixStretch | QueueAction::RemixDoppelganger => {
             if state.playback_mode == PlaybackMode::Radio {
                 let desc = match action {

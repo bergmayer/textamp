@@ -5,7 +5,7 @@
 //! - `AudioBackend` trait: The interface any platform audio implementation must fulfill
 //! - `RodioBackend`: Default implementation using rodio (for TUI on Linux/macOS/Windows)
 //! - `AudioPlayer`: High-level wrapper that handles URL fetching and uses an AudioBackend
-//! - `StreamingBuffer`: Buffer for progressive download playback
+//! - Bounded network downloads and a lock-free decoded PCM pipeline
 //!
 //! # Cross-Platform Design
 //!
@@ -17,7 +17,6 @@
 pub mod cache;
 mod player;
 mod rodio_backend;
-mod streaming;
 mod traits;
 
 /// Lock a mutex, recovering from poisoning.
@@ -32,5 +31,4 @@ pub(crate) fn lock_or_recover<T>(mutex: &std::sync::Mutex<T>) -> std::sync::Mute
 pub use cache::TrackAudioCache;
 pub use player::{AudioEvent, AudioPlayer};
 pub use rodio_backend::{RodioBackend, SampleTap};
-pub use streaming::StreamingBuffer;
 pub use traits::{AudioBackend, AudioError};

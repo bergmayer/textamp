@@ -2,6 +2,7 @@
 
 use crate::plex::models::Track;
 use crate::ui::theme::theme;
+use crate::ui::widgets::selectable_list::calculate_scroll_offset;
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Row, Table};
@@ -20,9 +21,13 @@ pub fn render(
         .style(Style::default().fg(t.colors.fg_muted))
         .height(1);
 
+    let visible_height = area.height.saturating_sub(1) as usize;
+    let scroll_offset = calculate_scroll_offset(selected_index, visible_height, tracks.len());
     let rows: Vec<Row> = tracks
         .iter()
         .enumerate()
+        .skip(scroll_offset)
+        .take(visible_height)
         .map(|(i, track)| {
             let is_playing = current_track_key == Some(track.rating_key.as_str());
             let is_selected = i == selected_index;
@@ -61,6 +66,16 @@ pub fn render(
         .row_highlight_style(Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg));
 
     frame.render_widget(table, area);
+
+    if tracks.len() > visible_height {
+        super::render_scrollbar_borderless(
+            frame,
+            area,
+            tracks.len(),
+            visible_height,
+            scroll_offset,
+        );
+    }
 }
 
 fn format_duration(ms: u64) -> String {

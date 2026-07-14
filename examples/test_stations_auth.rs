@@ -1,8 +1,10 @@
 //! Test script for radio stations with authentication.
 //!
-//! Run with: cargo run --example test_stations_auth --release
+//! Set `PLEX_USERNAME` and `PLEX_PASSWORD`, then run with:
+//! `cargo run --release --example test_stations_auth -- [server_url] [library_key]`
 
 use textamp::plex::{PlexAuth, PlexClient};
+use zeroize::Zeroizing;
 
 #[tokio::main]
 async fn main() {
@@ -11,16 +13,35 @@ async fn main() {
         .with_max_level(tracing::Level::DEBUG)
         .init();
 
-    let server_url = "http://127.0.0.1:32400";
-    let username = "featherstonehaugh";
-    let password = "4cb-cFb-cRJ-qmA";
-    let library_key = "5";
+    let args: Vec<String> = std::env::args().collect();
+    let server_url = args.get(1).map(String::as_str).unwrap_or("http://127.0.0.1:32400");
+    let library_key = args.get(2).map(String::as_str).unwrap_or("5");
+    let username = match std::env::var("PLEX_USERNAME") {
+        Ok(username) if !username.is_empty() => username,
+        _ => {
+            eprintln!("PLEX_USERNAME must be set");
+            std::process::exit(1);
+        }
+    };
+    let password = Zeroizing::new(match std::env::var("PLEX_PASSWORD") {
+        Ok(password) if !password.is_empty() => password,
+        _ => {
+            eprintln!("PLEX_PASSWORD must be set");
+            std::process::exit(1);
+        }
+    });
 
     println!("\n=== Authenticating with Plex ===\n");
 
     // Authenticate to get token
-    let auth = PlexAuth::new();
-    let token = match auth.authenticate_password(username, password).await {
+    let auth = match PlexAuth::new() {
+        Ok(auth) => auth,
+        Err(error) => {
+            eprintln!("Could not initialize Plex authentication: {error}");
+            std::process::exit(1);
+        }
+    };
+    let token = match auth.authenticate_password(&username, &password).await {
         Ok(t) => {
             println!("Authentication successful!");
             t
@@ -36,7 +57,13 @@ async fn main() {
     println!("Library: {}", library_key);
     println!();
 
-    let mut client = PlexClient::new_with_url(server_url, Some(&token), "textamp-test-example");
+    let mut client = match PlexClient::new_with_url(server_url, Some(&token), "textamp-test-example") {
+        Ok(client) => client,
+        Err(error) => {
+            eprintln!("Could not initialize Plex client: {error}");
+            std::process::exit(1);
+        }
+    };
 
     // Test each station type
     let station_types = [

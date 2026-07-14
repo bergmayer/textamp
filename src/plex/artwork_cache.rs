@@ -148,11 +148,16 @@ impl ArtworkCache {
         }
 
         let path = self.cache_path(key);
-        let temp_path = path.with_extension("bin.tmp");
+        let temp_path = path.with_extension(format!("bin.{}.tmp", uuid::Uuid::new_v4()));
 
         if std::fs::write(&temp_path, data).is_ok() {
-            std::fs::rename(&temp_path, &path).is_ok()
+            let saved = std::fs::rename(&temp_path, &path).is_ok();
+            if !saved {
+                let _ = std::fs::remove_file(temp_path);
+            }
+            saved
         } else {
+            let _ = std::fs::remove_file(temp_path);
             false
         }
     }

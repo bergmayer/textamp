@@ -23,7 +23,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+static LIBRARY_CACHE_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 /// Cached subfolder with timestamp for staleness tracking.
 ///
@@ -99,6 +102,10 @@ pub struct CacheData {
     pub playlist_timestamp: u64,
     #[serde(default)]
     pub library_key: String,
+    /// Plex server machine/client identifier. Library section keys are only
+    /// unique within a server, so this must participate in disk identity.
+    #[serde(default)]
+    pub server_id: Option<String>,
 
     // Core library data
     #[serde(default)]
@@ -128,6 +135,20 @@ pub struct CacheData {
     pub moods: Vec<Genre>,
     #[serde(default)]
     pub styles: Vec<Genre>,
+    #[serde(default)]
+    pub decades: Vec<Genre>,
+    #[serde(default)]
+    pub years: Vec<Genre>,
+    #[serde(default)]
+    pub collections: Vec<Genre>,
+    #[serde(default)]
+    pub countries: Vec<Genre>,
+    #[serde(default)]
+    pub labels: Vec<Genre>,
+    #[serde(default)]
+    pub formats: Vec<Genre>,
+    #[serde(default)]
+    pub studios: Vec<Genre>,
 
     // Playlist tracks (per-playlist, excludes smart playlists)
     #[serde(default)]
@@ -182,6 +203,16 @@ impl CacheData {
         }
     }
 
+    /// Create cache data scoped to a specific Plex server.
+    pub fn new_scoped(library_key: &str, server_id: Option<&str>) -> Self {
+        Self {
+            timestamp: current_timestamp(),
+            library_key: library_key.to_string(),
+            server_id: server_id.map(str::to_owned),
+            ..Default::default()
+        }
+    }
+
     /// Create a new cache data structure preserving an existing timestamp.
     ///
     /// Use this when re-saving existing data to disk so the timestamp
@@ -204,9 +235,78 @@ impl CacheData {
     pub fn now() -> u64 {
         current_timestamp()
     }
+
+    /// Preserve categories that were not loaded in the snapshot being saved.
+    /// A missing category timestamp means the corresponding preload never
+    /// completed in this library context. This prevents an early quit from
+    /// replacing a populated disk cache with empty vectors.
+    fn preserve_unloaded_from(&mut self, mut previous: Self) {
+        macro_rules! preserve_vec {
+            ($category:literal, $field:ident) => {
+                if !self.category_timestamps.contains_key($category)
+                    && self.$field.is_empty()
+                {
+                    self.$field = std::mem::take(&mut previous.$field);
+                }
+            };
+        }
+
+        preserve_vec!("Artists", artists);
+        preserve_vec!("Albums", albums);
+        preserve_vec!("Playlists", playlists);
+        preserve_vec!("Artist Genres", artist_genres);
+        preserve_vec!("Album Genres", album_genres);
+        preserve_vec!("Album Genres", genres);
+        preserve_vec!("Moods", moods);
+        preserve_vec!("Styles", styles);
+        preserve_vec!("Decades", decades);
+        preserve_vec!("Years", years);
+        preserve_vec!("Collections", collections);
+        preserve_vec!("Countries", countries);
+        preserve_vec!("Labels", labels);
+        preserve_vec!("Formats", formats);
+        preserve_vec!("Studios", studios);
+        preserve_vec!("Stations", stations);
+
+        if !self.category_timestamps.contains_key("Folders") {
+            if self.root_folders.is_empty() {
+                self.root_folders = std::mem::take(&mut previous.root_folders);
+            }
+            for (key, value) in previous.folder_contents {
+                self.folder_contents.entry(key).or_insert(value);
+            }
+        }
+
+        if !self.category_timestamps.contains_key("Playlists") {
+            for (key, value) in previous.playlist_tracks {
+                self.playlist_tracks.entry(key).or_insert(value);
+            }
+        }
+
+        if !self.category_timestamps.contains_key("Stations") {
+            for (key, value) in previous.station_children {
+                self.station_children.entry(key).or_insert(value);
+            }
+        }
+
+        if !self.category_timestamps.contains_key("All Tracks")
+            && self.all_tracks.is_empty()
+        {
+            self.all_tracks = previous.all_tracks;
+            self.track_artists = previous.track_artists;
+            self.compilation_albums = previous.compilation_albums;
+            self.compilation_artist_keys = previous.compilation_artist_keys;
+            self.compilation_track_artist_keys = previous.compilation_track_artist_keys;
+            self.artist_compilation_map = previous.artist_compilation_map;
+            self.single_artist_compilations = previous.single_artist_compilations;
+            self.artist_aliases = previous.artist_aliases;
+            self.album_display_artist = previous.album_display_artist;
+        }
+    }
 }
 
 /// Library data cache manager.
+#[derive(Clone)]
 pub struct LibraryCache {
     cache_dir: PathBuf,
 }
@@ -229,12 +329,52 @@ impl LibraryCache {
 
     /// Get the cache file path for a library.
     pub fn cache_path(&self, library_key: &str) -> PathBuf {
-        self.cache_dir.join(format!("library_{}.json", library_key))
+        self.cache_dir.join(format!(
+            "library_{}.json",
+            safe_cache_filename_component(library_key)
+        ))
+    }
+
+    /// Cache path whose identity includes both server and section key.
+    pub fn scoped_cache_path(&self, server_id: &str, library_key: &str) -> PathBuf {
+        self.cache_dir.join(format!(
+            "library_v2_{}_{}.json",
+            encode_cache_component(server_id),
+            encode_cache_component(library_key)
+        ))
     }
 
     /// Load cache data from disk.
     pub fn load(&self, library_key: &str) -> Option<CacheData> {
         let path = self.cache_path(library_key);
+
+        self.load_path(&path)
+    }
+
+    /// Load a server-scoped cache. A legacy unscoped file is accepted once
+    /// for migration and is tagged with the current server before its next
+    /// save.
+    pub fn load_scoped(&self, server_id: Option<&str>, library_key: &str) -> Option<CacheData> {
+        let Some(server_id) = server_id else {
+            return self.load(library_key);
+        };
+        let path = self.scoped_cache_path(server_id, library_key);
+        if let Some(data) = self.load_path(&path) {
+            if data.server_id.as_deref() == Some(server_id)
+                && data.library_key == library_key
+            {
+                return Some(data);
+            }
+            tracing::warn!("Ignoring cache whose server/library identity does not match its path");
+            return None;
+        }
+
+        let mut legacy = self.load(library_key)?;
+        legacy.server_id = Some(server_id.to_string());
+        Some(legacy)
+    }
+
+    fn load_path(&self, path: &std::path::Path) -> Option<CacheData> {
 
         if !path.exists() {
             tracing::debug!("No cache file found: {:?}", path);
@@ -272,12 +412,38 @@ impl LibraryCache {
 
     /// Save complete cache data to disk (call once, not per-field).
     pub fn save(&self, data: &CacheData) -> bool {
-        let path = self.cache_path(&data.library_key);
+        let lock = LIBRARY_CACHE_WRITE_LOCK.get_or_init(|| Mutex::new(()));
+        let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.save_unlocked(data)
+    }
+
+    /// Save a possibly partial snapshot without erasing categories whose
+    /// preload had not completed. The read/merge/write transaction shares the
+    /// same process-wide lock as ordinary saves.
+    pub fn save_preserving_unloaded(&self, mut data: CacheData) -> bool {
+        let lock = LIBRARY_CACHE_WRITE_LOCK.get_or_init(|| Mutex::new(()));
+        let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(previous) =
+            self.load_scoped(data.server_id.as_deref(), &data.library_key)
+        {
+            data.preserve_unloaded_from(previous);
+        }
+        self.save_unlocked(&data)
+    }
+
+    fn save_unlocked(&self, data: &CacheData) -> bool {
+        let path = match data.server_id.as_deref() {
+            Some(server_id) => self.scoped_cache_path(server_id, &data.library_key),
+            None => self.cache_path(&data.library_key),
+        };
 
         match serde_json::to_string(data) {
             Ok(contents) => {
                 // Write atomically
-                let temp_path = path.with_extension("json.tmp");
+                let temp_path = path.with_extension(format!(
+                    "json.{}.tmp",
+                    uuid::Uuid::new_v4(),
+                ));
                 if let Err(e) = fs::write(&temp_path, &contents) {
                     tracing::warn!("Failed to write cache temp file: {}", e);
                     return false;
@@ -299,6 +465,8 @@ impl LibraryCache {
 
     /// Clear all cache files.
     pub fn clear_all(&self) -> Result<usize, std::io::Error> {
+        let lock = LIBRARY_CACHE_WRITE_LOCK.get_or_init(|| Mutex::new(()));
+        let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut count = 0;
 
         if self.cache_dir.exists() {
@@ -342,10 +510,33 @@ impl LibraryCache {
         fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
     }
 
+    pub fn library_size_scoped(&self, server_id: Option<&str>, library_key: &str) -> u64 {
+        let path = match server_id {
+            Some(server_id) => self.scoped_cache_path(server_id, library_key),
+            None => self.cache_path(library_key),
+        };
+        fs::metadata(path).map(|metadata| metadata.len()).unwrap_or(0)
+    }
+
     /// Get per-field size breakdown for a specific library's cache.
     /// Returns vec of (field_name, bytes) sorted by size descending.
     pub fn library_breakdown(&self, library_key: &str) -> Vec<(String, u64)> {
         let Some(data) = self.load(library_key) else { return vec![] };
+        Self::breakdown(data)
+    }
+
+    pub fn library_breakdown_scoped(
+        &self,
+        server_id: Option<&str>,
+        library_key: &str,
+    ) -> Vec<(String, u64)> {
+        let Some(data) = self.load_scoped(server_id, library_key) else {
+            return vec![];
+        };
+        Self::breakdown(data)
+    }
+
+    fn breakdown(data: CacheData) -> Vec<(String, u64)> {
         fn measure(val: &(impl serde::Serialize + ?Sized)) -> u64 {
             serde_json::to_string(val).map(|s| s.len() as u64).unwrap_or(0)
         }
@@ -362,12 +553,37 @@ impl LibraryCache {
             ("genres".into(),
                 measure(&data.genres) + measure(&data.artist_genres)
                 + measure(&data.album_genres) + measure(&data.moods)
-                + measure(&data.styles)),
+                + measure(&data.styles) + measure(&data.decades)
+                + measure(&data.years) + measure(&data.collections)
+                + measure(&data.countries) + measure(&data.labels)
+                + measure(&data.formats) + measure(&data.studios)),
             ("stations".into(),
                 measure(&data.stations) + measure(&data.station_children)),
         ];
         sizes.sort_by(|a, b| b.1.cmp(&a.1));
         sizes
+    }
+}
+
+fn encode_cache_component(value: &str) -> String {
+    use std::fmt::Write;
+
+    let mut encoded = String::with_capacity(value.len() * 2);
+    for byte in value.as_bytes() {
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    encoded
+}
+
+fn safe_cache_filename_component(value: &str) -> String {
+    if !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        value.to_string()
+    } else {
+        format!("h{}", encode_cache_component(value))
     }
 }
 
@@ -390,4 +606,79 @@ fn current_timestamp() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn track(key: &str) -> Track {
+        Track {
+            rating_key: key.to_string(),
+            title: key.to_string(),
+            ..Track::default()
+        }
+    }
+
+    #[test]
+    fn partial_snapshot_preserves_unloaded_tracks() {
+        let mut current = CacheData::new_scoped("1", Some("server-a"));
+        let mut previous = CacheData::new_scoped("1", Some("server-a"));
+        previous.all_tracks.push(track("old"));
+
+        current.preserve_unloaded_from(previous);
+
+        assert_eq!(current.all_tracks.len(), 1);
+        assert_eq!(current.all_tracks[0].rating_key, "old");
+    }
+
+    #[test]
+    fn completed_empty_category_does_not_resurrect_old_tracks() {
+        let mut current = CacheData::new_scoped("1", Some("server-a"));
+        current
+            .category_timestamps
+            .insert("All Tracks".to_string(), CacheData::now());
+        let mut previous = CacheData::new_scoped("1", Some("server-a"));
+        previous.all_tracks.push(track("old"));
+
+        current.preserve_unloaded_from(previous);
+
+        assert!(current.all_tracks.is_empty());
+    }
+
+    #[test]
+    fn server_scoped_paths_do_not_collide_or_escape_cache_directory() {
+        let cache = LibraryCache {
+            cache_dir: PathBuf::from("/tmp/textamp-cache-test"),
+        };
+        let first = cache.scoped_cache_path("server-a", "1");
+        let second = cache.scoped_cache_path("server-b", "1");
+        let hostile = cache.cache_path("../../outside");
+
+        assert_ne!(first, second);
+        assert_eq!(hostile.parent(), Some(cache.cache_dir.as_path()));
+    }
+
+    #[test]
+    fn preserving_save_round_trips_previous_unloaded_category() {
+        let directory = std::env::temp_dir().join(format!(
+            "textamp-cache-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let cache = LibraryCache {
+            cache_dir: directory.clone(),
+        };
+
+        let mut previous = CacheData::new_scoped("1", Some("server-a"));
+        previous.all_tracks.push(track("old"));
+        assert!(cache.save(&previous));
+
+        let current = CacheData::new_scoped("1", Some("server-a"));
+        assert!(cache.save_preserving_unloaded(current));
+
+        let loaded = cache.load_scoped(Some("server-a"), "1").unwrap();
+        assert_eq!(loaded.all_tracks[0].rating_key, "old");
+        fs::remove_dir_all(directory).unwrap();
+    }
 }

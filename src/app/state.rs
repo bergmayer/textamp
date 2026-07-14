@@ -38,6 +38,7 @@ use crate::miller::{MillerColumn, MillerState};
 use crate::plex::{CachedFolder, CachedPlaylistTracks};
 use crate::services::{FolderNavigationState, WaveformData, MAX_HISTORY_SIZE};
 use crate::app::theme::ThemeName;
+use crate::util::SecretString;
 use std::collections::HashMap;
 
 /// Marquee scroll animation phase.
@@ -1198,7 +1199,7 @@ pub struct AuthState {
     /// Username input field
     pub username_input: String,
     /// Password input field
-    pub password_input: String,
+    pub password_input: SecretString,
     /// Which field is focused: 0=username, 1=password, 2=sign in button
     pub field_index: usize,
     /// Whether currently editing a text field
@@ -1434,7 +1435,12 @@ pub struct ArtworkState {
     pub current_thumb: Option<String>,
     pub current_data: Option<Vec<u8>>,
     pub loading: bool,
+    /// Exact thumb path whose completion may replace `current_data`.
+    pub pending_thumb: Option<String>,
     pub grid_cache: HashMap<String, Vec<u8>>,
+    grid_cache_order: std::collections::VecDeque<String>,
+    grid_cache_bytes: usize,
+    pub grid_generation: u64,
     pub grid_pending: std::collections::HashSet<String>,
     pub cache_stats: Option<(usize, u64)>,
     pub default_visible: bool,
@@ -1461,7 +1467,11 @@ impl Default for ArtworkState {
             current_thumb: None,
             current_data: None,
             loading: false,
+            pending_thumb: None,
             grid_cache: HashMap::new(),
+            grid_cache_order: std::collections::VecDeque::new(),
+            grid_cache_bytes: 0,
+            grid_generation: 0,
             grid_pending: std::collections::HashSet::new(),
             cache_stats: None,
             default_visible: false,
@@ -1469,6 +1479,46 @@ impl Default for ArtworkState {
             suppress_loads: false,
             last_motion_at: None,
         }
+    }
+}
+
+impl ArtworkState {
+    const MAX_GRID_CACHE_ENTRIES: usize = 256;
+    const MAX_GRID_CACHE_BYTES: usize = 128 * 1024 * 1024;
+
+    pub fn insert_grid_art(&mut self, key: String, data: Vec<u8>) {
+        if data.len() > Self::MAX_GRID_CACHE_BYTES {
+            tracing::debug!("Skipping oversized in-memory artwork item: {} bytes", data.len());
+            return;
+        }
+        if let Some(previous) = self.grid_cache.remove(&key) {
+            self.grid_cache_bytes = self.grid_cache_bytes.saturating_sub(previous.len());
+            if let Some(position) = self.grid_cache_order.iter().position(|item| item == &key) {
+                self.grid_cache_order.remove(position);
+            }
+        }
+        self.grid_cache_bytes = self.grid_cache_bytes.saturating_add(data.len());
+        self.grid_cache.insert(key.clone(), data);
+        self.grid_cache_order.push_back(key);
+
+        while self.grid_cache.len() > Self::MAX_GRID_CACHE_ENTRIES
+            || self.grid_cache_bytes > Self::MAX_GRID_CACHE_BYTES
+        {
+            let Some(oldest) = self.grid_cache_order.pop_front() else {
+                self.clear_grid_art();
+                break;
+            };
+            if let Some(removed) = self.grid_cache.remove(&oldest) {
+                self.grid_cache_bytes = self.grid_cache_bytes.saturating_sub(removed.len());
+            }
+        }
+    }
+
+    pub fn clear_grid_art(&mut self) {
+        self.grid_generation = self.grid_generation.wrapping_add(1);
+        self.grid_cache.clear();
+        self.grid_cache_order.clear();
+        self.grid_cache_bytes = 0;
     }
 }
 
@@ -1507,6 +1557,8 @@ pub struct SimilarViewState {
     pub mode: SimilarMode,
     pub loading: bool,
     pub source_title: String,
+    /// Identity of the in-flight request currently allowed to update this view.
+    pub request_key: Option<String>,
     /// Album key for Tab cycling in Similar view (tracks → albums).
     pub tab_album_key: Option<String>,
     /// Album title for Tab cycling footer display.
@@ -1561,6 +1613,10 @@ pub struct CompilationState {
     pub single_artist: std::collections::HashMap<String, Vec<Album>>,
     /// Whether compilation detection has run for current library.
     pub detected: bool,
+    /// A blocking worker is currently deriving compilation metadata.
+    pub detecting: bool,
+    /// Monotonic identity used to reject same-library stale workers after a refresh.
+    pub detection_request_id: u64,
 }
 
 /// Library data — artists, albums, playlists, genres, and derived data.
@@ -1631,6 +1687,9 @@ pub struct LibraryData {
     pub selected_artist_name: String,
     pub selected_album_title: String,
     pub right_panel_loading: bool,
+    /// Identity of the in-flight right-panel request. Late completions for a
+    /// prior selection are discarded.
+    pub right_panel_request_key: Option<String>,
 }
 
 /// Search/filter state.
@@ -1689,6 +1748,9 @@ pub struct AppState {
     /// Libraries from all available servers: (server_identifier, server_name, libraries).
     pub all_server_libraries: Vec<(String, String, Vec<Library>)>,
     pub active_server_id: Option<String>,
+    /// Monotonic identity of the selected server/library pair. Background
+    /// results carrying an older generation are discarded centrally.
+    pub library_generation: u64,
 
     // Authentication flow state
     pub auth_state: AuthState,
@@ -1724,6 +1786,8 @@ pub struct AppState {
     // Playback
     pub playback: PlaybackState,
     pub queue: QueueState,
+    /// Last-wins generation for async "replace queue and play" loads.
+    pub queue_play_request_id: u64,
     /// Whether user is currently dragging the seek indicator
     pub seeking_drag: bool,
     pub volume_drag: bool,
@@ -1776,6 +1840,7 @@ pub struct AppState {
     pub folder_contents_cache: HashMap<String, CachedFolder>,
     /// Folder key currently being loaded asynchronously (prevents duplicate spawns).
     pub pending_folder_load: Option<String>,
+    pub folder_play_request_id: u64,
     /// Whether a subfolder preload crawl is currently active.
     pub subfolder_preload_active: bool,
     /// Cancel flag for the subfolder preload task (set on library switch).
@@ -1785,12 +1850,17 @@ pub struct AppState {
 
     // Miller column navigation for browse categories
     pub artist_nav: BrowseNavigationState,
+    /// Generations for asynchronous Miller-column loads. Late completions from
+    /// a previous cursor position or category are ignored.
+    pub artist_nav_request_id: u64,
     /// Shared nav state for all tag-style sections (album genres, artist
     /// genres, moods, styles, decades, years, collections, countries,
     /// labels, formats, studios). Reset when the user switches between
     /// these sections.
     pub tag_nav: BrowseNavigationState,
+    pub tag_nav_request_id: u64,
     pub playlist_nav: BrowseNavigationState,
+    pub playlist_nav_request_id: u64,
 
     // Playlist tracks cache (playlist_key -> cached tracks with timestamp)
     pub playlist_tracks_cache: HashMap<String, CachedPlaylistTracks>,
@@ -1856,6 +1926,9 @@ pub struct AppState {
 
     // Sonic Adventure state
     pub adventure: AdventureState,
+    pub adventure_request_id: u64,
+    pub adventure_launcher_request_id: u64,
+    pub artist_bio_request_id: u64,
 
     // DJ mode state (Guest DJ modes that modify queue behavior)
     pub dj: DjState,
@@ -2334,6 +2407,30 @@ pub struct RadioState {
 }
 
 impl AppState {
+    /// Start a new server/library context and invalidate every asynchronous
+    /// request whose result could otherwise be mistaken for current data.
+    pub fn advance_library_generation(&mut self) {
+        self.library_generation = self.library_generation.wrapping_add(1);
+        self.queue_play_request_id = self.queue_play_request_id.wrapping_add(1);
+        self.folder_play_request_id = self.folder_play_request_id.wrapping_add(1);
+        self.artist_nav_request_id = self.artist_nav_request_id.wrapping_add(1);
+        self.tag_nav_request_id = self.tag_nav_request_id.wrapping_add(1);
+        self.playlist_nav_request_id = self.playlist_nav_request_id.wrapping_add(1);
+        self.adventure_request_id = self.adventure_request_id.wrapping_add(1);
+        self.adventure_launcher_request_id =
+            self.adventure_launcher_request_id.wrapping_add(1);
+        self.artist_bio_request_id = self.artist_bio_request_id.wrapping_add(1);
+        self.search.track_version = self.search.track_version.wrapping_add(1);
+        self.library.compilations.detection_request_id = self
+            .library
+            .compilations
+            .detection_request_id
+            .wrapping_add(1);
+        self.pending_folder_load = None;
+        self.subfolder_preload_cancel
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
     /// Create a new application state with defaults.
     pub fn new() -> Self {
         Self {
@@ -2344,6 +2441,7 @@ impl AppState {
             connected_server_url: None,
             all_server_libraries: Vec::new(),
             active_server_id: None,
+            library_generation: 0,
             auth_state: AuthState::default(),
             is_fresh_login: false,
             view: View::Auth,
@@ -2359,6 +2457,7 @@ impl AppState {
             related: RelatedViewState::default(),
             playback: PlaybackState::default(),
             queue: QueueState::default(),
+            queue_play_request_id: 0,
             seeking_drag: false,
             volume_drag: false,
             consecutive_playback_errors: 0,
@@ -2380,12 +2479,16 @@ impl AppState {
             folder_state: None,
             folder_contents_cache: HashMap::new(),
             pending_folder_load: None,
+            folder_play_request_id: 0,
             subfolder_preload_active: false,
             subfolder_preload_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             keep_subfolder_cache: false,
             artist_nav: BrowseNavigationState::new(),
+            artist_nav_request_id: 0,
             tag_nav: BrowseNavigationState::new(),
+            tag_nav_request_id: 0,
             playlist_nav: BrowseNavigationState::new(),
+            playlist_nav_request_id: 0,
             playlist_tracks_cache: HashMap::new(),
             artwork: ArtworkState::default(),
             radio_state: RadioState::default(),
@@ -2404,6 +2507,9 @@ impl AppState {
             miller_scroll_manual: false,
             miller_h_drag_grab: None,
             adventure: AdventureState::default(),
+            adventure_request_id: 0,
+            adventure_launcher_request_id: 0,
+            artist_bio_request_id: 0,
             dj: DjState::default(),
             now_playing_focus: NowPlayingFocus::default(),
             now_playing_sidebar_index: 0,
@@ -2462,40 +2568,40 @@ impl AppState {
             // partition the rest into "pinned" (hearted or named
             // "Recently Added") and "unpinned". Stable order within
             // each partition preserves Plex's playlist ordering.
-            let pinned_keys = ['\u{2764}', '\u{2661}', '\u{1f90d}', '\u{2665}'];
-            let mut pinned: Vec<usize> = Vec::new();
-            let mut rest: Vec<usize> = Vec::new();
-            for i in 0..self.library.playlists.len() {
-                let title = self.library.playlists[i].title.as_str();
+            let is_visible = |title: &str| !title.trim().eq_ignore_ascii_case("all music");
+            let is_pinned = |title: &str| {
                 let trimmed = title.trim();
-                if trimmed.eq_ignore_ascii_case("all music") {
-                    continue;
-                }
-                let is_pinned = trimmed.eq_ignore_ascii_case("recently added")
-                    || pinned_keys.iter().any(|k| title.contains(*k));
-                if is_pinned {
-                    pinned.push(i);
-                } else {
-                    rest.push(i);
-                }
-            }
+                trimmed.eq_ignore_ascii_case("recently added")
+                    || title.contains('\u{2764}')
+                    || title.contains('\u{2661}')
+                    || title.contains('\u{1f90d}')
+                    || title.contains('\u{2665}')
+            };
+            let has_pinned = self.library.playlists.iter()
+                .any(|playlist| is_visible(&playlist.title) && is_pinned(&playlist.title));
+            let has_rest = self.library.playlists.iter()
+                .any(|playlist| is_visible(&playlist.title) && !is_pinned(&playlist.title));
 
             // Divider after the categories block (above the playlists)
             // — only when there's at least one category and at least
             // one playlist to render.
-            if category_count > 0 && (!pinned.is_empty() || !rest.is_empty()) {
+            if category_count > 0 && (has_pinned || has_rest) {
                 rows.push(CategoryRow::Divider);
             }
-            for i in &pinned {
-                rows.push(CategoryRow::Playlist(*i));
+            for (index, playlist) in self.library.playlists.iter().enumerate() {
+                if is_visible(&playlist.title) && is_pinned(&playlist.title) {
+                    rows.push(CategoryRow::Playlist(index));
+                }
             }
             // Second divider between the pinned playlists and the
             // alphabetical remainder, but only if both sides exist.
-            if !pinned.is_empty() && !rest.is_empty() {
+            if has_pinned && has_rest {
                 rows.push(CategoryRow::Divider);
             }
-            for i in &rest {
-                rows.push(CategoryRow::Playlist(*i));
+            for (index, playlist) in self.library.playlists.iter().enumerate() {
+                if is_visible(&playlist.title) && !is_pinned(&playlist.title) {
+                    rows.push(CategoryRow::Playlist(index));
+                }
             }
         }
         rows
@@ -3142,7 +3248,40 @@ pub enum ConnectionState {
     AuthPending { pin_code: String, pin_id: u64 },
     Connecting,
     Connected { username: String, has_plex_pass: bool },
+    /// Authentication is still valid and cached state remains usable, but the
+    /// most recent server request failed. A later successful response restores
+    /// `Connected` without forcing the user through login again.
+    Degraded { username: String, has_plex_pass: bool, message: String },
     Error(String),
+}
+
+impl ConnectionState {
+    pub fn mark_degraded(&mut self, message: String) {
+        match self {
+            ConnectionState::Connected { username, has_plex_pass }
+            | ConnectionState::Degraded { username, has_plex_pass, .. } => {
+                *self = ConnectionState::Degraded {
+                    username: username.clone(),
+                    has_plex_pass: *has_plex_pass,
+                    message,
+                };
+            }
+            _ => {}
+        }
+    }
+
+    pub fn mark_healthy(&mut self) {
+        if let ConnectionState::Degraded { username, has_plex_pass, .. } = self {
+            *self = ConnectionState::Connected {
+                username: username.clone(),
+                has_plex_pass: *has_plex_pass,
+            };
+        }
+    }
+
+    pub fn is_authenticated(&self) -> bool {
+        matches!(self, ConnectionState::Connected { .. } | ConnectionState::Degraded { .. })
+    }
 }
 
 /// Current view (musikcube-style).
@@ -3651,11 +3790,20 @@ pub enum SimilarMode {
 /// Playback state.
 #[derive(Debug, Clone)]
 pub struct PlaybackState {
+    /// Monotonic identity of the current local playback attempt. Async audio
+    /// completions and delayed retries are ignored when this no longer matches.
+    pub request_id: u64,
+    /// Identity of the current URL/preparation effect. This advances before
+    /// transcode negotiation so a late decision cannot start an old track.
+    pub preparation_id: u64,
     pub status: PlayStatus,
     pub position_ms: u64,
     pub duration_ms: u64,
     pub volume: f32,
     pub muted: bool,
+    /// True once Plex has accepted (or we have queued) the played/scrobble
+    /// report for this track. Reset only when a new track starts.
+    pub scrobble_reported: bool,
     /// When the current track transitioned to Playing (for grace period on TrackEnded detection).
     pub playback_started_at: Option<std::time::Instant>,
 }
@@ -3663,11 +3811,14 @@ pub struct PlaybackState {
 impl Default for PlaybackState {
     fn default() -> Self {
         Self {
+            request_id: 0,
+            preparation_id: 0,
             status: PlayStatus::Stopped,
             position_ms: 0,
             duration_ms: 0,
             volume: 0.8,
             muted: false,
+            scrobble_reported: false,
             playback_started_at: None,
         }
     }
@@ -3896,7 +4047,7 @@ pub struct SettingsState {
     /// Username being edited (Account section sign-in)
     pub username_input: String,
     /// Password being edited (Account section sign-in)
-    pub password_input: String,
+    pub password_input: SecretString,
     /// Which credential field is being edited (None = not editing credentials)
     pub editing_credential: Option<CredentialField>,
     /// Whether the Account section is in sign-in mode (showing login form)
@@ -4089,6 +4240,9 @@ pub enum OutputTarget {
 pub struct RemotePlaybackState {
     /// Last time we polled the remote player for status.
     pub last_poll: Option<std::time::Instant>,
+    /// Ensures slow status requests never pile up behind the serialized
+    /// remote-command queue.
+    pub poll_in_flight: bool,
     /// Track key reported by the remote player (for detecting track changes).
     pub current_track_key: Option<String>,
     /// Position baseline from the last successful poll (ms).
@@ -4101,10 +4255,28 @@ impl Default for RemotePlaybackState {
     fn default() -> Self {
         Self {
             last_poll: None,
+            poll_in_flight: false,
             current_track_key: None,
             baseline_position: 0,
             baseline_time: None,
         }
+    }
+}
+
+impl RemotePlaybackState {
+    /// Anchor remote position at a server-confirmed or user-requested point.
+    pub fn anchor(&mut self, position_ms: u64, running: bool) {
+        self.baseline_position = position_ms;
+        self.baseline_time = running.then(std::time::Instant::now);
+    }
+
+    /// Interpolate from the last anchor without mutating the baseline.
+    pub fn estimated_position(&self) -> u64 {
+        self.baseline_position.saturating_add(
+            self.baseline_time
+                .map(|instant| instant.elapsed().as_millis() as u64)
+                .unwrap_or(0),
+        )
     }
 }
 
@@ -4116,6 +4288,9 @@ pub struct ListFilterState {
     pub version: u64,
     pub loading: bool,
     pub results: Option<ListFilterResults>,
+    /// Precomputed results for every visible Miller column. Renderers only
+    /// slice these indices; they never rescan an entire library per frame.
+    pub column_results: Vec<ListFilterResults>,
     /// Index into matched_indices (which filtered result is selected).
     pub selected: usize,
     /// Which category the filter applies to.
@@ -4132,6 +4307,7 @@ impl Default for ListFilterState {
             version: 0,
             loading: false,
             results: None,
+            column_results: Vec::new(),
             selected: 0,
             category: BrowseCategory::Library,
             column: 0,
@@ -4142,9 +4318,11 @@ impl Default for ListFilterState {
 impl ListFilterState {
     /// Deactivate the filter, clearing all state.
     pub fn deactivate(&mut self) {
+        self.version = self.version.wrapping_add(1);
         self.active = false;
         self.query.clear();
         self.results = None;
+        self.column_results.clear();
         self.loading = false;
         self.selected = 0;
     }

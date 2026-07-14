@@ -1,127 +1,430 @@
-//! High-level audio player that wraps an AudioBackend.
+//! High-level audio player.
 //!
-//! This module provides `AudioPlayer`, which:
-//! - Handles async URL fetching with streaming support
-//! - Delegates actual playback to an `AudioBackend` implementation
-//! - Provides a convenient API for the rest of the application
-//!
-//! The separation allows the backend to be synchronous (important for FFI)
-//! while the player handles the async network operations.
+//! Network fetching runs on Tokio tasks, decoder/device work lives on one
+//! dedicated OS thread, and all completions carry a playback generation. The
+//! UI thread only sends commands and reads atomics.
 
 use super::cache::TrackAudioCache;
-use super::rodio_backend::RodioBackend;
-use super::streaming::{BlockingReader, StreamingBuffer};
+use super::rodio_backend::{
+    PipelineEvent, RodioBackend, SampleTap, StreamFailure, StreamingInput,
+};
 use super::traits::AudioBackend;
-use crate::util::truncate_to_boundary;
 use anyhow::{anyhow, Result};
+use bytes::Bytes;
 use futures::StreamExt;
-use reqwest::header::HeaderMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use reqwest::header::{HeaderMap, RETRY_AFTER};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
-/// Events emitted by the audio player to signal state changes.
-///
-/// This decouples the audio module from the app event system,
-/// making it portable to other platforms.
+const MAX_AUDIO_BYTES: usize = 512 * 1024 * 1024;
+const MAX_RETRIES: usize = 3;
+const COMPRESSED_CHANNEL_CAPACITY: usize = 32;
+const BACKEND_COMMAND_CAPACITY: usize = 32;
+const MAX_PENDING_FAILURES: usize = 64;
+const BACKEND_STOPPED: u8 = 0;
+const BACKEND_PLAYING: u8 = 1;
+const BACKEND_PAUSED: u8 = 2;
+
 #[derive(Debug, Clone)]
 pub enum AudioEvent {
-    /// Streaming buffer has enough data to start playback.
-    BufferingReady,
-    /// An error occurred during audio fetching or playback.
-    Error(String),
+    BufferingReady { playback_id: u64 },
+    Error { playback_id: u64, message: String },
 }
 
-/// Shared pending playback buffer: spawned tasks write here, main thread reads.
-type PendingPlayback = Arc<Mutex<Option<(Arc<StreamingBuffer>, u64)>>>;
-
-/// High-level audio player with streaming support.
-///
-/// Uses RodioBackend directly to enable streaming playback.
-/// For other backends, use the trait-based approach with full download.
-///
-/// # Example
-///
-/// ```ignore
-/// let mut player = AudioPlayer::new()?;
-/// player.play_url("http://example.com/track.mp3", event_tx).await?;
-/// player.pause();
-/// player.resume();
-/// player.stop();
-/// ```
-pub struct AudioPlayer {
-    backend: Option<RodioBackend>,
-    /// Current streaming buffer (kept alive during playback)
-    _stream_buffer: Option<Arc<StreamingBuffer>>,
-    /// Shared inbox for pending playback — spawned tasks deliver buffers here,
-    /// and start_pending_playback() reads from it on the main thread.
-    pending_playback: PendingPlayback,
-    /// Cache for pre-fetched track audio data.
-    pub track_cache: Arc<TrackAudioCache>,
-    /// Generation counter to detect stale background fetch tasks.
-    /// Incremented on each play_url_with_headers call; spawned tasks check
-    /// this before delivering results to discard stale fetches.
-    playback_generation: Arc<AtomicU64>,
+enum BackendCommand {
+    PlayData { playback_id: u64, data: Arc<Vec<u8>> },
+    PlayStream {
+        playback_id: u64,
+        input: StreamingInput,
+        events: mpsc::Sender<AudioEvent>,
+    },
+    Stop,
+    Seek { playback_id: u64, position: Duration },
+    Shutdown,
 }
 
-impl AudioPlayer {
-    /// Create a new audio player with the default backend (rodio).
-    ///
-    /// Returns an error if no audio device is available.
-    pub fn new() -> Result<Self> {
-        let backend = RodioBackend::new()
-            .map_err(|e| anyhow!("Failed to create audio backend: {}", e))?;
+struct BackendFailure {
+    playback_id: u64,
+    message: String,
+}
+
+fn record_backend_failure(
+    failures: &Mutex<VecDeque<BackendFailure>>,
+    failure: BackendFailure,
+) {
+    let mut failures = super::lock_or_recover(failures);
+    if failures.len() == MAX_PENDING_FAILURES {
+        failures.pop_front();
+    }
+    failures.push_back(failure);
+}
+
+struct BackendState {
+    mode: AtomicU8,
+    position_ms: AtomicU64,
+    finished: AtomicBool,
+    seekable: AtomicBool,
+    volume_bits: AtomicU32,
+    desired_paused: AtomicBool,
+}
+
+impl BackendState {
+    fn new() -> Self {
+        Self {
+            mode: AtomicU8::new(BACKEND_STOPPED),
+            position_ms: AtomicU64::new(0),
+            finished: AtomicBool::new(false),
+            seekable: AtomicBool::new(false),
+            volume_bits: AtomicU32::new(0.8_f32.to_bits()),
+            desired_paused: AtomicBool::new(false),
+        }
+    }
+}
+
+struct BackendActor {
+    commands: std::sync::mpsc::SyncSender<BackendCommand>,
+    state: Arc<BackendState>,
+    failures: Arc<Mutex<VecDeque<BackendFailure>>>,
+    sample_tap: SampleTap,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl BackendActor {
+    fn spawn(generation: Arc<AtomicU64>, timeout: Duration) -> Result<Self> {
+        let (command_tx, command_rx) =
+            std::sync::mpsc::sync_channel(BACKEND_COMMAND_CAPACITY);
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+        let state = Arc::new(BackendState::new());
+        let failures = Arc::new(Mutex::new(VecDeque::new()));
+        let actor_state = state.clone();
+        let actor_failures = failures.clone();
+
+        let thread = std::thread::Builder::new()
+            .name("textamp-audio-actor".to_string())
+            .spawn(move || {
+                let backend = RodioBackend::new();
+                let mut backend = match backend {
+                    Ok(backend) => backend,
+                    Err(error) => {
+                        let _ = ready_tx.send(Err(error.to_string()));
+                        return;
+                    }
+                };
+
+                let sample_tap = backend.sample_tap();
+                if ready_tx.send(Ok(sample_tap)).is_err() {
+                    // The caller timed out; do not leave a detached audio actor.
+                    return;
+                }
+
+                let mut last_underruns = 0;
+                let mut stream_events: Option<(u64, mpsc::Sender<AudioEvent>)> = None;
+                let mut active_playback_id = None;
+                let mut applied_volume = backend.volume();
+                loop {
+                    // Generation invalidation is the out-of-band high-priority
+                    // stop path. It remains reliable even if the bounded
+                    // command mailbox is temporarily full.
+                    if active_playback_id
+                        .is_some_and(|id| generation.load(Ordering::Acquire) != id)
+                    {
+                        backend.stop();
+                        active_playback_id = None;
+                        stream_events = None;
+                        actor_state.mode.store(BACKEND_STOPPED, Ordering::Release);
+                        actor_state.position_ms.store(0, Ordering::Release);
+                        actor_state.finished.store(false, Ordering::Release);
+                        actor_state.seekable.store(false, Ordering::Release);
+                    }
+
+                    // Pause/resume is level-triggered rather than queued, so
+                    // rapid input or a full playback-command mailbox cannot
+                    // lose the user's final transport state.
+                    if active_playback_id.is_some() {
+                        let desired_paused = actor_state.desired_paused.load(Ordering::Acquire);
+                        let mode = actor_state.mode.load(Ordering::Acquire);
+                        if desired_paused && mode != BACKEND_PAUSED {
+                            backend.pause();
+                            actor_state.mode.store(BACKEND_PAUSED, Ordering::Release);
+                        } else if !desired_paused && mode == BACKEND_PAUSED {
+                            backend.resume();
+                            actor_state.mode.store(BACKEND_PLAYING, Ordering::Release);
+                        }
+                    }
+
+                    match command_rx.recv_timeout(Duration::from_millis(20)) {
+                        Ok(BackendCommand::PlayData { playback_id, data }) => {
+                            if generation.load(Ordering::Acquire) != playback_id {
+                                continue;
+                            }
+                            actor_state.finished.store(false, Ordering::Release);
+                            actor_state.position_ms.store(0, Ordering::Release);
+                            stream_events = None;
+                            match backend.play_data(data) {
+                                Ok(()) if generation.load(Ordering::Acquire) == playback_id => {
+                                    actor_state.seekable.store(true, Ordering::Release);
+                                    actor_state.mode.store(BACKEND_PLAYING, Ordering::Release);
+                                    active_playback_id = Some(playback_id);
+                                }
+                                Ok(()) => backend.stop(),
+                                Err(error) => {
+                                    actor_state.mode.store(BACKEND_STOPPED, Ordering::Release);
+                                    if generation.load(Ordering::Acquire) == playback_id {
+                                        record_backend_failure(
+                                            &actor_failures,
+                                            BackendFailure {
+                                                playback_id,
+                                                message: error.to_string(),
+                                            },
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        Ok(BackendCommand::PlayStream {
+                            playback_id,
+                            input,
+                            events,
+                        }) => {
+                            if generation.load(Ordering::Acquire) != playback_id {
+                                continue;
+                            }
+                            actor_state.finished.store(false, Ordering::Release);
+                            actor_state.position_ms.store(0, Ordering::Release);
+                            actor_state.seekable.store(false, Ordering::Release);
+                            actor_state.mode.store(BACKEND_STOPPED, Ordering::Release);
+                            match backend.start_stream(playback_id, input) {
+                                Ok(()) => {
+                                    active_playback_id = Some(playback_id);
+                                    stream_events = Some((playback_id, events));
+                                }
+                                Err(error) => {
+                                    stream_events = None;
+                                    record_backend_failure(
+                                        &actor_failures,
+                                        BackendFailure {
+                                            playback_id,
+                                            message: error.to_string(),
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                        Ok(BackendCommand::Stop) => {
+                            backend.stop();
+                            active_playback_id = None;
+                            stream_events = None;
+                            actor_state.mode.store(BACKEND_STOPPED, Ordering::Release);
+                            actor_state.position_ms.store(0, Ordering::Release);
+                            actor_state.finished.store(false, Ordering::Release);
+                            actor_state.seekable.store(false, Ordering::Release);
+                        }
+                        Ok(BackendCommand::Seek { playback_id, position }) => {
+                            if generation.load(Ordering::Acquire) == playback_id
+                                && !backend.seek(position)
+                            {
+                                actor_state.seekable.store(false, Ordering::Release);
+                                actor_state.mode.store(BACKEND_STOPPED, Ordering::Release);
+                                active_playback_id = None;
+                                record_backend_failure(
+                                    &actor_failures,
+                                    BackendFailure {
+                                        playback_id,
+                                        message: "seek failed".to_string(),
+                                    },
+                                );
+                            }
+                        }
+                        Ok(BackendCommand::Shutdown)
+                        | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                            backend.stop();
+                            break;
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    }
+
+                    for event in backend.poll_pipeline() {
+                        match event {
+                            PipelineEvent::Ready { playback_id }
+                                if generation.load(Ordering::Acquire) == playback_id =>
+                            {
+                                actor_state.mode.store(BACKEND_PLAYING, Ordering::Release);
+                                if let Some((event_id, events)) = &stream_events {
+                                    if *event_id == playback_id {
+                                        let _ = events.try_send(AudioEvent::BufferingReady {
+                                            playback_id,
+                                        });
+                                    }
+                                }
+                            }
+                            PipelineEvent::Failed {
+                                playback_id,
+                                message,
+                            } if generation.load(Ordering::Acquire) == playback_id => {
+                                actor_state.mode.store(BACKEND_STOPPED, Ordering::Release);
+                                active_playback_id = None;
+                                stream_events = None;
+                                record_backend_failure(
+                                    &actor_failures,
+                                    BackendFailure {
+                                        playback_id,
+                                        message,
+                                    },
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    let requested_volume = f32::from_bits(
+                        actor_state.volume_bits.load(Ordering::Acquire),
+                    );
+                    if requested_volume.to_bits() != applied_volume.to_bits() {
+                        backend.set_volume(requested_volume);
+                        applied_volume = backend.volume();
+                        actor_state
+                            .volume_bits
+                            .store(applied_volume.to_bits(), Ordering::Release);
+                    }
+
+                    if let Some(position) = backend.position() {
+                        actor_state
+                            .position_ms
+                            .store(position.as_millis() as u64, Ordering::Release);
+                    }
+                    if backend.is_finished() {
+                        actor_state.finished.store(true, Ordering::Release);
+                        actor_state.mode.store(BACKEND_STOPPED, Ordering::Release);
+                    } else if backend.is_paused() {
+                        actor_state.mode.store(BACKEND_PAUSED, Ordering::Release);
+                    } else if backend.is_playing() {
+                        actor_state.mode.store(BACKEND_PLAYING, Ordering::Release);
+                    }
+
+                    let underruns = backend.underrun_count();
+                    if underruns.saturating_sub(last_underruns) >= 48_000 {
+                        tracing::warn!(
+                            "Audio PCM ring underrun: {} silent samples since last report",
+                            underruns - last_underruns
+                        );
+                        last_underruns = underruns;
+                    }
+                }
+            })?;
+
+        let sample_tap = match ready_rx.recv_timeout(timeout) {
+            Ok(Ok(sample_tap)) => sample_tap,
+            Ok(Err(error)) => {
+                let _ = thread.join();
+                return Err(anyhow!("Failed to create audio backend: {error}"));
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                return Err(anyhow!("Audio initialization timed out"));
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                let _ = thread.join();
+                return Err(anyhow!("Audio initialization thread exited"));
+            }
+        };
 
         Ok(Self {
-            backend: Some(backend),
-            _stream_buffer: None,
-            pending_playback: Arc::new(Mutex::new(None)),
-            track_cache: Arc::new(TrackAudioCache::new()),
-            playback_generation: Arc::new(AtomicU64::new(0)),
+            commands: command_tx,
+            state,
+            failures,
+            sample_tap,
+            thread: Some(thread),
         })
     }
 
-    /// Create an audio player without a backend (no audio output).
-    /// The app runs normally but playback operations are no-ops.
-    /// Construct a player with no audio backend attached. This is
-    /// infallible — the returned player is a stub that reports
-    /// `has_audio() == false` and silently no-ops every play/seek call.
-    /// Used by the GUI's audio-init retry loop when no output device
-    /// is available, and by the test TUI binary that runs headless.
+    fn send(&self, command: BackendCommand) -> Result<()> {
+        self.commands
+            .try_send(command)
+            .map_err(|error| match error {
+                std::sync::mpsc::TrySendError::Full(_) => {
+                    anyhow!("Audio actor command queue is full")
+                }
+                std::sync::mpsc::TrySendError::Disconnected(_) => {
+                    anyhow!("Audio actor is unavailable")
+                }
+            })
+    }
+}
+
+impl Drop for BackendActor {
+    fn drop(&mut self) {
+        let _ = self.commands.send(BackendCommand::Shutdown);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+pub struct AudioPlayer {
+    backend: Option<BackendActor>,
+    pub track_cache: Arc<TrackAudioCache>,
+    playback_generation: Arc<AtomicU64>,
+    cancellation_tx: watch::Sender<u64>,
+}
+
+impl AudioPlayer {
+    pub fn new() -> Result<Self> {
+        let playback_generation = Arc::new(AtomicU64::new(0));
+        let (cancellation_tx, _) = watch::channel(0);
+        let backend = BackendActor::spawn(
+            playback_generation.clone(),
+            Duration::from_secs(5),
+        )?;
+        Ok(Self {
+            backend: Some(backend),
+            track_cache: Arc::new(TrackAudioCache::new()),
+            playback_generation,
+            cancellation_tx,
+        })
+    }
+
     pub fn new_without_audio() -> Self {
+        let (cancellation_tx, _) = watch::channel(0);
         Self {
             backend: None,
-            _stream_buffer: None,
-            pending_playback: Arc::new(Mutex::new(None)),
             track_cache: Arc::new(TrackAudioCache::new()),
             playback_generation: Arc::new(AtomicU64::new(0)),
+            cancellation_tx,
         }
     }
 
-    /// Play audio from a URL (non-blocking).
-    ///
-    /// Spawns the HTTP request and buffer setup in a background task.
-    /// Returns immediately — the event loop stays responsive.
-    /// Sends `AudioEvent::BufferingReady` when playback is ready to start.
-    pub async fn play_url(&mut self, url: &str, event_tx: mpsc::Sender<AudioEvent>, http_client: reqwest::Client) -> Result<()> {
-        self.play_url_with_headers(url, HeaderMap::new(), None, event_tx, http_client).await
+    fn invalidate_playback(&self) -> u64 {
+        let playback_id = self
+            .playback_generation
+            .fetch_add(1, Ordering::AcqRel)
+            .saturating_add(1);
+        self.cancellation_tx.send_replace(playback_id);
+        playback_id
     }
 
-    /// Play audio from a URL with optional fallback (non-blocking).
-    ///
-    /// This method:
-    /// 1. Stops current playback synchronously
-    /// 2. Spawns a background task that fetches the audio
-    /// 3. Returns immediately (no blocking network I/O)
-    /// 4. The background task sends `AudioEvent::BufferingReady` when ready
-    /// 5. `StartPendingPlayback` then starts actual audio output
-    ///
-    /// If `fallback_url` is provided and the primary URL fails,
-    /// the background task automatically tries the fallback.
-    ///
-    /// `http_client`: use the PlexClient's HTTP client to share connection pool and settings.
-    pub async fn play_url_with_headers(
+    pub fn playback_id(&self) -> u64 {
+        self.playback_generation.load(Ordering::Acquire)
+    }
+
+    pub fn play_url(
+        &mut self,
+        url: &str,
+        event_tx: mpsc::Sender<AudioEvent>,
+        http_client: reqwest::Client,
+    ) -> Result<()> {
+        self.play_url_with_headers(
+            url,
+            HeaderMap::new(),
+            None,
+            event_tx,
+            http_client,
+        )
+    }
+
+    pub fn play_url_with_headers(
         &mut self,
         url: &str,
         headers: HeaderMap,
@@ -129,332 +432,406 @@ impl AudioPlayer {
         event_tx: mpsc::Sender<AudioEvent>,
         http_client: reqwest::Client,
     ) -> Result<()> {
-        // Stop any existing playback synchronously
         self.stop();
+        let backend_commands = self
+            .backend
+            .as_ref()
+            .ok_or_else(|| anyhow!("No audio output device is available"))?
+            .commands
+            .clone();
 
-        // Increment generation so any in-flight fetch tasks become stale
-        let expected_gen = self.playback_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let playback_id = self.playback_id();
         let generation = self.playback_generation.clone();
-        let pending = self.pending_playback.clone();
-        let url = url.to_string();
-
+        let mut cancellation = self.cancellation_tx.subscribe();
+        let primary_url = url.to_string();
         tokio::spawn(async move {
-            // Try primary URL
-            match fetch_and_buffer(&url, &headers, &http_client, &pending, &event_tx, &generation, expected_gen).await {
-                Ok(()) => {},
-                Err(primary_err) => {
-                    tracing::warn!("Primary stream failed: {}", primary_err);
-                    // Try fallback if available
-                    if let Some(ref fb_url) = fallback_url {
-                        let redacted = fb_url.split("X-Plex-Token=").next().unwrap_or(fb_url);
-                        tracing::info!("Trying fallback (transcode): {}...", redacted);
-                        match fetch_and_buffer(fb_url, &headers, &http_client, &pending, &event_tx, &generation, expected_gen).await {
-                            Ok(()) => {},
-                            Err(fb_err) => {
-                                tracing::error!("Fallback stream also failed: {}", fb_err);
-                                let _ = event_tx.send(AudioEvent::Error(
-                                    format!("Playback failed: {}", fb_err)
-                                )).await;
-                            }
-                        }
-                    } else {
-                        let _ = event_tx.send(AudioEvent::Error(
-                            format!("Playback failed: {}", primary_err)
-                        )).await;
-                    }
-                }
-            }
+            stream_audio(
+                &primary_url,
+                fallback_url.as_deref(),
+                &headers,
+                &http_client,
+                playback_id,
+                &generation,
+                &mut cancellation,
+                &backend_commands,
+                &event_tx,
+            )
+            .await;
         });
 
         Ok(())
     }
 
-    /// Start playback from the pending buffer.
-    ///
-    /// Called when `BufferingEnd` event is received, indicating the streaming
-    /// buffer has enough data for format detection and playback start.
-    /// Returns `Ok(true)` if playback started, `Ok(false)` if no pending data
-    /// (e.g., stale BufferingEnd event after audio was stopped).
-    /// Whether audio output is available.
     pub fn has_audio(&self) -> bool {
         self.backend.is_some()
     }
 
-    /// Clone of the rodio sample tap, if a backend is attached. Used
-    /// by the vectorscope visualizer (TUI + GUI) to read recent
-    /// stereo samples on each tick.
-    pub fn sample_tap(&self) -> Option<super::rodio_backend::SampleTap> {
-        self.backend.as_ref().map(|b| b.sample_tap())
+    pub fn sample_tap(&self) -> Option<SampleTap> {
+        self.backend.as_ref().map(|backend| backend.sample_tap.clone())
     }
 
-    /// Try to (re)attach a live audio backend. Used to recover from a
-    /// startup where no device was available yet (e.g. Windows audio
-    /// service still initializing right after login). Returns Ok(true)
-    /// if the device is now usable, Ok(false) if we already had one,
-    /// and Err with the cpal failure if retrying still fails.
     pub fn try_attach_backend(&mut self) -> Result<bool> {
         if self.backend.is_some() {
             return Ok(false);
         }
-        let backend = RodioBackend::new()
-            .map_err(|e| anyhow!("Failed to create audio backend: {}", e))?;
-        self.backend = Some(backend);
+        self.backend = Some(BackendActor::spawn(
+            self.playback_generation.clone(),
+            Duration::from_secs(5),
+        )?);
         Ok(true)
     }
 
-    pub fn start_pending_playback(&mut self) -> Result<bool> {
-        let Some(ref mut backend) = self.backend else { return Ok(false) };
-        let pending = super::lock_or_recover(&self.pending_playback).take();
-        if let Some((buffer, byte_len_hint)) = pending {
-            let reader = BlockingReader::new(&buffer);
-            backend.play_streaming(reader, byte_len_hint)
-                .map_err(|e| anyhow!("Decode error: {}", e))?;
-            self._stream_buffer = Some(buffer);
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
     pub fn play_data(&mut self, data: Arc<Vec<u8>>) -> Result<()> {
-        let Some(ref mut backend) = self.backend else { return Ok(()) };
-        self._stream_buffer = None;
-        backend.play_data(data).map_err(|e| anyhow!("Playback error: {}", e))
+        self.stop();
+        let playback_id = self.playback_id();
+        let backend = self
+            .backend
+            .as_ref()
+            .ok_or_else(|| anyhow!("No audio output device is available"))?;
+        backend.send(BackendCommand::PlayData { playback_id, data })
     }
 
     pub fn pause(&mut self) {
-        if let Some(ref mut b) = self.backend { b.pause(); }
+        if let Some(backend) = &self.backend {
+            backend.state.desired_paused.store(true, Ordering::Release);
+        }
     }
 
     pub fn resume(&mut self) {
-        if let Some(ref mut b) = self.backend { b.resume(); }
+        if let Some(backend) = &self.backend {
+            backend.state.desired_paused.store(false, Ordering::Release);
+        }
     }
 
     pub fn stop(&mut self) {
-        *super::lock_or_recover(&self.pending_playback) = None;
-        self._stream_buffer = None;
-        if let Some(ref mut b) = self.backend { b.stop(); }
+        self.invalidate_playback();
+        if let Some(backend) = &self.backend {
+            backend.state.desired_paused.store(false, Ordering::Release);
+            let _ = backend.send(BackendCommand::Stop);
+        }
     }
 
     pub fn set_volume(&mut self, volume: f32) {
-        if let Some(ref mut b) = self.backend { b.set_volume(volume); }
+        if let Some(backend) = &self.backend {
+            backend
+                .state
+                .volume_bits
+                .store(volume.clamp(0.0, 1.0).to_bits(), Ordering::Release);
+        }
     }
 
     pub fn volume(&self) -> f32 {
-        self.backend.as_ref().map_or(0.8, |b| b.volume())
+        self.backend.as_ref().map_or(0.8, |backend| {
+            f32::from_bits(backend.state.volume_bits.load(Ordering::Acquire))
+        })
     }
 
     pub fn is_finished(&self) -> bool {
-        self.backend.as_ref().map_or(true, |b| b.is_finished())
+        self.backend
+            .as_ref()
+            .is_some_and(|backend| backend.state.finished.load(Ordering::Acquire))
     }
 
     pub fn is_playing(&self) -> bool {
-        self.backend.as_ref().map_or(false, |b| b.is_playing())
+        self.backend.as_ref().is_some_and(|backend| {
+            backend.state.mode.load(Ordering::Acquire) == BACKEND_PLAYING
+        })
     }
 
     pub fn is_paused(&self) -> bool {
-        self.backend.as_ref().map_or(false, |b| b.is_paused())
+        self.backend.as_ref().is_some_and(|backend| {
+            backend.state.mode.load(Ordering::Acquire) == BACKEND_PAUSED
+        })
     }
 
     pub fn try_seek(&mut self, position: Duration) -> bool {
-        self.backend.as_mut().map_or(false, |b| b.seek(position))
+        let playback_id = self.playback_id();
+        self.backend.as_ref().is_some_and(|backend| {
+            backend.state.seekable.load(Ordering::Acquire)
+                && backend
+                    .send(BackendCommand::Seek {
+                        playback_id,
+                        position,
+                    })
+                    .is_ok()
+        })
     }
 
     pub fn position(&self) -> Option<Duration> {
-        self.backend.as_ref().and_then(|b| b.position())
+        self.backend.as_ref().map(|backend| {
+            Duration::from_millis(backend.state.position_ms.load(Ordering::Acquire))
+        })
+    }
+
+    /// Drain decoder/device failures without blocking the UI.
+    pub fn take_failures(&self) -> Vec<(u64, String)> {
+        let Some(backend) = &self.backend else {
+            return Vec::new();
+        };
+        let mut failures = super::lock_or_recover(&backend.failures);
+        failures
+            .drain(..)
+            .map(|failure| (failure.playback_id, failure.message))
+            .collect()
     }
 }
 
-/// Fetch audio from a URL, set up streaming buffer, and signal readiness.
-///
-/// This runs inside a spawned task. On success, sets the pending_playback
-/// buffer and sends `BufferingEnd`. On failure, returns the error for
-/// the caller to handle (e.g., try a fallback URL).
-/// Check if a response has an HTML content-type header.
-fn is_html_content_type(response: &reqwest::Response) -> bool {
-    response.headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .map(|ct| ct.contains("text/html"))
-        .unwrap_or(false)
+fn is_current(generation: &AtomicU64, playback_id: u64) -> bool {
+    generation.load(Ordering::Acquire) == playback_id
 }
 
-/// Check if raw bytes look like HTML (starts with common HTML markers).
-fn looks_like_html(data: &[u8]) -> bool {
-    // Check first 256 bytes for HTML signatures
-    let prefix = &data[..data.len().min(256)];
-    let text = String::from_utf8_lossy(prefix);
-    let lower = text.to_lowercase();
-    lower.contains("<!doctype html") || lower.contains("<html") || lower.contains("<head")
+async fn wait_for_cancellation(
+    cancellation: &mut watch::Receiver<u64>,
+    playback_id: u64,
+) {
+    loop {
+        if *cancellation.borrow() != playback_id {
+            return;
+        }
+        if cancellation.changed().await.is_err() {
+            return;
+        }
+    }
 }
 
-async fn fetch_and_buffer(
-    url: &str,
+fn retry_delay(response: &reqwest::Response, attempt: usize) -> Duration {
+    response
+        .headers()
+        .get(RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(1_u64 << attempt.min(4)))
+        .min(Duration::from_secs(30))
+}
+
+fn redact_url(url: &str) -> String {
+    let Ok(mut parsed) = reqwest::Url::parse(url) else {
+        return "<invalid stream URL>".to_string();
+    };
+    let pairs: Vec<(String, String)> = parsed
+        .query_pairs()
+        .filter(|(key, _)| !key.eq_ignore_ascii_case("X-Plex-Token"))
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    parsed.set_query(None);
+    if !pairs.is_empty() {
+        parsed.query_pairs_mut().extend_pairs(pairs);
+    }
+    parsed.to_string()
+}
+
+async fn stream_audio(
+    primary_url: &str,
+    fallback_url: Option<&str>,
     headers: &HeaderMap,
     client: &reqwest::Client,
-    pending: &PendingPlayback,
-    event_tx: &mpsc::Sender<AudioEvent>,
-    generation: &Arc<AtomicU64>,
-    expected_gen: u64,
-) -> Result<(), String> {
-    tracing::debug!("Fetching audio from: {}", url);
+    playback_id: u64,
+    generation: &AtomicU64,
+    cancellation: &mut watch::Receiver<u64>,
+    backend_commands: &std::sync::mpsc::SyncSender<BackendCommand>,
+    events: &mpsc::Sender<AudioEvent>,
+) {
+    let mut last_error = "request cancelled".to_string();
 
-    // Retry loop with exponential backoff for transient errors (including HTML responses)
-    let backoff_secs = [1u64, 2, 4];
-    let max_retries = 3u32;
-    let mut last_error = String::new();
+    for url in [Some(primary_url), fallback_url].into_iter().flatten() {
+        tracing::debug!("Opening audio stream: {}", redact_url(url));
+        for attempt in 0..MAX_RETRIES {
+            if !is_current(generation, playback_id) {
+                return;
+            }
 
-    let response = 'retry: {
-        for attempt in 0..max_retries {
-            match client.get(url).headers(headers.clone()).send().await {
-                Ok(resp) => {
-                    let status = resp.status();
-                    if status.is_success() {
-                        // Check for HTML content-type on successful responses
-                        // Plex sometimes returns HTML error pages with 200 status
-                        if is_html_content_type(&resp) {
-                            last_error = "Server returned HTML instead of audio".to_string();
-                            let body = resp.text().await.unwrap_or_default();
-                            if attempt + 1 < max_retries {
-                                let delay = backoff_secs[attempt as usize];
-                                tracing::debug!("Audio fetch got HTML response (attempt {}), retrying in {}s - Body: {}",
-                                    attempt + 1, delay, truncate_to_boundary(&body, 200));
-                                tokio::time::sleep(Duration::from_secs(delay)).await;
-                                continue;
-                            }
-                            tracing::warn!("Audio fetch got HTML after {} retries", max_retries);
-                            return Err(last_error);
-                        }
-                        break 'retry resp;
+            let response = tokio::select! {
+                response = client.get(url).headers(headers.clone()).send() => response,
+                _ = wait_for_cancellation(cancellation, playback_id) => return,
+            };
+
+            let response = match response {
+                Ok(response) => response,
+                Err(error) => {
+                    last_error = if error.is_timeout() {
+                        "audio server timed out".to_string()
+                    } else if error.is_connect() {
+                        "could not connect to the audio server".to_string()
+                    } else {
+                        "audio request failed".to_string()
+                    };
+                    if attempt + 1 == MAX_RETRIES {
+                        break;
                     }
-
-                    // Retry on 5xx, 429, and HTML error bodies
-                    if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                        let body = resp.text().await.unwrap_or_default();
-                        last_error = format!("HTTP {}", status);
-                        if attempt + 1 < max_retries {
-                            let delay = backoff_secs[attempt as usize];
-                            tracing::debug!("Audio fetch HTTP {} (attempt {}), retrying in {}s", status, attempt + 1, delay);
-                            tokio::time::sleep(Duration::from_secs(delay)).await;
-                            continue;
-                        }
-                        tracing::error!("Audio fetch failed: HTTP {} - Body: {}", status, truncate_to_boundary(&body, 200));
-                        return Err(last_error);
+                    let delay = Duration::from_secs(1_u64 << attempt);
+                    tokio::select! {
+                        _ = tokio::time::sleep(delay) => {}
+                        _ = wait_for_cancellation(cancellation, playback_id) => return,
                     }
-
-                    // 4xx (except 429) - don't retry
-                    let body = resp.text().await.unwrap_or_default();
-                    tracing::error!("Audio fetch failed: HTTP {} - Body: {}", status, truncate_to_boundary(&body, 200));
-                    return Err(format!("HTTP {}", status));
+                    continue;
                 }
-                Err(e) => {
-                    last_error = format!("Failed to fetch audio: {}", e);
-                    tracing::warn!("Audio fetch send error (attempt {}): {:?}", attempt + 1, e);
-                    if attempt + 1 < max_retries {
-                        let delay = backoff_secs[attempt as usize];
-                        tokio::time::sleep(Duration::from_secs(delay)).await;
+            };
+
+            let status = response.status();
+            if !status.is_success() {
+                let retryable = status.is_server_error()
+                    || status == reqwest::StatusCode::TOO_MANY_REQUESTS;
+                let delay = retry_delay(&response, attempt);
+                last_error = format!("audio server returned HTTP {status}");
+                tracing::warn!("Audio request returned HTTP {}", status);
+                if !retryable || attempt + 1 == MAX_RETRIES {
+                    break;
+                }
+                tokio::select! {
+                    _ = tokio::time::sleep(delay) => {}
+                    _ = wait_for_cancellation(cancellation, playback_id) => return,
+                }
+                continue;
+            }
+
+            let mime_type = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(|value| value.split(';').next().unwrap_or(value).trim().to_string());
+            if mime_type
+                .as_deref()
+                .is_some_and(|content_type| content_type.contains("text/html"))
+            {
+                last_error = "server returned HTML instead of audio".to_string();
+                break;
+            }
+
+            if response
+                .content_length()
+                .is_some_and(|length| length > MAX_AUDIO_BYTES as u64)
+            {
+                last_error = format!(
+                    "audio response is too large ({} MiB limit)",
+                    MAX_AUDIO_BYTES / (1024 * 1024)
+                );
+                break;
+            }
+
+            let mut body = response.bytes_stream();
+            let first = tokio::select! {
+                chunk = body.next() => chunk,
+                _ = wait_for_cancellation(cancellation, playback_id) => return,
+            };
+            let first = match first {
+                Some(Ok(chunk)) if !chunk.is_empty() => chunk,
+                Some(Ok(_)) | None => {
+                    last_error = "audio server returned an empty response".to_string();
+                    if attempt + 1 < MAX_RETRIES {
                         continue;
                     }
-                    return Err(last_error);
+                    break;
                 }
+                Some(Err(_)) => {
+                    last_error = "audio transfer failed before playback started".to_string();
+                    if attempt + 1 < MAX_RETRIES {
+                        continue;
+                    }
+                    break;
+                }
+            };
+
+            if looks_like_html(&first) {
+                last_error = "server returned HTML instead of audio".to_string();
+                break;
             }
-        }
-        return Err(last_error);
-    };
 
-    // Log response headers for diagnostics
-    {
-        let h = response.headers();
-        tracing::info!("Audio response: status={}, content-type={:?}, content-encoding={:?}, content-length={:?}, transfer-encoding={:?}",
-            response.status(),
-            h.get("content-type").map(|v| v.to_str().unwrap_or("?")),
-            h.get("content-encoding").map(|v| v.to_str().unwrap_or("?")),
-            h.get("content-length").map(|v| v.to_str().unwrap_or("?")),
-            h.get("transfer-encoding").map(|v| v.to_str().unwrap_or("?")),
-        );
-    }
+            let (compressed_tx, compressed_rx) =
+                mpsc::channel::<Bytes>(COMPRESSED_CHANNEL_CAPACITY);
+            let failure = StreamFailure::default();
+            let input = StreamingInput::new(compressed_rx, failure.clone(), mime_type);
+            if backend_commands
+                .try_send(BackendCommand::PlayStream {
+                    playback_id,
+                    input,
+                    events: events.clone(),
+                })
+                .is_err()
+            {
+                last_error = "audio backend is unavailable".to_string();
+                break;
+            }
 
-    // Get content length for progress tracking
-    let content_length = response
-        .headers()
-        .get(reqwest::header::CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<usize>().ok());
-    let total_size = content_length.unwrap_or(0);
+            let mut transferred = first.len();
+            let first_send = tokio::select! {
+                result = compressed_tx.send(first) => result,
+                _ = wait_for_cancellation(cancellation, playback_id) => return,
+            };
+            if first_send.is_err() {
+                return;
+            }
 
-    // Small files (< 1MB): download fully, check for HTML, wrap in complete buffer
-    if total_size > 0 && total_size < 1024 * 1024 {
-        let bytes = response.bytes().await
-            .map_err(|e| { tracing::warn!("Small file bytes() error: {:?}", e); format!("Download failed: {}", e) })?;
-        let data = bytes.to_vec();
-
-        // Detect HTML that slipped through without a text/html content-type
-        if looks_like_html(&data) {
-            tracing::warn!("Downloaded data looks like HTML, not audio ({} bytes)", data.len());
-            return Err("Server returned HTML instead of audio".to_string());
-        }
-
-        // Discard if a newer playback request has superseded this one
-        if generation.load(Ordering::SeqCst) != expected_gen {
-            tracing::debug!("Stale fetch (small file) discarded (gen {} != current {})", expected_gen, generation.load(Ordering::SeqCst));
-            return Ok(());
-        }
-        let size = data.len();
-        let buffer = Arc::new(StreamingBuffer::with_size_hint(size));
-        buffer.append(&data);
-        buffer.set_complete();
-        *super::lock_or_recover(pending) = Some((buffer, size as u64));
-        let _ = event_tx.send(AudioEvent::BufferingReady).await;
-        return Ok(());
-    }
-
-    // Large files: streaming buffer with progressive download
-    let buffer = if total_size > 0 {
-        Arc::new(StreamingBuffer::with_size_hint(total_size))
-    } else {
-        Arc::new(StreamingBuffer::with_size_hint(10 * 1024 * 1024))
-    };
-    let byte_len_hint = if total_size > 0 { total_size as u64 } else { u64::MAX };
-
-    // Start download task
-    let dl_buffer = buffer.clone();
-    tokio::spawn(async move {
-        let mut stream = response.bytes_stream();
-        while let Some(chunk_result) = stream.next().await {
-            match chunk_result {
-                Ok(chunk) => dl_buffer.append(&chunk),
-                Err(e) => {
-                    tracing::warn!("Streaming chunk error: {:?}", e);
-                    dl_buffer.set_error(format!("Download error: {}", e));
+            loop {
+                let next = tokio::select! {
+                    chunk = body.next() => chunk,
+                    _ = wait_for_cancellation(cancellation, playback_id) => return,
+                };
+                let Some(chunk) = next else {
+                    // Dropping the sender communicates clean EOF.
+                    return;
+                };
+                let chunk = match chunk {
+                    Ok(chunk) => chunk,
+                    Err(_) => {
+                        failure.set("audio transfer was interrupted".to_string());
+                        return;
+                    }
+                };
+                transferred = transferred.saturating_add(chunk.len());
+                if transferred > MAX_AUDIO_BYTES {
+                    failure.set(format!(
+                        "audio response exceeded {} MiB limit",
+                        MAX_AUDIO_BYTES / (1024 * 1024)
+                    ));
+                    return;
+                }
+                let send = tokio::select! {
+                    result = compressed_tx.send(chunk) => result,
+                    _ = wait_for_cancellation(cancellation, playback_id) => return,
+                };
+                if send.is_err() {
                     return;
                 }
             }
         }
-        dl_buffer.set_complete();
-    });
-
-    // Wait for minimum buffer before signaling ready (10s timeout for remote servers)
-    let wait_buffer = buffer.clone();
-    let mut wait_count = 0;
-    while !wait_buffer.has_min_buffer() && wait_count < 200 {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        wait_count += 1;
-        if let Some(err) = wait_buffer.error() {
-            return Err(format!("Download failed: {}", err));
-        }
-    }
-    if !wait_buffer.has_min_buffer() {
-        return Err("Timeout waiting for initial buffer".to_string());
+        tracing::warn!(
+            "Audio endpoint {} failed before streaming; trying fallback if available",
+            redact_url(url)
+        );
     }
 
-    // Discard if a newer playback request has superseded this one
-    if generation.load(Ordering::SeqCst) != expected_gen {
-        tracing::debug!("Stale fetch (streaming) discarded (gen {} != current {})", expected_gen, generation.load(Ordering::SeqCst));
-        return Ok(());
+    if is_current(generation, playback_id) {
+        let _ = events.send(AudioEvent::Error {
+            playback_id,
+            message: format!("Playback failed: {last_error}"),
+        }).await;
+    }
+}
+
+fn looks_like_html(data: &[u8]) -> bool {
+    let prefix = &data[..data.len().min(256)];
+    let lower = String::from_utf8_lossy(prefix).to_ascii_lowercase();
+    lower.contains("<!doctype html") || lower.contains("<html") || lower.contains("<head")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stop_invalidates_playback_generation() {
+        let mut player = AudioPlayer::new_without_audio();
+        let old_id = player.playback_id();
+        player.stop();
+        assert_ne!(old_id, player.playback_id());
     }
 
-    // Deliver buffer and signal ready
-    *super::lock_or_recover(pending) = Some((buffer, byte_len_hint));
-    let _ = event_tx.send(AudioEvent::BufferingReady).await;
-    Ok(())
+    #[test]
+    fn redacts_plex_token_query_parameter() {
+        let redacted = redact_url("https://example.test/audio?foo=1&X-Plex-Token=secret");
+        assert!(redacted.contains("foo=1"));
+        assert!(!redacted.contains("secret"));
+        assert!(!redacted.contains("X-Plex-Token"));
+    }
 }

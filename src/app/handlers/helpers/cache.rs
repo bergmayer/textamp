@@ -31,7 +31,7 @@ pub fn maybe_save_cache_async(event_tx: &mpsc::Sender<Event>, state: &mut AppSta
     state.cache_mgmt.last_save = std::time::Instant::now();
 
     use crate::plex::CacheData;
-    let mut cache_data = CacheData::new(&lib_key);
+    let mut cache_data = CacheData::new_scoped(&lib_key, state.active_server_id.as_deref());
     // Write per-category timestamps
     cache_data.category_timestamps = state.cache_mgmt.category_timestamps.iter()
         .map(|(cat, &ts)| (cat.cache_key().to_string(), ts))
@@ -70,6 +70,13 @@ pub fn maybe_save_cache_async(event_tx: &mpsc::Sender<Event>, state: &mut AppSta
     cache_data.album_genres = state.library.album_genres.clone();
     cache_data.moods = state.library.moods.clone();
     cache_data.styles = state.library.styles.clone();
+    cache_data.decades = state.library.decades.clone();
+    cache_data.years = state.library.years.clone();
+    cache_data.collections = state.library.collections.clone();
+    cache_data.countries = state.library.countries.clone();
+    cache_data.labels = state.library.labels.clone();
+    cache_data.formats = state.library.formats.clone();
+    cache_data.studios = state.library.studios.clone();
     // Save root column stations (not state.stations which may be drilled children)
     cache_data.stations = state.station_nav.columns.first()
         .map(|c| c.stations.clone())
@@ -93,41 +100,27 @@ pub fn maybe_save_cache_async(event_tx: &mpsc::Sender<Event>, state: &mut AppSta
     cache_data.single_artist_compilations = state.library.compilations.single_artist.clone();
 
     // Save non-smart playlist tracks to disk cache
+    let smart_playlist_keys: std::collections::HashSet<&str> = state
+        .library
+        .playlists
+        .iter()
+        .filter(|playlist| playlist.smart)
+        .map(|playlist| playlist.rating_key.as_str())
+        .collect();
     for (key, cached) in &state.playlist_tracks_cache {
-        let is_smart = state.library.playlists.iter().any(|p| p.rating_key == *key && p.smart);
-        if !is_smart {
+        if !smart_playlist_keys.contains(key.as_str()) {
             cache_data.playlist_tracks.insert(key.clone(), cached.clone());
         }
     }
 
     let event_tx = event_tx.clone();
-    tokio::spawn(async move {
+    tokio::task::spawn_blocking(move || {
         if let Some(cache) = LibraryCache::new() {
-            match serde_json::to_string(&cache_data) {
-                Ok(contents) => {
-                    let path = cache.cache_path(&lib_key);
-                    let temp_path = path.with_extension("json.tmp");
-
-                    match tokio::fs::write(&temp_path, &contents).await {
-                        Ok(_) => {
-                            if let Err(e) = tokio::fs::rename(&temp_path, &path).await {
-                                tracing::warn!("Failed to rename cache file: {}", e);
-                                let _ = tokio::fs::remove_file(&temp_path).await;
-                            } else {
-                                tracing::debug!("Cache saved (periodic): {:?}", path);
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!("Failed to write cache temp file: {}", e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to serialize cache: {}", e);
-                }
+            if cache.save_preserving_unloaded(cache_data) {
+                tracing::debug!("Cache saved (periodic) for library {}", lib_key);
             }
         }
 
-        let _ = event_tx.send(CacheEvent::CacheSaved.into()).await;
+        let _ = event_tx.blocking_send(CacheEvent::CacheSaved.into());
     });
 }

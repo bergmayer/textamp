@@ -6,6 +6,24 @@
 use crate::plex::models::Track;
 use super::state::{BrowseCategory, View};
 
+/// Cloneable, UI-safe representation of a failed background effect. Keeping
+/// the transport classification lets reducers enter degraded/offline mode
+/// without moving `reqwest::Error` values through the event bus.
+#[derive(Debug, Clone)]
+pub struct AsyncError {
+    pub message: String,
+    pub connection_error: bool,
+}
+
+impl AsyncError {
+    pub fn from_api(context: &str, error: &crate::plex::ApiError) -> Self {
+        Self {
+            message: format!("{context}: {error}"),
+            connection_error: error.is_connection_error(),
+        }
+    }
+}
+
 /// Top-level action routing — each variant maps to a dispatch handler module.
 #[derive(Debug, Clone)]
 pub enum Action {
@@ -116,12 +134,44 @@ pub enum DataAction {
 #[derive(Debug, Clone)]
 pub enum MillerAction {
     LoadArtistAlbumsForMiller { artist_key: String, replace_child: bool },
+    ArtistAlbumsForMillerLoaded {
+        request_id: u64,
+        artist_key: String,
+        replace_child: bool,
+        is_plex_artist: bool,
+        result: Result<Vec<crate::plex::models::Album>, AsyncError>,
+    },
     LoadAlbumTracksForMiller { album_key: String, replace_child: bool },
+    AlbumTracksForMillerLoaded {
+        request_id: u64,
+        album_key: String,
+        album_title: String,
+        replace_child: bool,
+        result: Result<Vec<Track>, AsyncError>,
+    },
     LoadArtistAllTracksForMiller { artist_key: String, replace_child: bool },
+    ArtistAllTracksForMillerLoaded {
+        request_id: u64,
+        replace_child: bool,
+        result: Result<Vec<Track>, AsyncError>,
+    },
     LoadAllAlbumsForMiller { replace_child: bool },
     PlayTrackFromMiller { column_index: usize, track_index: usize, single_track: bool },
     LoadGenreAlbumsForMiller { genre_key: String, replace_child: bool },
+    GenreAlbumsForMillerLoaded {
+        request_id: u64,
+        genre_name: String,
+        replace_child: bool,
+        result: Result<Vec<crate::plex::models::Album>, AsyncError>,
+    },
     LoadGenreTracksForMiller { album_key: String, replace_child: bool },
+    GenreTracksForMillerLoaded {
+        request_id: u64,
+        album_key: String,
+        album_name: String,
+        replace_child: bool,
+        result: Result<Vec<Track>, AsyncError>,
+    },
     PlayGenreTrackFromMiller { column_index: usize, track_index: usize, single_track: bool },
     LoadPlaylistTracksForMiller { playlist_key: String, replace_child: bool },
     /// Fetch the next page of a lazy-loaded playlist tracks column.
@@ -131,6 +181,12 @@ pub enum MillerAction {
     LoadMorePlaylistTracks { playlist_key: String, offset: u32 },
     PlayPlaylistTrackFromMiller { column_index: usize, track_index: usize, single_track: bool },
     RefreshAlbumTracks { album_key: String },
+    AlbumTracksRefreshed {
+        request_id: u64,
+        tag_section: bool,
+        column_index: usize,
+        result: Result<Vec<Track>, AsyncError>,
+    },
     LoadCompilationsForMiller { replace_child: bool },
     LoadCompilationAlbumsForMiller { artist_key: String, artist_name: String, replace_child: bool },
     LoadCompilationAllTracksForMiller { artist_key: String, artist_name: String, replace_child: bool },
@@ -142,6 +198,10 @@ pub enum MillerAction {
 pub enum PlaybackAction {
     TogglePlayPause,
     Stop,
+    /// Stop local audio and discard playback state without reporting to Plex.
+    /// Used while credentials/server identity are being replaced, when any
+    /// report would necessarily be sent in the wrong account context.
+    ResetForAccountChange,
     Next,
     Previous,
     Seek(u64),
@@ -150,8 +210,25 @@ pub enum PlaybackAction {
     VolumeUp,
     VolumeDown,
     ToggleMute,
-    StartPendingPlayback,
+    StartResolvedStream {
+        preparation_id: u64,
+        track_key: String,
+        url: String,
+    },
+    /// Start low-priority next-track downloads after the current stream has
+    /// built its initial PCM runway.
+    PrefetchUpcoming,
     RetryCurrentTrack,
+}
+
+#[derive(Debug, Clone)]
+pub enum QueueLoadIntent {
+    ReplaceAndPlay {
+        request_id: u64,
+        label: Option<String>,
+    },
+    Append { label: String },
+    InsertNext { label: String },
 }
 
 #[derive(Debug, Clone)]
@@ -174,12 +251,21 @@ pub enum QueueAction {
     EnqueueAlbumNext { rating_key: String, title: String },
     EnqueueArtistTracksNext { artist_key: String, artist_name: String },
     EnqueueTracksNext(Vec<Track>),
+    TracksLoaded {
+        intent: QueueLoadIntent,
+        result: Result<Vec<Track>, AsyncError>,
+    },
     ClearQueue,
     RemoveFromQueue(usize),
     ToggleQueueShuffle,
     JumpToQueueIndex(usize),
     PromptSavePlaylist,
     SaveQueueAsPlaylist(String),
+    QueuePlaylistSaved {
+        name: String,
+        track_count: usize,
+        result: Result<(), AsyncError>,
+    },
     RemixGemini,
     RemixTwofer,
     RemixStretch,
@@ -216,6 +302,9 @@ pub enum SearchAction {
     /// `text_input` (which delivers the full edited value on each edit)
     /// rather than the TUI's char-at-a-time path.
     SetListFilterQuery(String),
+    /// Debounce completion for list filtering. The timer carries only a
+    /// generation; the winning generation snapshots and filters the column.
+    RunListFilter { version: u64 },
     OpenSearchPopup,
     CloseSearchPopup,
     /// Replace the global-search query (text input handler) and
@@ -284,16 +373,33 @@ pub enum SearchAction {
 #[derive(Debug, Clone)]
 pub enum BrowseAction {
     LoadStations,
+    StationsLoaded {
+        library_key: String,
+        result: Result<Vec<crate::plex::models::Station>, AsyncError>,
+    },
     /// Load tag-list data for a tag-style section (album genres, artist
     /// genres, moods, styles, decades, years, collections, countries,
     /// labels, formats, studios). The handler maps the section to the
     /// matching Plex client method.
     LoadTagList(crate::app::state::BrowseCategory),
+    TagListLoaded {
+        library_key: String,
+        section: crate::app::state::BrowseCategory,
+        result: Result<Vec<crate::plex::models::Genre>, AsyncError>,
+    },
     /// Load albums for the currently-selected tag in the active tag
     /// section (column 0 → column 1 drill). `replace_child` mirrors
     /// the MillerAction convention: `true` for keyboard auto-drill,
     /// `false` for click / Enter / palette.
     LoadTagAlbums { replace_child: bool },
+    TagAlbumsLoaded {
+        library_key: String,
+        section: crate::app::state::BrowseCategory,
+        tag_key: String,
+        tag_title: String,
+        replace_child: bool,
+        result: Result<Vec<crate::plex::models::Album>, AsyncError>,
+    },
     /// Populate the root column of `tag_nav` with the current section's
     /// tag list. Re-run on section switch.
     RefreshTagView,
@@ -325,7 +431,20 @@ pub enum FolderAction {
     /// Enter / palette.
     NavigateIntoFolder { folder_key: String, replace_child: bool },
     PlayFolderTracks,
+    FolderTracksLoaded {
+        request_id: u64,
+        selected_key: Option<String>,
+        selected_index: usize,
+        ordered_keys: Vec<String>,
+        result: Result<Vec<Track>, AsyncError>,
+    },
     PlayFolderTrack { track_index: usize },
+    FolderTrackLoaded {
+        request_id: u64,
+        selected_key: Option<String>,
+        track_index: usize,
+        result: Result<Vec<Track>, AsyncError>,
+    },
     RefreshSubfolder(String),
 }
 
@@ -346,6 +465,8 @@ pub enum RadioAction {
 #[derive(Debug, Clone)]
 pub enum SettingsAction {
     Logout,
+    LogoutStorageFinished(Result<(), String>),
+    PersistenceFailed { operation: String, error: String },
     AuthSignIn,
     AuthSelectServer,
     OpenSettings,
@@ -357,7 +478,13 @@ pub enum SettingsAction {
     SelectLibraryOnServer(String, String),
     SaveSettings,
     ClearLibraryCache,
+    LibraryCacheCleared(Result<usize, String>),
     ClearArtworkCache,
+    ArtworkCacheCleared(usize),
+    AllCachesCleared {
+        library: Result<usize, String>,
+        artwork: usize,
+    },
     ClearSubfolderCache,
     /// Recompute on-disk cache stats (library breakdown + artwork +
     /// waveform sizes) and post the results back via CacheEvent /
@@ -376,6 +503,10 @@ pub enum SettingsAction {
     CancelAdventure,
     AdventureComplete(Vec<Track>),
     AdventureError(String),
+    AdventureGenerated {
+        request_id: u64,
+        result: Result<Vec<Track>, AsyncError>,
+    },
     ArtistRadioComplete(Vec<Track>),
     /// Toggle whether the named external-search service is offered in
     /// the palette / context menu / menu bar. Mirrors `UiConfig`'s

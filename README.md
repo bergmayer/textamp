@@ -211,7 +211,7 @@ play immediately.
 | Key | Action |
 |-----|--------|
 | `F5` | Refresh current view (updates cache) |
-| `Ctrl+Q` | Quit |
+| `Ctrl+Q` / `Ctrl+C` | Quit cleanly |
 | `Esc` | Cancel / Go back |
 
 ## Genres

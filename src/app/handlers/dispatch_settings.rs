@@ -4,16 +4,141 @@
 
 use crate::app::event::*;
 use crate::app::{Action, AppState, Event};
-use crate::app::action::SettingsAction;
+use crate::app::action::{AsyncError, SettingsAction};
 use crate::app::state::{ConnectionState, PlayStatus, PlaybackMode, QueueSortMode, SettingsSection, View};
 use crate::plex::{PlexAuth, PlexClient};
 use crate::audio::AudioPlayer;
 use crate::plex::LibraryCache;
 use crate::config::Config;
 use anyhow::Result;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use tokio::sync::mpsc;
+use zeroize::{Zeroize, Zeroizing};
 
 use super::helpers;
+
+static CONFIG_SAVE_REVISION: AtomicU64 = AtomicU64::new(1);
+static LAST_CONFIG_SAVE_REVISION: AtomicU64 = AtomicU64::new(0);
+static CONFIG_SAVE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Serialize atomic config-file replacements on a blocking worker. A monotonic
+/// revision prevents an older worker that starts late from overwriting a newer
+/// in-memory settings snapshot.
+fn save_config_in_background(
+    event_tx: &mpsc::Sender<Event>,
+    config: &Config,
+    operation: &'static str,
+) {
+    let revision = CONFIG_SAVE_REVISION.fetch_add(1, Ordering::Relaxed);
+    let snapshot = config.clone();
+    let event_tx = event_tx.clone();
+    tokio::task::spawn_blocking(move || {
+        let _guard = CONFIG_SAVE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if revision < LAST_CONFIG_SAVE_REVISION.load(Ordering::Acquire) {
+            return;
+        }
+        // Claim the revision before touching disk. If this write fails, an
+        // older snapshot must still not be allowed to "recover" by replacing
+        // the newer in-memory configuration.
+        LAST_CONFIG_SAVE_REVISION.store(revision, Ordering::Release);
+        match crate::config::save_config(&snapshot) {
+            Ok(()) => {}
+            Err(error) => {
+                let _ = event_tx.blocking_send(Event::Effect(
+                    SettingsAction::PersistenceFailed {
+                        operation: operation.to_string(),
+                        error: error.to_string(),
+                    }
+                    .into(),
+                ));
+            }
+        }
+    });
+}
+
+fn drop_in_background<T: Send + 'static>(value: T) {
+    tokio::task::spawn_blocking(move || drop(value));
+}
+
+fn reset_library_data(state: &mut AppState) {
+    let library_sub_mode = state.library.library_sub_mode;
+    let detection_request_id = state.library.compilations.detection_request_id;
+    let previous = std::mem::replace(
+        &mut state.library,
+        crate::app::state::LibraryData::default(),
+    );
+    state.library.library_sub_mode = library_sub_mode;
+    state.library.compilations.detection_request_id = detection_request_id;
+    drop_in_background(previous);
+}
+
+fn clear_folder_cache(state: &mut AppState) {
+    let previous = std::mem::take(&mut state.folder_contents_cache);
+    drop_in_background(previous);
+}
+
+fn clear_playlist_track_cache(state: &mut AppState) {
+    let previous = std::mem::take(&mut state.playlist_tracks_cache);
+    drop_in_background(previous);
+}
+
+fn apply_library_cache_clear(
+    count: usize,
+    event_tx: &mpsc::Sender<Event>,
+    state: &mut AppState,
+    client: &PlexClient,
+) {
+    // Reject every request launched from the pre-clear snapshot before
+    // starting its replacement preloads.
+    state.advance_library_generation();
+
+    reset_library_data(state);
+    let old_playlist_tracks = std::mem::take(&mut state.playlist_tracks_cache);
+    drop_in_background(old_playlist_tracks);
+    state.artist_nav = crate::app::state::BrowseNavigationState::new();
+    state.tag_nav = crate::app::state::BrowseNavigationState::new();
+    state.playlist_nav = crate::app::state::BrowseNavigationState::new();
+    state.station_nav = crate::app::state::StationNavigationState::new();
+    state.stations.clear();
+    state.station_children_cache.clear();
+    state.folder_state = None;
+    state.list_filter.deactivate();
+    state.list_state.reset();
+    state.cache_mgmt.category_timestamps.clear();
+    state.cache_mgmt.background_refresh.clear();
+    state.cache_mgmt.preloads_in_progress.clear();
+    state.cache_mgmt.dirty = true;
+    state.library_loading = true;
+
+    if let Some(lib_key) = state.active_library.clone() {
+        let lib_name = state
+            .libraries
+            .iter()
+            .find(|library| library.key == lib_key)
+            .map(|library| library.title.clone())
+            .unwrap_or_else(|| lib_key.clone());
+        helpers::preload_all_library_data(event_tx, &lib_key, &lib_name, client, state);
+    }
+
+    state.library_cache_stats = Some((0, vec![]));
+    state.set_status(format!(
+        "Cleared {} library cache files, reloading...",
+        count
+    ));
+}
+
+fn apply_artwork_cache_clear(count: usize, state: &mut AppState) {
+    state.artwork.clear_grid_art();
+    state.artwork.grid_pending.clear();
+    state.artwork.current_data = None;
+    state.artwork.pending_thumb = None;
+    state.artwork.loading = false;
+    state.artwork.cache_stats = Some((0, 0));
+    state.set_status(format!("Cleared {} artwork cache files", count));
+}
 
 /// Dispatch settings/auth/adventure actions. Returns follow-up actions.
 pub async fn dispatch(
@@ -28,23 +153,19 @@ pub async fn dispatch(
 
     match action {
         SettingsAction::Logout => {
+            let logout_storage_epoch = PlexAuth::begin_account_storage_epoch();
+            state.advance_library_generation();
+            reset_library_data(state);
+            let marker_username = match &state.connection {
+                ConnectionState::Connected { username, .. }
+                | ConnectionState::Degraded { username, .. } => Some(username.clone()),
+                _ => None,
+            };
             // Record which account the on-disk cache belongs to so a
             // future sign-in with the same account (within 30 days)
             // can skip a full re-fetch. Written BEFORE we delete the
-            // auth token because the token is the source of the
-            // username we want to remember.
-            if let Some(stored) = PlexAuth::load_token() {
-                if let Some(username) = stored.username.as_deref() {
-                    if let Err(e) = PlexAuth::save_account_marker(username) {
-                        tracing::warn!("Failed to save account marker on logout: {}", e);
-                    }
-                }
-            }
-
-            // Clear auth token (signs the user out).
-            if let Err(e) = PlexAuth::delete_token() {
-                tracing::warn!("Failed to delete auth token: {}", e);
-            }
+            // auth token. Disk work is deferred until after local playback and
+            // account state have been invalidated.
 
             // Cache files on disk are intentionally preserved here.
             // The next sign-in compares the account marker and either
@@ -54,6 +175,7 @@ pub async fn dispatch(
 
             // Reset connection and display state
             state.connection = ConnectionState::Disconnected;
+            client.clear_session();
             state.active_library = None;
             state.libraries.clear();
             state.available_servers.clear();
@@ -83,12 +205,14 @@ pub async fn dispatch(
             state.library.compilations.artist_map.clear();
             state.library.compilations.single_artist.clear();
             state.library.compilations.detected = false;
+            state.library.compilations.detecting = false;
+            state.library.compilations.detection_request_id = state.library.compilations.detection_request_id.wrapping_add(1);
 
             state.library.selected_artist_albums.clear();
             state.library.selected_album_tracks.clear();
             state.library.tag_albums.clear();
             state.folder_state = None;
-            state.folder_contents_cache.clear();
+            clear_folder_cache(state);
             state.subfolder_preload_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
             state.subfolder_preload_active = false;
 
@@ -108,14 +232,15 @@ pub async fn dispatch(
             state.cache_mgmt.preloads_in_progress.clear();
             state.cache_mgmt.preloads_total = 0;
             state.plex_session_id = None;
-            state.artwork.grid_cache.clear();
+            state.artwork.clear_grid_art();
             state.artwork.grid_pending.clear();
             state.waveform = Default::default();
             state.search.results = None;
-            state.playlist_tracks_cache.clear();
+            clear_playlist_track_cache(state);
 
             // Stop playback and flush track cache
             audio.stop();
+            state.playback.request_id = audio.playback_id();
             audio.track_cache.flush();
             state.playback.status = PlayStatus::Stopped;
 
@@ -124,37 +249,86 @@ pub async fn dispatch(
             config.libraries.default_library = None;
             config.libraries.selected_server = None;
             config.general.default_library = None;
-            if let Err(e) = crate::config::save_config(config) {
-                tracing::warn!("Failed to save config after logout: {}", e);
-            }
+            save_config_in_background(event_tx, config, "save configuration after logout");
 
             // Send the user straight to the sign-in form. Without
             // this they're stranded on whatever view they triggered
             // logout from (typically a Settings popup that's now
             // showing "Not signed in") with no obvious way back.
             state.view = View::Auth;
-            state.auth_state.step = crate::app::state::AuthStep::Login;
+            // Keep the login form inert until token deletion has completed;
+            // otherwise a very fast new sign-in can save a token just before
+            // the logout worker deletes it.
+            state.auth_state.step = crate::app::state::AuthStep::Authenticating;
             state.auth_state.error_message = None;
 
-            state.set_status("Signed out.".to_string());
+            state.set_status("Signing out...".to_string());
+            let event_tx = event_tx.clone();
+            tokio::task::spawn_blocking(move || {
+                let result = PlexAuth::with_account_storage_epoch(
+                    logout_storage_epoch,
+                    || {
+                        let mut errors = Vec::new();
+                        if let Some(username) = marker_username {
+                            if let Err(error) = PlexAuth::save_account_marker(&username) {
+                                errors.push(format!("save account marker: {error}"));
+                            }
+                        }
+                        if let Err(error) = PlexAuth::delete_token() {
+                            errors.push(format!("delete auth token: {error}"));
+                        }
+                        if errors.is_empty() {
+                            Ok(())
+                        } else {
+                            Err(errors.join("; "))
+                        }
+                    }
+                ).unwrap_or(Ok(()));
+                let _ = event_tx.blocking_send(Event::Effect(
+                    SettingsAction::LogoutStorageFinished(result).into(),
+                ));
+            });
+        }
+        SettingsAction::LogoutStorageFinished(result) => {
+            state.auth_state.step = crate::app::state::AuthStep::Login;
+            match result {
+                Ok(()) => state.set_status("Signed out.".to_string()),
+                Err(error) => state.set_error(format!(
+                    "Signed out locally, but credential cleanup failed: {error}"
+                )),
+            }
+        }
+        SettingsAction::PersistenceFailed { operation, error } => {
+            state.set_error(format!("Failed to {operation}: {error}"));
         }
         SettingsAction::AuthSignIn => {
             use crate::app::state::AuthStep;
             // Authenticate with username/password entered in auth screen login form
             let username = state.auth_state.username_input.clone();
-            let password = state.auth_state.password_input.clone();
 
-            if username.is_empty() || password.is_empty() {
+            if username.is_empty() || state.auth_state.password_input.is_empty() {
                 state.auth_state.error_message = Some("Please enter username and password".to_string());
             } else {
+                // Move rather than clone the secret. The authentication task is
+                // its sole owner and zeroizes it immediately after the request.
+                let password = Zeroizing::new(state.auth_state.password_input.take());
                 state.auth_state.step = AuthStep::Authenticating;
                 state.auth_state.error_message = None;
                 let event_tx = event_tx.clone();
 
                 tokio::spawn(async move {
-                    let auth = PlexAuth::new();
+                    let auth = match PlexAuth::new() {
+                        Ok(auth) => auth,
+                        Err(error) => {
+                            let _ = event_tx.send(AuthEvent::AuthLoginFailed(
+                                format!("Cannot initialize HTTP client: {}", error)
+                            ).into()).await;
+                            return;
+                        }
+                    };
 
-                    match auth.authenticate_password(&username, &password).await {
+                    let authentication = auth.authenticate_password(&username, &password).await;
+                    match authentication {
                         Ok(token) => {
                             // Verify token and get user info
                             match auth.verify_token(&token).await {
@@ -162,18 +336,26 @@ pub async fn dispatch(
                                     // Get client_identifier BEFORE saving (save_token consumes it)
                                     let client_id = auth.client_identifier().to_string();
 
-                                    // Save token (not password!)
-                                    if let Err(e) = auth.save_token(&token, Some(&user)) {
-                                        tracing::warn!("Failed to save token: {}", e);
-                                    }
-
                                     // Get servers
                                     let servers = auth.get_servers(&token).await.unwrap_or_default();
+
+                                    // Credential serialization and atomic file replacement are
+                                    // blocking. Complete them off the runtime before exposing the
+                                    // authenticated session to the reducer.
+                                    let save_token = token.clone();
+                                    let save_user = user.clone();
+                                    match tokio::task::spawn_blocking(move || {
+                                        auth.save_token(&save_token, Some(&save_user))
+                                    }).await {
+                                        Ok(Ok(())) => {}
+                                        Ok(Err(error)) => tracing::warn!("Failed to save token: {}", error),
+                                        Err(error) => tracing::warn!("Token-save worker failed: {}", error),
+                                    }
 
                                     // Send servers ready event (will auto-select or show selection)
                                     let has_plex_pass = user.has_plex_pass();
                                     let _ = event_tx.send(AuthEvent::AuthServersReady {
-                                        token,
+                                        token: token.into(),
                                         username: user.username,
                                         servers,
                                         client_identifier: client_id,
@@ -197,7 +379,7 @@ pub async fn dispatch(
                 });
 
                 // Clear password from memory immediately
-                state.auth_state.password_input.clear();
+                state.auth_state.password_input.zeroize();
             }
         }
         SettingsAction::AuthSelectServer => {
@@ -219,10 +401,12 @@ pub async fn dispatch(
                     let has_plex_pass = state.auth_state.has_plex_pass;
                     tokio::spawn(async move {
                         if let Some(url) = helpers::find_working_connection(&server_clone, &token, &client_id).await {
+                            let server_identifier = Some(server_clone.client_identifier.clone());
                             let _ = event_tx.send(AuthEvent::AuthSuccess {
-                                token,
+                                token: token.into(),
                                 username,
                                 server_url: url,
+                                server_identifier,
                                 servers,
                                 client_identifier: client_id,
                                 has_plex_pass,
@@ -257,27 +441,51 @@ pub async fn dispatch(
             // cache file hadn't been written yet).
             follow_ups.push(SettingsAction::RefreshCacheStats.into());
 
-            // Get username from connection state first (most reliable), then StoredAuth, then config
+            // Get username from live state first, then config. Opening a view
+            // must not synchronously read the credential file.
             state.settings_state.username_input = match &state.connection {
-                ConnectionState::Connected { username, .. } => username.clone(),
-                _ => PlexAuth::load_token()
-                    .and_then(|s| s.username)
-                    .or_else(|| config.plex.username.clone())
+                ConnectionState::Connected { username, .. }
+                | ConnectionState::Degraded { username, .. } => username.clone(),
+                _ => config.plex.username.clone()
                     .unwrap_or_default(),
             };
 
             // Password field no longer used - token-based auth only
-            state.settings_state.password_input = String::new();
+            state.settings_state.password_input.zeroize();
             state.settings_state.editing_credential = None;
 
             // If servers list is empty but we're connected, trigger discovery
             if state.available_servers.is_empty() {
-                // Use stored auth to get the correct client_identifier
-                if let Some(stored) = PlexAuth::load_token() {
+                if let Some(token) = client.token().map(str::to_owned) {
+                    let stored = crate::plex::StoredAuth {
+                        token: token.into(),
+                        user_id: None,
+                        username: Some(state.settings_state.username_input.clone()),
+                        client_identifier: client.client_identifier().to_string(),
+                        server_url: client.server_url().map(str::to_owned),
+                        server_identifier: state.active_server_id.clone(),
+                        server_name: state.active_server_name().map(str::to_owned),
+                        has_plex_pass: matches!(
+                            &state.connection,
+                            ConnectionState::Connected { has_plex_pass: true, .. }
+                                | ConnectionState::Degraded { has_plex_pass: true, .. }
+                        ),
+                    };
                     state.settings_state.discovering_servers = true;
-                    let event_tx = event_tx.clone();
+                    let event_tx = LibraryEventSender::new(
+                        event_tx.clone(),
+                        state.library_generation,
+                    );
                     tokio::spawn(async move {
-                        let auth = PlexAuth::from_stored_auth(&stored);
+                        let auth = match PlexAuth::from_stored_auth(&stored) {
+                            Ok(auth) => auth,
+                            Err(error) => {
+                                let _ = event_tx.send(
+                                    AuthEvent::ServerDiscoveryFailed(error.to_string()).into()
+                                ).await;
+                                return;
+                            }
+                        };
                         match auth.get_servers(&stored.token).await {
                             Ok(servers) => {
                                 let _ = event_tx.send(AuthEvent::ServersDiscovered(servers).into()).await;
@@ -293,17 +501,13 @@ pub async fn dispatch(
         SettingsAction::SaveCredentials => {
             // Save username to config file (for display purposes only)
             // Authentication is handled via stored tokens, not passwords
-            let mut updated_config = config.clone();
-            updated_config.plex.username = if state.settings_state.username_input.is_empty() {
+            config.plex.username = if state.settings_state.username_input.is_empty() {
                 None
             } else {
                 Some(state.settings_state.username_input.clone())
             };
-            if let Err(e) = crate::config::save_config(&updated_config) {
-                state.set_error(format!("Failed to save: {}", e));
-            } else {
-                state.set_status("Username saved.".to_string());
-            }
+            save_config_in_background(event_tx, config, "save username");
+            state.set_status("Username saved.".to_string());
         }
         SettingsAction::SettingsSelect => {
             match state.settings_state.section {
@@ -316,7 +520,7 @@ pub async fn dispatch(
                             tracing::info!("Selected server: {}", server.name);
                             follow_ups.push(SettingsAction::SelectServer(server_id).into());
                         }
-                    } else if matches!(state.connection, ConnectionState::Connected { .. }) {
+                    } else if state.connection.is_authenticated() {
                         use crate::app::state::{ConfirmDialog, ConfirmAction};
                         let lib_count = state.libraries.len();
                         let idx = state.settings_state.item_index;
@@ -390,9 +594,7 @@ pub async fn dispatch(
                             state.set_status(format!("Theme: {}", state.theme.display_name()));
 
                             config.ui.theme = state.theme.config_name().to_string();
-                            if let Err(e) = crate::config::save_config(config) {
-                                tracing::warn!("Failed to save theme preference: {}", e);
-                            }
+                            save_config_in_background(event_tx, config, "save theme preference");
                         }
                     } else if idx >= theme_count && idx < output_offset {
                         // Select artwork mode
@@ -423,9 +625,7 @@ pub async fn dispatch(
                             state.set_status(format!("Artwork: {}", mode.name()));
 
                             config.ui.artwork_mode = mode.name().to_string();
-                            if let Err(e) = crate::config::save_config(config) {
-                                tracing::warn!("Failed to save artwork_mode preference: {}", e);
-                            }
+                            save_config_in_background(event_tx, config, "save artwork preference");
                         }
                     } else if idx == output_offset {
                         // Local output
@@ -463,9 +663,7 @@ pub async fn dispatch(
 
                         // Save to config
                         config.playback.transcode_kbps = next;
-                        if let Err(e) = crate::config::save_config(config) {
-                            tracing::warn!("Failed to save transcode setting: {}", e);
-                        }
+                        save_config_in_background(event_tx, config, "save transcode preference");
 
                         if next == 0 {
                             state.set_status("Streaming: original (direct play)".to_string());
@@ -503,21 +701,30 @@ pub async fn dispatch(
         SettingsAction::SettingsSignIn => {
             // Authenticate with username/password entered in settings
             let username = state.settings_state.username_input.clone();
-            let password = state.settings_state.password_input.clone();
 
-            if username.is_empty() || password.is_empty() {
+            if username.is_empty() || state.settings_state.password_input.is_empty() {
                 state.set_error("Please enter username and password".to_string());
             } else if state.settings_state.discovering_servers {
                 // Already signing in
             } else {
+                let password = Zeroizing::new(state.settings_state.password_input.take());
                 state.settings_state.discovering_servers = true;
                 let event_tx = event_tx.clone();
                 let server_url = config.plex.server_url.clone();
 
                 tokio::spawn(async move {
-                    let auth = PlexAuth::new();
+                    let auth = match PlexAuth::new() {
+                        Ok(auth) => auth,
+                        Err(error) => {
+                            let _ = event_tx.send(AuthEvent::AuthLoginFailed(
+                                format!("Cannot initialize HTTP client: {}", error)
+                            ).into()).await;
+                            return;
+                        }
+                    };
 
-                    match auth.authenticate_password(&username, &password).await {
+                    let authentication = auth.authenticate_password(&username, &password).await;
+                    match authentication {
                         Ok(token) => {
                             // Verify token and get user info
                             match auth.verify_token(&token).await {
@@ -525,19 +732,24 @@ pub async fn dispatch(
                                     // Get client_identifier BEFORE saving
                                     let client_id = auth.client_identifier().to_string();
 
-                                    // Save token (not password!)
-                                    if let Err(e) = auth.save_token(&token, Some(&user)) {
-                                        tracing::warn!("Failed to save token: {}", e);
-                                    }
-
                                     // Get servers
                                     let servers = auth.get_servers(&token).await.unwrap_or_default();
+
+                                    let save_token = token.clone();
+                                    let save_user = user.clone();
+                                    match tokio::task::spawn_blocking(move || {
+                                        auth.save_token(&save_token, Some(&save_user))
+                                    }).await {
+                                        Ok(Ok(())) => {}
+                                        Ok(Err(error)) => tracing::warn!("Failed to save token: {}", error),
+                                        Err(error) => tracing::warn!("Token-save worker failed: {}", error),
+                                    }
 
                                     // Multiple servers and no configured URL: show server selection
                                     if server_url.is_empty() && servers.len() > 1 {
                                         let has_plex_pass = user.has_plex_pass();
                                         let _ = event_tx.send(AuthEvent::AuthServersReady {
-                                            token,
+                                            token: token.into(),
                                             username: user.username,
                                             servers,
                                             client_identifier: client_id,
@@ -547,25 +759,50 @@ pub async fn dispatch(
                                     }
 
                                     // Single server or configured URL: connect directly
-                                    let final_url = if server_url.is_empty() {
-                                        helpers::find_working_connection_from_servers(&servers, &token, &client_id).await
-                                    } else {
+                                    let final_url = if !server_url.is_empty()
+                                        && crate::plex::test_connection(
+                                            &server_url,
+                                            &token,
+                                            &client_id,
+                                        ).await.is_ok()
+                                    {
                                         Some(server_url)
+                                    } else {
+                                        helpers::find_working_connection_from_servers(
+                                            &servers,
+                                            &token,
+                                            &client_id,
+                                        ).await
                                     };
 
                                     if let Some(url) = final_url {
                                         let has_plex_pass = user.has_plex_pass();
+                                        let server_identifier = servers
+                                            .iter()
+                                            .find(|server| {
+                                                server.connections.iter().any(|connection| connection.uri == url)
+                                            })
+                                            .map(|server| server.client_identifier.clone());
                                         let _ = event_tx.send(AuthEvent::AuthSuccess {
-                                            token,
+                                            token: token.into(),
                                             username: user.username,
                                             server_url: url,
+                                            server_identifier,
                                             servers,
                                             client_identifier: client_id,
                                             has_plex_pass,
                                         }.into()).await;
                                     } else {
-                                        // No working server connection available
-                                        let _ = event_tx.send(AuthEvent::ServersDiscovered(servers).into()).await;
+                                        // Preserve the pending credential context and let the
+                                        // normal server-selection reducer show the choices.
+                                        let has_plex_pass = user.has_plex_pass();
+                                        let _ = event_tx.send(AuthEvent::AuthServersReady {
+                                            token: token.into(),
+                                            username: user.username,
+                                            servers,
+                                            client_identifier: client_id,
+                                            has_plex_pass,
+                                        }.into()).await;
                                     }
                                 }
                                 Err(e) => {
@@ -584,31 +821,41 @@ pub async fn dispatch(
                 });
 
                 // Clear password immediately from memory (don't store it)
-                state.settings_state.password_input.clear();
+                state.settings_state.password_input.zeroize();
             }
         }
         SettingsAction::SelectServer(server_id) => {
-            // Find server and try to connect
+            // Complete a settings-screen sign-in. This must flow through
+            // AuthSuccess rather than merely replacing PlexClient::server_url;
+            // the latter would retain the prior account's state and connection
+            // identity under the newly installed token.
             if let Some(server) = state.available_servers.iter().find(|s| s.client_identifier == server_id) {
-                // Get token for connection testing
                 let token = client.token().map(|s| s.to_string());
 
                 if let Some(token) = token {
                     let server_clone = server.clone();
                     let event_tx = event_tx.clone();
                     let client_id = client.client_identifier().to_string();
+                    let username = state.settings_state.username_input.clone();
+                    let servers = state.available_servers.clone();
+                    let has_plex_pass = state.auth_state.has_plex_pass;
 
-                    // Find working connection URL (tests connectivity)
                     tokio::spawn(async move {
                         if let Some(url) = helpers::find_working_connection(&server_clone, &token, &client_id).await {
-                            let _ = event_tx.send(AuthEvent::ServerConnectionSucceeded {
-                                server_name: server_clone.name.clone(),
-                                url,
+                            let _ = event_tx.send(AuthEvent::AuthSuccess {
+                                token: token.into(),
+                                username,
+                                server_url: url,
+                                server_identifier: Some(server_clone.client_identifier),
+                                servers,
+                                client_identifier: client_id,
+                                has_plex_pass,
                             }.into()).await;
                         } else {
-                            let _ = event_tx.send(AuthEvent::ServerConnectionFailed {
-                                server_name: server_clone.name.clone(),
-                            }.into()).await;
+                            let _ = event_tx.send(AuthEvent::AuthFailed(format!(
+                                "Could not connect to {} - all connections failed",
+                                server_clone.name,
+                            )).into()).await;
                         }
                     });
 
@@ -621,6 +868,8 @@ pub async fn dispatch(
         SettingsAction::SelectLibrary(lib_key) => {
             // Switch to the selected library
             if state.active_library.as_ref() != Some(&lib_key) {
+                state.advance_library_generation();
+                reset_library_data(state);
                 state.active_library = Some(lib_key.clone());
                 state.keep_subfolder_cache = config.libraries.per_library
                     .get(lib_key.as_str())
@@ -636,6 +885,13 @@ pub async fn dispatch(
                 state.library.album_genres.clear();
                 state.library.moods.clear();
                 state.library.styles.clear();
+                state.library.decades.clear();
+                state.library.years.clear();
+                state.library.collections.clear();
+                state.library.countries.clear();
+                state.library.labels.clear();
+                state.library.formats.clear();
+                state.library.studios.clear();
                 state.stations.clear();
                 state.library.all_tracks.clear();
                 state.library.track_artists.clear();
@@ -644,15 +900,24 @@ pub async fn dispatch(
                 state.library.compilations.albums.clear();
                 state.library.compilations.artist_keys.clear();
                 state.library.compilations.track_artist_keys.clear();
+                state.library.compilations.artist_map.clear();
+                state.library.compilations.single_artist.clear();
                 state.library.compilations.detected = false;
+                state.library.compilations.detecting = false;
+                state.library.compilations.detection_request_id = state.library.compilations.detection_request_id.wrapping_add(1);
 
                 state.library.selected_artist_albums.clear();
                 state.library.selected_album_tracks.clear();
+                state.library.tag_albums.clear();
                 state.folder_state = None;
-                state.folder_contents_cache.clear();
+                clear_folder_cache(state);
                 state.subfolder_preload_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
                 state.subfolder_preload_active = false;
-                state.playlist_tracks_cache.clear();
+                clear_playlist_track_cache(state);
+                state.search.results = None;
+                state.similar = crate::app::state::SimilarViewState::default();
+                state.related = crate::app::state::RelatedViewState::default();
+                state.list_filter.deactivate();
                 state.list_state.reset();
 
                 // Clear cache timestamps (old library's values must not leak to new library)
@@ -679,21 +944,25 @@ pub async fn dispatch(
                 if let crate::app::state::OutputTarget::Remote { ref player_id, ref player_uri, .. } = state.remote.output_target {
                     let target_id = player_id.clone();
                     let p_uri = player_uri.clone();
-                    let token = client.token().map(|s| s.to_string()).unwrap_or_default();
+                    let token = client.shared_token_or_empty();
                     let client_id = client.client_identifier().to_string();
                     let server_url = client.server_url().unwrap_or("").to_string();
-                    let machine_id = state.available_servers.first()
-                        .map(|s| s.client_identifier.clone()).unwrap_or_default();
+                    let machine_id = state.active_server_id.clone()
+                        .or_else(|| state.available_servers.first()
+                            .map(|server| server.client_identifier.clone()))
+                        .unwrap_or_default();
                     tokio::spawn(async move {
-                        let rc = crate::plex::RemotePlayerClient::new(
+                        if let Ok(rc) = crate::plex::RemotePlayerClient::new(
                             token, client_id, target_id, server_url, machine_id, p_uri,
-                        );
-                        let _ = rc.stop().await;
+                        ) {
+                            let _ = rc.stop().await;
+                        }
                     });
                 }
 
                 // Stop playback, flush track cache, and clear queue (tracks belong to the old library)
                 audio.stop();
+                state.playback.request_id = audio.playback_id();
                 audio.track_cache.flush();
                 state.playback.status = PlayStatus::Stopped;
                 state.playback.position_ms = 0;
@@ -711,6 +980,7 @@ pub async fn dispatch(
                 state.artwork.current_thumb = None;
                 state.artwork.current_data = None;
                 state.artwork.loading = false;
+                state.artwork.pending_thumb = None;
 
                 // Find library name for status message
                 let lib_name = state.libraries.iter()
@@ -723,19 +993,25 @@ pub async fn dispatch(
 
                 let tx = event_tx.clone();
                 let bg_lib_key = lib_key.clone();
+                let cache_generation = state.library_generation;
+                let cache_server_id = state.active_server_id.clone();
                 tokio::task::spawn_blocking(move || {
-                    let result = LibraryCache::new().and_then(|cache| cache.load(&bg_lib_key));
+                    let result = LibraryCache::new().and_then(|cache| {
+                        cache.load_scoped(cache_server_id.as_deref(), &bg_lib_key)
+                    });
                     match result {
                         Some(cached) => {
-                            let _ = tx.blocking_send(PreloadEvent::LibraryCacheLoaded {
+                            let event = PreloadEvent::LibraryCacheLoaded {
                                 library_key: bg_lib_key,
                                 cached: Box::new(cached),
-                            }.into());
+                            };
+                            let _ = tx.blocking_send(Event::for_library(cache_generation, event));
                         }
                         None => {
-                            let _ = tx.blocking_send(PreloadEvent::LibraryCacheLoadFailed {
+                            let event = PreloadEvent::LibraryCacheLoadFailed {
                                 library_key: bg_lib_key,
-                            }.into());
+                            };
+                            let _ = tx.blocking_send(Event::for_library(cache_generation, event));
                         }
                     }
                 });
@@ -756,6 +1032,8 @@ pub async fn dispatch(
                 let token = client.token().map(|s| s.to_string());
 
                 if let Some(token) = token {
+                    state.advance_library_generation();
+                    reset_library_data(state);
                     // Clear all current data (same as SelectLibrary but more thorough)
                     state.library.artists.clear();
                     state.library.albums.clear();
@@ -765,21 +1043,39 @@ pub async fn dispatch(
                     state.library.album_genres.clear();
                     state.library.moods.clear();
                     state.library.styles.clear();
+                    state.library.decades.clear();
+                    state.library.years.clear();
+                    state.library.collections.clear();
+                    state.library.countries.clear();
+                    state.library.labels.clear();
+                    state.library.formats.clear();
+                    state.library.studios.clear();
                     state.stations.clear();
                     state.library.all_tracks.clear();
                     state.library.track_artists.clear();
+                    state.library.artist_aliases.clear();
+                    state.library.album_display_artist.clear();
                     state.library.compilations.albums.clear();
                     state.library.compilations.artist_keys.clear();
                     state.library.compilations.track_artist_keys.clear();
+                    state.library.compilations.artist_map.clear();
+                    state.library.compilations.single_artist.clear();
                     state.library.compilations.detected = false;
+                    state.library.compilations.detecting = false;
+                    state.library.compilations.detection_request_id = state.library.compilations.detection_request_id.wrapping_add(1);
 
                     state.library.selected_artist_albums.clear();
                     state.library.selected_album_tracks.clear();
+                    state.library.tag_albums.clear();
                     state.folder_state = None;
-                    state.folder_contents_cache.clear();
+                    clear_folder_cache(state);
                     state.subfolder_preload_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
                     state.subfolder_preload_active = false;
-                    state.playlist_tracks_cache.clear();
+                    clear_playlist_track_cache(state);
+                    state.search.results = None;
+                    state.similar = crate::app::state::SimilarViewState::default();
+                    state.related = crate::app::state::RelatedViewState::default();
+                    state.list_filter.deactivate();
                     state.list_state.reset();
                     state.cache_mgmt.category_timestamps.clear();
                     state.cache_mgmt.dirty = false;
@@ -787,6 +1083,12 @@ pub async fn dispatch(
                     state.tag_nav = crate::app::state::BrowseNavigationState::new();
                     state.playlist_nav = crate::app::state::BrowseNavigationState::new();
                     state.station_nav = crate::app::state::StationNavigationState::new();
+                    state.artwork.current_thumb = None;
+                    state.artwork.current_data = None;
+                    state.artwork.pending_thumb = None;
+                    state.artwork.loading = false;
+                    state.artwork.grid_pending.clear();
+                    state.artwork.clear_grid_art();
 
                     // Stop playback
                     if state.playback.status != PlayStatus::Stopped {
@@ -798,6 +1100,7 @@ pub async fn dispatch(
                         }
                     }
                     audio.stop();
+                    state.playback.request_id = audio.playback_id();
                     audio.track_cache.flush();
                     state.playback.status = PlayStatus::Stopped;
                     state.playback.position_ms = 0;
@@ -815,30 +1118,45 @@ pub async fn dispatch(
 
                     let client_id = client.client_identifier().to_string();
                     let event_tx = event_tx.clone();
-                    let server_id_clone = server_id.clone();
                     let spawn_server_name = server_name.clone();
+                    let library_generation = state.library_generation;
 
                     tokio::spawn(async move {
                         if let Some(url) = helpers::find_working_connection(&server, &token, &client_id).await {
-                            let _ = event_tx.send(AuthEvent::ServerConnectionSucceeded {
+                            let event = AuthEvent::ServerConnectionSucceeded {
                                 server_name: spawn_server_name.clone(),
                                 url: url.clone(),
-                            }.into()).await;
+                            };
+                            let _ = event_tx
+                                .send(Event::for_library(library_generation, event))
+                                .await;
 
                             // Now load libraries from this server
-                            let new_client = crate::plex::PlexClient::new_with_url(&url, Some(&token), &client_id);
-                            match new_client.get_libraries().await {
-                                Ok(libs) => {
-                                    let _ = event_tx.send(DataEvent::LibrariesLoaded(libs).into()).await;
-                                }
-                                Err(e) => {
-                                    tracing::error!("Failed to load libraries from {}: {}", spawn_server_name, e);
-                                }
-                            }
+                            let libraries = match crate::plex::PlexClient::new_with_url(
+                                &url,
+                                Some(&token),
+                                &client_id,
+                            ) {
+                                Ok(new_client) => new_client.get_libraries().await,
+                                Err(error) => Err(error),
+                            };
+                            let result = libraries.map_err(|error| {
+                                AsyncError::from_api("Failed to load libraries", &error)
+                            });
+                            let event = DataEvent::LibrariesLoaded {
+                                    server_url: Some(url),
+                                    result,
+                                };
+                            let _ = event_tx
+                                .send(Event::for_library(library_generation, event))
+                                .await;
                         } else {
-                            let _ = event_tx.send(AuthEvent::ServerConnectionFailed {
+                            let event = AuthEvent::ServerConnectionFailed {
                                 server_name: spawn_server_name,
-                            }.into()).await;
+                            };
+                            let _ = event_tx
+                                .send(Event::for_library(library_generation, event))
+                                .await;
                         }
                     });
 
@@ -850,97 +1168,63 @@ pub async fn dispatch(
                         .map(|s| s.keep_subfolder_cache)
                         .unwrap_or(false);
 
-                    // Persist the new server info
-                    let server_info = crate::plex::ServerInfo {
-                        url: String::new(), // Will be updated by ServerConnectionSucceeded
-                        identifier: server_id_clone,
-                        name: server_name.clone(),
-                    };
-                    if let Err(e) = PlexAuth::update_server_info(&server_info) {
-                        tracing::warn!("Failed to persist server info: {}", e);
-                    }
+                    // ServerConnectionSucceeded persists the verified URL.
                 }
             } else {
                 state.set_error("Server not found".to_string());
             }
         }
         SettingsAction::SaveSettings => {
-            // Build updated config from current state
-            let mut updated_config = config.clone();
-            updated_config.libraries.default_library = state.active_library.clone();
-
-            // Save config to disk
-            if let Err(e) = crate::config::save_config(&updated_config) {
-                state.set_error(format!("Failed to save settings: {}", e));
-            } else {
-                tracing::debug!("Settings saved");
-            }
+            config.libraries.default_library = state.active_library.clone();
+            save_config_in_background(event_tx, config, "save library selection");
         }
         SettingsAction::ClearLibraryCache => {
-            // Clear main library cache files and in-memory data (but not subfolders or artwork)
-            if let Some(cache) = LibraryCache::new() {
-                match cache.clear_all() {
-                    Ok(count) => {
-                        tracing::info!("Cleared {} library cache files", count);
-
-                        // Clear in-memory library data
-                        state.library.artists.clear();
-                        state.library.albums.clear();
-                        state.library.playlists.clear();
-                        state.library.album_genres.clear();
-                        state.library.artist_genres.clear();
-                        state.library.album_genres.clear();
-                        state.library.moods.clear();
-                        state.library.styles.clear();
-                        state.stations.clear();
-                        state.library.all_tracks.clear();
-                        state.library.track_artists.clear();
-                        state.library.compilations.albums.clear();
-                        state.library.compilations.artist_keys.clear();
-                        state.library.compilations.track_artist_keys.clear();
-                        state.library.compilations.detected = false;
-
-                        state.playlist_tracks_cache.clear();
-                        state.cache_mgmt.category_timestamps.clear();
-                        state.cache_mgmt.dirty = true;
-
-                        // Reload from API
-                        if let Some(lib_key) = &state.active_library {
-                            let lib_key = lib_key.clone();
-                            let lib_name = state.libraries.iter()
-                                .find(|l| l.key == lib_key)
-                                .map(|l| l.title.clone())
-                                .unwrap_or_else(|| lib_key.clone());
-                            helpers::preload_all_library_data(event_tx, &lib_key, &lib_name, client, state);
-                        }
-
-                        state.library_cache_stats = Some((0, vec![]));
-
-                        state.set_status(format!("Cleared {} library cache files, reloading...", count));
-                    }
-                    Err(e) => {
-                        state.set_error(format!("Failed to clear library cache: {}", e));
-                    }
-                }
-            } else {
-                state.set_error("Cache not available".to_string());
-            }
+            state.set_status("Clearing library cache...".to_string());
+            let tx = event_tx.clone();
+            tokio::task::spawn_blocking(move || {
+                let result = LibraryCache::new()
+                    .ok_or_else(|| "Cache not available".to_string())
+                    .and_then(|cache| cache.clear_all().map_err(|error| error.to_string()));
+                let _ = tx.blocking_send(Event::Effect(
+                    SettingsAction::LibraryCacheCleared(result).into(),
+                ));
+            });
         }
+        SettingsAction::LibraryCacheCleared(result) => match result {
+            Ok(count) => {
+                tracing::info!("Cleared {} library cache files", count);
+                apply_library_cache_clear(count, event_tx, state, client);
+            }
+            Err(error) => state.set_error(format!("Failed to clear library cache: {error}")),
+        },
         SettingsAction::ClearArtworkCache => {
-            let artwork_cache = crate::plex::ArtworkCache::default();
-            let removed = artwork_cache.clear_all();
+            state.set_status("Clearing artwork cache...".to_string());
+            let tx = event_tx.clone();
+            tokio::task::spawn_blocking(move || {
+                let removed = crate::plex::ArtworkCache::default().clear_all();
+                let _ = tx.blocking_send(Event::Effect(
+                    SettingsAction::ArtworkCacheCleared(removed).into(),
+                ));
+            });
+        }
+        SettingsAction::ArtworkCacheCleared(removed) => {
             tracing::info!("Cleared {} artwork cache files", removed);
-
-            // Clear in-memory artwork
-            state.artwork.grid_cache.clear();
-            state.artwork.grid_pending.clear();
-            state.artwork.cache_stats = Some((0, 0));
-
-            state.set_status(format!("Cleared {} artwork cache files", removed));
+            apply_artwork_cache_clear(removed, state);
+        }
+        SettingsAction::AllCachesCleared { library, artwork } => {
+            match library {
+                Ok(count) => apply_library_cache_clear(count, event_tx, state, client),
+                Err(error) => {
+                    state.set_error(format!("Failed to clear library cache: {error}"));
+                }
+            }
+            apply_artwork_cache_clear(artwork, state);
+            follow_ups.push(SettingsAction::RefreshCacheStats.into());
+            state.set_status("Caches cleared; reloading library...".to_string());
         }
         SettingsAction::ClearSubfolderCache => {
             let count = state.folder_contents_cache.len();
-            state.folder_contents_cache.clear();
+            clear_folder_cache(state);
             state.subfolder_preload_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
             state.subfolder_preload_active = false;
             state.cache_mgmt.dirty = true;
@@ -956,42 +1240,66 @@ pub async fn dispatch(
             // background disk read that overrides those numbers
             // with the precise on-disk figures when (and only when)
             // a real cache file exists.
-            fn measure<T: serde::Serialize + ?Sized>(v: &T) -> u64 {
-                serde_json::to_string(v).map(|s| s.len() as u64).unwrap_or(0)
+            fn measure_slice<T>(items: &[T]) -> u64 {
+                items.len().saturating_mul(std::mem::size_of::<T>()) as u64
+            }
+            fn measure_map<K, V>(items: &std::collections::HashMap<K, V>) -> u64 {
+                items
+                    .len()
+                    .saturating_mul(
+                        std::mem::size_of::<K>()
+                            .saturating_add(std::mem::size_of::<V>())
+                            .saturating_add(16),
+                    ) as u64
             }
             let est_breakdown: Vec<(String, u64)> = vec![
-                ("artists".into(),         measure(&state.library.artists)),
-                ("albums".into(),          measure(&state.library.albums)),
-                ("tracks".into(),          measure(&state.library.all_tracks)),
-                ("playlist tracks".into(), measure(&state.playlist_tracks_cache)),
+                ("artists".into(),         measure_slice(&state.library.artists)),
+                ("albums".into(),          measure_slice(&state.library.albums)),
+                ("tracks".into(),          measure_slice(&state.library.all_tracks)),
+                ("playlist tracks".into(), measure_map(&state.playlist_tracks_cache)),
                 ("genres".into(),
-                    measure(&state.library.album_genres)
-                    + measure(&state.library.artist_genres)
-                    + measure(&state.library.album_genres)
-                    + measure(&state.library.moods)
-                    + measure(&state.library.styles)),
-                ("stations".into(),        measure(&state.stations)),
-                ("folders".into(),         measure(&state.folder_contents_cache)),
+                    measure_slice(&state.library.album_genres)
+                    + measure_slice(&state.library.artist_genres)
+                    + measure_slice(&state.library.moods)
+                    + measure_slice(&state.library.styles)
+                    + measure_slice(&state.library.decades)
+                    + measure_slice(&state.library.years)
+                    + measure_slice(&state.library.collections)
+                    + measure_slice(&state.library.countries)
+                    + measure_slice(&state.library.labels)
+                    + measure_slice(&state.library.formats)
+                    + measure_slice(&state.library.studios)),
+                ("stations".into(),        measure_slice(&state.stations)),
+                ("folders".into(),         measure_map(&state.folder_contents_cache)),
             ];
             let est_total: u64 = est_breakdown.iter().map(|(_, v)| *v).sum();
             state.library_cache_stats = Some((est_total, est_breakdown));
 
             let event_tx = event_tx.clone();
             let lib_key = state.active_library.clone();
+            let server_id = state.active_server_id.clone();
+            let library_generation = state.library_generation;
             tokio::task::spawn_blocking(move || {
                 let cache = crate::plex::ArtworkCache::default();
                 let (count, total_bytes) = cache.stats();
                 let _ = event_tx.blocking_send(crate::app::event::ArtworkEvent::ArtworkCacheStats { count, total_bytes }.into());
                 if let (Some(cache), Some(key)) = (crate::plex::LibraryCache::new(), lib_key) {
-                    let breakdown = cache.library_breakdown(&key);
+                    let breakdown = cache.library_breakdown_scoped(server_id.as_deref(), &key);
                     // Only override the synchronous in-memory
                     // estimate if a real cache file exists on disk.
                     // Posting `(0, [])` here would clobber the
                     // estimate with all-dashes immediately after
                     // sign-in.
                     if !breakdown.is_empty() {
-                        let total_bytes = cache.library_size(&key);
-                        let _ = event_tx.blocking_send(crate::app::event::CacheEvent::LibraryCacheStats { total_bytes, breakdown }.into());
+                        let total_bytes = cache.library_size_scoped(server_id.as_deref(), &key);
+                        let event = crate::app::event::CacheEvent::LibraryCacheStats {
+                            total_bytes,
+                            breakdown,
+                        };
+                        let _ = event_tx.blocking_send(Event::for_library(
+                            library_generation,
+                            event,
+                        ));
                     }
                 }
                 let wf = crate::plex::WaveformCache::default();
@@ -1000,15 +1308,20 @@ pub async fn dispatch(
             });
         }
         SettingsAction::RefreshAllCache => {
-            // "Refresh all cache" — wipe library + artwork and
-            // trigger a fresh fetch from the server. Subfolder cache
-            // is intentionally left alone (the crawl is opt-in).
-            follow_ups.push(SettingsAction::ClearLibraryCache.into());
-            follow_ups.push(SettingsAction::ClearArtworkCache.into());
-            // Stats refresh after the clears so the table updates
-            // even before the new data finishes loading.
-            follow_ups.push(SettingsAction::RefreshCacheStats.into());
-            state.set_status("Refreshing cache from server\u{2026}".to_string());
+            // One worker owns the whole disk phase. The reducer does not start
+            // replacement preloads or refresh statistics until both clears
+            // have actually completed.
+            state.set_status("Clearing caches...".to_string());
+            let tx = event_tx.clone();
+            tokio::task::spawn_blocking(move || {
+                let library = LibraryCache::new()
+                    .ok_or_else(|| "Cache not available".to_string())
+                    .and_then(|cache| cache.clear_all().map_err(|error| error.to_string()));
+                let artwork = crate::plex::ArtworkCache::default().clear_all();
+                let _ = tx.blocking_send(Event::Effect(
+                    SettingsAction::AllCachesCleared { library, artwork }.into(),
+                ));
+            });
         }
         SettingsAction::StartSubfolderCrawl => {
             use crate::app::handlers::helpers::SubfolderPreloadResult;
@@ -1043,9 +1356,7 @@ pub async fn dispatch(
                 state.keep_subfolder_cache = !state.keep_subfolder_cache;
                 let entry = config.libraries.per_library.entry(lib_key).or_default();
                 entry.keep_subfolder_cache = state.keep_subfolder_cache;
-                if let Err(e) = crate::config::save_config(config) {
-                    tracing::warn!("Failed to save keep_subfolder_cache preference: {}", e);
-                }
+                save_config_in_background(event_tx, config, "save subfolder cache preference");
                 state.set_status(if state.keep_subfolder_cache {
                     "subfolder cache: keep indefinitely".to_string()
                 } else {
@@ -1055,11 +1366,39 @@ pub async fn dispatch(
         }
 
         SettingsAction::DiscoverPlayers => {
-            if let Some(stored) = PlexAuth::load_token() {
+            if let Some(token) = client.token().map(str::to_owned) {
+                let (username, has_plex_pass) = match &state.connection {
+                    ConnectionState::Connected { username, has_plex_pass }
+                    | ConnectionState::Degraded { username, has_plex_pass, .. } => {
+                        (Some(username.clone()), *has_plex_pass)
+                    }
+                    _ => (None, false),
+                };
+                let stored = crate::plex::StoredAuth {
+                    token: token.into(),
+                    user_id: None,
+                    username,
+                    client_identifier: client.client_identifier().to_string(),
+                    server_url: client.server_url().map(str::to_owned),
+                    server_identifier: state.active_server_id.clone(),
+                    server_name: state.active_server_name().map(str::to_owned),
+                    has_plex_pass,
+                };
                 state.remote.discovering = true;
-                let event_tx = event_tx.clone();
+                let event_tx = LibraryEventSender::new(
+                    event_tx.clone(),
+                    state.library_generation,
+                );
                 tokio::spawn(async move {
-                    let auth = PlexAuth::from_stored_auth(&stored);
+                    let auth = match PlexAuth::from_stored_auth(&stored) {
+                        Ok(auth) => auth,
+                        Err(error) => {
+                            let _ = event_tx.send(
+                                RemoteEvent::PlayerDiscoveryFailed(error.to_string()).into()
+                            ).await;
+                            return;
+                        }
+                    };
                     match auth.get_players(&stored.token).await {
                         Ok(players) => {
                             let _ = event_tx.send(RemoteEvent::PlayersDiscovered(players).into()).await;
@@ -1083,16 +1422,19 @@ pub async fn dispatch(
                     if let OutputTarget::Remote { player_id, player_uri, .. } = &state.remote.output_target {
                         let target_id = player_id.clone();
                         let p_uri = player_uri.clone();
-                        let token = client.token().map(|s| s.to_string()).unwrap_or_default();
+                        let token = client.shared_token_or_empty();
                         let client_id = client.client_identifier().to_string();
                         let server_url = client.server_url().unwrap_or("").to_string();
-                        let machine_id = state.available_servers.first()
-                            .map(|s| s.client_identifier.clone()).unwrap_or_default();
+                        let machine_id = state.active_server_id.clone()
+                            .or_else(|| state.available_servers.first()
+                                .map(|server| server.client_identifier.clone()))
+                            .unwrap_or_default();
                         tokio::spawn(async move {
-                            let rc = crate::plex::RemotePlayerClient::new(
+                            if let Ok(rc) = crate::plex::RemotePlayerClient::new(
                                 token, client_id, target_id, server_url, machine_id, p_uri,
-                            );
-                            let _ = rc.stop().await;
+                            ) {
+                                let _ = rc.stop().await;
+                            }
                         });
                     }
                     state.remote.output_target = OutputTarget::Local;
@@ -1100,7 +1442,7 @@ pub async fn dispatch(
 
                     if was_playing && state.current_track().is_some() {
                         // Transfer playback to local
-                        helpers::play_current_track(event_tx, state, client, audio).await;
+                        helpers::play_current_track(event_tx, state, client, audio);
                         state.set_status("Output: Local".to_string());
                     } else {
                         state.playback.status = PlayStatus::Stopped;
@@ -1112,12 +1454,13 @@ pub async fn dispatch(
                     let name = player_name.clone();
                     // Stop local audio
                     audio.stop();
+                    state.playback.request_id = audio.playback_id();
                     state.remote.output_target = target;
                     state.remote.playback = crate::app::state::RemotePlaybackState::default();
 
                     if was_playing && state.current_track().is_some() {
                         // Transfer playback to remote
-                        helpers::play_current_track(event_tx, state, client, audio).await;
+                        helpers::play_current_track(event_tx, state, client, audio);
                         state.set_status(format!("Output: {}", name));
                     } else {
                         state.playback.status = PlayStatus::Stopped;
@@ -1132,45 +1475,37 @@ pub async fn dispatch(
             state.adventure.requested_length = length.clamp(5, 100);
             state.popups.input_dialog = None;
             state.adventure.generating = true;
+            state.adventure_request_id = state.adventure_request_id.wrapping_add(1);
+            let request_id = state.adventure_request_id;
             state.set_status("Adventure: generating sonic bridge...".to_string());
 
             // Generate the adventure
             if let (Some(start), Some(end)) = (state.adventure.start_track.clone(), state.adventure.end_track.clone()) {
                 let requested_length = state.adventure.requested_length;
-                match crate::services::generate_adventure_for_library(client, &start, &end, requested_length, state.active_library.as_deref()).await {
-                    Ok(tracks) => {
-                        // Check if we got meaningful results (more than just start + end)
-                        if tracks.len() <= 2 {
-                            state.adventure = crate::app::state::AdventureState::default();
-                            state.set_error("Adventure: no similar tracks found for these songs. Try different tracks with sonic analysis data.".to_string());
-                            return Ok(vec![]);
-                        }
-
-                        // Clear adventure state
-                        state.adventure = crate::app::state::AdventureState::default();
-
-                        // Clear radio state if switching from radio mode
-                        if state.playback_mode == PlaybackMode::Radio {
-                            state.radio.clear();
-                        }
-                        // Replace queue with adventure
-                        state.queue.tracks = tracks;
-                        state.queue.index = Some(0);
-                        state.queue.original.clear();
-                        state.queue.sort_mode = QueueSortMode::QueueOrder;
-                        state.playback_mode = PlaybackMode::Queue;
-                        state.set_view(View::Queue);
-
-                        // Start playback
-                        helpers::play_current_track(event_tx, state, client, audio).await;
-                        state.set_status(format!("Adventure: {} tracks ready!", state.queue.tracks.len()));
-                    }
-                    Err(e) => {
-                        // Fully reset adventure state on error
-                        state.adventure = crate::app::state::AdventureState::default();
-                        state.set_error(format!("Adventure failed: {}", e));
-                    }
-                }
+                let library_key = state.active_library.clone();
+                let request_client = client.clone();
+                let tx = event_tx.clone();
+                tokio::spawn(async move {
+                    let result = crate::services::generate_adventure_for_library(
+                        &request_client,
+                        &start,
+                        &end,
+                        requested_length,
+                        library_key.as_deref(),
+                    )
+                    .await
+                    .map_err(|error| {
+                        crate::app::action::AsyncError::from_api(
+                            "Adventure generation failed",
+                            &error,
+                        )
+                    });
+                    let _ = tx
+                        .send(Event::Effect(
+                            SettingsAction::AdventureGenerated { request_id, result }.into(),
+                        ))
+                        .await;
+                });
             } else {
                 // Fully reset adventure state
                 state.adventure = crate::app::state::AdventureState::default();
@@ -1178,6 +1513,7 @@ pub async fn dispatch(
             }
         }
         SettingsAction::CancelAdventure => {
+            state.adventure_request_id = state.adventure_request_id.wrapping_add(1);
             state.adventure = crate::app::state::AdventureState::default();
             state.popups.input_dialog = None;
             state.clear_status();
@@ -1195,11 +1531,47 @@ pub async fn dispatch(
             state.queue.sort_mode = QueueSortMode::QueueOrder;
             state.playback_mode = PlaybackMode::Queue;
             state.set_view(View::Queue);
-            helpers::play_current_track(event_tx, state, client, audio).await;
+            helpers::play_current_track(event_tx, state, client, audio);
         }
         SettingsAction::AdventureError(msg) => {
             state.adventure.generating = false;
             state.set_error(format!("Adventure failed: {}", msg));
+        }
+        SettingsAction::AdventureGenerated { request_id, result } => {
+            if state.adventure_request_id != request_id || !state.adventure.generating {
+                return Ok(vec![]);
+            }
+            match result {
+                Ok(tracks) if tracks.len() > 2 => {
+                    state.connection.mark_healthy();
+                    state.adventure = crate::app::state::AdventureState::default();
+                    if state.playback_mode == PlaybackMode::Radio {
+                        state.radio.clear();
+                    }
+                    state.queue.tracks = tracks;
+                    state.queue.index = Some(0);
+                    state.queue.original.clear();
+                    state.queue.sort_mode = QueueSortMode::QueueOrder;
+                    state.playback_mode = PlaybackMode::Queue;
+                    state.set_view(View::Queue);
+                    helpers::play_current_track(event_tx, state, client, audio);
+                    state.set_status(format!(
+                        "Adventure: {} tracks ready!",
+                        state.queue.tracks.len()
+                    ));
+                }
+                Ok(_) => {
+                    state.adventure = crate::app::state::AdventureState::default();
+                    state.set_error("Adventure: no similar tracks found for these songs. Try different tracks with sonic analysis data.".to_string());
+                }
+                Err(error) => {
+                    state.adventure = crate::app::state::AdventureState::default();
+                    if error.connection_error {
+                        state.connection.mark_degraded(error.message.clone());
+                    }
+                    state.set_error(error.message);
+                }
+            }
         }
         SettingsAction::ToggleExternalSearchService(target) => {
             use crate::services::external_search::SearchTarget;
@@ -1316,7 +1688,7 @@ pub async fn dispatch(
             state.list_state.queue_index = 0;
             state.set_view(View::Queue);
             state.set_status(format!("Artist radio: {} tracks", count));
-            helpers::play_current_track(event_tx, state, client, audio).await;
+            helpers::play_current_track(event_tx, state, client, audio);
         }
     }
     Ok(follow_ups)

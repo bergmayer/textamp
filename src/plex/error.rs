@@ -4,8 +4,16 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum ApiError {
+    #[error("HTTP client initialization failed: {0}")]
+    ClientInitialization(String),
+
     #[error("HTTP request failed: {0}")]
     Http(#[from] reqwest::Error),
+
+    /// Transport failure whose source URL may contain credentials. The
+    /// sanitized message deliberately omits the underlying reqwest error.
+    #[error("Connection failed: {0}")]
+    Connection(String),
 
     #[error("JSON parsing failed: {0}")]
     Json(#[from] serde_json::Error),
@@ -39,6 +47,9 @@ pub enum ApiError {
 
     #[error("Invalid header value: {0}")]
     InvalidHeader(String),
+
+    #[error("HTTP response exceeded the {limit_bytes} byte safety limit")]
+    ResponseTooLarge { limit_bytes: usize },
 }
 
 impl ApiError {
@@ -47,6 +58,7 @@ impl ApiError {
     pub fn is_connection_error(&self) -> bool {
         match self {
             ApiError::Http(e) => e.is_connect() || e.is_timeout(),
+            ApiError::Connection(_) => true,
             ApiError::NoServerSelected => true,
             _ => false,
         }

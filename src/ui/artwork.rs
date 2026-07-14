@@ -4,11 +4,11 @@
 //! (Kitty, iTerm2, Sixel) or falls back to halfblocks.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::hash::{Hash, Hasher};
 
 use image::DynamicImage;
 use ratatui::prelude::*;
-use ratatui::widgets::Paragraph;
 use ratatui_image::{picker::Picker, protocol::StatefulProtocol, Resize, StatefulImage};
 
 use crate::app::state::ArtworkMode;
@@ -21,6 +21,7 @@ pub struct ArtworkRenderer {
     picker: Option<Picker>,
     protocol: Option<StatefulProtocol>,
     current_thumb: Option<String>,
+    current_image_id: Option<u64>,
     braille_image: Option<DynamicImage>,
     mode: ArtworkMode,
     /// The protocol type detected at startup (for restoring after Halfblocks override).
@@ -40,6 +41,7 @@ impl ArtworkRenderer {
             picker: None,
             protocol: None,
             current_thumb: None,
+            current_image_id: None,
             braille_image: None,
             mode: ArtworkMode::Auto,
             native_protocol: None,
@@ -54,6 +56,7 @@ impl ArtworkRenderer {
             picker: Some(picker),
             protocol: None,
             current_thumb: None,
+            current_image_id: None,
             braille_image: None,
             mode: ArtworkMode::Auto,
             native_protocol: Some(native),
@@ -100,6 +103,7 @@ impl ArtworkRenderer {
             self.braille_image = Some(img);
             self.protocol = None;
             self.current_thumb = Some(thumb_path.to_string());
+            self.current_image_id = Some(artwork_id(thumb_path, image_data));
             return true;
         }
 
@@ -111,6 +115,7 @@ impl ArtworkRenderer {
         self.protocol = Some(picker.new_resize_protocol(img));
         self.braille_image = None;
         self.current_thumb = Some(thumb_path.to_string());
+        self.current_image_id = Some(artwork_id(thumb_path, image_data));
         true
     }
 
@@ -123,6 +128,7 @@ impl ArtworkRenderer {
 
         // Cache key includes crop amount to avoid re-creating protocol unnecessarily
         let crop_key = format!("{}:c{}", thumb_path, (crop_fraction * 100.0) as u32);
+        let image_id = artwork_id(&crop_key, image_data);
         if self.current_thumb.as_deref() == Some(&crop_key) {
             return self.has_image();
         }
@@ -140,6 +146,7 @@ impl ArtworkRenderer {
             self.braille_image = Some(cropped);
             self.protocol = None;
             self.current_thumb = Some(crop_key);
+            self.current_image_id = Some(image_id);
             return true;
         }
 
@@ -147,6 +154,7 @@ impl ArtworkRenderer {
         self.protocol = Some(picker.new_resize_protocol(cropped));
         self.braille_image = None;
         self.current_thumb = Some(crop_key);
+        self.current_image_id = Some(image_id);
         true
     }
 
@@ -155,6 +163,7 @@ impl ArtworkRenderer {
         self.protocol = None;
         self.braille_image = None;
         self.current_thumb = None;
+        self.current_image_id = None;
     }
 
     /// Render the artwork to a frame area.
@@ -170,7 +179,7 @@ impl ArtworkRenderer {
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
         if self.mode == ArtworkMode::Braille {
             if let Some(ref img) = self.braille_image {
-                render_braille_image(frame, img, area);
+                render_braille_image(frame, img, area, self.current_image_id.unwrap_or(0));
             }
             return;
         }
@@ -200,6 +209,7 @@ impl ArtworkRenderer {
             // Clear cached image so it's re-created with the new protocol
             self.protocol = None;
             self.current_thumb = None;
+            self.current_image_id = None;
         }
     }
 
@@ -209,6 +219,7 @@ impl ArtworkRenderer {
             picker.set_protocol_type(native);
             self.protocol = None;
             self.current_thumb = None;
+            self.current_image_id = None;
         }
     }
 
@@ -218,6 +229,7 @@ impl ArtworkRenderer {
         self.protocol = None;
         self.braille_image = None;
         self.current_thumb = None;
+        self.current_image_id = None;
     }
 }
 
@@ -235,11 +247,47 @@ impl ArtworkRenderer {
 /// Dot bit mapping per cell:
 ///   Col 0: bits 0,1,2,6 (rows 0-3)
 ///   Col 1: bits 3,4,5,7 (rows 0-3)
-fn render_braille_image(frame: &mut Frame, img: &DynamicImage, area: Rect) {
+#[derive(Clone, Copy)]
+struct BrailleCell {
+    symbol: char,
+    foreground: Color,
+    background: Color,
+}
+
+struct BrailleRender {
+    width: u16,
+    height: u16,
+    cells: Vec<BrailleCell>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct BrailleRenderKey {
+    image_id: u64,
+    max_width: u16,
+    max_height: u16,
+}
+
+fn artwork_id(key: &str, data: &[u8]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    data.len().hash(&mut hasher);
+    let prefix_len = data.len().min(64);
+    data[..prefix_len].hash(&mut hasher);
+    if data.len() > prefix_len {
+        data[data.len().saturating_sub(64)..].hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn build_braille_render(
+    img: &DynamicImage,
+    max_width: u16,
+    max_height: u16,
+) -> Option<BrailleRender> {
     use image::GenericImageView;
 
-    if area.width == 0 || area.height == 0 {
-        return;
+    if max_width == 0 || max_height == 0 {
+        return None;
     }
 
     // Match the other renderers (Resize::Scale, halfblocks): preserve the
@@ -250,10 +298,10 @@ fn render_braille_image(frame: &mut Frame, img: &DynamicImage, area: Rect) {
     // square cover into a wide rectangle.
     let (src_w, src_h) = img.dimensions();
     if src_w == 0 || src_h == 0 {
-        return;
+        return None;
     }
-    let area_px_w = area.width as u32 * 2;
-    let area_px_h = area.height as u32 * 4;
+    let area_px_w = max_width as u32 * 2;
+    let area_px_h = max_height as u32 * 4;
     let (dest_px_w, dest_px_h) = if src_w * area_px_h <= src_h * area_px_w {
         // Height-limited.
         ((src_w * area_px_h / src_h).max(1), area_px_h)
@@ -261,14 +309,8 @@ fn render_braille_image(frame: &mut Frame, img: &DynamicImage, area: Rect) {
         // Width-limited.
         (area_px_w, (src_h * area_px_w / src_w).max(1))
     };
-    let dest_w = ((dest_px_w / 2) as u16).clamp(1, area.width);
-    let dest_h = ((dest_px_h / 4) as u16).clamp(1, area.height);
-    let area = Rect {
-        x: area.x + (area.width - dest_w) / 2,
-        y: area.y + (area.height - dest_h) / 2,
-        width: dest_w,
-        height: dest_h,
-    };
+    let dest_w = ((dest_px_w / 2) as u16).clamp(1, max_width);
+    let dest_h = ((dest_px_h / 4) as u16).clamp(1, max_height);
     let pixel_w = dest_w as u32 * 2;
     let pixel_h = dest_h as u32 * 4;
 
@@ -309,12 +351,10 @@ fn render_braille_image(frame: &mut Frame, img: &DynamicImage, area: Rect) {
         [3, 4, 5, 7], // col 1, rows 0-3
     ];
 
-    let mut lines: Vec<Line<'static>> = Vec::with_capacity(area.height as usize);
+    let mut cells = Vec::with_capacity(dest_width_len(dest_w, dest_h));
 
-    for row in 0..area.height as u32 {
-        let mut spans: Vec<Span<'static>> = Vec::with_capacity(area.width as usize);
-
-        for col in 0..area.width as u32 {
+    for row in 0..dest_h as u32 {
+        for col in 0..dest_w as u32 {
             let px = col * 2;
             let py = row * 4;
 
@@ -374,27 +414,140 @@ fn render_braille_image(frame: &mut Frame, img: &DynamicImage, area: Rect) {
                 fg_color
             };
 
-            spans.push(Span::styled(
-                String::from(ch),
-                Style::default().fg(fg_color).bg(bg_color),
-            ));
+            cells.push(BrailleCell {
+                symbol: ch,
+                foreground: fg_color,
+                background: bg_color,
+            });
         }
-
-        lines.push(Line::from(spans));
     }
 
-    let paragraph = Paragraph::new(lines);
-    frame.render_widget(paragraph, area);
+    Some(BrailleRender {
+        width: dest_w,
+        height: dest_h,
+        cells,
+    })
+}
+
+fn dest_width_len(width: u16, height: u16) -> usize {
+    usize::from(width).saturating_mul(usize::from(height))
+}
+
+fn paint_braille_render(frame: &mut Frame, area: Rect, rendered: &BrailleRender) {
+    let origin_x = area.x + area.width.saturating_sub(rendered.width) / 2;
+    let origin_y = area.y + area.height.saturating_sub(rendered.height) / 2;
+    let buffer = frame.buffer_mut();
+    for row in 0..rendered.height {
+        for column in 0..rendered.width {
+            let index = usize::from(row) * usize::from(rendered.width) + usize::from(column);
+            let cell = rendered.cells[index];
+            buffer[(origin_x + column, origin_y + row)]
+                .set_char(cell.symbol)
+                .set_fg(cell.foreground)
+                .set_bg(cell.background);
+        }
+    }
+}
+
+fn render_braille_image(frame: &mut Frame, img: &DynamicImage, area: Rect, image_id: u64) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let key = BrailleRenderKey {
+        image_id,
+        max_width: area.width,
+        max_height: area.height,
+    };
+    BRAILLE_RENDERS.with(|renders| {
+        let mut renders = renders.borrow_mut();
+        if !renders.contains_key(&key) {
+            let Some(rendered) = build_braille_render(img, area.width, area.height) else {
+                return;
+            };
+            renders.insert(key, rendered);
+        }
+        if let Some(rendered) = renders.get(&key) {
+            paint_braille_render(frame, area, rendered);
+        }
+    });
 }
 
 // ============================================================================
 // Album Art Grid — shared Picker and per-album protocol cache
 // ============================================================================
 
+const MAX_RENDERED_ARTWORK_ENTRIES: usize = 64;
+
+struct BoundedCache<K, V> {
+    values: HashMap<K, V>,
+    order: VecDeque<K>,
+    capacity: usize,
+}
+
+impl<K: Clone + Eq + Hash, V> BoundedCache<K, V> {
+    fn new(capacity: usize) -> Self {
+        Self {
+            values: HashMap::new(),
+            order: VecDeque::new(),
+            capacity: capacity.max(1),
+        }
+    }
+
+    fn contains_key(&self, key: &K) -> bool {
+        self.values.contains_key(key)
+    }
+
+    fn touch(&mut self, key: &K) {
+        if let Some(position) = self.order.iter().position(|candidate| candidate == key) {
+            self.order.remove(position);
+        }
+        self.order.push_back(key.clone());
+    }
+
+    fn insert(&mut self, key: K, value: V) {
+        if self.values.contains_key(&key) {
+            self.values.insert(key.clone(), value);
+            self.touch(&key);
+            return;
+        }
+        while self.values.len() >= self.capacity {
+            let Some(oldest) = self.order.pop_front() else {
+                self.values.clear();
+                break;
+            };
+            self.values.remove(&oldest);
+        }
+        self.values.insert(key.clone(), value);
+        self.order.push_back(key);
+    }
+
+    fn get(&mut self, key: &K) -> Option<&V> {
+        if !self.values.contains_key(key) {
+            return None;
+        }
+        self.touch(key);
+        self.values.get(key)
+    }
+
+    fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+        if !self.values.contains_key(key) {
+            return None;
+        }
+        self.touch(key);
+        self.values.get_mut(key)
+    }
+
+    fn clear(&mut self) {
+        self.values.clear();
+        self.order.clear();
+    }
+}
+
 thread_local! {
     static GRID_PICKER: RefCell<Option<Picker>> = RefCell::new(None);
-    static GRID_PROTOCOLS: RefCell<HashMap<String, StatefulProtocol>> = RefCell::new(HashMap::new());
-    static GRID_BRAILLE_IMAGES: RefCell<HashMap<String, DynamicImage>> = RefCell::new(HashMap::new());
+    static GRID_PROTOCOLS: RefCell<BoundedCache<u64, StatefulProtocol>> = RefCell::new(BoundedCache::new(MAX_RENDERED_ARTWORK_ENTRIES));
+    static GRID_BRAILLE_IMAGES: RefCell<BoundedCache<u64, DynamicImage>> = RefCell::new(BoundedCache::new(MAX_RENDERED_ARTWORK_ENTRIES));
+    static BRAILLE_RENDERS: RefCell<BoundedCache<BrailleRenderKey, BrailleRender>> = RefCell::new(BoundedCache::new(MAX_RENDERED_ARTWORK_ENTRIES));
     static GRID_ARTWORK_MODE: RefCell<ArtworkMode> = RefCell::new(ArtworkMode::Auto);
     static GRID_NATIVE_PROTOCOL: RefCell<Option<ratatui_image::picker::ProtocolType>> = RefCell::new(None);
 }
@@ -417,7 +570,8 @@ pub fn render_grid_image(frame: &mut Frame, area: Rect, key: &str, data: &[u8]) 
     }
 
     // Protocol-based rendering (Auto/Halfblocks)
-    let has_protocol = GRID_PROTOCOLS.with(|protos| protos.borrow().contains_key(key));
+    let image_id = artwork_id(key, data);
+    let has_protocol = GRID_PROTOCOLS.with(|protos| protos.borrow().contains_key(&image_id));
 
     if !has_protocol {
         let created = GRID_PICKER.with(|picker_cell| {
@@ -426,7 +580,7 @@ pub fn render_grid_image(frame: &mut Frame, area: Rect, key: &str, data: &[u8]) 
             let Ok(img) = image::load_from_memory(data) else { return false; };
             let protocol = picker.new_resize_protocol(img);
             GRID_PROTOCOLS.with(|protos| {
-                protos.borrow_mut().insert(key.to_string(), protocol);
+                protos.borrow_mut().insert(image_id, protocol);
             });
             true
         });
@@ -437,7 +591,7 @@ pub fn render_grid_image(frame: &mut Frame, area: Rect, key: &str, data: &[u8]) 
 
     GRID_PROTOCOLS.with(|protos| {
         let mut map = protos.borrow_mut();
-        if let Some(protocol) = map.get_mut(key) {
+        if let Some(protocol) = map.get_mut(&image_id) {
             // `Resize::Scale` upscales when the source thumbnail is
             // smaller than the render area; `Resize::Crop`/`Resize::Fit`
             // both cap at the source image size in ratatui-image 9, which
@@ -454,19 +608,20 @@ pub fn render_grid_image(frame: &mut Frame, area: Rect, key: &str, data: &[u8]) 
 
 /// Render a grid album cover using braille characters.
 fn render_grid_braille(frame: &mut Frame, area: Rect, key: &str, data: &[u8]) -> bool {
-    let has_image = GRID_BRAILLE_IMAGES.with(|imgs| imgs.borrow().contains_key(key));
+    let image_id = artwork_id(key, data);
+    let has_image = GRID_BRAILLE_IMAGES.with(|imgs| imgs.borrow().contains_key(&image_id));
 
     if !has_image {
         let Ok(img) = image::load_from_memory(data) else { return false; };
         GRID_BRAILLE_IMAGES.with(|imgs| {
-            imgs.borrow_mut().insert(key.to_string(), img);
+            imgs.borrow_mut().insert(image_id, img);
         });
     }
 
     GRID_BRAILLE_IMAGES.with(|imgs| {
-        let map = imgs.borrow();
-        if let Some(img) = map.get(key) {
-            render_braille_image(frame, img, area);
+        let mut map = imgs.borrow_mut();
+        if let Some(img) = map.get(&image_id) {
+            render_braille_image(frame, img, area, image_id);
             true
         } else {
             false
@@ -478,6 +633,7 @@ fn render_grid_braille(frame: &mut Frame, area: Rect, key: &str, data: &[u8]) ->
 pub fn clear_grid_cache() {
     GRID_PROTOCOLS.with(|protos| protos.borrow_mut().clear());
     GRID_BRAILLE_IMAGES.with(|imgs| imgs.borrow_mut().clear());
+    BRAILLE_RENDERS.with(|renders| renders.borrow_mut().clear());
 }
 
 /// Change the grid renderer's graphics protocol and clear cached images.

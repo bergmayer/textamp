@@ -18,7 +18,7 @@ async fn main() -> Result<()> {
 
     // Authenticate using stored token
     println!("Step 1: Authenticating...");
-    let auth = PlexAuth::new();
+    let auth = PlexAuth::new()?;
     let token = if let Some(stored) = PlexAuth::load_token() {
         auth.verify_token(&stored.token).await?;
         stored.token
@@ -29,7 +29,7 @@ async fn main() -> Result<()> {
 
     // Create client
     let client_info = PlexClientInfo::default();
-    let mut client = PlexClient::new(client_info);
+    let mut client = PlexClient::new(client_info)?;
     client.set_auth_token(token);
     client.set_server(config.plex.server_url.clone());
 

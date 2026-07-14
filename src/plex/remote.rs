@@ -9,19 +9,71 @@
 //!    "Allow player to be controlled" enabled).
 
 use super::constants::*;
+use super::client::{
+    read_error_body, read_response_text_limited, MAX_SMALL_RESPONSE_BYTES,
+};
 use super::error::ApiError;
 use super::models::Track;
 use crate::util::truncate_to_boundary;
 use reqwest::Client;
 use serde::Deserialize;
+use std::collections::HashMap;
+use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+use crate::util::SecretString;
 use std::time::Duration;
 
+#[derive(Debug)]
+struct RemoteCoordinator {
+    gate: tokio::sync::Mutex<()>,
+    command_id: AtomicU64,
+}
+
+impl RemoteCoordinator {
+    fn new() -> Self {
+        Self {
+            gate: tokio::sync::Mutex::new(()),
+            command_id: AtomicU64::new(0),
+        }
+    }
+}
+
+static REMOTE_HTTP: OnceLock<Client> = OnceLock::new();
+static REMOTE_COORDINATORS: OnceLock<Mutex<HashMap<String, Weak<RemoteCoordinator>>>> =
+    OnceLock::new();
+
+fn shared_http_client() -> Result<Client, ApiError> {
+    if let Some(client) = REMOTE_HTTP.get() {
+        return Ok(client.clone());
+    }
+
+    let candidate = Client::builder()
+        .connect_timeout(Duration::from_secs(3))
+        .read_timeout(Duration::from_secs(5))
+        .build()?;
+    let _ = REMOTE_HTTP.set(candidate.clone());
+    Ok(REMOTE_HTTP.get().cloned().unwrap_or(candidate))
+}
+
+fn coordinator_for(key: String) -> Arc<RemoteCoordinator> {
+    let registry = REMOTE_COORDINATORS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut registry = registry.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(existing) = registry.get(&key).and_then(Weak::upgrade) {
+        return existing;
+    }
+    registry.retain(|_, coordinator| coordinator.strong_count() > 0);
+    let coordinator = Arc::new(RemoteCoordinator::new());
+    registry.insert(key, Arc::downgrade(&coordinator));
+    coordinator
+}
+
 /// Client for controlling a remote Plex player device.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RemotePlayerClient {
     http: Client,
     /// Plex auth token.
-    token: String,
+    token: Arc<SecretString>,
     /// Our client identifier (textamp's device ID).
     client_id: String,
     /// The target player's client identifier.
@@ -32,6 +84,22 @@ pub struct RemotePlayerClient {
     server_machine_id: String,
     /// Direct URI for the player (if it advertises on the LAN).
     player_uri: Option<String>,
+    /// Fair FIFO gate shared by every client instance for this target.
+    coordinator: Arc<RemoteCoordinator>,
+}
+
+impl fmt::Debug for RemotePlayerClient {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RemotePlayerClient")
+            .field("token", &"<redacted>")
+            .field("client_id", &self.client_id)
+            .field("target_client_id", &self.target_client_id)
+            .field("server_url", &self.server_url)
+            .field("server_machine_id", &self.server_machine_id)
+            .field("player_uri", &self.player_uri)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Timeline status from a remote player poll.
@@ -87,34 +155,38 @@ struct PlayQueueResponse {
 impl RemotePlayerClient {
     /// Create a new remote player client.
     pub fn new(
-        token: String,
+        token: Arc<SecretString>,
         client_id: String,
         target_client_id: String,
         server_url: String,
         server_machine_id: String,
         player_uri: Option<String>,
-    ) -> Self {
-        let http = Client::builder()
-            .timeout(Duration::from_secs(5))
-            .danger_accept_invalid_certs(true)
-            .build()
-            .expect("Failed to create remote player HTTP client");
-
-        Self {
-            http,
+    ) -> Result<Self, ApiError> {
+        let coordinator_key = format!("{}\0{}\0{:?}", server_url, target_client_id, player_uri);
+        Ok(Self {
+            http: shared_http_client()?,
             token,
             client_id,
             target_client_id,
             server_url,
             server_machine_id,
             player_uri,
-        }
+            coordinator: coordinator_for(coordinator_key),
+        })
+    }
+
+    fn next_command_id(&self) -> String {
+        self.coordinator
+            .command_id
+            .fetch_add(1, Ordering::AcqRel)
+            .saturating_add(1)
+            .to_string()
     }
 
     /// Common headers for all player commands.
     fn add_headers(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         request
-            .header(HEADER_PLEX_TOKEN, &self.token)
+            .header(HEADER_PLEX_TOKEN, self.token.as_str())
             .header(HEADER_PLEX_CLIENT_ID, &self.client_id)
             .header(HEADER_PLEX_PRODUCT, "textamp")
             .header("X-Plex-Target-Client-Identifier", &self.target_client_id)
@@ -123,10 +195,11 @@ impl RemotePlayerClient {
 
     /// Send a player command, trying server proxy first, then direct.
     async fn send_command(&self, command: &str) -> Result<(), ApiError> {
+        let command_id = self.next_command_id();
         // Try 1: Server proxy
         let proxy_url = format!("{}/player/playback/{}", self.server_url, command);
         let proxy_resp = self.add_headers(self.http.get(&proxy_url))
-            .query(&[("commandID", "1")])
+            .query(&[("commandID", command_id.as_str())])
             .send()
             .await;
 
@@ -147,7 +220,7 @@ impl RemotePlayerClient {
         if let Some(ref uri) = self.player_uri {
             let direct_url = format!("{}/player/playback/{}", uri, command);
             let direct_resp = self.add_headers(self.http.get(&direct_url))
-                .query(&[("commandID", "1")])
+                .query(&[("commandID", command_id.as_str())])
                 .send()
                 .await;
 
@@ -158,7 +231,7 @@ impl RemotePlayerClient {
                 }
                 Ok(resp) => {
                     let status = resp.status();
-                    let text = resp.text().await.unwrap_or_default();
+                    let text = read_error_body(resp).await;
                     tracing::warn!("Remote {}: direct returned {} - {}", command, status, text);
                     return Err(ApiError::ServerError {
                         status: status.as_u16(),
@@ -203,7 +276,7 @@ impl RemotePlayerClient {
 
         if !response.status().is_success() {
             let status = response.status();
-            let text = response.text().await.unwrap_or_default();
+            let text = read_error_body(response).await;
             tracing::warn!("Create play queue failed ({}): {}", status, text);
             return Err(ApiError::ServerError {
                 status: status.as_u16(),
@@ -211,7 +284,7 @@ impl RemotePlayerClient {
             });
         }
 
-        let body = response.text().await.unwrap_or_default();
+        let body = read_response_text_limited(response, MAX_SMALL_RESPONSE_BYTES).await?;
 
         // Try to parse the playQueueID from MediaContainer wrapper
         #[derive(Deserialize)]
@@ -251,6 +324,7 @@ impl RemotePlayerClient {
     /// Creates a play queue on the server, then sends a playMedia command
     /// trying server proxy first, then direct to the player.
     pub async fn play_media(&self, track: &Track, _library_key: &str) -> Result<(), ApiError> {
+        let _gate = self.coordinator.gate.lock().await;
         let key = format!("/library/metadata/{}", track.rating_key);
 
         // Create a play queue first
@@ -264,6 +338,7 @@ impl RemotePlayerClient {
         let port = self.server_url.split(':').last().unwrap_or("32400");
         let protocol = if self.server_url.starts_with("https") { "https" } else { "http" };
 
+        let command_id = self.next_command_id();
         let mut params: Vec<(&str, String)> = vec![
             ("key", key.clone()),
             ("machineIdentifier", self.server_machine_id.clone()),
@@ -271,7 +346,7 @@ impl RemotePlayerClient {
             ("protocol", protocol.to_string()),
             ("port", port.to_string()),
             ("type", "music".to_string()),
-            ("commandID", "1".to_string()),
+            ("commandID", command_id),
         ];
         if queue_id > 0 {
             params.push(("containerKey", format!("/playQueues/{}?own=1&window=200", queue_id)));
@@ -319,7 +394,7 @@ impl RemotePlayerClient {
                 }
                 Ok(resp) => {
                     let status = resp.status();
-                    let text = resp.text().await.unwrap_or_default();
+                    let text = read_error_body(resp).await;
                     tracing::error!("Remote playMedia: direct returned {} - {}", status, text);
                     return Err(ApiError::ServerError {
                         status: status.as_u16(),
@@ -344,24 +419,29 @@ impl RemotePlayerClient {
 
     /// Pause playback on the remote player.
     pub async fn pause(&self) -> Result<(), ApiError> {
+        let _gate = self.coordinator.gate.lock().await;
         self.send_command("pause").await
     }
 
     /// Resume playback on the remote player.
     pub async fn resume(&self) -> Result<(), ApiError> {
+        let _gate = self.coordinator.gate.lock().await;
         self.send_command("play").await
     }
 
     /// Stop playback on the remote player.
     pub async fn stop(&self) -> Result<(), ApiError> {
+        let _gate = self.coordinator.gate.lock().await;
         self.send_command("stop").await
     }
 
     /// Seek to an absolute position on the remote player.
     pub async fn seek_to(&self, offset_ms: u64) -> Result<(), ApiError> {
+        let _gate = self.coordinator.gate.lock().await;
+        let command_id = self.next_command_id();
         let proxy_url = format!("{}/player/playback/seekTo", self.server_url);
         let proxy_resp = self.add_headers(self.http.get(&proxy_url))
-            .query(&[("offset", &offset_ms.to_string()), ("commandID", &"1".to_string())])
+            .query(&[("offset", offset_ms.to_string()), ("commandID", command_id.clone())])
             .send()
             .await;
 
@@ -372,7 +452,7 @@ impl RemotePlayerClient {
         if let Some(ref uri) = self.player_uri {
             let direct_url = format!("{}/player/playback/seekTo", uri);
             let resp = self.add_headers(self.http.get(&direct_url))
-                .query(&[("offset", &offset_ms.to_string()), ("commandID", &"1".to_string())])
+                .query(&[("offset", offset_ms.to_string()), ("commandID", command_id)])
                 .send()
                 .await?;
             if resp.status().is_success() { return Ok(()); }
@@ -383,9 +463,11 @@ impl RemotePlayerClient {
 
     /// Set volume on the remote player (0-100).
     pub async fn set_volume(&self, percent: u32) -> Result<(), ApiError> {
+        let _gate = self.coordinator.gate.lock().await;
+        let command_id = self.next_command_id();
         let proxy_url = format!("{}/player/playback/setParameters", self.server_url);
         let proxy_resp = self.add_headers(self.http.get(&proxy_url))
-            .query(&[("volume", &percent.to_string()), ("commandID", &"1".to_string())])
+            .query(&[("volume", percent.to_string()), ("commandID", command_id.clone())])
             .send()
             .await;
 
@@ -396,7 +478,7 @@ impl RemotePlayerClient {
         if let Some(ref uri) = self.player_uri {
             let direct_url = format!("{}/player/playback/setParameters", uri);
             let resp = self.add_headers(self.http.get(&direct_url))
-                .query(&[("volume", &percent.to_string()), ("commandID", &"1".to_string())])
+                .query(&[("volume", percent.to_string()), ("commandID", command_id)])
                 .send()
                 .await?;
             if resp.status().is_success() { return Ok(()); }
@@ -407,9 +489,10 @@ impl RemotePlayerClient {
 
     /// Poll the Plex server's active sessions to find the target player's status.
     pub async fn poll_timeline(&self) -> Result<RemoteTimelineStatus, ApiError> {
+        let _gate = self.coordinator.gate.lock().await;
         let url = format!("{}/status/sessions", self.server_url);
         let response = self.http.get(&url)
-            .header(HEADER_PLEX_TOKEN, &self.token)
+            .header(HEADER_PLEX_TOKEN, self.token.as_str())
             .header("Accept", "application/json")
             .send()
             .await?;
@@ -421,7 +504,7 @@ impl RemotePlayerClient {
             });
         }
 
-        let body = response.text().await.unwrap_or_default();
+        let body = read_response_text_limited(response, MAX_SMALL_RESPONSE_BYTES).await?;
 
         // Parse MediaContainer wrapper
         #[derive(Deserialize)]

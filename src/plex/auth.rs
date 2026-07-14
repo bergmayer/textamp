@@ -3,15 +3,41 @@
 //! Supports both username/password authentication and PIN-based OAuth flow.
 
 use super::constants::*;
+use super::client::{read_response_text_limited, MAX_SMALL_RESPONSE_BYTES};
 use super::error::ApiError;
 use super::models::{PlexServer, PlexUser};
-use crate::util::truncate_to_boundary;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::io::Write;
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use uuid::Uuid;
+use zeroize::Zeroizing;
+use crate::util::SecretString;
 
 const PLEX_TV_URL: &str = "https://plex.tv";
 const PLEX_AUTH_URL: &str = "https://app.plex.tv/auth";
+const AUTH_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+static AUTH_FILE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static ACCOUNT_STORAGE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static ACCOUNT_STORAGE_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+fn auth_file_guard() -> std::sync::MutexGuard<'static, ()> {
+    AUTH_FILE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+async fn deserialize_auth_response<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+) -> Result<T, ApiError> {
+    let body = Zeroizing::new(
+        read_response_text_limited(response, MAX_SMALL_RESPONSE_BYTES).await?,
+    );
+    Ok(serde_json::from_str(&body)?)
+}
 
 /// Plex client identification headers.
 #[derive(Debug, Clone)]
@@ -44,17 +70,28 @@ pub struct PlexAuth {
 }
 
 /// PIN for OAuth authentication flow.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AuthPin {
     pub id: u64,
     pub code: String,
     pub auth_url: String,
 }
 
+impl fmt::Debug for AuthPin {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AuthPin")
+            .field("id", &self.id)
+            .field("code", &"[REDACTED]")
+            .field("auth_url", &"[REDACTED]")
+            .finish()
+    }
+}
+
 /// Stored authentication data.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct StoredAuth {
-    pub token: String,
+    pub token: SecretString,
     pub user_id: Option<u64>,
     pub username: Option<String>,
     pub client_identifier: String,
@@ -66,6 +103,22 @@ pub struct StoredAuth {
     pub server_name: Option<String>,
     #[serde(default)]
     pub has_plex_pass: bool,
+}
+
+impl fmt::Debug for StoredAuth {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StoredAuth")
+            .field("token", &"<redacted>")
+            .field("user_id", &self.user_id)
+            .field("username", &self.username)
+            .field("client_identifier", &self.client_identifier)
+            .field("server_url", &self.server_url)
+            .field("server_identifier", &self.server_identifier)
+            .field("server_name", &self.server_name)
+            .field("has_plex_pass", &self.has_plex_pass)
+            .finish()
+    }
 }
 
 /// Server info for persistence.
@@ -94,27 +147,92 @@ fn account_marker_path(paths: &crate::config::XdgPaths) -> std::path::PathBuf {
     paths.data_dir.join("account_marker.toml")
 }
 
+/// Atomically replace a credential-adjacent file with owner-only permissions.
+/// A crash can leave an unused temporary file, but never a truncated auth file.
+fn write_private_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no parent")
+    })?;
+    std::fs::create_dir_all(parent)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+    }
+
+    let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or("auth");
+    let temporary = parent.join(format!(".{file_name}.{}.tmp", Uuid::new_v4()));
+    let result = (|| {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary)?;
+        file.write_all(contents)?;
+        file.sync_all()?;
+        std::fs::rename(&temporary, path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
 impl PlexAuth {
+    /// Start a new account-storage context, invalidating queued maintenance
+    /// work from any prior sign-in/logout.
+    pub fn begin_account_storage_epoch() -> u64 {
+        ACCOUNT_STORAGE_EPOCH
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1)
+    }
+
+    pub fn current_account_storage_epoch() -> u64 {
+        ACCOUNT_STORAGE_EPOCH.load(Ordering::Acquire)
+    }
+
+    /// Run account-scoped disk maintenance only if its initiating session is
+    /// still current. The lock makes the epoch check and its side effects one
+    /// ordered operation relative to the next sign-in/logout worker.
+    pub fn with_account_storage_epoch<T>(
+        expected: u64,
+        operation: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let _guard = ACCOUNT_STORAGE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if ACCOUNT_STORAGE_EPOCH.load(Ordering::Acquire) != expected {
+            return None;
+        }
+        Some(operation())
+    }
+
     /// Create a new PlexAuth with default client info.
-    pub fn new() -> Self {
+    pub fn new() -> Result<Self, ApiError> {
         Self::with_client_info(PlexClientInfo::default())
     }
 
     /// Create a new PlexAuth with custom client info.
-    pub fn with_client_info(client_info: PlexClientInfo) -> Self {
-        use std::time::Duration;
-        Self {
-            http: Client::builder()
-                .timeout(Duration::from_secs(10)) // 10s timeout for plex.tv calls
-                .build()
-                .expect("Failed to create auth HTTP client"),
+    pub fn with_client_info(client_info: PlexClientInfo) -> Result<Self, ApiError> {
+        Ok(Self {
+            http: super::client::shared_http_client()?,
             client_info,
-        }
+        })
     }
 
     /// Create a PlexAuth using the client_identifier from stored auth.
     /// This ensures API calls use the same identifier the token was issued for.
-    pub fn from_stored_auth(stored: &StoredAuth) -> Self {
+    pub fn from_stored_auth(stored: &StoredAuth) -> Result<Self, ApiError> {
         let mut client_info = PlexClientInfo::default();
         client_info.client_identifier = stored.client_identifier.clone();
         Self::with_client_info(client_info)
@@ -132,7 +250,7 @@ impl PlexAuth {
         &self,
         username: &str,
         password: &str,
-    ) -> Result<String, ApiError> {
+    ) -> Result<SecretString, ApiError> {
         let url = format!("{}/users/sign_in.json", PLEX_TV_URL);
 
         tracing::info!("Authenticating user: {}", username);
@@ -150,20 +268,19 @@ impl PlexAuth {
                 ("user[login]", username),
                 ("user[password]", password),
             ])
+            .timeout(AUTH_REQUEST_TIMEOUT)
             .send()
             .await?;
 
         if !response.status().is_success() {
             let status = response.status().as_u16();
-            let text = response.text().await.unwrap_or_default();
-            tracing::error!("Auth failed: {} - {}", status, text);
-            return Err(ApiError::AuthFailed(format!("Status {}: {}", status, text)));
+            tracing::error!("Authentication failed with HTTP {}", status);
+            return Err(ApiError::AuthFailed(format!("Status {}", status)));
         }
 
-        let text = response.text().await?;
-        tracing::debug!("Sign-in response: {}", truncate_to_boundary(&text, 500));
-
-        let data: SignInResponse = serde_json::from_str(&text)
+        // Never log or retain the raw sign-in body: it contains the auth token.
+        let data: SignInResponse = deserialize_auth_response(response)
+            .await
             .map_err(|e| {
                 tracing::error!("Failed to parse sign-in response: {}", e);
                 ApiError::AuthFailed(format!("Parse error: {}", e))
@@ -185,10 +302,12 @@ impl PlexAuth {
             .header(HEADER_PLEX_PRODUCT, &self.client_info.product)
             .header(HEADER_PLEX_CLIENT_ID, &self.client_info.client_identifier)
             .form(&[("strong", "true")])
+            .timeout(AUTH_REQUEST_TIMEOUT)
             .send()
             .await?;
 
-        let pin_response: PinResponse = response.json().await?;
+        let response = response.error_for_status()?;
+        let pin_response: PinResponse = deserialize_auth_response(response).await?;
 
         let auth_url = format!(
             "{}#?clientID={}&code={}&context%5Bdevice%5D%5Bproduct%5D={}",
@@ -208,7 +327,11 @@ impl PlexAuth {
     /// Check if a PIN has been authorized (Step 2).
     ///
     /// Returns the auth token if authorized, None if still pending.
-    pub async fn check_pin(&self, pin_id: u64, code: &str) -> Result<Option<String>, ApiError> {
+    pub async fn check_pin(
+        &self,
+        pin_id: u64,
+        code: &str,
+    ) -> Result<Option<SecretString>, ApiError> {
         let url = format!("{}/api/v2/pins/{}", PLEX_TV_URL, pin_id);
 
         let response = self
@@ -216,10 +339,12 @@ impl PlexAuth {
             .get(&url)
             .header(HEADER_PLEX_CLIENT_ID, &self.client_info.client_identifier)
             .query(&[("code", code)])
+            .timeout(AUTH_REQUEST_TIMEOUT)
             .send()
             .await?;
 
-        let pin_response: PinCheckResponse = response.json().await?;
+        let response = response.error_for_status()?;
+        let pin_response: PinCheckResponse = deserialize_auth_response(response).await?;
         Ok(pin_response.auth_token)
     }
 
@@ -234,6 +359,7 @@ impl PlexAuth {
             .header(HEADER_PLEX_CLIENT_ID, &self.client_info.client_identifier)
             .header(HEADER_PLEX_TOKEN, token)
             .header("Accept", "application/json")
+            .timeout(AUTH_REQUEST_TIMEOUT)
             .send()
             .await?;
 
@@ -243,15 +369,14 @@ impl PlexAuth {
 
         if !response.status().is_success() {
             let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            tracing::error!("Token verify failed: {} - {}", status, text);
+            tracing::error!("Token verification failed with HTTP {}", status);
             return Err(ApiError::AuthFailed(format!("Status {}", status)));
         }
 
-        let text = response.text().await?;
-        tracing::debug!("User response: {}", truncate_to_boundary(&text, 500));
-
-        let user: PlexUser = serde_json::from_str(&text)
+        // The user document contains private account data; deserialize without
+        // copying it into debug logs.
+        let user: PlexUser = deserialize_auth_response(response)
+            .await
             .map_err(|e| {
                 tracing::error!("Failed to parse user response: {}", e);
                 ApiError::AuthFailed(format!("Parse error: {}", e))
@@ -270,10 +395,12 @@ impl PlexAuth {
             .header(HEADER_PLEX_CLIENT_ID, &self.client_info.client_identifier)
             .header("Accept", "application/json")
             .query(&[("includeHttps", "1"), ("includeRelay", "1")])
+            .timeout(AUTH_REQUEST_TIMEOUT)
             .send()
             .await?;
 
-        let resources: Vec<ResourceResponse> = response.json().await?;
+        let response = response.error_for_status()?;
+        let resources: Vec<ResourceResponse> = deserialize_auth_response(response).await?;
 
         let servers = resources
             .into_iter()
@@ -299,26 +426,38 @@ impl PlexAuth {
 
     /// Save auth token to file.
     pub fn save_token(&self, token: &str, user: Option<&PlexUser>) -> Result<(), ApiError> {
+        let _guard = auth_file_guard();
         let paths = crate::config::XdgPaths::new("textamp");
         paths.ensure_dirs().map_err(|e| ApiError::AuthFailed(e.to_string()))?;
 
         // Preserve existing server info if present
-        let existing = Self::load_token();
+        let existing = Self::load_token_unlocked();
+        let same_account = existing.as_ref().is_some_and(|stored| {
+            stored.username.as_deref() == user.map(|account| account.username.as_str())
+        });
         let stored = StoredAuth {
-            token: token.to_string(),
+            token: token.into(),
             user_id: user.map(|u| u.id),
             username: user.map(|u| u.username.clone()),
             client_identifier: self.client_info.client_identifier.clone(),
-            server_url: existing.as_ref().and_then(|e| e.server_url.clone()),
-            server_identifier: existing.as_ref().and_then(|e| e.server_identifier.clone()),
-            server_name: existing.as_ref().and_then(|e| e.server_name.clone()),
+            server_url: same_account
+                .then(|| existing.as_ref().and_then(|entry| entry.server_url.clone()))
+                .flatten(),
+            server_identifier: same_account
+                .then(|| existing.as_ref().and_then(|entry| entry.server_identifier.clone()))
+                .flatten(),
+            server_name: same_account
+                .then(|| existing.as_ref().and_then(|entry| entry.server_name.clone()))
+                .flatten(),
             has_plex_pass: user.map(|u| u.has_plex_pass()).unwrap_or(false),
         };
 
-        let toml_str = toml::to_string(&stored)
-            .map_err(|e| ApiError::AuthFailed(e.to_string()))?;
+        let toml_str = Zeroizing::new(
+            toml::to_string(&stored)
+                .map_err(|e| ApiError::AuthFailed(e.to_string()))?,
+        );
 
-        std::fs::write(paths.token_file(), toml_str)
+        write_private_file(&paths.token_file(), toml_str.as_bytes())
             .map_err(|e| ApiError::AuthFailed(e.to_string()))?;
 
         Ok(())
@@ -326,9 +465,10 @@ impl PlexAuth {
 
     /// Update server info in stored auth (preserves token and other fields).
     pub fn update_server_info(server_info: &ServerInfo) -> Result<(), ApiError> {
+        let _guard = auth_file_guard();
         let paths = crate::config::XdgPaths::new("textamp");
 
-        let Some(mut stored) = Self::load_token() else {
+        let Some(mut stored) = Self::load_token_unlocked() else {
             return Err(ApiError::AuthFailed("No stored auth to update".to_string()));
         };
 
@@ -336,10 +476,12 @@ impl PlexAuth {
         stored.server_identifier = Some(server_info.identifier.clone());
         stored.server_name = Some(server_info.name.clone());
 
-        let toml_str = toml::to_string(&stored)
-            .map_err(|e| ApiError::AuthFailed(e.to_string()))?;
+        let toml_str = Zeroizing::new(
+            toml::to_string(&stored)
+                .map_err(|e| ApiError::AuthFailed(e.to_string()))?,
+        );
 
-        std::fs::write(paths.token_file(), toml_str)
+        write_private_file(&paths.token_file(), toml_str.as_bytes())
             .map_err(|e| ApiError::AuthFailed(e.to_string()))?;
 
         tracing::info!("Persisted server info: {} ({})", server_info.name, server_info.url);
@@ -348,11 +490,16 @@ impl PlexAuth {
 
     /// Load stored auth token.
     pub fn load_token() -> Option<StoredAuth> {
+        let _guard = auth_file_guard();
+        Self::load_token_unlocked()
+    }
+
+    fn load_token_unlocked() -> Option<StoredAuth> {
         let paths = crate::config::XdgPaths::new("textamp");
         let path = paths.token_file();
 
         if path.exists() {
-            let contents = std::fs::read_to_string(path).ok()?;
+            let contents = Zeroizing::new(std::fs::read_to_string(path).ok()?);
             toml::from_str(&contents).ok()
         } else {
             None
@@ -374,7 +521,7 @@ impl PlexAuth {
         let marker = AccountMarker { username: username.to_string(), last_seen_unix: now };
         let toml_str = toml::to_string(&marker)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-        std::fs::write(account_marker_path(&paths), toml_str)
+        write_private_file(&account_marker_path(&paths), toml_str.as_bytes())
     }
 
     /// Load the persisted account marker if present. Returns `None`
@@ -412,10 +559,12 @@ impl PlexAuth {
             .header(HEADER_PLEX_PLATFORM, &self.client_info.platform)
             .header("Accept", "application/json")
             .query(&[("includeHttps", "1"), ("includeRelay", "1"), ("includeIPv6", "1")])
+            .timeout(AUTH_REQUEST_TIMEOUT)
             .send()
             .await?;
 
-        let resources: Vec<ResourceResponse> = response.json().await?;
+        let response = response.error_for_status()?;
+        let resources: Vec<ResourceResponse> = deserialize_auth_response(response).await?;
 
         tracing::info!("Resources API returned {} devices:", resources.len());
         for r in &resources {
@@ -531,7 +680,7 @@ impl PlexAuth {
         let path = Self::apple_tv_cache_path();
         match serde_json::to_string(players) {
             Ok(json) => {
-                if let Err(e) = std::fs::write(&path, json) {
+                if let Err(e) = write_private_file(&path, json.as_bytes()) {
                     tracing::warn!("Failed to save Apple TV cache: {}", e);
                 }
             }
@@ -549,6 +698,7 @@ impl PlexAuth {
 
     /// Delete stored auth token (logout).
     pub fn delete_token() -> Result<(), std::io::Error> {
+        let _guard = auth_file_guard();
         let paths = crate::config::XdgPaths::new("textamp");
         let path = paths.token_file();
 
@@ -559,39 +709,33 @@ impl PlexAuth {
     }
 }
 
-impl Default for PlexAuth {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 // Response types for Plex auth API
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct SignInResponse {
     user: SignInUser,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SignInUser {
-    auth_token: String,
+    auth_token: SecretString,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct PinResponse {
     id: u64,
     code: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PinCheckResponse {
     #[allow(dead_code)]
     id: u64,
     #[allow(dead_code)]
     code: String,
-    auth_token: Option<String>,
+    auth_token: Option<SecretString>,
 }
 
 #[derive(Debug, Deserialize)]

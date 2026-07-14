@@ -6,7 +6,7 @@ use crossterm::event::{self, KeyCode};
 use crate::app::Action;
 use crate::app::state::View;
 use crate::app::AppState;
-use crate::plex::PlexAuth;
+use zeroize::Zeroize;
 
 /// Handle Help view keys.
 pub(super) fn handle_help_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
@@ -59,12 +59,18 @@ pub(super) fn handle_settings_keys(key: event::KeyEvent, state: &mut AppState, c
             KeyCode::Esc => {
                 // Cancel editing, restore original value
                 state.settings_state.editing_credential = None;
-                // Restore username from stored auth or config
-                state.settings_state.username_input = PlexAuth::load_token()
-                    .and_then(|s| s.username)
+                // Restore from in-memory account/config state; key handling
+                // must never perform filesystem I/O.
+                state.settings_state.username_input = match &state.connection {
+                    crate::app::state::ConnectionState::Connected { username, .. }
+                    | crate::app::state::ConnectionState::Degraded { username, .. } => {
+                        Some(username.clone())
+                    }
+                    _ => None,
+                }
                     .or_else(|| config.plex.username.clone())
                     .unwrap_or_default();
-                state.settings_state.password_input = String::new();
+                state.settings_state.password_input.zeroize();
                 return vec![];
             }
             KeyCode::Enter => {
@@ -169,7 +175,7 @@ pub(super) fn handle_settings_keys(key: event::KeyEvent, state: &mut AppState, c
                                 if state.settings_state.signing_in {
                                     // username(0), password(1), sign in(2), then servers(3+)
                                     2 + state.available_servers.len()
-                                } else if matches!(state.connection, crate::app::state::ConnectionState::Connected { .. }) {
+                                } else if state.connection.is_authenticated() {
                                     // libraries(0..lib_count-1), actions(lib_count..lib_count+4), sign out(lib_count+5)
                                     (state.libraries.len() + 6).saturating_sub(1)
                                 } else {

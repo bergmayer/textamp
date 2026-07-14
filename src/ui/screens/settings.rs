@@ -131,7 +131,7 @@ fn render_account_content(frame: &mut Frame, state: &AppState, outer: Rect, area
 
     let mut lines = vec![];
     let mut selected_line: Option<usize> = None;
-    let connected = matches!(state.connection, ConnectionState::Connected { .. });
+    let connected = state.connection.is_authenticated();
 
     // Account info header
     match &state.connection {
@@ -143,6 +143,15 @@ fn render_account_content(frame: &mut Frame, state: &AppState, outer: Rect, area
             let plex_pass_text = if *has_plex_pass { "plex pass: active" } else { "plex pass: inactive" };
             let plex_pass_color = if *has_plex_pass { t.colors.fg_accent } else { t.colors.fg_muted };
             lines.push(Line::from(Span::styled(plex_pass_text, Style::default().fg(plex_pass_color))));
+        }
+        ConnectionState::Degraded { username, has_plex_pass, message } => {
+            lines.push(Line::from(Span::styled(
+                format!("signed in as {} (server unavailable)", username),
+                Style::default().fg(t.colors.warning),
+            )));
+            let plex_pass_text = if *has_plex_pass { "plex pass: active" } else { "plex pass: inactive" };
+            lines.push(Line::from(Span::styled(plex_pass_text, Style::default().fg(t.colors.fg_muted))));
+            lines.push(Line::from(Span::styled(message, Style::default().fg(t.colors.fg_muted))));
         }
         _ => {
             lines.push(Line::from(Span::styled(

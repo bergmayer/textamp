@@ -275,7 +275,7 @@ fn render_browse_in(frame: &mut Frame, state: &AppState, area: Rect, skip_transp
     // the same width as everything else. Visible whenever the
     // focused Miller row is a Track AND the pane hasn't been
     // hidden via Ctrl+W for that specific track.
-    let pane_track: Option<crate::plex::models::Track> = state.pane_track().cloned();
+    let pane_track = state.pane_track();
     let n_pane: usize = if pane_track.is_some() { 1 } else { 0 };
 
     let total_cols_wanted = 1 + n_meaningful_miller + n_pane;
@@ -628,7 +628,7 @@ fn render_browse_in(frame: &mut Frame, state: &AppState, area: Rect, skip_transp
     }
 
     // Track details pane (when focused row is a Track).
-    if let (Some(area), Some(track)) = (pane_area, pane_track.as_ref()) {
+    if let (Some(area), Some(track)) = (pane_area, pane_track) {
         render_track_details_pane(frame, state, area, track);
     }
 
@@ -1010,25 +1010,23 @@ fn render_folder_view(
 
                 // Check if filter is active on this column
                 let is_filter_column = filter_column == Some(col_idx);
-                let (items_to_show, total_items, filter_active_on_col): (Vec<(usize, &crate::services::FolderItem)>, usize, bool) =
-                    if let Some(results) = filter_results.filter(|_| is_filter_column) {
-                        if results.matched_indices.is_empty() {
-                            (vec![], 0, true)
-                        } else {
-                            let items: Vec<_> = results.matched_indices.iter()
-                                .filter_map(|&idx| col.items.get(idx).map(|item| (idx, item)))
-                                .collect();
-                            let len = items.len();
-                            (items, len, true)
-                        }
-                    } else {
-                        let items: Vec<_> = col.items.iter().enumerate().collect();
-                        let len = items.len();
-                        (items, len, false)
-                    };
+                let column_filter = if state.list_filter.active
+                    && state.list_filter.category == BrowseCategory::Folders
+                    && !state.list_filter.query.trim().is_empty()
+                {
+                    state.list_filter.column_results.get(col_idx)
+                } else if is_filter_column {
+                    filter_results
+                } else {
+                    None
+                };
+                let display_indices = column_filter
+                    .map(|results| results.matched_indices.as_slice());
+                let filter_active_on_col = column_filter.is_some();
+                let total_items = display_indices.map_or(col.items.len(), <[usize]>::len);
 
                 // Calculate scroll offset (needed for both rendering and scrollbar)
-                let display_selected_idx = if let Some(results) = filter_results.filter(|_| filter_active_on_col) {
+                let display_selected_idx = if let Some(results) = column_filter.filter(|_| filter_active_on_col) {
                     results.matched_indices.iter()
                         .position(|&idx| idx == selected_idx)
                         .unwrap_or(0)
@@ -1040,13 +1038,22 @@ fn render_folder_view(
                     _ => NavigationService::calc_scroll_offset(display_selected_idx, visible_height, total_items),
                 };
 
-                if items_to_show.is_empty() && filter_active_on_col {
+                if total_items == 0 && filter_active_on_col {
                     let empty = Paragraph::new("no matches")
                         .style(Style::default().fg(t.colors.fg_muted));
                     frame.render_widget(empty, inner);
                 } else {
                     // Only create ListItems for visible range
-                    let visible_items: Vec<ListItem> = items_to_show.into_iter()
+                    let display_items: Box<
+                        dyn Iterator<Item = (usize, &crate::services::FolderItem)> + '_
+                    > = if let Some(indices) = display_indices {
+                        Box::new(indices.iter().filter_map(|&idx| {
+                            col.items.get(idx).map(|item| (idx, item))
+                        }))
+                    } else {
+                        Box::new(col.items.iter().enumerate())
+                    };
+                    let visible_items: Vec<ListItem> = display_items
                         .skip(scroll_offset)
                         .take(visible_height)
                         .map(|(orig_idx, item)| {
@@ -2199,44 +2206,29 @@ fn render_browse_miller_columns(
             continue;
         }
 
-        // Quick-filter (transport-bar text input) narrows EVERY
-        // visible Miller column on-the-fly — same behaviour as the
-        // GUI. The original `filter_results` precomputed for ONE
-        // column is ignored for rendering; we run
-        // `filter_with_priority` against this column's items
-        // inline instead.
-        let live_query: Option<&str> = if state.list_filter.active
+        // Quick-filter results for every visible Miller column are computed
+        // once on a blocking worker when the query changes. Rendering only
+        // slices the resulting indices; it never rescans a 70k-track playlist.
+        let per_col_result = if state.list_filter.active
             && state.list_filter.category == state.browse_category
             && !state.list_filter.query.trim().is_empty()
         {
-            Some(state.list_filter.query.trim())
+            state.list_filter.column_results.get(col_idx)
         } else {
             None
         };
-        let per_col_matches: Option<Vec<usize>> = live_query.map(|q| {
-            use crate::services::{filter_with_priority, DEFAULT_MAX_RESULTS};
-            filter_with_priority(&col.items, q, |it| it.title(), DEFAULT_MAX_RESULTS).matched_indices
-        });
         // For the historic single-column filter (used by FilteredList*
         // selection actions in the dispatcher), only the column the
         // user is anchored on gets keyboard-driven selection helpers.
         let is_filter_column = filter_column == Some(col_idx);
 
         if col.artwork_visible {
-            // Album-art grids still need filter results; for live
-            // multi-column filtering we synthesize a fake
-            // ListFilterResults so the grid path keeps working.
-            let synth = per_col_matches.as_ref().map(|m| crate::app::state::ListFilterResults {
-                matched_indices: m.clone(),
-                total_matches: m.len(),
-                has_more: false,
-            });
-            let col_filter_owned = synth.or_else(|| {
-                if is_filter_column { filter_results.cloned() } else { None }
+            let col_filter = per_col_result.or_else(|| {
+                if is_filter_column { filter_results } else { None }
             });
             render_album_art_grid(
                 frame, state, col, is_focused, inner, col_area, col_idx,
-                col_filter_owned.as_ref(),
+                col_filter,
             );
             continue;
         }
@@ -2253,38 +2245,19 @@ fn render_browse_miller_columns(
             let rows_per_item = if is_two_row { 2 } else { 1 };
             let visible_item_count = visible_height / rows_per_item;
 
-            // Pick which row indices to show. Per-column live filter
-            // first (every column), then the legacy single-column
-            // filter_results as a fallback for anything that still
-            // expects it.
-            let (items_to_show, total_display_items, filter_active_on_col): (Vec<(usize, &BrowseItem)>, usize, bool) =
-                if let Some(matched) = per_col_matches.as_ref() {
-                    if matched.is_empty() {
-                        (vec![], 0, true)
-                    } else {
-                        let items: Vec<_> = matched.iter()
-                            .filter_map(|&idx| col.items.get(idx).map(|item| (idx, item)))
-                            .collect();
-                        let len = items.len();
-                        (items, len, true)
-                    }
-                } else if let Some(results) = filter_results.filter(|_| is_filter_column) {
-                    if results.matched_indices.is_empty() {
-                        (vec![], 0, true)
-                    } else {
-                        let items: Vec<_> = results.matched_indices.iter()
-                            .filter_map(|&idx| col.items.get(idx).map(|item| (idx, item)))
-                            .collect();
-                        let len = items.len();
-                        (items, len, true)
-                    }
-                } else {
-                    let items: Vec<_> = col.items.iter().enumerate().collect();
-                    let len = items.len();
-                    (items, len, false)
-                };
+            // Keep the unfiltered path allocation-free: retaining a slice of
+            // matched indices avoids constructing a 70k-element Vec<&Item>
+            // merely to render the twenty rows visible in the terminal.
+            let active_filter = per_col_result.or_else(|| {
+                filter_results.filter(|_| is_filter_column)
+            });
+            let display_indices = active_filter
+                .map(|results| results.matched_indices.as_slice());
+            let filter_active_on_col = active_filter.is_some();
+            let total_display_items = display_indices
+                .map_or(col.items.len(), <[usize]>::len);
 
-            if items_to_show.is_empty() && filter_active_on_col {
+            if total_display_items == 0 && filter_active_on_col {
                 let empty = Paragraph::new("no matches")
                     .style(Style::default().fg(t.colors.fg_muted));
                 frame.render_widget(empty, inner);
@@ -2294,9 +2267,7 @@ fn render_browse_miller_columns(
                 // real selected_index into the filtered display
                 // index; otherwise fall back to the historic single-
                 // column results / unfiltered position.
-                let display_selected_idx = if let Some(matched) = per_col_matches.as_ref() {
-                    matched.iter().position(|&idx| idx == selected_idx).unwrap_or(0)
-                } else if let Some(results) = filter_results.filter(|_| filter_active_on_col) {
+                let display_selected_idx = if let Some(results) = active_filter {
                     results.matched_indices.iter()
                         .position(|&idx| idx == selected_idx)
                         .unwrap_or(0)
@@ -2308,7 +2279,15 @@ fn render_browse_miller_columns(
                     _ => NavigationService::calc_scroll_offset(display_selected_idx, visible_item_count, total_display_items),
                 };
 
-                let visible_items: Vec<ListItem> = items_to_show.into_iter()
+                let display_items: Box<dyn Iterator<Item = (usize, &BrowseItem)> + '_> =
+                    if let Some(indices) = display_indices {
+                        Box::new(indices.iter().filter_map(|&idx| {
+                            col.items.get(idx).map(|item| (idx, item))
+                        }))
+                    } else {
+                        Box::new(col.items.iter().enumerate())
+                    };
+                let visible_items: Vec<ListItem> = display_items
                     .skip(scroll_offset)
                     .take(visible_item_count)
                     .map(|(orig_idx, item)| {
@@ -2695,25 +2674,32 @@ fn render_album_art_grid(
     use crate::util::truncate_middle;
     let t = theme();
 
-    // Build the list of items to display (filtered or full)
-    let items_with_indices: Vec<(usize, &BrowseItem)> = if let Some(results) = filter_results {
+    // Retain only the optional index slice. The unfiltered art path must not
+    // allocate a Vec entry for every album on every terminal frame.
+    let display_indices = if let Some(results) = filter_results {
         if results.matched_indices.is_empty() {
             let empty = Paragraph::new("no matches")
                 .style(Style::default().fg(t.colors.fg_muted));
             frame.render_widget(empty, inner);
             return;
         }
-        results.matched_indices.iter()
-            .filter_map(|&idx| col.items.get(idx).map(|item| (idx, item)))
-            .collect()
+        Some(results.matched_indices.as_slice())
     } else {
-        col.items.iter().enumerate().collect()
+        None
     };
 
-    let total_items = items_with_indices.len();
+    let total_items = display_indices.map_or(col.items.len(), <[usize]>::len);
     if total_items == 0 {
         return;
     }
+    let item_at = |display_index: usize| -> Option<(usize, &BrowseItem)> {
+        let original_index = display_indices
+            .and_then(|indices| indices.get(display_index).copied())
+            .unwrap_or(display_index);
+        col.items
+            .get(original_index)
+            .map(|item| (original_index, item))
+    };
 
     // Classify items: "one-row" pinned items vs normal art-height items
     fn is_one_row(item: &BrowseItem) -> bool {
@@ -2725,14 +2711,10 @@ fn render_album_art_grid(
         )
     }
 
-    // Count art items to size rows (one-row items don't affect art sizing)
-    let art_item_count = items_with_indices.iter().filter(|(_, item)| !is_one_row(item)).count();
-
     // Each list row: artwork on left, text on right.
     //
     // Single source of truth for the art-grid row height — both the
     // renderer and the mouse hit-test go through `compute_art_grid_row`.
-    let _ = art_item_count;
     let (art_row_height, art_width) = compute_art_grid_row(inner.width, inner.height);
 
     if art_row_height == 0 {
@@ -2746,9 +2728,13 @@ fn render_album_art_grid(
     // of pinned rows to the bottom of the column still gets the
     // visual separator.
     let has_spacer_after = |idx: usize| -> bool {
-        idx + 1 < total_items
-            && is_one_row(items_with_indices[idx].1)
-                != is_one_row(items_with_indices[idx + 1].1)
+        if idx + 1 >= total_items {
+            return false;
+        }
+        match (item_at(idx), item_at(idx + 1)) {
+            (Some((_, current)), Some((_, next))) => is_one_row(current) != is_one_row(next),
+            _ => false,
+        }
     };
 
     // Compute how many items are visible from a given scroll offset
@@ -2756,7 +2742,8 @@ fn render_album_art_grid(
         let mut y = 0u16;
         let mut count = 0;
         for i in offset..total_items {
-            let h = if is_one_row(items_with_indices[i].1) { 1 } else { art_row_height };
+            let Some((_, item)) = item_at(i) else { continue };
+            let h = if is_one_row(item) { 1 } else { art_row_height };
             // Account for spacer row after last one-row item
             let spacer = if has_spacer_after(i) { 1u16 } else { 0 };
             if y + h + spacer > inner.height { break; }
@@ -2769,8 +2756,8 @@ fn render_album_art_grid(
     let selected_idx = col.selected_index;
 
     // Convert selected_idx to display position within the (possibly filtered) list
-    let display_selected = if filter_results.is_some() {
-        items_with_indices.iter().position(|(idx, _)| *idx == selected_idx).unwrap_or(0)
+    let display_selected = if let Some(indices) = display_indices {
+        indices.iter().position(|&idx| idx == selected_idx).unwrap_or(0)
     } else {
         selected_idx
     };
@@ -2806,7 +2793,7 @@ fn render_album_art_grid(
             break;
         }
 
-        let (orig_idx, item) = items_with_indices[display_idx];
+        let Some((orig_idx, item)) = item_at(display_idx) else { continue };
         let is_selected = orig_idx == selected_idx;
         let one_row = is_one_row(item);
         let row_height = if one_row { 1 } else { art_row_height };
@@ -2959,7 +2946,7 @@ fn render_transport(frame: &mut Frame, state: &AppState, area: Rect) {
 
 /// Render the command bar (3 rows: top info/tabs + spacer + contextual commands).
 ///
-/// Top row layout: [library name] [^Q quit] ... [F-keys] [^L library] [^U queue] [^N now playing]
+/// Top row layout: [library name] [^Q/^C quit] ... [F-keys] [^L library] [^U queue] [^N now playing]
 fn render_library_picker(frame: &mut Frame, state: &AppState) {
     let t = theme();
     let area = centered_rect(50, 30, frame.area());

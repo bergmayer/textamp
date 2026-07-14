@@ -22,12 +22,14 @@ pub use cache::maybe_save_cache_async;
 pub use connection::{find_working_connection, find_working_connection_from_servers};
 pub use navigation::{
     adjust_list_index, calc_scroll_offset, load_artists,
-    load_playlists, maybe_load_more, set_list_index,
+    load_playlists, maybe_load_more, set_list_index, sorted_merge,
 };
 pub use playback::{
     fetch_more_radio_tracks, generate_plex_session_id,
     get_upcoming_tracks, insert_tracks_next, play_current_track, play_track, queue_and_play,
-    report_playback_progress_to_plex, report_playback_stop_to_plex,
+    start_resolved_stream,
+    report_playback_progress_to_plex, report_playback_stop_to_plex, report_playback_to_plex,
+    report_scrobble_to_plex,
 };
 pub use preload::{maybe_start_subfolder_preload, preload_all_library_data, preload_data, PreloadType, SubfolderPreloadResult};
 pub use compilations::maybe_detect as maybe_detect_compilations;
@@ -458,28 +460,44 @@ pub fn get_artist_for_bio(state: &crate::app::state::AppState) -> Option<(String
     None
 }
 
-/// Spawn a simple async API call that sends an event on success or `DataLoadError` on failure.
-///
-/// Reduces boilerplate for the common pattern of:
-/// clone client + event_tx → spawn → match client.method().await → send event.
-pub fn spawn_api_call<T, F, Fut>(
+/// Spawn an API call whose success and failure both retain the identity of
+/// the selection that initiated it.
+pub fn spawn_scoped_api_call<T, F, Fut>(
     event_tx: &tokio::sync::mpsc::Sender<crate::app::Event>,
+    library_generation: u64,
     client: &crate::plex::PlexClient,
+    request_key: String,
     call: F,
-    on_success: impl Fn(T) -> crate::app::Event + Send + 'static,
+    on_success: impl Fn(String, T) -> crate::app::Event + Send + 'static,
     error_msg: &str,
 ) where
     F: FnOnce(crate::plex::PlexClient) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = Result<T, crate::plex::ApiError>> + Send,
     T: Send + 'static,
 {
-    let tx = event_tx.clone();
-    let c = client.clone();
-    let msg = error_msg.to_string();
+    let tx = crate::app::event::LibraryEventSender::new(
+        event_tx.clone(),
+        library_generation,
+    );
+    let client = client.clone();
+    let message = error_msg.to_string();
     tokio::spawn(async move {
-        match call(c).await {
-            Ok(data) => { let _ = tx.send(on_success(data)).await; }
-            Err(e) => { let _ = tx.send(crate::app::event::DataEvent::DataLoadError(format!("{}: {}", msg, e)).into()).await; }
+        match call(client).await {
+            Ok(data) => {
+                let _ = tx.send(on_success(request_key, data)).await;
+            }
+            Err(error) => {
+                let _ = tx
+                    .send(
+                        crate::app::event::DataEvent::ScopedLoadError {
+                            request_key,
+                            message: format!("{message}: {error}"),
+                            connection_error: error.is_connection_error(),
+                        }
+                        .into(),
+                    )
+                    .await;
+            }
         }
     });
 }

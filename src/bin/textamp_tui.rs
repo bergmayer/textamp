@@ -49,8 +49,45 @@ async fn run_tui_mode(verbose: bool) -> Result<()> {
 
     tracing::info!("Starting textamp v{}", env!("CARGO_PKG_VERSION"));
 
-    // Restore the terminal if anything panics after raw mode is enabled,
-    // so the panic message is actually visible and the shell stays usable.
+    // Complete filesystem/client/audio initialization before entering raw
+    // mode. A slow credential volume or a wedged CoreAudio device must not
+    // leave the user staring at an unresponsive alternate screen.
+    let stored_auth = tokio::task::spawn_blocking(PlexAuth::load_token)
+        .await
+        .map_err(|error| anyhow::anyhow!("Stored-auth worker failed: {error}"))?;
+    let client_info = if let Some(stored) = stored_auth {
+        tracing::info!("Loaded stored client_identifier: {}", stored.client_identifier);
+        PlexClientInfo {
+            client_identifier: stored.client_identifier,
+            ..Default::default()
+        }
+    } else {
+        tracing::info!("No stored auth, using new client_identifier");
+        PlexClientInfo::default()
+    };
+    let client = PlexClient::new(client_info)?;
+    tracing::info!("PlexClient created with client_identifier: {}", client.client_identifier());
+
+    let mut audio = match tokio::task::spawn_blocking(AudioPlayer::new).await {
+        Ok(Ok(audio)) => audio,
+        Ok(Err(error)) => {
+            tracing::warn!(
+                "Audio device unavailable: {} — launching without playback",
+                error
+            );
+            AudioPlayer::new_without_audio()
+        }
+        Err(error) => {
+            tracing::warn!(
+                "Audio initialization worker failed: {} — launching without playback",
+                error
+            );
+            AudioPlayer::new_without_audio()
+        }
+    };
+
+    // Restore the terminal if anything panics during or after raw-mode setup,
+    // so the panic message is visible and the shell stays usable.
     install_panic_hook();
 
     // Setup terminal
@@ -101,10 +138,12 @@ async fn run_tui_mode(verbose: bool) -> Result<()> {
     }
 
     // Run the app and ensure terminal is always restored
-    let (result, pending_cache) = run_app(&mut terminal, config).await;
+    let (result, pending_cache) = run_app(&mut terminal, config, client, &mut audio).await;
 
     // Always restore terminal, even on error
-    let _ = restore_terminal(&mut terminal);
+    if let Err(error) = restore_terminal(&mut terminal) {
+        eprintln!("Failed to fully restore terminal state: {error}");
+    }
 
     // Display exit logo (clear screen, show ANSI art)
     display_exit_logo();
@@ -113,7 +152,7 @@ async fn run_tui_mode(verbose: bool) -> Result<()> {
     let cache_thread = pending_cache.map(|cache_data| {
         std::thread::spawn(move || {
             if let Some(cache) = textamp::plex::LibraryCache::new() {
-                if cache.save(&cache_data) {
+                if cache.save_preserving_unloaded(cache_data) {
                     tracing::info!("Cache saved on quit");
                 }
             }
@@ -185,41 +224,9 @@ fn display_exit_logo() {
 async fn run_app(
     terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
     config: Config,
+    mut client: PlexClient,
+    audio: &mut AudioPlayer,
 ) -> (Result<()>, Option<textamp::plex::CacheData>) {
-    // Create Plex client with stored client_identifier if available
-    // IMPORTANT: The client_identifier must match what the auth token was issued for,
-    // otherwise Plex will reject requests with 400 errors
-    let client_info = if let Some(stored) = PlexAuth::load_token() {
-        tracing::info!("Loaded stored client_identifier: {}", stored.client_identifier);
-        PlexClientInfo {
-            client_identifier: stored.client_identifier,
-            ..Default::default()
-        }
-    } else {
-        tracing::info!("No stored auth, using new client_identifier");
-        PlexClientInfo::default()
-    };
-    let mut client = PlexClient::new(client_info);
-    tracing::info!("PlexClient created with client_identifier: {}", client.client_identifier());
-
-    // Create audio player (with timeout — WSL2 PulseAudio can hang on fresh reboot)
-    // Uses block_in_place instead of spawn_blocking because on macOS the CoreAudio
-    // stream type is !Send and cannot be returned across thread boundaries.
-    let mut audio = match tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        async { tokio::task::block_in_place(AudioPlayer::new) },
-    ).await {
-        Ok(Ok(a)) => a,
-        Ok(Err(e)) => {
-            tracing::warn!("Audio device unavailable: {} — launching without playback", e);
-            AudioPlayer::new_without_audio()
-        }
-        _ => {
-            tracing::warn!("Audio initialization timed out — launching without playback");
-            AudioPlayer::new_without_audio()
-        }
-    };
-
     // Create application state
     let mut state = AppState::new();
     state.audio_available = audio.has_audio();
@@ -244,7 +251,7 @@ async fn run_app(
 
     // Run event loop
     let mut event_loop = EventLoop::new(config);
-    let result = event_loop.run(terminal, &mut state, &mut client, &mut audio).await;
+    let result = event_loop.run(terminal, &mut state, &mut client, audio).await;
 
     // Extract pending cache save (built during Action::Quit, deferred for fast exit)
     let pending_cache = state.pending_cache_save.take();

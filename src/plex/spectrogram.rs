@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rustfft::FftPlanner;
@@ -71,8 +72,12 @@ impl SpectrogramData {
 
     /// Get the spectrum (frequency bins) at a given frame index.
     pub fn spectrum_at(&self, frame: usize) -> &[u8] {
-        let start = frame * self.bins_per_frame;
-        let end = start + self.bins_per_frame;
+        let Some(start) = frame.checked_mul(self.bins_per_frame) else {
+            return &[];
+        };
+        let Some(end) = start.checked_add(self.bins_per_frame) else {
+            return &[];
+        };
         if end <= self.frames.len() {
             &self.frames[start..end]
         } else {
@@ -80,32 +85,39 @@ impl SpectrogramData {
         }
     }
 
-    /// Resample frequency bins to a target width for a given frame.
-    pub fn resample_spectrum(&self, frame: usize, target_width: usize) -> Vec<u8> {
+    /// Return one peak-preserving frequency sample without allocating an
+    /// intermediate resampled spectrum.
+    pub fn resampled_spectrum_peak(
+        &self,
+        frame: usize,
+        target_width: usize,
+        output_index: usize,
+    ) -> u8 {
         let spectrum = self.spectrum_at(frame);
-        if spectrum.is_empty() || target_width == 0 {
-            return vec![0; target_width];
+        if spectrum.is_empty() || target_width == 0 || output_index >= target_width {
+            return 0;
         }
         if target_width == spectrum.len() {
-            return spectrum.to_vec();
+            return spectrum.get(output_index).copied().unwrap_or(0);
         }
 
-        let mut result = Vec::with_capacity(target_width);
         let bins_per_output = spectrum.len() as f32 / target_width as f32;
+        let start = (output_index as f32 * bins_per_output) as usize;
+        let end = (((output_index + 1) as f32 * bins_per_output) as usize)
+            .min(spectrum.len());
 
-        for i in 0..target_width {
-            let start = (i as f32 * bins_per_output) as usize;
-            let end = ((i + 1) as f32 * bins_per_output) as usize;
-            let end = end.min(spectrum.len());
-
-            if start < end {
-                let max_val = spectrum[start..end].iter().copied().max().unwrap_or(0);
-                result.push(max_val);
-            } else {
-                result.push(spectrum.get(start).copied().unwrap_or(0));
-            }
+        if start < end {
+            spectrum[start..end].iter().copied().max().unwrap_or(0)
+        } else {
+            spectrum.get(start).copied().unwrap_or(0)
         }
-        result
+    }
+
+    /// Resample frequency bins to a target width for a given frame.
+    pub fn resample_spectrum(&self, frame: usize, target_width: usize) -> Vec<u8> {
+        (0..target_width)
+            .map(|index| self.resampled_spectrum_peak(frame, target_width, index))
+            .collect()
     }
 }
 
@@ -283,7 +295,7 @@ fn compute_spectrogram(samples: &[f32], sample_rate: u32) -> SpectrogramData {
 pub fn generate_spectrogram(
     track_key: String,
     duration_ms: u64,
-    audio_data: Vec<u8>,
+    audio_data: Arc<[u8]>,
 ) -> Result<SpectrogramData, WaveformError> {
     let (samples, sample_rate) = decode_to_pcm(audio_data)?;
     let mut data = compute_spectrogram(&samples, sample_rate);
@@ -340,9 +352,28 @@ impl SpectrogramCache {
         self.cache_dir.join(format!("{:016x}.json", hash))
     }
 
+    fn scoped_cache_path(&self, scope: &str, track_key: &str) -> PathBuf {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        scope.hash(&mut hasher);
+        track_key.hash(&mut hasher);
+        self.cache_dir.join(format!("{:016x}.json", hasher.finish()))
+    }
+
     /// Load spectrogram from cache.
     pub fn load(&self, track_key: &str) -> Option<SpectrogramData> {
         let path = self.cache_path(track_key);
+        self.load_path(path, track_key)
+    }
+
+    pub fn load_scoped(&self, scope: &str, track_key: &str) -> Option<SpectrogramData> {
+        let path = self.scoped_cache_path(scope, track_key);
+        self.load_path(path, track_key)
+    }
+
+    fn load_path(&self, path: PathBuf, track_key: &str) -> Option<SpectrogramData> {
         if !path.exists() {
             return None;
         }
@@ -370,23 +401,80 @@ impl SpectrogramCache {
 
     /// Save spectrogram to cache.
     pub fn save(&self, data: &SpectrogramData) -> bool {
+        let path = self.cache_path(&data.track_key);
+        self.save_path(path, data)
+    }
+
+    pub fn save_scoped(&self, scope: &str, data: &SpectrogramData) -> bool {
+        let path = self.scoped_cache_path(scope, &data.track_key);
+        self.save_path(path, data)
+    }
+
+    fn save_path(&self, path: PathBuf, data: &SpectrogramData) -> bool {
         if !self.cache_dir.exists() {
             if std::fs::create_dir_all(&self.cache_dir).is_err() {
                 return false;
             }
         }
 
-        let path = self.cache_path(&data.track_key);
         match serde_json::to_string(data) {
             Ok(contents) => {
-                let temp_path = path.with_extension("json.tmp");
+                let temp_path = path.with_extension(format!(
+                    "json.{}.tmp",
+                    uuid::Uuid::new_v4(),
+                ));
                 if std::fs::write(&temp_path, &contents).is_ok() {
-                    std::fs::rename(&temp_path, &path).is_ok()
+                    let saved = std::fs::rename(&temp_path, &path).is_ok();
+                    if !saved {
+                        let _ = std::fs::remove_file(temp_path);
+                    }
+                    saved
                 } else {
+                    let _ = std::fs::remove_file(temp_path);
                     false
                 }
             }
             Err(_) => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn data() -> SpectrogramData {
+        SpectrogramData {
+            track_key: "track".to_string(),
+            duration_ms: 1_000,
+            bins_per_frame: 4,
+            frame_count: 1,
+            frames_per_second: 1.0,
+            sample_rate: 44_100,
+            frames: vec![10, 40, 20, 80],
+            version: SPECTROGRAM_VERSION,
+            created_at: 1,
+        }
+    }
+
+    #[test]
+    fn indexed_resampling_matches_allocating_resample() {
+        let data = data();
+        let allocating = data.resample_spectrum(0, 2);
+        let indexed = (0..2)
+            .map(|index| data.resampled_spectrum_peak(0, 2, index))
+            .collect::<Vec<_>>();
+
+        assert_eq!(indexed, allocating);
+        assert_eq!(indexed, vec![40, 80]);
+    }
+
+    #[test]
+    fn malformed_frame_metadata_cannot_overflow_slice_bounds() {
+        let mut data = data();
+        data.bins_per_frame = usize::MAX;
+
+        assert!(data.spectrum_at(2).is_empty());
+        assert_eq!(data.resampled_spectrum_peak(2, 10, 0), 0);
     }
 }

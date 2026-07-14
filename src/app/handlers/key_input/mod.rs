@@ -228,7 +228,7 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
     // Global CUA shortcuts (work everywhere)
     //
     // Quit shortcuts (with confirmation):
-    //   - Ctrl+Q       (Linux/Windows/TUI standard)
+    //   - Ctrl+Q / Ctrl+C (Linux/Windows/TUI standard)
     //   - Cmd+Q        (Mac standard — `SUPER` is the cross-platform
     //                   crossterm name for the OS Logo / Cmd / Win key)
     //   - Alt+F4       (Windows standard)
@@ -239,6 +239,7 @@ pub fn handle_key(key: event::KeyEvent, state: &mut AppState, config: &crate::co
     // frequently useful.
     let is_quit_keypress = match (key.modifiers, key.code) {
         (KeyModifiers::CONTROL, KeyCode::Char('q')) => true,
+        (KeyModifiers::CONTROL, KeyCode::Char('c')) => true,
         (KeyModifiers::SUPER,   KeyCode::Char('q')) => true,
         (KeyModifiers::ALT,     KeyCode::F(4))      => true,
         _ => false,

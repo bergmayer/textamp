@@ -3,6 +3,7 @@
 //! ToggleDjMode, DjModeProcess, DjModeTracksReady, DjModeBatchReady.
 
 use crate::app::event::*;
+use crate::app::event::LibraryEventSender;
 use crate::app::{Action, AppState, Event};
 use crate::app::action::RadioAction;
 use crate::app::state::{DjMode, PlaybackMode, RadioMode, View};
@@ -47,7 +48,7 @@ pub async fn dispatch(
             if idx < state.radio.tracks.len() {
                 state.radio.track_index = Some(idx);
                 state.list_state.queue_index = idx;
-                helpers::play_current_track(event_tx, state, client, audio).await;
+                helpers::play_current_track(event_tx, state, client, audio);
             }
         }
         RadioAction::StartPlexRadio { key, title } => {
@@ -57,6 +58,7 @@ pub async fn dispatch(
             }
 
             audio.stop();
+            state.playback.request_id = audio.playback_id();
             state.playback.status = crate::app::state::PlayStatus::Stopped;
             state.plex_session_id = Some(helpers::generate_plex_session_id());
 
@@ -89,13 +91,20 @@ pub async fn dispatch(
                 .find(|a| a.rating_key == key)
                 .and_then(|a| a.thumb.clone());
             if let Some(ref thumb) = artist_thumb {
+                state.artwork.loading = true;
+                state.artwork.pending_thumb = Some(thumb.clone());
                 let art_tx = event_tx.clone();
                 let art_client = client.clone();
                 let thumb_path = thumb.clone();
+                let generation = state.artwork.grid_generation;
                 tokio::spawn(async move {
                     match art_client.fetch_artwork(&thumb_path, 300).await {
                         Ok(data) => {
-                            let _ = art_tx.send(ArtworkEvent::ArtworkLoaded { thumb_path, data }.into()).await;
+                            let _ = art_tx.send(ArtworkEvent::ArtworkLoaded {
+                                generation,
+                                thumb_path,
+                                data,
+                            }.into()).await;
                         }
                         Err(e) => {
                             tracing::debug!("Failed to load artist artwork for radio: {}", e);
@@ -104,7 +113,7 @@ pub async fn dispatch(
                 });
             }
 
-            let tx = event_tx.clone();
+            let tx = LibraryEventSender::new(event_tx.clone(), state.library_generation);
             let mut client_clone = client.clone();
             let rk = key.clone();
             let rt = title.clone();
@@ -177,6 +186,7 @@ pub async fn dispatch(
             // Stop audio immediately to prevent stale TrackEnded events from the
             // old track being processed after the new station starts playing.
             audio.stop();
+            state.playback.request_id = audio.playback_id();
             state.playback.status = crate::app::state::PlayStatus::Stopped;
 
             // Generate new session ID for this playback context
@@ -217,7 +227,7 @@ pub async fn dispatch(
             state.set_status(format!("Loading {}...", station_title));
 
             // Spawn background task for station queue creation (non-blocking)
-            let tx = event_tx.clone();
+            let tx = LibraryEventSender::new(event_tx.clone(), state.library_generation);
             let mut client_clone = client.clone();
             let sk = station_key.clone();
             let st = station_title.clone();
@@ -281,7 +291,7 @@ pub async fn dispatch(
             state.set_status(format!("Loading {}...", station_title));
 
             // Spawn background task for child loading (non-blocking)
-            let tx = event_tx.clone();
+            let tx = LibraryEventSender::new(event_tx.clone(), state.library_generation);
             let mut client_clone = client.clone();
             let sk = station_key.clone();
             let st = station_title.clone();
@@ -347,7 +357,7 @@ pub async fn dispatch(
         RadioAction::PlayCurrentRadioTrack => {
             // Play the current track in radio mode (stays in Radio playback mode)
             state.consecutive_playback_errors = 0;
-            helpers::play_current_track(event_tx, state, client, audio).await;
+            helpers::play_current_track(event_tx, state, client, audio);
         }
         RadioAction::ToggleDjMode(mode) => {
             tracing::info!("ToggleDjMode: {:?}, current_mode={:?}, playback_mode={:?}, queue_len={}, queue_index={:?}, current_track={}",
@@ -386,7 +396,7 @@ pub async fn dispatch(
         }
         RadioAction::DjModeProcess => {
             // Only for continuous modes (Freeze, Contempo, Groupie)
-            dispatch_dj_continuous(event_tx, state, client).await;
+            dispatch_dj_continuous(event_tx, state, client);
         }
         RadioAction::DjModeTracksReady(tracks, _insert_next, error) => {
             // Insert DJ-picked tracks right after the current track position.
@@ -603,7 +613,7 @@ fn pick_diverse(
 ///   queue tracks, not after DJ-inserted tracks. This alternates: original → DJ → original → DJ.
 /// - **Continuous modes** (Freeze, Contempo, Groupie): always insert after the current
 ///   track, pushing original queue tracks further down so you only hear DJ picks.
-async fn dispatch_dj_continuous(
+fn dispatch_dj_continuous(
     event_tx: &mpsc::Sender<Event>,
     state: &mut AppState,
     client: &mut PlexClient,
@@ -658,7 +668,7 @@ async fn dispatch_dj_continuous(
 
     let (used_artists, used_albums) = build_diversity_context(state);
 
-    let tx = event_tx.clone();
+    let tx = LibraryEventSender::new(event_tx.clone(), state.library_generation);
     let client_clone = client.clone();
     let history = state.dj.history.clone();
     let lib_key = state.active_library.clone();

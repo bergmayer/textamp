@@ -100,15 +100,21 @@ pub fn handle_core_event(
 /// Mirrors `EventLoop::start_auth_task` exactly, just extracted so both the
 /// TUI event loop and the GUI Iced application drive identical auth logic:
 ///  - Fast path: stored token + server_url + username → immediate
-///    `AuthSuccess` (with a background server-discovery + connection-test
-///    task that reconciles stale URLs and emits ServersDiscovered /
-///    ServerConnectionSucceeded).
+///    `AuthSuccess`. The generation-scoped validation task is launched by the
+///    reducer after it has installed that account context.
 ///  - Slow path: verify the stored token with plex.tv, discover servers,
 ///    pick a working connection, emit `AuthSuccess`.
 ///  - Nothing stored / token invalid: emit `AuthShowLogin`.
 pub fn spawn_auth_task(event_tx: mpsc::Sender<Event>) {
     tokio::spawn(async move {
-        if let Some(stored) = PlexAuth::load_token() {
+        let stored = match tokio::task::spawn_blocking(PlexAuth::load_token).await {
+            Ok(stored) => stored,
+            Err(error) => {
+                tracing::error!("Stored-auth worker failed: {}", error);
+                None
+            }
+        };
+        if let Some(stored) = stored {
             tracing::info!(
                 "Loaded stored auth: client_identifier={}, server_url={:?}",
                 stored.client_identifier, stored.server_url
@@ -124,60 +130,25 @@ pub fn spawn_auth_task(event_tx: mpsc::Sender<Event>) {
                         token: stored.token.clone(),
                         username: username.clone(),
                         server_url: server_url.clone(),
+                        server_identifier: stored.server_identifier.clone(),
                         servers: vec![],
                         client_identifier: stored.client_identifier.clone(),
                         has_plex_pass: stored.has_plex_pass,
                     }.into())
                     .await;
 
-                // Background validation + recovery.
-                let event_tx_bg = event_tx.clone();
-                let stored_bg = stored.clone();
-                tokio::spawn(async move {
-                    let auth = PlexAuth::from_stored_auth(&stored_bg);
-                    let token = &stored_bg.token;
-                    let client_id = &stored_bg.client_identifier;
-
-                    let servers = match auth.get_servers(token).await {
-                        Ok(s) => {
-                            let _ = event_tx_bg.send(AuthEvent::ServersDiscovered(s.clone()).into()).await;
-                            s
-                        }
-                        Err(e) => {
-                            tracing::warn!("Background server discovery failed: {}", e);
-                            return;
-                        }
-                    };
-
-                    let working_url = if let Some(ref stored_id) = stored_bg.server_identifier {
-                        if let Some(server) = servers.iter().find(|s| &s.client_identifier == stored_id) {
-                            helpers::find_working_connection(server, token, client_id).await
-                        } else {
-                            helpers::find_working_connection_from_servers(&servers, token, client_id).await
-                        }
-                    } else {
-                        helpers::find_working_connection_from_servers(&servers, token, client_id).await
-                    };
-
-                    if let Some(url) = working_url {
-                        let server_name = servers
-                            .iter()
-                            .find(|s| s.connections.iter().any(|c| c.uri == url))
-                            .map(|s| s.name.clone())
-                            .unwrap_or_else(|| "Server".to_string());
-                        let _ = event_tx_bg.send(AuthEvent::ServerConnectionSucceeded { server_name, url }.into()).await;
-                    } else {
-                        let server_name = stored_bg.server_name.clone()
-                            .or_else(|| servers.first().map(|s| s.name.clone()))
-                            .unwrap_or_else(|| "Server".to_string());
-                        let _ = event_tx_bg.send(AuthEvent::ServerConnectionFailed { server_name }.into()).await;
-                    }
-                });
                 return;
             }
 
             // Slow path: verify the token and find a live connection.
-            let auth = PlexAuth::from_stored_auth(&stored);
+            let auth = match PlexAuth::from_stored_auth(&stored) {
+                Ok(auth) => auth,
+                Err(error) => {
+                    tracing::error!("Cannot initialize authentication client: {}", error);
+                    let _ = event_tx.send(AuthEvent::AuthShowLogin.into()).await;
+                    return;
+                }
+            };
             if let Ok(user) = auth.verify_token(&stored.token).await {
                 let servers = auth.get_servers(&stored.token).await.unwrap_or_default();
 
@@ -193,11 +164,18 @@ pub fn spawn_auth_task(event_tx: mpsc::Sender<Event>) {
 
                 if let Some(url) = final_server_url {
                     let has_plex_pass = user.has_plex_pass();
+                    let server_identifier = servers
+                        .iter()
+                        .find(|server| {
+                            server.connections.iter().any(|connection| connection.uri == url)
+                        })
+                        .map(|server| server.client_identifier.clone());
                     let _ = event_tx
                         .send(AuthEvent::AuthSuccess {
                             token: stored.token,
                             username: user.username,
                             server_url: url,
+                            server_identifier,
                             servers,
                             client_identifier: stored.client_identifier,
                             has_plex_pass,

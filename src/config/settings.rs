@@ -112,9 +112,6 @@ pub struct PlexConfig {
     #[serde(default)]
     pub username: Option<String>,
 
-    /// Pre-existing auth token (primary authentication method)
-    #[serde(default)]
-    pub token: Option<String>,
 }
 
 impl Default for PlexConfig {
@@ -122,7 +119,6 @@ impl Default for PlexConfig {
         Self {
             server_url: default_server_url(),
             username: None,
-            token: None,
         }
     }
 }

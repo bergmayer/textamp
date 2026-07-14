@@ -2,8 +2,9 @@
 //! NavigateUpFolder, RefreshSubfolder, PlayFolderTracks.
 
 use crate::app::event::*;
+use crate::app::event::LibraryEventSender;
 use crate::app::{Action, AppState, Event};
-use crate::app::action::FolderAction;
+use crate::app::action::{AsyncError, FolderAction};
 use crate::plex::PlexClient;
 use crate::audio::AudioPlayer;
 use crate::plex::CachedFolder;
@@ -75,9 +76,11 @@ pub(crate) fn derive_path_from_children(
 /// filesystem paths. This probes the first child folder to find tracks and derive the
 /// parent path from their file paths.
 pub(crate) fn spawn_path_discovery(
+    library_key: &str,
     folder_key: &str,
     items: &[crate::plex::models::FolderItem],
     event_tx: &mpsc::Sender<Event>,
+    library_generation: u64,
     client: &PlexClient,
 ) {
     // Find the first child folder to probe
@@ -86,8 +89,9 @@ pub(crate) fn spawn_path_discovery(
         .map(|item| item.key.clone());
 
     if let Some(child_key) = child_key {
-        let event_tx = event_tx.clone();
+        let event_tx = LibraryEventSender::new(event_tx.clone(), library_generation);
         let client = client.clone();
+        let lk = library_key.to_string();
         let fk = folder_key.to_string();
         tokio::spawn(async move {
             match client.get_folder_contents(&child_key).await {
@@ -99,6 +103,7 @@ pub(crate) fn spawn_path_discovery(
                             let parent = &child_path[..pos];
                             if !parent.is_empty() {
                                 let _ = event_tx.send(FolderEvent::FolderPathDiscovered {
+                                    library_key: lk,
                                     folder_key: fk,
                                     path: parent.to_string(),
                                 }.into()).await;
@@ -149,7 +154,8 @@ pub async fn dispatch(
                     .map(|l| l.title.clone())
                     .unwrap_or_else(|| "Root".to_string());
 
-                let event_tx = event_tx.clone();
+                let event_tx =
+                    LibraryEventSender::new(event_tx.clone(), state.library_generation);
                 let client = client.clone();
                 let lk = lib_key.clone();
                 let lt = lib_title;
@@ -164,9 +170,11 @@ pub async fn dispatch(
                             }.into()).await;
                         }
                         Err(e) => {
-                            let _ = event_tx.send(FolderEvent::FolderLoadFailed(
-                                format!("Failed to load folders: {}", e)
-                            ).into()).await;
+                            let _ = event_tx.send(FolderEvent::FolderLoadFailed {
+                                library_key: lk,
+                                pending_folder_key: None,
+                                message: format!("Failed to load folders: {}", e),
+                            }.into()).await;
                         }
                     }
                 });
@@ -201,7 +209,16 @@ pub async fn dispatch(
 
                 // If we couldn't determine the path, probe a child folder in background
                 if let Some(items) = items_for_discovery {
-                    spawn_path_discovery(&folder_key, &items, event_tx, client);
+                    if let Some(library_key) = state.active_library.as_deref() {
+                        spawn_path_discovery(
+                            library_key,
+                            &folder_key,
+                            &items,
+                            event_tx,
+                            state.library_generation,
+                            client,
+                        );
+                    }
                 }
 
                 // If entry is >= 72h old, serve from cache (warm) but re-fetch in background
@@ -213,8 +230,10 @@ pub async fn dispatch(
                 if age_secs >= crate::plex::constants::CACHE_STALE_THRESHOLD_SECS {
                     tracing::info!("Warm subfolder cache: {} ({} days old), re-fetching in background",
                         folder_key, age_secs / (24 * 60 * 60));
-                    let event_tx = event_tx.clone();
+                    let event_tx =
+                        LibraryEventSender::new(event_tx.clone(), state.library_generation);
                     let client = client.clone();
+                    let library_key = state.active_library.clone().unwrap_or_default();
                     let fk = folder_key;
                     tokio::spawn(async move {
                         match client.get_folder_contents(&fk).await {
@@ -222,6 +241,7 @@ pub async fn dispatch(
                                 let items = FolderService::from_response(&response);
                                 let folder_path = FolderService::folder_path(&response);
                                 let _ = event_tx.send(FolderEvent::SubfolderRefreshed {
+                                    library_key,
                                     folder_key: fk,
                                     cached_folder: CachedFolder::with_path(items, folder_path),
                                 }.into()).await;
@@ -236,8 +256,10 @@ pub async fn dispatch(
                 // Not in cache and not already loading - fetch from API in background
                 state.pending_folder_load = Some(folder_key.clone());
                 state.set_status("Loading folder\u{2026}".to_string());
-                let event_tx = event_tx.clone();
+                let event_tx =
+                    LibraryEventSender::new(event_tx.clone(), state.library_generation);
                 let client = client.clone();
+                let library_key = state.active_library.clone().unwrap_or_default();
                 let fk = folder_key;
                 let ip = item_path;
                 let rc = replace_child;
@@ -247,6 +269,7 @@ pub async fn dispatch(
                             let items = FolderService::from_response(&response);
                             let folder_path = FolderService::folder_path(&response);
                             let _ = event_tx.send(FolderEvent::FolderContentsLoaded {
+                                library_key,
                                 folder_key: fk,
                                 items,
                                 folder_path,
@@ -255,9 +278,11 @@ pub async fn dispatch(
                             }.into()).await;
                         }
                         Err(e) => {
-                            let _ = event_tx.send(FolderEvent::FolderLoadFailed(
-                                format!("Failed to load folder: {}", e)
-                            ).into()).await;
+                            let _ = event_tx.send(FolderEvent::FolderLoadFailed {
+                                library_key,
+                                pending_folder_key: Some(fk),
+                                message: format!("Failed to load folder: {}", e),
+                            }.into()).await;
                         }
                     }
                 });
@@ -267,8 +292,10 @@ pub async fn dispatch(
             // Manual refresh of a specific subfolder (F5 when focused on subfolder)
             // This is the ONLY way subfolder caches get manually refreshed.
             state.set_status("Refreshing folder\u{2026}".to_string());
-            let event_tx = event_tx.clone();
+            let event_tx =
+                LibraryEventSender::new(event_tx.clone(), state.library_generation);
             let client = client.clone();
+            let library_key = state.active_library.clone().unwrap_or_default();
             let fk = folder_key;
             tokio::spawn(async move {
                 match client.get_folder_contents(&fk).await {
@@ -276,15 +303,18 @@ pub async fn dispatch(
                         let items = FolderService::from_response(&response);
                         let folder_path = FolderService::folder_path(&response);
                         let _ = event_tx.send(FolderEvent::FolderRefreshLoaded {
+                            library_key,
                             folder_key: fk,
                             items,
                             folder_path,
                         }.into()).await;
                     }
                     Err(e) => {
-                        let _ = event_tx.send(FolderEvent::FolderLoadFailed(
-                            format!("Failed to refresh folder: {}", e)
-                        ).into()).await;
+                        let _ = event_tx.send(FolderEvent::FolderLoadFailed {
+                            library_key,
+                            pending_folder_key: None,
+                            message: format!("Failed to refresh folder: {}", e),
+                        }.into()).await;
                     }
                 }
             });
@@ -310,7 +340,7 @@ pub async fn dispatch(
                     state.plex_session_id = Some(helpers::generate_plex_session_id());
                     state.queue.original.clear();
                     state.queue.sort_mode = crate::app::state::QueueSortMode::QueueOrder;
-                    helpers::queue_and_play(event_tx, state, client, audio, tracks, start_idx).await;
+                    helpers::queue_and_play(event_tx, state, client, audio, tracks, start_idx);
                 } else {
                     // Fallback: fetch from API if all_tracks cache is empty
                     let selected_key = folder_state.selected_item().map(|item| item.key.clone());
@@ -321,55 +351,100 @@ pub async fn dispatch(
                     }).unwrap_or_default();
 
                     if let Some(col) = folder_state.focused() {
-                        let api_result = if let Some(ref folder_key) = col.key {
-                            client.get_folder_tracks(folder_key).await
-                        } else if let Some(lib_key) = &state.active_library {
-                            client.get_library_root_tracks(lib_key).await
-                        } else {
-                            Ok(vec![])
-                        };
-
-                        match api_result {
-                            Ok(mut tracks) if !tracks.is_empty() => {
-                                // Reorder to match column display order
-                                if !column_track_keys.is_empty() {
-                                    use std::collections::HashMap;
-                                    let pos_map: HashMap<&str, usize> = column_track_keys.iter()
-                                        .enumerate()
-                                        .map(|(i, k)| (k.as_str(), i))
-                                        .collect();
-                                    tracks.sort_by_key(|t| {
-                                        pos_map.get(t.rating_key.as_str()).copied().unwrap_or(usize::MAX)
-                                    });
-                                }
-
-                                let start_idx = if let Some(ref sel_key) = selected_key {
-                                    tracks.iter().position(|t| {
-                                        t.rating_key == *sel_key || t.key == *sel_key
-                                    }).unwrap_or(selected_index.min(tracks.len().saturating_sub(1)))
-                                } else {
-                                    0
-                                };
-
-                                if let Some(current) = state.current_track().cloned() {
-                                    helpers::report_playback_stop_to_plex(
-                                        &current, state.playback.position_ms, true,
-                                        state.plex_session_id.clone(), client,
-                                    );
-                                }
-                                state.plex_session_id = Some(helpers::generate_plex_session_id());
-                                state.queue.original.clear();
-                                state.queue.sort_mode = crate::app::state::QueueSortMode::QueueOrder;
-                                helpers::queue_and_play(event_tx, state, client, audio, tracks, start_idx).await;
+                        state.folder_play_request_id = state.folder_play_request_id.wrapping_add(1);
+                        let request_id = state.folder_play_request_id;
+                        let folder_key = col.key.clone();
+                        let library_key = state.active_library.clone();
+                        let tx = event_tx.clone();
+                        let request_client = client.clone();
+                        tokio::spawn(async move {
+                            let result = if let Some(folder_key) = folder_key {
+                                request_client.get_folder_tracks(&folder_key).await
+                            } else if let Some(library_key) = library_key {
+                                request_client.get_library_root_tracks(&library_key).await
+                            } else {
+                                Ok(vec![])
                             }
-                            Ok(_) => {} // empty
-                            Err(e) => {
-                                state.set_error(format!("Failed to load folder tracks: {}", e));
-                            }
-                        }
+                            .map_err(|error| {
+                                AsyncError::from_api("Failed to load folder tracks", &error)
+                            });
+                            let _ = tx
+                                .send(Event::Effect(
+                                    FolderAction::FolderTracksLoaded {
+                                        request_id,
+                                        selected_key,
+                                        selected_index,
+                                        ordered_keys: column_track_keys,
+                                        result,
+                                    }
+                                    .into(),
+                                ))
+                                .await;
+                        });
                     }
                 }
             }
+        }
+        FolderAction::FolderTracksLoaded {
+            request_id,
+            selected_key,
+            selected_index,
+            ordered_keys,
+            result,
+        } => {
+            if state.folder_play_request_id != request_id {
+                return Ok(vec![]);
+            }
+            let mut tracks = match result {
+                Ok(tracks) => {
+                    state.connection.mark_healthy();
+                    tracks
+                }
+                Err(error) => {
+                    if error.connection_error {
+                        state.connection.mark_degraded(error.message.clone());
+                    }
+                    state.set_error(error.message);
+                    return Ok(vec![]);
+                }
+            };
+            if !ordered_keys.is_empty() {
+                let positions: std::collections::HashMap<&str, usize> = ordered_keys
+                    .iter()
+                    .enumerate()
+                    .map(|(index, key)| (key.as_str(), index))
+                    .collect();
+                tracks.sort_by_key(|track| {
+                    positions
+                        .get(track.rating_key.as_str())
+                        .copied()
+                        .unwrap_or(usize::MAX)
+                });
+            }
+            if tracks.is_empty() {
+                return Ok(vec![]);
+            }
+            let start_index = selected_key
+                .as_ref()
+                .and_then(|key| {
+                    tracks
+                        .iter()
+                        .position(|track| track.rating_key == *key || track.key == *key)
+                })
+                .unwrap_or(selected_index.min(tracks.len().saturating_sub(1)));
+            if let Some(current) = state.current_track().cloned() {
+                helpers::report_playback_stop_to_plex(
+                    &current,
+                    state.playback.position_ms,
+                    true,
+                    state.plex_session_id.clone(),
+                    client,
+                );
+            }
+            state.plex_session_id = Some(helpers::generate_plex_session_id());
+            state.queue.original.clear();
+            state.queue.sort_mode = crate::app::state::QueueSortMode::QueueOrder;
+            helpers::queue_and_play(event_tx, state, client, audio, tracks, start_index);
         }
         FolderAction::PlayFolderTrack { track_index } => {
             // Play a single track from the focused folder column
@@ -384,7 +459,7 @@ pub async fn dispatch(
                         state.plex_session_id = Some(helpers::generate_plex_session_id());
                         state.queue.original.clear();
                         state.queue.sort_mode = crate::app::state::QueueSortMode::QueueOrder;
-                        helpers::queue_and_play(event_tx, state, client, audio, vec![track.clone()], 0).await;
+                        helpers::queue_and_play(event_tx, state, client, audio, vec![track.clone()], 0);
                         return Ok(vec![]);
                     }
                 }
@@ -392,26 +467,68 @@ pub async fn dispatch(
                 // Slow path: fetch from API
                 if let Some(col) = folder_state.focused() {
                     if let Some(ref folder_key) = col.key {
-                        match client.get_folder_tracks(folder_key).await {
-                            Ok(tracks) => {
-                                let track = if let Some(ref sel_key) = selected_key {
-                                    tracks.into_iter().find(|t| t.rating_key == *sel_key || t.key == *sel_key)
-                                } else {
-                                    tracks.into_iter().nth(track_index)
-                                };
-                                if let Some(track) = track {
-                                    state.plex_session_id = Some(helpers::generate_plex_session_id());
-                                    state.queue.original.clear();
-                                    state.queue.sort_mode = crate::app::state::QueueSortMode::QueueOrder;
-                                    helpers::queue_and_play(event_tx, state, client, audio, vec![track], 0).await;
-                                }
-                            }
-                            Err(e) => {
-                                state.set_error(format!("Failed to load folder tracks: {}", e));
-                            }
-                        }
+                        state.folder_play_request_id = state.folder_play_request_id.wrapping_add(1);
+                        let request_id = state.folder_play_request_id;
+                        let folder_key = folder_key.clone();
+                        let tx = event_tx.clone();
+                        let request_client = client.clone();
+                        tokio::spawn(async move {
+                            let result = request_client
+                                .get_folder_tracks(&folder_key)
+                                .await
+                                .map_err(|error| {
+                                    AsyncError::from_api("Failed to load folder tracks", &error)
+                                });
+                            let _ = tx
+                                .send(Event::Effect(
+                                    FolderAction::FolderTrackLoaded {
+                                        request_id,
+                                        selected_key,
+                                        track_index,
+                                        result,
+                                    }
+                                    .into(),
+                                ))
+                                .await;
+                        });
                     }
                 }
+            }
+        }
+        FolderAction::FolderTrackLoaded {
+            request_id,
+            selected_key,
+            track_index,
+            result,
+        } => {
+            if state.folder_play_request_id != request_id {
+                return Ok(vec![]);
+            }
+            let tracks = match result {
+                Ok(tracks) => {
+                    state.connection.mark_healthy();
+                    tracks
+                }
+                Err(error) => {
+                    if error.connection_error {
+                        state.connection.mark_degraded(error.message.clone());
+                    }
+                    state.set_error(error.message);
+                    return Ok(vec![]);
+                }
+            };
+            let track = if let Some(selected_key) = selected_key {
+                tracks
+                    .into_iter()
+                    .find(|track| track.rating_key == selected_key || track.key == selected_key)
+            } else {
+                tracks.into_iter().nth(track_index)
+            };
+            if let Some(track) = track {
+                state.plex_session_id = Some(helpers::generate_plex_session_id());
+                state.queue.original.clear();
+                state.queue.sort_mode = crate::app::state::QueueSortMode::QueueOrder;
+                helpers::queue_and_play(event_tx, state, client, audio, vec![track], 0);
             }
         }
     }

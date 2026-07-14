@@ -1,6 +1,7 @@
 //! Background data preloading for faster access.
 
 use crate::app::event::*;
+use crate::app::event::LibraryEventSender;
 use crate::app::Event;
 use crate::plex::PlexClient;
 use tokio::sync::mpsc;
@@ -37,18 +38,23 @@ pub enum PreloadType {
 }
 
 /// Preload data in background for faster access.
-pub fn preload_data(event_tx: &mpsc::Sender<Event>, preload_type: PreloadType, lib_key: &str, client: &PlexClient) {
+pub fn preload_data(
+    event_tx: &mpsc::Sender<Event>,
+    preload_type: PreloadType,
+    lib_key: &str,
+    client: &PlexClient,
+    library_generation: u64,
+) {
     use crate::services::{FolderColumn, FolderNavigationState, FolderService};
 
-    let Some(server_url) = client.server_url() else { return };
-    let server_url = server_url.to_string();
-    let token = client.token().map(|s| s.to_string());
-    let client_id = client.client_identifier().to_string();
+    if !client.has_server() {
+        return;
+    }
+    let client = client.clone();
     let lib_key = lib_key.to_string();
-    let event_tx = event_tx.clone();
+    let event_tx = LibraryEventSender::new(event_tx.clone(), library_generation);
 
     tokio::spawn(async move {
-        let client = crate::plex::PlexClient::new_with_url(&server_url, token.as_deref(), &client_id);
         let lib_key_ref = lib_key.as_str();
 
         match preload_type {
@@ -190,9 +196,7 @@ pub fn preload_data(event_tx: &mpsc::Sender<Event>, preload_type: PreloadType, l
             }
             PreloadType::AllTracks => {
                 // Use a much longer timeout for AllTracks — can be hundreds of MB for large libraries
-                let long_client = crate::plex::PlexClient::new_with_url_and_timeout(
-                    &server_url, token.as_deref(), &client_id, 600,
-                );
+                let long_client = client.clone_with_timeout(std::time::Duration::from_secs(600));
                 tracing::debug!("Preloading all tracks for library: {}", lib_key);
                 match long_client.get_tracks(lib_key_ref).await {
                     Ok(data) => {
@@ -332,13 +336,11 @@ pub fn maybe_start_subfolder_preload(
     state.subfolder_preload_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
 
     let cancel = state.subfolder_preload_cancel.clone();
-    let Some(server_url) = client.server_url() else {
+    if !client.has_server() {
         return SubfolderPreloadResult::NoLibrary;
-    };
-    let server_url = server_url.to_string();
-    let token = client.token().map(|s| s.to_string());
-    let client_id = client.client_identifier().to_string();
-    let event_tx = event_tx.clone();
+    }
+    let client = client.clone();
+    let event_tx = LibraryEventSender::new(event_tx.clone(), state.library_generation);
 
     tokio::spawn(async move {
         use crate::plex::CachedFolder;
@@ -355,7 +357,7 @@ pub fn maybe_start_subfolder_preload(
         }
 
         let semaphore = Arc::new(Semaphore::new(4));
-        let client = Arc::new(crate::plex::PlexClient::new_with_url(&server_url, token.as_deref(), &client_id));
+        let client = Arc::new(client);
         let cancel = Arc::new(cancel);
 
         // Track all keys we've ever queued for fetching (cycle prevention)
@@ -381,7 +383,10 @@ pub fn maybe_start_subfolder_preload(
                 let cancel = cancel.clone();
 
                 handles.push(tokio::spawn(async move {
-                    let _permit = sem.acquire().await.unwrap();
+                    let _permit = match sem.acquire().await {
+                        Ok(permit) => permit,
+                        Err(_) => return None,
+                    };
                     if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                         return None;
                     }
@@ -504,23 +509,24 @@ pub fn preload_all_library_data(event_tx: &mpsc::Sender<Event>, lib_key: &str, l
     state.cache_mgmt.preloads_in_progress = categories.iter().map(|s| s.to_string()).collect();
     state.cache_mgmt.preloads_total = categories.len();
 
-    preload_data(event_tx, PreloadType::Artists, lib_key, client);
-    preload_data(event_tx, PreloadType::Folders { lib_title: lib_title.to_string() }, lib_key, client);
-    preload_data(event_tx, PreloadType::Albums, lib_key, client);
-    preload_data(event_tx, PreloadType::AllTracks, lib_key, client);
-    preload_data(event_tx, PreloadType::ArtistGenres, lib_key, client);
-    preload_data(event_tx, PreloadType::AlbumGenres, lib_key, client);
-    preload_data(event_tx, PreloadType::Moods, lib_key, client);
-    preload_data(event_tx, PreloadType::Styles, lib_key, client);
-    preload_data(event_tx, PreloadType::Decades, lib_key, client);
-    preload_data(event_tx, PreloadType::Years, lib_key, client);
-    preload_data(event_tx, PreloadType::Collections, lib_key, client);
-    preload_data(event_tx, PreloadType::Countries, lib_key, client);
-    preload_data(event_tx, PreloadType::Labels, lib_key, client);
-    preload_data(event_tx, PreloadType::Formats, lib_key, client);
-    preload_data(event_tx, PreloadType::Studios, lib_key, client);
-    preload_data(event_tx, PreloadType::Stations, lib_key, client);
-    preload_data(event_tx, PreloadType::Playlists, lib_key, client);
+    let generation = state.library_generation;
+    preload_data(event_tx, PreloadType::Artists, lib_key, client, generation);
+    preload_data(event_tx, PreloadType::Folders { lib_title: lib_title.to_string() }, lib_key, client, generation);
+    preload_data(event_tx, PreloadType::Albums, lib_key, client, generation);
+    preload_data(event_tx, PreloadType::AllTracks, lib_key, client, generation);
+    preload_data(event_tx, PreloadType::ArtistGenres, lib_key, client, generation);
+    preload_data(event_tx, PreloadType::AlbumGenres, lib_key, client, generation);
+    preload_data(event_tx, PreloadType::Moods, lib_key, client, generation);
+    preload_data(event_tx, PreloadType::Styles, lib_key, client, generation);
+    preload_data(event_tx, PreloadType::Decades, lib_key, client, generation);
+    preload_data(event_tx, PreloadType::Years, lib_key, client, generation);
+    preload_data(event_tx, PreloadType::Collections, lib_key, client, generation);
+    preload_data(event_tx, PreloadType::Countries, lib_key, client, generation);
+    preload_data(event_tx, PreloadType::Labels, lib_key, client, generation);
+    preload_data(event_tx, PreloadType::Formats, lib_key, client, generation);
+    preload_data(event_tx, PreloadType::Studios, lib_key, client, generation);
+    preload_data(event_tx, PreloadType::Stations, lib_key, client, generation);
+    preload_data(event_tx, PreloadType::Playlists, lib_key, client, generation);
 }
 
 /// Send the right preload event for a tag-style fetch result. The
@@ -528,7 +534,7 @@ pub fn preload_all_library_data(event_tx: &mpsc::Sender<Event>, lib_key: &str, l
 /// handler route the items into the matching `library` field.
 async fn emit_tag_preload(
     res: Result<Vec<crate::plex::models::Genre>, crate::plex::ApiError>,
-    event_tx: &mpsc::Sender<Event>,
+    event_tx: &LibraryEventSender,
     lib_key: &str,
     category: crate::app::state::RefreshCategory,
     label: &str,

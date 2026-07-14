@@ -7,50 +7,131 @@ use super::constants::*;
 use super::error::ApiError;
 use super::models::*;
 use crate::util::truncate_to_boundary;
-use reqwest::Client;
+use futures::StreamExt;
+use reqwest::{Client, Response};
+use reqwest::header::{HeaderMap, RETRY_AFTER};
+use std::sync::{Arc, OnceLock};
+use crate::util::SecretString;
 use std::time::Duration;
 
-/// Build an HTTP client with the given timeout.
-///
-/// `reqwest::Client::builder().build()` only fails for transport-init
-/// errors (missing TLS root store on a stripped Linux container, etc.)
-/// — vanishingly rare on the platforms we ship to. If it does fail we
-/// log it and fall back to `Client::new()` (which uses sensible
-/// defaults) so the GUI still boots and can surface errors via the
-/// normal "couldn't reach server" toast instead of crashing.
-fn build_http_client(timeout_secs: u64) -> Client {
-    match Client::builder()
-        .timeout(Duration::from_secs(timeout_secs))
-        .build()
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const HTTP_READ_STALL_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_GET_ATTEMPTS: usize = 3;
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
+const MAX_ARTWORK_BYTES: usize = 20 * 1024 * 1024;
+pub(crate) const MAX_METADATA_RESPONSE_BYTES: usize = 512 * 1024 * 1024;
+pub(crate) const MAX_SMALL_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const MAX_ERROR_RESPONSE_BYTES: usize = 64 * 1024;
+
+/// Read a response body incrementally with a hard upper bound. `reqwest`'s
+/// convenience `text()`/`json()` methods buffer without a limit, allowing a
+/// broken or hostile server to exhaust the process.
+pub(crate) async fn read_response_text_limited(
+    response: Response,
+    limit_bytes: usize,
+) -> Result<String, ApiError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit_bytes as u64)
     {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!("reqwest Client::builder() failed: {e}; falling back to default Client");
-            Client::new()
-        }
+        return Err(ApiError::ResponseTooLarge { limit_bytes });
     }
+
+    let capacity = response
+        .content_length()
+        .unwrap_or(0)
+        .min(limit_bytes as u64) as usize;
+    let mut body = Vec::with_capacity(capacity);
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if body.len().saturating_add(chunk.len()) > limit_bytes {
+            return Err(ApiError::ResponseTooLarge { limit_bytes });
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    String::from_utf8(body)
+        .map_err(|error| ApiError::ParseError(format!("response was not UTF-8: {error}")))
+}
+
+pub(crate) async fn read_error_body(response: Response) -> String {
+    match read_response_text_limited(response, MAX_ERROR_RESPONSE_BYTES).await {
+        Ok(body) => body,
+        Err(ApiError::ResponseTooLarge { .. }) => "response body was too large".to_string(),
+        Err(error) => format!("unable to read response body: {error}"),
+    }
+}
+
+/// All Plex clients share one connection pool. Request builders impose
+/// operation-specific whole-request deadlines; the pool itself only has a
+/// connect timeout and a per-read stall timeout so a long audio transfer is
+/// not killed merely because its total duration exceeds the metadata timeout.
+pub(crate) fn shared_http_client() -> Result<Client, ApiError> {
+    static CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
+    match CLIENT.get_or_init(|| {
+        Client::builder()
+            .connect_timeout(HTTP_CONNECT_TIMEOUT)
+            .read_timeout(HTTP_READ_STALL_TIMEOUT)
+            .pool_idle_timeout(Duration::from_secs(90))
+            .build()
+            .map_err(|error| error.to_string())
+    }) {
+        Ok(client) => Ok(client.clone()),
+        Err(error) => Err(ApiError::ClientInitialization(error.clone())),
+    }
+}
+
+fn retry_delay(response: &Response, attempt: usize) -> Duration {
+    response
+        .headers()
+        .get(RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(1_u64 << attempt.min(4)))
+        .min(MAX_RETRY_DELAY)
+}
+
+fn redact_url(url: &str) -> String {
+    let Ok(mut parsed) = reqwest::Url::parse(url) else {
+        return "<invalid URL>".to_string();
+    };
+    let query: Vec<(String, String)> = parsed
+        .query_pairs()
+        .filter(|(key, _)| !key.eq_ignore_ascii_case(HEADER_PLEX_TOKEN))
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    parsed.set_query(None);
+    if !query.is_empty() {
+        parsed.query_pairs_mut().extend_pairs(query);
+    }
+    parsed.to_string()
 }
 
 /// Plex API client.
 #[derive(Clone)]
 pub struct PlexClient {
     http: Client,
+    request_timeout: Duration,
     client_info: PlexClientInfo,
-    auth_token: Option<String>,
+    /// Shared rather than copied when `PlexClient` is cloned for a task.
+    auth_token: Option<Arc<SecretString>>,
     server_url: Option<String>,
     cached_machine_id: Option<String>,
 }
 
 impl PlexClient {
     /// Create a new PlexClient.
-    pub fn new(client_info: PlexClientInfo) -> Self {
-        Self {
-            http: build_http_client(DEFAULT_TIMEOUT_SECS),
+    pub fn new(client_info: PlexClientInfo) -> Result<Self, ApiError> {
+        Ok(Self {
+            http: shared_http_client()?,
+            request_timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
             client_info,
             auth_token: None,
             server_url: None,
             cached_machine_id: None,
-        }
+        })
     }
 
     /// Create a new PlexClient with server URL, optional token, and client_identifier.
@@ -59,41 +140,79 @@ impl PlexClient {
     /// IMPORTANT: The client_identifier MUST match the one the token was issued for,
     /// otherwise Plex will reject requests with 400 errors. Always pass the
     /// client_identifier from auth.toml, not a new random one.
-    pub fn new_with_url(server_url: &str, token: Option<&str>, client_identifier: &str) -> Self {
+    pub fn new_with_url(
+        server_url: &str,
+        token: Option<&str>,
+        client_identifier: &str,
+    ) -> Result<Self, ApiError> {
         let mut client_info = PlexClientInfo::default();
         client_info.client_identifier = client_identifier.to_string();
 
-        Self {
-            http: build_http_client(DEFAULT_TIMEOUT_SECS),
+        Ok(Self {
+            http: shared_http_client()?,
+            request_timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
             client_info,
-            auth_token: token.map(|s| s.to_string()),
+            auth_token: token.map(|token| Arc::new(SecretString::from(token))),
             server_url: Some(server_url.trim_end_matches('/').to_string()),
             cached_machine_id: None,
-        }
+        })
     }
 
     /// Create a new PlexClient with a specific timeout (for large responses like AllTracks).
-    pub fn new_with_url_and_timeout(server_url: &str, token: Option<&str>, client_identifier: &str, timeout_secs: u64) -> Self {
+    pub fn new_with_url_and_timeout(
+        server_url: &str,
+        token: Option<&str>,
+        client_identifier: &str,
+        timeout_secs: u64,
+    ) -> Result<Self, ApiError> {
         let mut client_info = PlexClientInfo::default();
         client_info.client_identifier = client_identifier.to_string();
 
-        Self {
-            http: build_http_client(timeout_secs),
+        Ok(Self {
+            http: shared_http_client()?,
+            request_timeout: Duration::from_secs(timeout_secs),
             client_info,
-            auth_token: token.map(|s| s.to_string()),
+            auth_token: token.map(|token| Arc::new(SecretString::from(token))),
             server_url: Some(server_url.trim_end_matches('/').to_string()),
             cached_machine_id: None,
-        }
+        })
     }
 
     /// Set the authentication token.
-    pub fn set_auth_token(&mut self, token: String) {
-        self.auth_token = Some(token);
+    pub fn set_auth_token(&mut self, token: impl Into<SecretString>) {
+        self.auth_token = Some(Arc::new(token.into()));
+    }
+
+    /// Drop the authenticated server context. The final shared credential
+    /// owner zeroizes its allocation automatically.
+    pub fn clear_session(&mut self) {
+        self.auth_token = None;
+        self.server_url = None;
+        self.cached_machine_id = None;
     }
 
     /// Get the authentication token.
     pub fn token(&self) -> Option<&str> {
-        self.auth_token.as_deref()
+        self.auth_token.as_ref().map(|token| token.as_str())
+    }
+
+    /// Clone the shared credential handle for a background task without
+    /// copying the token bytes into another heap allocation.
+    pub(crate) fn shared_token(&self) -> Option<Arc<SecretString>> {
+        self.auth_token.clone()
+    }
+
+    pub(crate) fn shared_token_or_empty(&self) -> Arc<SecretString> {
+        self.shared_token()
+            .unwrap_or_else(|| Arc::new(SecretString::default()))
+    }
+
+    /// Clone this logical client while changing only its whole-request
+    /// deadline. The HTTP pool and credential allocation remain shared.
+    pub(crate) fn clone_with_timeout(&self, timeout: Duration) -> Self {
+        let mut client = self.clone();
+        client.request_timeout = timeout;
+        client
     }
 
     /// Set the server URL.
@@ -128,7 +247,7 @@ impl PlexClient {
     }
 
     fn require_token(&self) -> Result<&str, ApiError> {
-        self.auth_token.as_deref().ok_or(ApiError::NotAuthenticated)
+        self.token().ok_or(ApiError::NotAuthenticated)
     }
 
     /// Build Plex identification headers (shared between API and streaming requests).
@@ -154,7 +273,7 @@ impl PlexClient {
             headers.insert(HEADER_PLEX_PLATFORM, v);
         }
         if let Some(ref token) = self.auth_token {
-            if let Ok(v) = HeaderValue::from_str(token) {
+            if let Ok(v) = HeaderValue::from_str(token.as_str()) {
                 headers.insert(HEADER_PLEX_TOKEN, v);
             }
         }
@@ -194,51 +313,168 @@ impl PlexClient {
         Ok(format!("{}{}", self.require_server()?, path))
     }
 
+    /// Send an idempotent GET with a bounded retry policy. Plex occasionally
+    /// responds with 429 while refreshing a library and can transiently return
+    /// 5xx during server wake-up. Mutating POST/DELETE calls are deliberately
+    /// excluded because replaying them may duplicate an operation.
+    async fn send_get(&self, url: &str, headers: HeaderMap) -> Result<Response, ApiError> {
+        let mut last_error = None;
+        for attempt in 0..MAX_GET_ATTEMPTS {
+            match self
+                .http
+                .get(url)
+                .headers(headers.clone())
+                .timeout(self.request_timeout)
+                .send()
+                .await
+            {
+                Ok(response)
+                    if (response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+                        || response.status().is_server_error())
+                        && attempt + 1 < MAX_GET_ATTEMPTS =>
+                {
+                    let status = response.status();
+                    let delay = retry_delay(&response, attempt);
+                    tracing::warn!(
+                        "Plex GET {} returned {}; retrying in {:?}",
+                        redact_url(url),
+                        status,
+                        delay
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+                Ok(response) => return Ok(response),
+                Err(error)
+                    if (error.is_connect() || error.is_timeout())
+                        && attempt + 1 < MAX_GET_ATTEMPTS =>
+                {
+                    let delay = Duration::from_secs(1_u64 << attempt);
+                    tracing::warn!(
+                        "Plex GET {} failed: {}; retrying in {:?}",
+                        redact_url(url),
+                        error,
+                        delay
+                    );
+                    last_error = Some(error);
+                    tokio::time::sleep(delay).await;
+                }
+                Err(error) => return Err(ApiError::Http(error)),
+            }
+        }
+        match last_error {
+            Some(error) => Err(ApiError::Http(error)),
+            None => Err(ApiError::ServerError {
+                status: 503,
+                message: "GET retry policy exhausted".to_string(),
+            }),
+        }
+    }
+
+    /// GET variant for the one Plex endpoint that requires the token in its
+    /// query string. `reqwest::Error` includes the request URL in its Display
+    /// output, so this path converts transport errors before they can reach
+    /// logs, UI state, or crash reports.
+    async fn send_sensitive_get(
+        &self,
+        url: &str,
+        headers: HeaderMap,
+    ) -> Result<Response, ApiError> {
+        for attempt in 0..MAX_GET_ATTEMPTS {
+            match self
+                .http
+                .get(url)
+                .headers(headers.clone())
+                .timeout(self.request_timeout)
+                .send()
+                .await
+            {
+                Ok(response)
+                    if (response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+                        || response.status().is_server_error())
+                        && attempt + 1 < MAX_GET_ATTEMPTS =>
+                {
+                    let status = response.status();
+                    let delay = retry_delay(&response, attempt);
+                    tracing::warn!(
+                        "Sensitive Plex GET {} returned {}; retrying in {:?}",
+                        redact_url(url),
+                        status,
+                        delay
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+                Ok(response) => return Ok(response),
+                Err(error) if attempt + 1 < MAX_GET_ATTEMPTS => {
+                    let delay = Duration::from_secs(1_u64 << attempt);
+                    let reason = if error.is_timeout() {
+                        "request timed out"
+                    } else if error.is_connect() {
+                        "connection failed"
+                    } else {
+                        "request failed"
+                    };
+                    tracing::warn!(
+                        "Sensitive Plex GET {} {}; retrying in {:?}",
+                        redact_url(url),
+                        reason,
+                        delay
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+                Err(error) => {
+                    let reason = if error.is_timeout() {
+                        "request timed out"
+                    } else if error.is_connect() {
+                        "connection failed"
+                    } else {
+                        "request failed"
+                    };
+                    return Err(ApiError::Connection(reason.to_string()));
+                }
+            }
+        }
+        Err(ApiError::Connection(
+            "request retry policy exhausted".to_string(),
+        ))
+    }
+
     /// Make a GET request and return raw text (for debugging).
     pub async fn get_raw(&self, path: &str) -> Result<String, ApiError> {
         let url = self.build_url(path)?;
-        let response = self
-            .http
-            .get(&url)
-            .headers(self.build_headers()?)
-            .send()
-            .await?;
+        let response = self.send_get(&url, self.build_headers()?).await?;
 
         if !response.status().is_success() {
             return Err(ApiError::ServerError {
                 status: response.status().as_u16(),
-                message: response.text().await.unwrap_or_default(),
+                message: read_error_body(response).await,
             });
         }
 
-        Ok(response.text().await?)
+        read_response_text_limited(response, MAX_METADATA_RESPONSE_BYTES).await
     }
 
     /// Make a GET request to the server.
     async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, ApiError> {
         let url = self.build_url(path)?;
 
-        tracing::debug!("GET {}", url);
+        tracing::debug!("GET {}", redact_url(&url));
 
         let response = self
-            .http
-            .get(&url)
-            .headers(self.build_headers()?)
-            .send()
+            .send_get(&url, self.build_headers()?)
             .await
             .map_err(|e| {
-                tracing::error!("HTTP request failed for URL '{}': {}", url, e);
+                tracing::error!("HTTP request failed for URL '{}': {}", redact_url(&url), e);
                 e
             })?;
 
         if !response.status().is_success() {
             return Err(ApiError::ServerError {
                 status: response.status().as_u16(),
-                message: response.text().await.unwrap_or_default(),
+                message: read_error_body(response).await,
             });
         }
 
-        let text = response.text().await?;
+        let text = read_response_text_limited(response, MAX_METADATA_RESPONSE_BYTES).await?;
         tracing::trace!("Response: {}", truncate_to_boundary(&text, 1000));
 
         let data: T = serde_json::from_str(&text).map_err(|e| {
@@ -590,12 +826,13 @@ impl PlexClient {
             .http
             .post(&url)
             .headers(self.build_headers()?)
+            .timeout(self.request_timeout)
             .send()
             .await?;
 
         if !response.status().is_success() {
             let status = response.status().as_u16();
-            let message = response.text().await.unwrap_or_default();
+            let message = read_error_body(response).await;
             tracing::error!("Failed to create playlist: {} - {}", status, message);
             return Err(ApiError::ServerError { status, message });
         }
@@ -611,12 +848,13 @@ impl PlexClient {
             .http
             .delete(&url)
             .headers(self.build_headers()?)
+            .timeout(self.request_timeout)
             .send()
             .await?;
 
         if !response.status().is_success() {
             let status = response.status().as_u16();
-            let message = response.text().await.unwrap_or_default();
+            let message = read_error_body(response).await;
             return Err(ApiError::ServerError { status, message });
         }
 
@@ -1400,17 +1638,18 @@ impl PlexClient {
             .http
             .post(&url)
             .headers(self.build_headers()?)
+            .timeout(self.request_timeout)
             .send()
             .await?;
 
         if !response.status().is_success() {
             let status = response.status().as_u16();
-            let message = response.text().await.unwrap_or_default();
+            let message = read_error_body(response).await;
             tracing::error!("PlayQueue creation failed: {} - {}", status, message);
             return Err(ApiError::ServerError { status, message });
         }
 
-        let text = response.text().await?;
+        let text = read_response_text_limited(response, MAX_SMALL_RESPONSE_BYTES).await?;
         tracing::debug!("PlayQueue response (first 500 chars): {}", truncate_to_boundary(&text, 500));
 
         let queue: PlayQueueResponse = serde_json::from_str(&text).map_err(|e| {
@@ -1450,17 +1689,18 @@ impl PlexClient {
             .http
             .post(&url)
             .headers(self.build_headers()?)
+            .timeout(self.request_timeout)
             .send()
             .await?;
 
         if !response.status().is_success() {
             let status = response.status().as_u16();
-            let message = response.text().await.unwrap_or_default();
+            let message = read_error_body(response).await;
             tracing::error!("Radio PlayQueue creation failed: {} - {}", status, message);
             return Err(ApiError::ServerError { status, message });
         }
 
-        let text = response.text().await?;
+        let text = read_response_text_limited(response, MAX_SMALL_RESPONSE_BYTES).await?;
         tracing::debug!("Radio PlayQueue response (first 500 chars): {}", truncate_to_boundary(&text, 500));
 
         let queue: PlayQueueResponse = serde_json::from_str(&text).map_err(|e| {
@@ -1790,17 +2030,18 @@ impl PlexClient {
             .http
             .post(&url)
             .headers(self.build_headers()?)
+            .timeout(self.request_timeout)
             .send()
             .await?;
 
         if !response.status().is_success() {
             let status = response.status().as_u16();
-            let message = response.text().await.unwrap_or_default();
+            let message = read_error_body(response).await;
             tracing::error!("Artist radio PlayQueue failed: {} - {}", status, message);
             return Err(ApiError::ServerError { status, message });
         }
 
-        let text = response.text().await?;
+        let text = read_response_text_limited(response, MAX_SMALL_RESPONSE_BYTES).await?;
         let queue: PlayQueueResponse = serde_json::from_str(&text).map_err(|e| {
             tracing::error!("Artist radio PlayQueue parse error: {} - Response: {}", e, truncate_to_boundary(&text, 500));
             ApiError::ParseError(format!("Artist radio PlayQueue parse error: {}", e))
@@ -2014,10 +2255,13 @@ impl PlexClient {
     /// Get the direct stream URL for a track.
     pub fn get_stream_url(&self, track: &Track) -> Result<String, ApiError> {
         let part = track.stream_part().ok_or(ApiError::NoMediaAvailable)?;
-        let token = self.require_token()?;
+        // Validate authentication here, but carry the token in the request
+        // header. Query-string credentials leak into logs, process telemetry,
+        // proxies, and crash reports.
+        self.require_token()?;
         let server = self.require_server()?;
 
-        Ok(format!("{}{}?{}={}", server, part.key, HEADER_PLEX_TOKEN, token))
+        Ok(format!("{}{}", server, part.key))
     }
 
     /// Get a transcoded stream URL (Plex converts to MP3 at the given bitrate).
@@ -2043,20 +2287,6 @@ impl PlexClient {
             format!("{}/{}", EP_LIBRARY_METADATA, track.rating_key)
         };
 
-        // Transcode endpoints fail over HTTPS .plex.direct (400 Bad Request) but work
-        // over plain HTTP to the LAN IP. Convert the server URL to HTTP.
-        let transcode_server = if server.contains(".plex.direct") {
-            if let Some(ip_part) = server.split("//").nth(1).and_then(|s| s.split('.').next()) {
-                let raw_ip = ip_part.replace('-', ".");
-                let port = server.rsplit(':').next().unwrap_or("32400");
-                format!("http://{}:{}", raw_ip, port)
-            } else {
-                server.to_string()
-            }
-        } else {
-            server.to_string()
-        };
-
         let profile_extra = "add-transcode-target(type=musicProfile&context=streaming&protocol=http&container=mp3&audioCodec=mp3)";
 
         let common_params = format!(
@@ -2076,7 +2306,7 @@ impl PlexClient {
             bitrate_kbps,
             &session_id,
             &session_id,
-            token,
+            urlencoding::encode(token),
             urlencoding::encode(&self.client_info.client_identifier),
             urlencoding::encode(&self.client_info.product),
             urlencoding::encode(&self.client_info.version),
@@ -2084,29 +2314,86 @@ impl PlexClient {
             urlencoding::encode(profile_extra),
         );
 
-        // Step 1: Decision — establishes the transcode session
-        let decision_url = format!("{}/video/:/transcode/universal/decision?{}", transcode_server, common_params);
-        tracing::info!("Transcode decision ({}kbps): {}", bitrate_kbps,
-            decision_url.split("X-Plex-Token=").next().unwrap_or(&decision_url));
-
-        let resp = self.http.get(&decision_url).send().await?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            tracing::error!("Transcode decision failed: HTTP {} - {}", status, truncate_to_boundary(&body, 500));
-            return Err(ApiError::ServerError {
-                status: status.as_u16(),
-                message: format!("Transcode decision failed: HTTP {}", status),
-            });
+        // Prefer the authenticated HTTPS server address. Some PMS versions
+        // reject universal-transcode decisions through plex.direct; only then
+        // fall back to the LAN IP over HTTP. This avoids silently downgrading
+        // every session while preserving compatibility with those servers.
+        let mut candidates = vec![server.to_string()];
+        if let Ok(parsed) = reqwest::Url::parse(server) {
+            if parsed
+                .host_str()
+                .is_some_and(|host| host.ends_with(".plex.direct"))
+            {
+                if let Some(host) = parsed.host_str() {
+                    if let Some(encoded_ip) = host.split('.').next() {
+                        let raw_ip = encoded_ip.replace('-', ".");
+                        if raw_ip.parse::<std::net::Ipv4Addr>().is_ok() {
+                            let port = parsed.port().unwrap_or(32400);
+                            let fallback = format!("http://{raw_ip}:{port}");
+                            if fallback != server {
+                                candidates.push(fallback);
+                            }
+                        }
+                    }
+                }
+            }
         }
-        let _decision_body = resp.text().await.unwrap_or_default();
 
-        // Step 2: Return the start URL — the actual MP3 audio stream
-        let start_url = format!("{}/music/:/transcode/universal/start?{}", transcode_server, common_params);
-        tracing::info!("Transcode stream ({}kbps): {}", bitrate_kbps,
-            start_url.split("X-Plex-Token=").next().unwrap_or(&start_url));
+        let mut last_error = ApiError::Connection(
+            "transcode decision could not be established".to_string(),
+        );
+        for transcode_server in candidates {
+            let decision_url = format!(
+                "{transcode_server}/video/:/transcode/universal/decision?{common_params}"
+            );
+            tracing::info!(
+                "Transcode decision ({}kbps): {}",
+                bitrate_kbps,
+                redact_url(&decision_url)
+            );
 
-        Ok(start_url)
+            match self
+                .send_sensitive_get(&decision_url, HeaderMap::new())
+                .await
+            {
+                Ok(response) if response.status().is_success() => {
+                    // The decision body is not needed. Do not buffer an
+                    // untrusted, unbounded response merely to reuse a socket.
+                    drop(response);
+                    let start_url = format!(
+                        "{transcode_server}/music/:/transcode/universal/start?{common_params}"
+                    );
+                    tracing::info!(
+                        "Transcode stream ready ({}kbps): {}",
+                        bitrate_kbps,
+                        redact_url(&start_url)
+                    );
+                    return Ok(start_url);
+                }
+                Ok(response) => {
+                    let status = response.status();
+                    tracing::warn!(
+                        "Transcode decision via {} returned HTTP {}",
+                        transcode_server,
+                        status
+                    );
+                    last_error = ApiError::ServerError {
+                        status: status.as_u16(),
+                        message: "transcode decision was rejected".to_string(),
+                    };
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        "Transcode decision via {} failed: {}",
+                        transcode_server,
+                        error
+                    );
+                    last_error = error;
+                }
+            }
+        }
+
+        Err(last_error)
     }
 
     /// Get client identifier.
@@ -2116,35 +2403,29 @@ impl PlexClient {
 
     /// Get thumbnail URL with transcoding for size.
     pub fn get_thumb_url(&self, thumb_path: &str, width: u32, height: u32) -> Result<String, ApiError> {
-        let token = self.require_token()?;
+        self.require_token()?;
         let server = self.require_server()?;
 
         Ok(format!(
-            "{}{}?width={}&height={}&minSize=1&upscale=1&url={}&{}={}",
+            "{}{}?width={}&height={}&minSize=1&upscale=1&url={}",
             server, EP_PHOTO_TRANSCODE, width, height,
-            urlencoding::encode(thumb_path),
-            HEADER_PLEX_TOKEN, token
+            urlencoding::encode(thumb_path)
         ))
     }
 
     /// Get raw thumbnail URL without transcoding.
     pub fn get_thumb_url_raw(&self, thumb_path: &str) -> Result<String, ApiError> {
-        let token = self.require_token()?;
+        self.require_token()?;
         let server = self.require_server()?;
 
-        Ok(format!("{}{}?{}={}", server, thumb_path, HEADER_PLEX_TOKEN, token))
+        Ok(format!("{}{}", server, thumb_path))
     }
 
     /// Fetch artwork image data as bytes.
     pub async fn fetch_artwork(&self, thumb_path: &str, size: u32) -> Result<Vec<u8>, ApiError> {
         let url = self.get_thumb_url(thumb_path, size, size)?;
 
-        let response = self
-            .http
-            .get(&url)
-            .headers(self.build_headers()?)
-            .send()
-            .await?;
+        let response = self.send_get(&url, self.build_headers()?).await?;
 
         if !response.status().is_success() {
             return Err(ApiError::ServerError {
@@ -2153,7 +2434,34 @@ impl PlexClient {
             });
         }
 
-        Ok(response.bytes().await?.to_vec())
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_ARTWORK_BYTES as u64)
+        {
+            return Err(ApiError::ParseError(format!(
+                "Artwork exceeds {} MiB limit",
+                MAX_ARTWORK_BYTES / (1024 * 1024),
+            )));
+        }
+
+        let capacity = response
+            .content_length()
+            .and_then(|length| usize::try_from(length).ok())
+            .unwrap_or(64 * 1024)
+            .min(MAX_ARTWORK_BYTES);
+        let mut bytes = Vec::with_capacity(capacity);
+        let mut body = response.bytes_stream();
+        while let Some(chunk) = body.next().await {
+            let chunk = chunk?;
+            if bytes.len().saturating_add(chunk.len()) > MAX_ARTWORK_BYTES {
+                return Err(ApiError::ParseError(format!(
+                    "Artwork exceeds {} MiB limit",
+                    MAX_ARTWORK_BYTES / (1024 * 1024),
+                )));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(bytes)
     }
 
     // ========================================================================
@@ -2219,11 +2527,12 @@ impl PlexClient {
             );
         }
 
-        self.http
-            .get(&url)
-            .headers(headers)
-            .send()
-            .await?;
+        let response = self.send_get(&url, headers).await?;
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let message = read_error_body(response).await;
+            return Err(ApiError::ServerError { status, message });
+        }
 
         Ok(())
     }
@@ -2236,14 +2545,12 @@ impl PlexClient {
         );
         let url = self.build_url(&path)?;
 
-        let response = self.http
-            .get(&url)
-            .headers(self.build_headers()?)
-            .send()
-            .await?;
+        let response = self.send_get(&url, self.build_headers()?).await?;
 
         if !response.status().is_success() {
-            tracing::warn!("Scrobble failed with status {} for key {}", response.status(), rating_key);
+            let status = response.status().as_u16();
+            let message = read_error_body(response).await;
+            return Err(ApiError::ServerError { status, message });
         }
 
         Ok(())
@@ -2282,10 +2589,7 @@ impl PlexClient {
 pub async fn test_connection(url: &str, token: &str, client_identifier: &str) -> Result<(), ApiError> {
     use super::auth::PlexClientInfo;
 
-    let http = Client::builder()
-        .timeout(Duration::from_secs(CONNECTION_TEST_TIMEOUT_SECS))
-        .build()
-        .map_err(ApiError::Http)?;
+    let http = shared_http_client()?;
 
     // Use the stored client_identifier — Plex tokens are tied to the identifier
     // they were issued for, so a mismatch can cause 400/401 errors.
@@ -2301,6 +2605,7 @@ pub async fn test_connection(url: &str, token: &str, client_identifier: &str) ->
         .header(HEADER_PLEX_DEVICE_NAME, &client_info.device_name)
         .header(HEADER_PLEX_PLATFORM, &client_info.platform)
         .header("Accept", "application/json")
+        .timeout(Duration::from_secs(CONNECTION_TEST_TIMEOUT_SECS))
         .send()
         .await?;
 

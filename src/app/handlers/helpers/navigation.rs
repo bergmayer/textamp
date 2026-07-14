@@ -1,13 +1,15 @@
 //! List navigation, scrolling, pagination, and filter selection.
 
 use crate::app::event::*;
+use crate::app::event::LibraryEventSender;
 use crate::app::{AppState, Event};
+use crate::app::action::AsyncError;
 use crate::app::state::{
     BrowseCategory, Focus,
     RightPanelMode, View,
 };
 use crate::plex::PlexClient;
-use super::{sort_key, PAGE_SIZE};
+use super::PAGE_SIZE;
 use tokio::sync::mpsc;
 
 /// Calculate the scroll offset to keep the selected item centered.
@@ -31,19 +33,24 @@ pub fn load_artists(event_tx: &mpsc::Sender<Event>, state: &mut AppState, client
         tracing::info!("Loading all artists from library: {}", lib_key);
         state.library.artists_loading = true;
 
-        let event_tx = event_tx.clone();
+        let event_tx =
+            LibraryEventSender::new(event_tx.clone(), state.library_generation);
         let client = client.clone();
         let lib_key = lib_key.clone();
         tokio::spawn(async move {
-            match client.get_artists(&lib_key).await {
-                Ok(artists) => {
-                    tracing::info!("Loaded {} artists", artists.len());
-                    let _ = event_tx.send(DataEvent::ArtistsLoaded(artists).into()).await;
-                }
-                Err(e) => {
-                    tracing::error!("Failed to load artists: {}", e);
-                }
-            }
+            let result = client.get_artists(&lib_key).await.map_err(|error| {
+                tracing::error!("Failed to load artists: {}", error);
+                AsyncError::from_api("Failed to load artists", &error)
+            });
+            let _ = event_tx
+                .send(
+                    DataEvent::ArtistsLoaded {
+                        library_key: lib_key,
+                        result,
+                    }
+                    .into(),
+                )
+                .await;
         });
     } else {
         tracing::warn!("load_artists called but no active_library set");
@@ -64,23 +71,32 @@ pub fn load_playlists(event_tx: &mpsc::Sender<Event>, state: &mut AppState, clie
     tracing::info!("Loading playlists (server-wide, no section filter)");
     state.library.playlists_loading = true;
 
-    let event_tx = event_tx.clone();
+    let event_tx = LibraryEventSender::new(event_tx.clone(), state.library_generation);
     let client = client.clone();
+    let server_url = client.server_url().map(str::to_string);
     tokio::spawn(async move {
-        match client.get_playlists(None).await {
-            Ok(playlists) => {
-                tracing::info!("Loaded {} playlists", playlists.len());
-                let _ = event_tx.send(DataEvent::PlaylistsLoaded(playlists).into()).await;
-            }
-            Err(e) => {
-                tracing::error!("Failed to load playlists: {}", e);
-            }
-        }
+        let result = client.get_playlists(None).await.map_err(|error| {
+            tracing::error!("Failed to load playlists: {}", error);
+            AsyncError::from_api("Failed to load playlists", &error)
+        });
+        let _ = event_tx
+            .send(
+                DataEvent::PlaylistsLoaded {
+                    server_url,
+                    result,
+                }
+                .into(),
+            )
+            .await;
     });
 }
 
 /// Load more data when nearing the end of a paginated list.
-pub async fn maybe_load_more(state: &mut AppState, client: &PlexClient) {
+pub fn maybe_load_more(
+    event_tx: &mpsc::Sender<Event>,
+    state: &mut AppState,
+    client: &PlexClient,
+) {
     if state.view != View::Browse || state.focus != Focus::Left {
         return;
     }
@@ -97,16 +113,36 @@ pub async fn maybe_load_more(state: &mut AppState, client: &PlexClient) {
                 // Remember selected artist before re-sort
                 let selected_key = state.library.artists.get(idx)
                     .map(|a| a.rating_key.clone());
-                if let Ok((more, _)) = client.get_artists_page(lib_key, offset, PAGE_SIZE).await {
-                    sorted_merge(&mut state.library.artists, more, |a| sort_key(&a.title));
-                    // Restore selection to the same artist after re-sort
-                    if let Some(ref key) = selected_key {
-                        if let Some(pos) = state.library.artists.iter().position(|a| &a.rating_key == key) {
-                            state.list_state.artists_index = pos;
+                let request_client = client.clone();
+                let tx =
+                    LibraryEventSender::new(event_tx.clone(), state.library_generation);
+                let library_key = lib_key.clone();
+                tokio::spawn(async move {
+                    match request_client
+                        .get_artists_page(&library_key, offset, PAGE_SIZE)
+                        .await
+                    {
+                        Ok((artists, total)) => {
+                            let _ = tx
+                                .send(
+                                    DataEvent::ArtistsPageLoaded {
+                                        library_key,
+                                        selected_key,
+                                        artists,
+                                        total,
+                                    }
+                                    .into(),
+                                )
+                                .await;
+                        }
+                        Err(error) => {
+                            tracing::warn!("Failed to load another artist page: {}", error);
+                            let _ = tx
+                                .send(DataEvent::ArtistsPageFailed { library_key }.into())
+                                .await;
                         }
                     }
-                }
-                state.library.artists_loading = false;
+                });
             }
         }
     }
@@ -283,7 +319,7 @@ pub fn related_flat_resolve(groups: &[crate::app::state::RelatedArtistGroup], fl
 /// More efficient than extend + re-sort for appending small pages to large lists:
 /// O(m log m + n + m) vs O((n+m) log(n+m)), where n = existing, m = new items.
 /// Each sort key is computed exactly once.
-fn sorted_merge<T>(existing: &mut Vec<T>, mut new_items: Vec<T>, key_fn: impl Fn(&T) -> String) {
+pub fn sorted_merge<T>(existing: &mut Vec<T>, mut new_items: Vec<T>, key_fn: impl Fn(&T) -> String) {
     if new_items.is_empty() {
         return;
     }

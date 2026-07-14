@@ -50,9 +50,13 @@ pub use client::{PlexClient, test_connection};
 pub use error::ApiError;
 pub use remote::RemotePlayerClient;
 pub use spectrogram::{SpectrogramCache, SpectrogramData, generate_spectrogram, generate_spectrogram_from_pcm};
-pub use waveform::{WaveformCache, WaveformData, WaveformError, generate_waveform};
+pub use waveform::{
+    WaveformCache, WaveformData, WaveformError, decode_to_pcm, generate_waveform,
+    generate_waveform_from_pcm,
+};
 
 use models::{Album, Artist, Genre, Playlist, Station, Track};
+use futures::StreamExt;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -65,6 +69,7 @@ const WAVEFORM_CACHE_TTL_SECS: u64 = 7 * 24 * 60 * 60;
 
 /// Maximum waveform cache size in bytes (100 MB).
 const WAVEFORM_CACHE_MAX_BYTES: u64 = 100 * 1024 * 1024;
+const MAX_WAVEFORM_SOURCE_BYTES: usize = 128 * 1024 * 1024;
 
 /// Unified Plex service combining API client with caching.
 ///
@@ -77,26 +82,23 @@ pub struct PlexService {
     client: PlexClient,
     library_cache: LibraryCache,
     waveform_cache: WaveformCache,
-    /// Current library key for cached data.
-    library_key: Arc<RwLock<Option<String>>>,
     /// Cached library data (in-memory for fast access).
     cache_data: Arc<RwLock<Option<CacheData>>>,
 }
 
 impl PlexService {
     /// Create a new PlexService with default cache locations.
-    pub fn new(client_info: PlexClientInfo) -> Self {
-        let client = PlexClient::new(client_info);
+    pub fn new(client_info: PlexClientInfo) -> Result<Self, ApiError> {
+        let client = PlexClient::new(client_info)?;
         let library_cache = LibraryCache::default();
         let waveform_cache = WaveformCache::default();
 
-        Self {
+        Ok(Self {
             client,
             library_cache,
             waveform_cache,
-            library_key: Arc::new(RwLock::new(None)),
             cache_data: Arc::new(RwLock::new(None)),
-        }
+        })
     }
 
     /// Create a PlexService with a pre-configured client.
@@ -108,7 +110,6 @@ impl PlexService {
             client,
             library_cache,
             waveform_cache,
-            library_key: Arc::new(RwLock::new(None)),
             cache_data: Arc::new(RwLock::new(None)),
         }
     }
@@ -133,6 +134,10 @@ impl PlexService {
         &self.waveform_cache
     }
 
+    fn server_cache_scope(&self) -> Option<String> {
+        self.client.server_url().map(str::to_owned)
+    }
+
     // ========================================================================
     // Cache Management
     // ========================================================================
@@ -140,7 +145,21 @@ impl PlexService {
     /// Load cached data for a library.
     /// Returns the cached data if available and not expired.
     pub async fn load_cache(&self, library_key: &str) -> Option<CacheData> {
-        let data = self.library_cache.load(library_key)?;
+        let server_scope = self.server_cache_scope()?;
+        let cache = self.library_cache.clone();
+        let cache_library_key = library_key.to_string();
+        let cache_server_scope = server_scope.clone();
+        let data = match tokio::task::spawn_blocking(move || {
+            cache.load_scoped(Some(&cache_server_scope), &cache_library_key)
+        })
+        .await
+        {
+            Ok(data) => data?,
+            Err(error) => {
+                tracing::warn!("Library cache worker failed: {}", error);
+                return None;
+            }
+        };
 
         // Check if cache is expired
         let now = std::time::SystemTime::now()
@@ -148,16 +167,12 @@ impl PlexService {
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
-        if now - data.timestamp > LIBRARY_CACHE_TTL_SECS {
+        if now.saturating_sub(data.timestamp) > LIBRARY_CACHE_TTL_SECS {
             tracing::info!("Library cache expired, will refresh");
             // Still return stale data for fast startup - caller can refresh
         }
 
         // Store in memory for fast access
-        {
-            let mut key_lock = self.library_key.write().await;
-            *key_lock = Some(library_key.to_string());
-        }
         {
             let mut data_lock = self.cache_data.write().await;
             *data_lock = Some(data.clone());
@@ -168,13 +183,26 @@ impl PlexService {
 
     /// Save cache data to disk.
     pub async fn save_cache(&self, data: &CacheData) -> bool {
+        let Some(server_scope) = self.server_cache_scope() else {
+            return false;
+        };
+        let mut snapshot = data.clone();
+        snapshot.server_id = Some(server_scope);
+
         // Update in-memory cache
         {
             let mut data_lock = self.cache_data.write().await;
-            *data_lock = Some(data.clone());
+            *data_lock = Some(snapshot.clone());
         }
 
-        self.library_cache.save(data)
+        let cache = self.library_cache.clone();
+        match tokio::task::spawn_blocking(move || cache.save(&snapshot)).await {
+            Ok(saved) => saved,
+            Err(error) => {
+                tracing::warn!("Library cache worker failed: {}", error);
+                false
+            }
+        }
     }
 
     /// Update specific fields in the cache without full reload.
@@ -182,17 +210,38 @@ impl PlexService {
     where
         F: FnOnce(&mut CacheData),
     {
-        let mut data_lock = self.cache_data.write().await;
+        let Some(server_scope) = self.server_cache_scope() else {
+            return false;
+        };
+        let snapshot = {
+            let mut data_lock = self.cache_data.write().await;
 
-        if let Some(ref mut data) = *data_lock {
-            if data.library_key == library_key {
-                updater(data);
-                data.touch();
-                return self.library_cache.save(data);
+            if let Some(ref mut data) = *data_lock {
+                if data.library_key == library_key
+                    && data.server_id.as_deref() == Some(server_scope.as_str())
+                {
+                    updater(data);
+                    data.touch();
+                    Some(data.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+
+        let Some(snapshot) = snapshot else {
+            return false;
+        };
+        let cache = self.library_cache.clone();
+        match tokio::task::spawn_blocking(move || cache.save(&snapshot)).await {
+            Ok(saved) => saved,
+            Err(error) => {
+                tracing::warn!("Library cache worker failed: {}", error);
+                false
             }
         }
-
-        false
     }
 
     // ========================================================================
@@ -201,16 +250,20 @@ impl PlexService {
 
     /// Load waveform from cache.
     pub fn load_waveform(&self, track_key: &str) -> Option<WaveformData> {
-        self.waveform_cache.load(track_key)
+        self.server_cache_scope()
+            .and_then(|scope| self.waveform_cache.load_scoped(&scope, track_key))
     }
 
     /// Save waveform to cache with expiration check.
     pub fn save_waveform(&self, data: &WaveformData) -> bool {
+        let Some(scope) = self.server_cache_scope() else {
+            return false;
+        };
         // First, check if we need to prune old waveforms
         self.waveform_cache.prune_expired(WAVEFORM_CACHE_TTL_SECS);
         self.waveform_cache.prune_to_size(WAVEFORM_CACHE_MAX_BYTES);
 
-        self.waveform_cache.save(data)
+        self.waveform_cache.save_scoped(&scope, data)
     }
 
     /// Generate and cache waveform for a track.
@@ -219,7 +272,20 @@ impl PlexService {
         track: &Track,
     ) -> Result<WaveformData, WaveformError> {
         // Check cache first
-        if let Some(data) = self.load_waveform(&track.rating_key) {
+        let cache_scope = self.server_cache_scope().ok_or_else(|| {
+            WaveformError::Download("no Plex server selected".to_string())
+        })?;
+        let cache = self.waveform_cache.clone();
+        let cache_key = track.rating_key.clone();
+        let read_scope = cache_scope.clone();
+        let cached = tokio::task::spawn_blocking(move || {
+            cache.load_scoped(&read_scope, &cache_key)
+        })
+        .await
+        .map_err(|error| {
+            WaveformError::Decode(format!("waveform cache worker failed: {}", error))
+        })?;
+        if let Some(data) = cached {
             return Ok(data);
         }
 
@@ -227,22 +293,48 @@ impl PlexService {
         let url = self.client.get_stream_url(track)
             .map_err(|e| WaveformError::Download(e.to_string()))?;
 
-        // Download audio
-        let response = reqwest::get(&url).await
+        // Download audio through the shared pool with header-based auth. The
+        // direct URL intentionally contains no credential query parameter.
+        let response = self.client.http_client()
+            .get(&url)
+            .headers(self.client.stream_headers())
+            .send()
+            .await
             .map_err(|e| WaveformError::Download(e.to_string()))?;
-        let audio_data = response.bytes().await
-            .map_err(|e| WaveformError::Download(e.to_string()))?
-            .to_vec();
+        if !response.status().is_success() {
+            return Err(WaveformError::Download(format!("HTTP {}", response.status())));
+        }
+        if response.content_length().is_some_and(|length| {
+            length > MAX_WAVEFORM_SOURCE_BYTES as u64
+        }) {
+            return Err(WaveformError::Download("audio exceeds 128 MiB limit".to_string()));
+        }
+        let mut audio_data = Vec::with_capacity(
+            response.content_length()
+                .and_then(|length| usize::try_from(length).ok())
+                .unwrap_or(256 * 1024)
+                .min(MAX_WAVEFORM_SOURCE_BYTES)
+        );
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|error| WaveformError::Download(error.to_string()))?;
+            if audio_data.len().saturating_add(chunk.len()) > MAX_WAVEFORM_SOURCE_BYTES {
+                return Err(WaveformError::Download("audio exceeds 128 MiB limit".to_string()));
+            }
+            audio_data.extend_from_slice(&chunk);
+        }
 
-        // Generate waveform
-        let waveform = generate_waveform(
-            track.rating_key.clone(),
-            track.duration_ms(),
-            audio_data,
-        )?;
-
-        // Save to cache
-        self.save_waveform(&waveform);
+        // Decoding and cache I/O are blocking/CPU-heavy and must not occupy a
+        // Tokio worker used by API and UI-completion tasks.
+        let track_key = track.rating_key.clone();
+        let duration_ms = track.duration_ms();
+        let waveform_cache = self.waveform_cache.clone();
+        let waveform = tokio::task::spawn_blocking(move || {
+            let waveform = generate_waveform(track_key, duration_ms, Arc::from(audio_data))?;
+            waveform_cache.save_scoped(&cache_scope, &waveform);
+            Ok::<_, WaveformError>(waveform)
+        }).await
+            .map_err(|error| WaveformError::Decode(format!("waveform worker failed: {}", error)))??;
 
         Ok(waveform)
     }
@@ -254,11 +346,15 @@ impl PlexService {
     /// Get artists with cache-first strategy.
     /// Returns cached data immediately, then optionally refreshes.
     pub async fn get_artists_cached(&self, library_key: &str) -> Vec<Artist> {
+        let server_scope = self.server_cache_scope();
         // Try cache first
         {
             let data_lock = self.cache_data.read().await;
             if let Some(ref data) = *data_lock {
-                if data.library_key == library_key && !data.artists.is_empty() {
+                if data.library_key == library_key
+                    && data.server_id.as_deref() == server_scope.as_deref()
+                    && !data.artists.is_empty()
+                {
                     return data.artists.clone();
                 }
             }
@@ -282,11 +378,14 @@ impl PlexService {
 
     /// Get playlists with cache-first strategy.
     pub async fn get_playlists_cached(&self, section_id: Option<&str>) -> Vec<Playlist> {
+        let server_scope = self.server_cache_scope();
         // Try cache first
         {
             let data_lock = self.cache_data.read().await;
             if let Some(ref data) = *data_lock {
-                if !data.playlists.is_empty() {
+                if data.server_id.as_deref() == server_scope.as_deref()
+                    && !data.playlists.is_empty()
+                {
                     return data.playlists.clone();
                 }
             }
@@ -296,13 +395,23 @@ impl PlexService {
         match self.client.get_playlists(section_id).await {
             Ok(playlists) => {
                 // Update cache
-                {
+                let snapshot = {
                     let mut data_lock = self.cache_data.write().await;
                     if let Some(ref mut data) = *data_lock {
-                        data.playlists = playlists.clone();
-                        data.touch();
-                        let _ = self.library_cache.save(data);
+                        if data.server_id.as_deref() == server_scope.as_deref() {
+                            data.playlists = playlists.clone();
+                            data.touch();
+                            Some(data.clone())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
                     }
+                };
+                if let Some(snapshot) = snapshot {
+                    let cache = self.library_cache.clone();
+                    let _ = tokio::task::spawn_blocking(move || cache.save(&snapshot)).await;
                 }
                 playlists
             }
@@ -315,11 +424,15 @@ impl PlexService {
 
     /// Get genres with cache-first strategy.
     pub async fn get_genres_cached(&self, library_key: &str) -> Vec<Genre> {
+        let server_scope = self.server_cache_scope();
         // Try cache first
         {
             let data_lock = self.cache_data.read().await;
             if let Some(ref data) = *data_lock {
-                if data.library_key == library_key && !data.genres.is_empty() {
+                if data.library_key == library_key
+                    && data.server_id.as_deref() == server_scope.as_deref()
+                    && !data.genres.is_empty()
+                {
                     return data.genres.clone();
                 }
             }
@@ -343,11 +456,15 @@ impl PlexService {
 
     /// Get stations with cache-first strategy.
     pub async fn get_stations_cached(&self, library_key: &str) -> Vec<Station> {
+        let server_scope = self.server_cache_scope();
         // Try cache first
         {
             let data_lock = self.cache_data.read().await;
             if let Some(ref data) = *data_lock {
-                if data.library_key == library_key && !data.stations.is_empty() {
+                if data.library_key == library_key
+                    && data.server_id.as_deref() == server_scope.as_deref()
+                    && !data.stations.is_empty()
+                {
                     return data.stations.clone();
                 }
             }

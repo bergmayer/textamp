@@ -114,19 +114,46 @@ where
     }
 }
 
-/// Filter BrowseItem lists with year matching for albums.
-///
-/// For Album items, also matches the year field against the query.
-/// Year matches are placed in the lowest priority bucket so title matches come first.
-pub fn filter_browse_items(
+/// Lightweight projection used to move large columns to a filtering worker
+/// without cloning complete tracks, albums, artwork paths, and metadata.
+#[derive(Debug, Clone)]
+pub struct BrowseFilterRecord {
+    pub title: String,
+    pub album_year: Option<u16>,
+    pub artist_key: Option<String>,
+    pub is_compilations: bool,
+}
+
+pub fn browse_filter_records(
     items: &[crate::app::state::BrowseItem],
+) -> Vec<BrowseFilterRecord> {
+    use crate::app::state::BrowseItem;
+
+    items
+        .iter()
+        .map(|item| BrowseFilterRecord {
+            title: item.title().to_string(),
+            album_year: match item {
+                BrowseItem::Album { year, .. } => *year,
+                _ => None,
+            },
+            artist_key: match item {
+                BrowseItem::Artist { key, .. } => Some(key.clone()),
+                _ => None,
+            },
+            is_compilations: matches!(item, BrowseItem::Compilations),
+        })
+        .collect()
+}
+
+/// Filter lightweight browse records with year and artist-alias matching.
+pub fn filter_browse_records(
+    items: &[BrowseFilterRecord],
     query: &str,
     max_results: usize,
     artist_aliases: &std::collections::HashMap<String, std::collections::HashSet<String>>,
     compilation_artist_keys: &std::collections::HashSet<String>,
 ) -> ListFilterResults {
-    use crate::app::state::BrowseItem;
-
     if query.is_empty() {
         return ListFilterResults::default();
     }
@@ -145,10 +172,10 @@ pub fn filter_browse_items(
 
     for (idx, item) in items.iter().enumerate() {
         // Skip compilation-only artists (they appear only on compilations)
-        if let BrowseItem::Artist { key, .. } = item {
+        if let Some(key) = item.artist_key.as_deref() {
             if !compilation_artist_keys.is_empty() && compilation_artist_keys.contains(key) {
                 // Check if it matches the query — if so, flag for Compilations injection
-                let title = item.title().to_lowercase();
+                let title = item.title.to_lowercase();
                 let title_norm = normalize_for_search(&title);
                 if title.starts_with(&query_lower) || title_norm.starts_with(&query_normalized)
                     || (!short_query && (title.split_whitespace().any(|w| w.starts_with(&query_lower))
@@ -161,7 +188,7 @@ pub fn filter_browse_items(
             }
         }
 
-        let title = item.title().to_lowercase();
+        let title = item.title.to_lowercase();
         let title_norm = normalize_for_search(&title);
 
         if title.starts_with(&query_lower) || title_norm.starts_with(&query_normalized) {
@@ -173,11 +200,11 @@ pub fn filter_browse_items(
                 priority2.push(idx);
             } else if title.contains(&query_lower) || title_norm.contains(&query_normalized) {
                 priority3.push(idx);
-            } else if let BrowseItem::Album { year: Some(year), .. } = item {
+            } else if let Some(year) = item.album_year {
                 if year.to_string().contains(&query_lower) {
                     priority4.push(idx);
                 }
-            } else if let BrowseItem::Artist { key, .. } = item {
+            } else if let Some(key) = item.artist_key.as_deref() {
                 // Check artist aliases (with normalization)
                 if let Some(aliases) = artist_aliases.get(key) {
                     let query_norm = crate::services::artist_alias_service::normalize_artist_name(&query_lower);
@@ -191,7 +218,7 @@ pub fn filter_browse_items(
             }
         } else {
             // Short query: check year match for single-char digits too
-            if let BrowseItem::Album { year: Some(year), .. } = item {
+            if let Some(year) = item.album_year {
                 if year.to_string().contains(&query_lower) {
                     priority4.push(idx);
                 }
@@ -202,7 +229,7 @@ pub fn filter_browse_items(
     // If a compilation-only artist matched, inject the Compilations entry index
     // (find it in the items list)
     if compilation_artist_matched {
-        if let Some(comp_idx) = items.iter().position(|item| matches!(item, BrowseItem::Compilations)) {
+        if let Some(comp_idx) = items.iter().position(|item| item.is_compilations) {
             // Add at the end of priority4 if not already in results
             if !priority1.contains(&comp_idx) && !priority2.contains(&comp_idx)
                 && !priority3.contains(&comp_idx) && !priority4.contains(&comp_idx)
@@ -226,6 +253,23 @@ pub fn filter_browse_items(
         total_matches,
         has_more,
     }
+}
+
+/// Filter BrowseItem lists with year matching for albums.
+pub fn filter_browse_items(
+    items: &[crate::app::state::BrowseItem],
+    query: &str,
+    max_results: usize,
+    artist_aliases: &std::collections::HashMap<String, std::collections::HashSet<String>>,
+    compilation_artist_keys: &std::collections::HashSet<String>,
+) -> ListFilterResults {
+    filter_browse_records(
+        &browse_filter_records(items),
+        query,
+        max_results,
+        artist_aliases,
+        compilation_artist_keys,
+    )
 }
 
 /// Wrapper for filtering folder items.

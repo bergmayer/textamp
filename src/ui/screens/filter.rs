@@ -232,104 +232,107 @@ fn render_all_tab(
         return;
     }
 
-    // Build flat list with section headers
-    // Each entry is: (display_text, is_header, is_selectable_idx)
-    // selectable_idx maps to the global flat index for selection tracking
-    let mut entries: Vec<(String, bool, Option<usize>)> = Vec::new();
-    let mut global_idx: usize = 0;
-
-    // Artists section
-    if !results.artists.is_empty() {
-        entries.push((format!("── Artists ({}) ──", results.artists.len()), true, None));
-        for a in &results.artists {
-            entries.push((format!("  {}", a.title), false, Some(global_idx)));
-            global_idx += 1;
-        }
-    }
-
-    // Albums section
-    if !results.albums.is_empty() {
-        entries.push((format!("── Albums ({}) ──", results.albums.len()), true, None));
-        for a in &results.albums {
-            let artist = a.artist_name();
-            let text = if a.title.is_empty() {
-                format!("  Unknown Album ({}) - {}", artist, artist)
-            } else if let Some(year) = a.year {
-                format!("  {} ({}) - {}", a.title, year, artist)
-            } else {
-                format!("  {} - {}", a.title, artist)
-            };
-            entries.push((text, false, Some(global_idx)));
-            global_idx += 1;
-        }
-    }
-
-    // Playlists section
-    if !results.playlists.is_empty() {
-        entries.push((format!("── Playlists ({}) ──", results.playlists.len()), true, None));
-        for p in &results.playlists {
-            entries.push((format!("  {}", p.title), false, Some(global_idx)));
-            global_idx += 1;
-        }
-    }
-
-    // Genres section
-    if !results.genres.is_empty() {
-        entries.push((format!("── Genres ({}) ──", results.genres.len()), true, None));
-        for g in &results.genres {
-            entries.push((format!("  {}", g.title), false, Some(global_idx)));
-            global_idx += 1;
-        }
-    }
-
-    // Tracks section
-    if !results.tracks.is_empty() {
-        entries.push((format!("── Tracks ({}) ──", results.tracks.len()), true, None));
-        for tr in &results.tracks {
-            let title = if tr.title.is_empty() {
-                tr.file_name().unwrap_or("Unknown Track")
-            } else {
-                &tr.title
-            };
-            entries.push((format!("  {} - {}", title, tr.track_artist()), false, Some(global_idx)));
-            global_idx += 1;
-        }
-    }
+    let section_lengths = [
+        results.artists.len(),
+        results.albums.len(),
+        results.playlists.len(),
+        results.genres.len(),
+        results.tracks.len(),
+    ];
+    let total_entries: usize = section_lengths
+        .iter()
+        .map(|length| if *length == 0 { 0 } else { length + 1 })
+        .sum();
 
     let visible_height = area.height as usize;
 
     // Find display position of selected item
-    let display_selected = entries.iter().position(|(_, _, idx)| *idx == Some(selected_idx)).unwrap_or(0);
+    let display_selected = {
+        let mut selectable_base = 0;
+        let mut display_base = 0;
+        let mut found = None;
+        for length in section_lengths {
+            if length == 0 {
+                continue;
+            }
+            if selected_idx < selectable_base + length {
+                found = Some(display_base + 1 + selected_idx - selectable_base);
+                break;
+            }
+            selectable_base += length;
+            display_base += length + 1;
+        }
+        found.unwrap_or(0)
+    };
     let scroll_offset = match scroll_pin {
         Some(pinned) => pinned,
-        None => NavigationService::calc_scroll_offset(display_selected, visible_height, entries.len()),
+        None => NavigationService::calc_scroll_offset(display_selected, visible_height, total_entries),
     };
 
-    let items: Vec<ListItem> = entries.iter()
-        .enumerate()
-        .skip(scroll_offset)
-        .take(visible_height)
-        .map(|(_, (text, is_header, sel_idx))| {
-            if *is_header {
-                ListItem::new(text.as_str())
-                    .style(Style::default().fg(t.colors.fg_accent))
-            } else {
-                let is_selected = is_focused && *sel_idx == Some(selected_idx);
-                let style = if is_selected {
-                    Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
+    let mut items = Vec::with_capacity(visible_height.min(total_entries));
+    for display_index in scroll_offset..(scroll_offset + visible_height).min(total_entries) {
+        let mut local = display_index;
+        let mut global_base = 0;
+        for (section, length) in section_lengths.iter().copied().enumerate() {
+            if length == 0 {
+                continue;
+            }
+            if local == 0 {
+                let name = ["Artists", "Albums", "Playlists", "Genres", "Tracks"][section];
+                items.push(
+                    ListItem::new(format!("── {} ({}) ──", name, length))
+                        .style(Style::default().fg(t.colors.fg_accent)),
+                );
+                break;
+            }
+            local -= 1;
+            if local < length {
+                let text = match section {
+                    0 => format!("  {}", results.artists[local].title),
+                    1 => {
+                        let album = &results.albums[local];
+                        let artist = album.artist_name();
+                        if album.title.is_empty() {
+                            format!("  Unknown Album ({artist}) - {artist}")
+                        } else if let Some(year) = album.year {
+                            format!("  {} ({year}) - {artist}", album.title)
+                        } else {
+                            format!("  {} - {artist}", album.title)
+                        }
+                    }
+                    2 => format!("  {}", results.playlists[local].title),
+                    3 => format!("  {}", results.genres[local].title),
+                    _ => {
+                        let track = &results.tracks[local];
+                        let title = if track.title.is_empty() {
+                            track.file_name().unwrap_or("Unknown Track")
+                        } else {
+                            &track.title
+                        };
+                        format!("  {} - {}", title, track.track_artist())
+                    }
+                };
+                let global_index = global_base + local;
+                let style = if is_focused && global_index == selected_idx {
+                    Style::default()
+                        .fg(t.colors.selection_text)
+                        .bg(t.colors.selection_bar_bg)
                 } else {
                     Style::default().fg(t.colors.fg_primary)
                 };
-                ListItem::new(text.as_str()).style(style)
+                items.push(ListItem::new(text).style(style));
+                break;
             }
-        })
-        .collect();
+            local -= length;
+            global_base += length;
+        }
+    }
 
     frame.render_widget(List::new(items), area);
 
     // Scrollbar for long lists
-    if entries.len() > visible_height {
-        crate::ui::widgets::render_scrollbar_borderless(frame, area, entries.len(), visible_height, scroll_offset);
+    if total_entries > visible_height {
+        crate::ui::widgets::render_scrollbar_borderless(frame, area, total_entries, visible_height, scroll_offset);
     }
 }
 
@@ -385,4 +388,3 @@ fn render_single_section<T, F>(
         crate::ui::widgets::render_scrollbar_borderless(frame, area, total, visible_height, scroll_offset);
     }
 }
-

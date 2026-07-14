@@ -6,18 +6,29 @@
 use crate::plex::PlexClient;
 use crate::plex::models::Track;
 
-use std::collections::{HashMap, HashSet};
+use futures::StreamExt;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Maximum number of cached tracks (10 upcoming + 3 recently played).
 const MAX_ENTRIES: usize = 13;
 
-/// Maximum total cache size in bytes (800 MB).
-const MAX_BYTES: usize = 800 * 1024 * 1024;
+/// Maximum total cache size in bytes. This is deliberately conservative:
+/// decoded playback already consumes a separate PCM ring, and an 800 MiB
+/// compressed cache caused severe memory pressure on ordinary laptops.
+const MAX_BYTES: usize = 128 * 1024 * 1024;
 
-/// Maximum concurrent background downloads.
-const MAX_CONCURRENT_DOWNLOADS: usize = 3;
+/// Per-track prefetch ceiling. With one active download this also caps memory
+/// not yet admitted to the LRU at roughly 32 MiB; oversized tracks fall
+/// back to the incremental streaming path.
+const MAX_PREFETCH_TRACK_BYTES: usize = 32 * 1024 * 1024;
+
+/// Keep prefetch subordinate to the active incremental playback stream. One
+/// download still fills the immediate next-track cache without opening three
+/// competing transfers on a slow Plex connection.
+const MAX_CONCURRENT_DOWNLOADS: usize = 1;
 
 /// Maximum retry attempts per URL.
 const MAX_RETRIES: u32 = 3;
@@ -31,7 +42,8 @@ struct CachedTrack {
 /// Thread-safe cache for pre-fetched track audio data.
 pub struct TrackAudioCache {
     entries: Mutex<HashMap<String, CachedTrack>>,
-    in_flight: Mutex<HashSet<String>>,
+    in_flight: Mutex<HashMap<String, u64>>,
+    generation: AtomicU64,
     semaphore: Arc<tokio::sync::Semaphore>,
 }
 
@@ -40,7 +52,8 @@ impl TrackAudioCache {
     pub fn new() -> Self {
         Self {
             entries: Mutex::new(HashMap::new()),
-            in_flight: Mutex::new(HashSet::new()),
+            in_flight: Mutex::new(HashMap::new()),
+            generation: AtomicU64::new(0),
             semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_DOWNLOADS)),
         }
     }
@@ -59,6 +72,13 @@ impl TrackAudioCache {
 
     /// Insert audio data into the cache, evicting LRU entries if limits exceeded.
     pub fn insert(&self, key: String, data: Vec<u8>) {
+        if data.len() > MAX_BYTES {
+            tracing::debug!(
+                "Track cache: skipped {}-byte item larger than cache budget",
+                data.len()
+            );
+            return;
+        }
         let mut entries = super::lock_or_recover(&self.entries);
 
         let data_size = data.len();
@@ -104,29 +124,56 @@ impl TrackAudioCache {
     }
 
     /// Mark a key as currently being downloaded.
-    /// Returns false if already in-flight or already cached.
-    pub fn start_fetch(&self, key: &str) -> bool {
+    /// Returns the cache generation if the fetch was admitted.
+    pub fn start_fetch(&self, key: &str) -> Option<u64> {
         if self.contains(key) {
-            return false;
+            return None;
         }
+        let generation = self.generation.load(Ordering::Acquire);
         let mut in_flight = super::lock_or_recover(&self.in_flight);
-        in_flight.insert(key.to_string())
+        if in_flight.contains_key(key) {
+            None
+        } else {
+            in_flight.insert(key.to_string(), generation);
+            Some(generation)
+        }
     }
 
     /// Remove a key from the in-flight set (download finished or failed).
-    pub fn finish_fetch(&self, key: &str) {
-        super::lock_or_recover(&self.in_flight).remove(key);
+    pub fn finish_fetch(&self, key: &str, generation: u64) {
+        let mut in_flight = super::lock_or_recover(&self.in_flight);
+        if in_flight.get(key) == Some(&generation) {
+            in_flight.remove(key);
+        }
+    }
+
+    fn generation_is_current(&self, generation: u64) -> bool {
+        self.generation.load(Ordering::Acquire) == generation
     }
 
     /// Remove a specific entry (e.g., corrupt data fallback).
     pub fn remove(&self, key: &str) {
-        super::lock_or_recover(&self.entries).remove(key);
+        let removed = super::lock_or_recover(&self.entries).remove(key);
+        if let Some(removed) = removed {
+            let _ = std::thread::Builder::new()
+                .name("textamp-audio-cache-drop".to_string())
+                .spawn(move || drop(removed));
+        }
     }
 
     /// Clear all entries and in-flight state.
     pub fn flush(&self) {
-        super::lock_or_recover(&self.entries).clear();
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        let previous = {
+            let mut entries = super::lock_or_recover(&self.entries);
+            std::mem::take(&mut *entries)
+        };
         super::lock_or_recover(&self.in_flight).clear();
+        if !previous.is_empty() {
+            let _ = std::thread::Builder::new()
+                .name("textamp-audio-cache-drop".to_string())
+                .spawn(move || drop(previous));
+        }
         tracing::debug!("Track cache flushed");
     }
 
@@ -155,14 +202,33 @@ impl std::fmt::Debug for TrackAudioCache {
 /// Retries on 5xx, 429, timeouts, and connection errors.
 /// Does NOT retry on 4xx client errors (except 429).
 pub async fn download_track_audio(url: &str, fallback_url: Option<&str>, headers: reqwest::header::HeaderMap, http_client: reqwest::Client) -> Result<Vec<u8>, String> {
+    download_track_audio_inner(url, fallback_url, headers, http_client, None).await
+}
+
+type PrefetchGeneration<'a> = Option<(&'a TrackAudioCache, u64)>;
+
+fn prefetch_cancelled(cancellation: PrefetchGeneration<'_>) -> bool {
+    cancellation.is_some_and(|(cache, generation)| !cache.generation_is_current(generation))
+}
+
+async fn download_track_audio_inner(
+    url: &str,
+    fallback_url: Option<&str>,
+    headers: reqwest::header::HeaderMap,
+    http_client: reqwest::Client,
+    cancellation: PrefetchGeneration<'_>,
+) -> Result<Vec<u8>, String> {
     // Try primary URL
-    match download_with_retry(url, &headers, &http_client).await {
+    match download_with_retry(url, &headers, &http_client, cancellation).await {
         Ok(data) => return Ok(data),
         Err(primary_err) => {
+            if prefetch_cancelled(cancellation) {
+                return Err("Prefetch cancelled".to_string());
+            }
             tracing::warn!("Pre-fetch primary download failed: {}", primary_err);
             // Try fallback if available
             if let Some(fb_url) = fallback_url {
-                match download_with_retry(fb_url, &headers, &http_client).await {
+                match download_with_retry(fb_url, &headers, &http_client, cancellation).await {
                     Ok(data) => return Ok(data),
                     Err(fb_err) => {
                         return Err(format!("Both URLs failed: primary={}, fallback={}", primary_err, fb_err));
@@ -175,14 +241,30 @@ pub async fn download_track_audio(url: &str, fallback_url: Option<&str>, headers
 }
 
 /// Download from a single URL with exponential backoff retry.
-async fn download_with_retry(url: &str, headers: &reqwest::header::HeaderMap, client: &reqwest::Client) -> Result<Vec<u8>, String> {
+async fn download_with_retry(
+    url: &str,
+    headers: &reqwest::header::HeaderMap,
+    client: &reqwest::Client,
+    cancellation: PrefetchGeneration<'_>,
+) -> Result<Vec<u8>, String> {
     let backoff_secs = [1, 2, 4];
 
     for attempt in 0..MAX_RETRIES {
+        if prefetch_cancelled(cancellation) {
+            return Err("Prefetch cancelled".to_string());
+        }
         match client.get(url).headers(headers.clone()).send().await {
             Ok(response) => {
                 let status = response.status();
                 if status.is_success() {
+                    if response.content_length().is_some_and(|length| {
+                        length > MAX_PREFETCH_TRACK_BYTES as u64
+                    }) {
+                        return Err(format!(
+                            "Track exceeds prefetch limit of {} MiB",
+                            MAX_PREFETCH_TRACK_BYTES / (1024 * 1024)
+                        ));
+                    }
                     // Check for HTML content-type (Plex can return HTML errors with 200)
                     let is_html = response.headers()
                         .get(reqwest::header::CONTENT_TYPE)
@@ -199,9 +281,38 @@ async fn download_with_retry(url: &str, headers: &reqwest::header::HeaderMap, cl
                         return Err("Server returned HTML instead of audio".to_string());
                     }
 
-                    match response.bytes().await {
-                        Ok(bytes) => {
-                            let data = bytes.to_vec();
+                    let initial_capacity = response
+                        .content_length()
+                        .and_then(|length| usize::try_from(length).ok())
+                        .unwrap_or(256 * 1024)
+                        .min(MAX_PREFETCH_TRACK_BYTES);
+                    let mut data = Vec::with_capacity(initial_capacity);
+                    let mut body = response.bytes_stream();
+                    let mut body_error = None;
+                    while let Some(chunk) = body.next().await {
+                        if prefetch_cancelled(cancellation) {
+                            return Err("Prefetch cancelled".to_string());
+                        }
+                        match chunk {
+                            Ok(chunk) => {
+                                if data.len().saturating_add(chunk.len())
+                                    > MAX_PREFETCH_TRACK_BYTES
+                                {
+                                    return Err(format!(
+                                        "Track exceeds prefetch limit of {} MiB",
+                                        MAX_PREFETCH_TRACK_BYTES / (1024 * 1024)
+                                    ));
+                                }
+                                data.extend_from_slice(&chunk);
+                            }
+                            Err(error) => {
+                                body_error = Some(error);
+                                break;
+                            }
+                        }
+                    }
+                    match body_error {
+                        None => {
                             // Check downloaded bytes for HTML markers (small responses only)
                             if data.len() < 1024 * 1024 {
                                 let prefix = &data[..data.len().min(256)];
@@ -218,14 +329,14 @@ async fn download_with_retry(url: &str, headers: &reqwest::header::HeaderMap, cl
                             }
                             return Ok(data);
                         }
-                        Err(e) => {
+                        Some(_error) => {
                             if attempt + 1 < MAX_RETRIES {
                                 let delay = backoff_secs[attempt as usize];
-                                tracing::debug!("Download body error (attempt {}), retrying in {}s: {}", attempt + 1, delay, e);
+                                tracing::debug!("Download body error (attempt {}), retrying in {}s", attempt + 1, delay);
                                 tokio::time::sleep(Duration::from_secs(delay)).await;
                                 continue;
                             }
-                            return Err(format!("Download body error: {}", e));
+                            return Err("Audio transfer was interrupted".to_string());
                         }
                     }
                 }
@@ -233,7 +344,13 @@ async fn download_with_retry(url: &str, headers: &reqwest::header::HeaderMap, cl
                 // Retry on 5xx and 429
                 if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
                     if attempt + 1 < MAX_RETRIES {
-                        let delay = backoff_secs[attempt as usize];
+                        let delay = response
+                            .headers()
+                            .get(reqwest::header::RETRY_AFTER)
+                            .and_then(|value| value.to_str().ok())
+                            .and_then(|value| value.parse::<u64>().ok())
+                            .unwrap_or(backoff_secs[attempt as usize])
+                            .min(30);
                         tracing::debug!("HTTP {} (attempt {}), retrying in {}s", status, attempt + 1, delay);
                         tokio::time::sleep(Duration::from_secs(delay)).await;
                         continue;
@@ -243,15 +360,25 @@ async fn download_with_retry(url: &str, headers: &reqwest::header::HeaderMap, cl
                 // 4xx (except 429) - don't retry
                 return Err(format!("HTTP {}", status));
             }
-            Err(e) => {
+            Err(error) => {
+                // A reqwest transport error may embed the request URL. Plex
+                // transcode URLs contain the token in their query string, so
+                // never copy that error verbatim into logs or UI state.
+                let reason = if error.is_timeout() {
+                    "request timed out"
+                } else if error.is_connect() {
+                    "connection failed"
+                } else {
+                    "request failed"
+                };
                 // Retry on timeout and connection errors
                 if attempt + 1 < MAX_RETRIES {
                     let delay = backoff_secs[attempt as usize];
-                    tracing::debug!("Request error (attempt {}), retrying in {}s: {}", attempt + 1, delay, e);
+                    tracing::debug!("Request error (attempt {}), retrying in {}s", attempt + 1, delay);
                     tokio::time::sleep(Duration::from_secs(delay)).await;
                     continue;
                 }
-                return Err(format!("Request failed: {}", e));
+                return Err(reason.to_string());
             }
         }
     }
@@ -271,16 +398,16 @@ pub fn trigger_prefetch(
 ) {
     for track in upcoming_tracks {
         // Skip if already cached or being downloaded
-        if !cache.start_fetch(&track.rating_key) {
+        let Some(fetch_generation) = cache.start_fetch(&track.rating_key) else {
             continue;
-        }
+        };
 
         // For direct play, build URL synchronously. For transcode, defer to async task.
         let direct_url = if transcode_kbps == 0 {
             match client.get_stream_url(track) {
                 Ok(url) => Some(url),
                 Err(_) => {
-                    cache.finish_fetch(&track.rating_key);
+                    cache.finish_fetch(&track.rating_key, fetch_generation);
                     continue;
                 }
             }
@@ -303,13 +430,28 @@ pub fn trigger_prefetch(
         let plex_client = client.clone();
 
         tokio::spawn(async move {
+            struct InFlightGuard {
+                cache: Arc<TrackAudioCache>,
+                key: String,
+                generation: u64,
+            }
+
+            impl Drop for InFlightGuard {
+                fn drop(&mut self) {
+                    self.cache.finish_fetch(&self.key, self.generation);
+                }
+            }
+
+            let _in_flight = InFlightGuard {
+                cache: cache.clone(),
+                key: rating_key.clone(),
+                generation: fetch_generation,
+            };
+
             // Acquire semaphore permit (limits concurrent downloads)
             let _permit = match semaphore.acquire().await {
                 Ok(permit) => permit,
-                Err(_) => {
-                    cache.finish_fetch(&rating_key);
-                    return;
-                }
+                Err(_) => return,
             };
 
             // Resolve URL (transcode requires async HLS playlist fetch)
@@ -319,7 +461,6 @@ pub fn trigger_prefetch(
                 match plex_client.get_transcoded_stream_url(&track_clone, transcode_kbps).await {
                     Ok(url) => url,
                     Err(e) => {
-                        cache.finish_fetch(&rating_key);
                         tracing::warn!("Pre-fetch transcode URL failed for {}: {}", title, e);
                         return;
                     }
@@ -327,18 +468,70 @@ pub fn trigger_prefetch(
             };
 
             tracing::debug!("Pre-fetching: {}", title);
-            match download_track_audio(&primary_url, None, stream_headers, http_client).await {
+            match download_track_audio_inner(
+                &primary_url,
+                None,
+                stream_headers,
+                http_client,
+                Some((&cache, fetch_generation)),
+            )
+            .await
+            {
                 Ok(data) => {
                     let size = data.len();
-                    cache.insert(rating_key.clone(), data);
-                    cache.finish_fetch(&rating_key);
-                    tracing::debug!("Pre-fetched: {} ({} bytes)", title, size);
+                    if cache.generation_is_current(fetch_generation) {
+                        cache.insert(rating_key.clone(), data);
+                        tracing::debug!("Pre-fetched: {} ({} bytes)", title, size);
+                    } else {
+                        tracing::debug!("Discarded stale prefetch for {}", title);
+                    }
                 }
                 Err(e) => {
-                    cache.finish_fetch(&rating_key);
-                    tracing::warn!("Pre-fetch failed for {}: {}", title, e);
+                    if cache.generation_is_current(fetch_generation) {
+                        tracing::warn!("Pre-fetch failed for {}: {}", title, e);
+                    } else {
+                        tracing::debug!("Cancelled stale prefetch for {}", title);
+                    }
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flush_invalidates_in_flight_download_without_removing_new_generation() {
+        let cache = Arc::new(TrackAudioCache::new());
+        let old_generation = cache.start_fetch("same-key").unwrap();
+        cache.flush();
+        let new_generation = cache.start_fetch("same-key").unwrap();
+        assert_ne!(old_generation, new_generation);
+
+        cache.finish_fetch("same-key", old_generation);
+        assert!(cache.start_fetch("same-key").is_none());
+
+        cache.finish_fetch("same-key", new_generation);
+        assert!(cache.start_fetch("same-key").is_some());
+    }
+
+    #[tokio::test]
+    async fn stale_prefetch_is_cancelled_before_opening_network_request() {
+        let cache = TrackAudioCache::new();
+        let generation = cache.start_fetch("track").unwrap();
+        cache.flush();
+
+        let error = download_with_retry(
+            "http://127.0.0.1:9/should-not-be-opened",
+            &reqwest::header::HeaderMap::new(),
+            &reqwest::Client::new(),
+            Some((&cache, generation)),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, "Prefetch cancelled");
     }
 }

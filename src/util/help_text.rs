@@ -68,7 +68,7 @@ TOOLS
   Sonic Adventure: open the palette and pick "Sonic Adventure".
 
 QUIT
-  Ctrl+Q                Linux / Windows / macOS terminal (TUI)
+  Ctrl+Q / Ctrl+C       Linux / Windows / macOS terminal (TUI)
   Cmd+Q                 GUI on macOS
   Alt+F4                GUI on Windows
 

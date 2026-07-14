@@ -158,7 +158,7 @@ mod tests {
     fn setup() -> (mpsc::Sender<Event>, mpsc::Receiver<Event>, AppState, PlexClient) {
         let (tx, rx) = mpsc::channel(100);
         let state = AppState::new();
-        let client = PlexClient::new(PlexClientInfo::default());
+        let client = PlexClient::new(PlexClientInfo::default()).unwrap();
         (tx, rx, state, client)
     }
 

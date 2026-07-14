@@ -1,9 +1,10 @@
 //! Test script for radio stations.
 //!
-//! Run with: cargo run --example test_stations -- <server_url> <token> <library_key>
-//! Example: cargo run --example test_stations -- http://192.168.1.100:32400 abc123token 5
+//! Set `PLEX_TOKEN`, then run with:
+//! `cargo run --example test_stations -- <server_url> <library_key>`
 
 use textamp::plex::PlexClient;
+use zeroize::Zeroizing;
 
 #[tokio::main]
 async fn main() {
@@ -13,22 +14,37 @@ async fn main() {
         .init();
 
     let args: Vec<String> = std::env::args().collect();
-    if args.len() < 4 {
-        eprintln!("Usage: {} <server_url> <token> <library_key>", args[0]);
-        eprintln!("Example: {} http://192.168.1.100:32400 abc123token 5", args[0]);
+    if args.len() < 3 {
+        eprintln!("Usage: PLEX_TOKEN=... {} <server_url> <library_key>", args[0]);
         std::process::exit(1);
     }
 
     let server_url = &args[1];
-    let token = &args[2];
-    let library_key = &args[3];
+    let token = Zeroizing::new(match std::env::var("PLEX_TOKEN") {
+        Ok(token) if !token.is_empty() => token,
+        _ => {
+            eprintln!("PLEX_TOKEN must be set (tokens are not accepted on the command line)");
+            std::process::exit(1);
+        }
+    });
+    let library_key = &args[2];
 
     println!("\n=== Testing Radio Stations ===\n");
     println!("Server: {}", server_url);
     println!("Library: {}", library_key);
     println!();
 
-    let mut client = PlexClient::new_with_url(server_url, Some(token), "textamp-test-example");
+    let mut client = match PlexClient::new_with_url(
+        server_url,
+        Some(token.as_str()),
+        "textamp-test-example",
+    ) {
+        Ok(client) => client,
+        Err(error) => {
+            eprintln!("Could not initialize Plex client: {error}");
+            std::process::exit(1);
+        }
+    };
 
     // Test each station type
     let station_types = [

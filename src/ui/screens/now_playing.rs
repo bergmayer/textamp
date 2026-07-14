@@ -738,9 +738,12 @@ fn render_visualizer_tab_bar(frame: &mut Frame, state: &AppState, area: Rect) {
 }
 
 /// Draw waveform seekbar visualization showing full song amplitude profile.
-fn draw_waveform_seekbar(lines: &mut Vec<Line<'static>>, state: &AppState, height: usize, width: usize) {
-    let vis_chars = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-
+fn draw_waveform_seekbar(
+    lines: &mut Vec<Line<'static>>,
+    state: &AppState,
+    height: usize,
+    width: usize,
+) {
     // Calculate playback progress
     let progress = if state.playback.duration_ms > 0 {
         state.playback.position_ms as f32 / state.playback.duration_ms as f32
@@ -761,26 +764,46 @@ fn draw_waveform_seekbar(lines: &mut Vec<Line<'static>>, state: &AppState, heigh
         // (vs the half-cell `▌`/`▐` blocks). Two amplitude bins
         // per cell — one per dot column — so the waveform's
         // horizontal density doubles too.
-        let _ = vis_chars; // unused on the braille path
         let data = state.waveform.data.as_ref().unwrap();
         let sub_count = width.saturating_mul(2);
-        let bins = data.resample(sub_count);
-
         let total_sub_rows = (height as i32) * 4;
         let center_dot = total_sub_rows / 2;
 
-        for row in 0..height {
-            let mut spans: Vec<Span> = Vec::with_capacity(width);
-            let cell_top_dot = (row as i32) * 4;
+        // A waveform has only three style runs per row (played, cursor,
+        // unplayed). Build those strings directly instead of allocating one
+        // String and one Span for every terminal cell on every frame.
+        let mut row_segments: Vec<[String; 3]> = (0..height)
+            .map(|_| {
+                [
+                    String::with_capacity(position_col.saturating_mul(3)),
+                    String::with_capacity(3),
+                    String::with_capacity(
+                        width
+                            .saturating_sub(position_col + 1)
+                            .saturating_mul(3),
+                    ),
+                ]
+            })
+            .collect();
 
-            for col in 0..width {
-                let l_amp = *bins.get(col * 2).unwrap_or(&0.0);
-                let r_amp = *bins.get(col * 2 + 1).unwrap_or(&0.0);
+        for col in 0..width {
+            let l_amp = data.resampled_peak_at(sub_count, col * 2);
+            let r_amp = data.resampled_peak_at(sub_count, col * 2 + 1);
 
-                // Bar height in sub-rows. Half the total because the
-                // bar mirrors above and below the centre line.
-                let l_height = (l_amp * (total_sub_rows as f32 / 2.0)).round() as i32;
-                let r_height = (r_amp * (total_sub_rows as f32 / 2.0)).round() as i32;
+            // Bar height in sub-rows. Half the total because the
+            // bar mirrors above and below the centre line.
+            let l_height = (l_amp * (total_sub_rows as f32 / 2.0)).round() as i32;
+            let r_height = (r_amp * (total_sub_rows as f32 / 2.0)).round() as i32;
+            let segment = if col < position_col {
+                0
+            } else if col == position_col {
+                1
+            } else {
+                2
+            };
+
+            for (row, segments) in row_segments.iter_mut().enumerate() {
+                let cell_top_dot = (row as i32) * 4;
 
                 // Build the cell's 8-bit braille bitmask. Dot
                 // mapping (Unicode standard):
@@ -812,20 +835,21 @@ fn draw_waveform_seekbar(lines: &mut Vec<Line<'static>>, state: &AppState, heigh
                     }
                 }
                 let ch = char::from_u32(0x2800 + bits).unwrap_or(' ');
-
-                let is_position = col == position_col;
-                let is_played = col < position_col;
-                let style = if is_position {
-                    Style::default().fg(Color::White).bg(Color::Blue)
-                } else if is_played {
-                    Style::default().fg(Color::Cyan)
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                };
-
-                spans.push(Span::styled(ch.to_string(), style));
+                segments[segment].push(ch);
             }
+        }
 
+        let styles = [
+            Style::default().fg(Color::Cyan),
+            Style::default().fg(Color::White).bg(Color::Blue),
+            Style::default().fg(Color::DarkGray),
+        ];
+        for segments in row_segments {
+            let spans = segments
+                .into_iter()
+                .zip(styles)
+                .filter_map(|(text, style)| (!text.is_empty()).then(|| Span::styled(text, style)))
+                .collect::<Vec<_>>();
             lines.push(Line::from(spans));
         }
     } else if generating {
@@ -934,22 +958,14 @@ fn draw_spectrum_analyzer(lines: &mut Vec<Line<'static>>, state: &AppState, heig
             }
         };
 
-        // Pre-compute bar heights from dB-scaled values (0-255 → 0.0-1.0)
-        let bar_values: Vec<f32> = spectrum.iter()
-            .map(|&v| v as f32 / 255.0)
-            .collect();
-
         // Auto-gain: scale so the tallest bar fills most of the display.
         // This makes quiet tracks show their frequency profile clearly.
-        let max_val = bar_values.iter().cloned().fold(0.0f32, f32::max);
+        let max_val = spectrum.iter().copied().max().unwrap_or(0) as f32 / 255.0;
         let gain = if max_val > 0.01 {
             (0.85 / max_val).min(15.0)
         } else {
             1.0
         };
-        let bar_values: Vec<f32> = bar_values.iter()
-            .map(|&v| (v * gain).min(1.0))
-            .collect();
 
         // Build rows from top to bottom
         for row in 0..bar_height {
@@ -957,7 +973,9 @@ fn draw_spectrum_analyzer(lines: &mut Vec<Line<'static>>, state: &AppState, heig
             let row_from_bottom = bar_height - 1 - row;
 
             for bar_idx in 0..num_bars {
-                let val = bar_values.get(bar_idx).copied().unwrap_or(0.0);
+                let val = spectrum
+                    .get(bar_idx)
+                    .map_or(0.0, |value| ((*value as f32 / 255.0) * gain).min(1.0));
                 let bar_fill = val * bar_height as f32;
                 let full_rows = bar_fill.floor() as usize;
                 let partial = bar_fill - full_rows as f32;
@@ -1223,20 +1241,17 @@ fn draw_spectrogram(lines: &mut Vec<Line<'static>>, state: &AppState, height: us
             let top_valid = top_frame_offset <= current_frame && top_frame < data.frame_count;
             let bottom_valid = bottom_frame_offset <= current_frame && bottom_frame < data.frame_count;
 
-            let top_spectrum = if top_valid {
-                data.resample_spectrum(top_frame, width)
-            } else {
-                vec![0; width]
-            };
-            let bottom_spectrum = if bottom_valid {
-                data.resample_spectrum(bottom_frame, width)
-            } else {
-                vec![0; width]
-            };
-
             for col in 0..width {
-                let top_val = top_spectrum.get(col).copied().unwrap_or(0);
-                let bottom_val = bottom_spectrum.get(col).copied().unwrap_or(0);
+                let top_val = if top_valid {
+                    data.resampled_spectrum_peak(top_frame, width, col)
+                } else {
+                    0
+                };
+                let bottom_val = if bottom_valid {
+                    data.resampled_spectrum_peak(bottom_frame, width, col)
+                } else {
+                    0
+                };
 
                 let top_color = intensity_color(top_val);
                 let bottom_color = intensity_color(bottom_val);

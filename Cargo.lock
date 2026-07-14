@@ -2805,6 +2805,7 @@ version = "1.0.0"
 dependencies = [
  "anyhow",
  "base64",
+ "bytes",
  "crossterm",
  "dirs",
  "fs4",
@@ -2834,6 +2835,7 @@ dependencies = [
  "unicode-width 0.2.0",
  "urlencoding",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

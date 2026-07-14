@@ -148,9 +148,11 @@ pub async fn dispatch(
 
         // Inline list filter actions
         SearchAction::ActivateListFilter => {
+            state.list_filter.version = state.list_filter.version.wrapping_add(1);
             state.list_filter.active = true;
             state.list_filter.query.clear();
             state.list_filter.results = None;
+            state.list_filter.column_results.clear();
             state.list_filter.loading = false;
             state.list_filter.selected = 0;
             // Capture which category and column the filter was activated on
@@ -187,11 +189,7 @@ pub async fn dispatch(
             state.track_pane_focused = false;
         }
         SearchAction::DeactivateListFilter => {
-            state.list_filter.active = false;
-            state.list_filter.query.clear();
-            state.list_filter.results = None;
-            state.list_filter.loading = false;
-            state.list_filter.selected = 0;
+            state.list_filter.deactivate();
         }
         SearchAction::FilteredListUp => {
             // Wrap-around at the top: pressing Up on the first match
@@ -312,33 +310,26 @@ pub async fn dispatch(
             if is_on_filter_column(state) {
                 super::key_input::truncate_filter_right_columns(state);
             }
-            execute_list_filter(event_tx, state).await?;
+            schedule_list_filter(event_tx, state)?;
         }
         SearchAction::DeleteListFilterChar => {
             state.list_filter.query.pop();
             if state.list_filter.query.is_empty() {
-                state.list_filter.active = false;
-                state.list_filter.results = None;
-                state.list_filter.loading = false;
-                state.list_filter.selected = 0;
+                state.list_filter.deactivate();
             } else if is_on_filter_column(state) {
                 state.list_filter.selected = 0;
                 super::key_input::truncate_filter_right_columns(state);
-                execute_list_filter(event_tx, state).await?;
+                schedule_list_filter(event_tx, state)?;
             } else {
                 state.list_filter.selected = 0;
-                execute_list_filter(event_tx, state).await?;
+                schedule_list_filter(event_tx, state)?;
             }
         }
         SearchAction::SetListFilterQuery(query) => {
             // Empty query deactivates the filter (same rule as the
             // char-at-a-time deletion path above).
             if query.is_empty() {
-                state.list_filter.active = false;
-                state.list_filter.query.clear();
-                state.list_filter.results = None;
-                state.list_filter.loading = false;
-                state.list_filter.selected = 0;
+                state.list_filter.deactivate();
             } else {
                 // Activating from scratch mirrors ActivateListFilter:
                 // record category and column so rendering can match.
@@ -365,17 +356,16 @@ pub async fn dispatch(
                 // Truncating here was what made the album column vanish
                 // when the user typed in the filter box with the artist
                 // column focused.
-                execute_list_filter(event_tx, state).await?;
+                schedule_list_filter(event_tx, state)?;
             }
+        }
+        SearchAction::RunListFilter { version } => {
+            run_list_filter(event_tx, state, version);
         }
         // Search popup actions
         SearchAction::OpenSearchPopup => {
             if state.list_filter.active {
-                state.list_filter.active = false;
-                state.list_filter.query.clear();
-                state.list_filter.results = None;
-                state.list_filter.loading = false;
-                state.list_filter.selected = 0;
+                state.list_filter.deactivate();
             }
             state.popups.close_all();
             state.popups.search_active = true;
@@ -567,6 +557,7 @@ pub async fn dispatch(
 
         // Adventure launcher popup actions
         SearchAction::OpenAdventureLauncher => {
+            state.adventure_launcher_request_id = state.adventure_launcher_request_id.wrapping_add(1);
             state.popups.close_all();
             state.popups.adventure_launcher = Some(crate::app::state::AdventureLauncherState {
                 step: crate::app::state::AdventureStep::FindStartTrack,
@@ -593,6 +584,7 @@ pub async fn dispatch(
             // Pre-select the start track (e.g. from a right-click on a
             // specific track row) and skip past FindStartTrack — the
             // user already chose; only the count + end track remain.
+            state.adventure_launcher_request_id = state.adventure_launcher_request_id.wrapping_add(1);
             state.popups.close_all();
             state.popups.adventure_launcher = Some(crate::app::state::AdventureLauncherState {
                 step: crate::app::state::AdventureStep::EnterTrackCount,
@@ -616,69 +608,77 @@ pub async fn dispatch(
             });
         }
         SearchAction::CloseAdventureLauncher => {
+            state.adventure_launcher_request_id = state.adventure_launcher_request_id.wrapping_add(1);
             state.popups.adventure_launcher = None;
         }
         SearchAction::AdventureLauncherSearch => {
-            adventure_launcher_search(event_tx, state, client).await?;
+            adventure_launcher_search(event_tx, state, client)?;
         }
         SearchAction::AdventureLauncherDrillArtist { key, name } => {
             // Async fetch artist albums
             if let Some(ref mut launcher) = state.popups.adventure_launcher {
                 launcher.loading = true;
             }
+            state.adventure_launcher_request_id = state.adventure_launcher_request_id.wrapping_add(1);
+            let request_id = state.adventure_launcher_request_id;
             let event_tx = event_tx.clone();
             let client_clone = client.clone();
+            let server_url = client.server_url().map(str::to_owned);
             let artist_key = key.clone();
             let artist_name = name.clone();
             tokio::spawn(async move {
-                match client_clone.get_artist_albums(&artist_key).await {
-                    Ok(albums) => {
-                        let _ = event_tx.send(UiEvent::AdventureLauncherAlbumsLoaded {
-                            artist_key, artist_name, albums,
-                        }.into()).await;
-                    }
-                    Err(e) => {
-                        tracing::warn!("Adventure launcher: failed to load artist albums: {}", e);
-                        // Send empty to clear loading state
-                        let _ = event_tx.send(UiEvent::AdventureLauncherAlbumsLoaded {
-                            artist_key, artist_name, albums: vec![],
-                        }.into()).await;
-                    }
-                }
+                let result = client_clone.get_artist_albums(&artist_key).await.map_err(|error| {
+                    crate::app::action::AsyncError::from_api(
+                        "Adventure launcher could not load artist albums",
+                        &error,
+                    )
+                });
+                let _ = event_tx.send(UiEvent::AdventureLauncherAlbumsLoaded {
+                    server_url,
+                    request_id,
+                    artist_key,
+                    artist_name,
+                    result,
+                }.into()).await;
             });
         }
         SearchAction::AdventureLauncherDrillAlbum { key, title, artist_name } => {
             if let Some(ref mut launcher) = state.popups.adventure_launcher {
                 launcher.loading = true;
             }
+            state.adventure_launcher_request_id = state.adventure_launcher_request_id.wrapping_add(1);
+            let request_id = state.adventure_launcher_request_id;
             let event_tx = event_tx.clone();
             let client_clone = client.clone();
+            let server_url = client.server_url().map(str::to_owned);
             let album_key = key.clone();
             let album_title = title.clone();
             let artist = artist_name.clone();
             tokio::spawn(async move {
-                match client_clone.get_album_tracks(&album_key).await {
-                    Ok(tracks) => {
-                        let _ = event_tx.send(UiEvent::AdventureLauncherTracksLoaded {
-                            album_key, album_title, artist_name: artist, tracks,
-                        }.into()).await;
-                    }
-                    Err(e) => {
-                        tracing::warn!("Adventure launcher: failed to load album tracks: {}", e);
-                        let _ = event_tx.send(UiEvent::AdventureLauncherTracksLoaded {
-                            album_key, album_title, artist_name: artist, tracks: vec![],
-                        }.into()).await;
-                    }
-                }
+                let result = client_clone.get_album_tracks(&album_key).await.map_err(|error| {
+                    crate::app::action::AsyncError::from_api(
+                        "Adventure launcher could not load album tracks",
+                        &error,
+                    )
+                });
+                let _ = event_tx.send(UiEvent::AdventureLauncherTracksLoaded {
+                    server_url,
+                    request_id,
+                    album_key,
+                    album_title,
+                    artist_name: artist,
+                    result,
+                }.into()).await;
             });
         }
         SearchAction::AdventureLauncherSelectTrack => {
-            follow_ups = adventure_launcher_select_track(event_tx, state, client).await?;
+            follow_ups = adventure_launcher_select_track(event_tx, state, client)?;
         }
         SearchAction::AdventureLauncherBack => {
             adventure_launcher_back(state);
         }
         SearchAction::AdventureLauncherSetStep(step) => {
+            state.adventure_launcher_request_id = state.adventure_launcher_request_id.wrapping_add(1);
             if let Some(l) = state.popups.adventure_launcher.as_mut() {
                 l.step = step;
                 // Reset the search panel so a fresh query targets the
@@ -703,26 +703,28 @@ pub async fn dispatch(
             }
         }
         SearchAction::AdventureLauncherClearStart => {
+            state.adventure_launcher_request_id = state.adventure_launcher_request_id.wrapping_add(1);
             if let Some(l) = state.popups.adventure_launcher.as_mut() {
                 l.start_track = None;
                 l.step = crate::app::state::AdventureStep::FindStartTrack;
             }
         }
         SearchAction::AdventureLauncherClearEnd => {
+            state.adventure_launcher_request_id = state.adventure_launcher_request_id.wrapping_add(1);
             if let Some(l) = state.popups.adventure_launcher.as_mut() {
                 l.end_track = None;
                 l.step = crate::app::state::AdventureStep::FindEndTrack;
             }
         }
         SearchAction::AdventureLauncherGenerate => {
-            follow_ups = adventure_launcher_generate(state, client).await?;
+            follow_ups = adventure_launcher_generate(event_tx, state, client)?;
         }
         SearchAction::AdventureLauncherSetQuery(q) => {
             if let Some(l) = state.popups.adventure_launcher.as_mut() {
                 l.query = q;
             }
             // Trigger the search with the new query.
-            adventure_launcher_search(event_tx, state, client).await?;
+            adventure_launcher_search(event_tx, state, client)?;
         }
 
         // Multi-artist radio picker actions
@@ -811,6 +813,8 @@ pub async fn dispatch(
         // Artist bio popup (F4)
         SearchAction::ShowArtistBio { artist_key, artist_name } => {
             // Initialize popup in loading state
+            state.artist_bio_request_id = state.artist_bio_request_id.wrapping_add(1);
+            let request_id = state.artist_bio_request_id;
             state.popups.close_all();
             state.popups.artist_bio = Some(crate::app::state::ArtistBioPopup {
                 artist_name: artist_name.clone(),
@@ -824,18 +828,30 @@ pub async fn dispatch(
             // Fetch artist details from API
             let tx = event_tx.clone();
             let client_clone = client.clone();
+            let server_url = client.server_url().map(str::to_owned);
             tokio::spawn(async move {
                 match client_clone.get_artist(&artist_key).await {
                     Ok(artist) => {
                         let bio = artist.summary.unwrap_or_else(|| "No biography available.".to_string());
                         let thumb = artist.thumb.clone();
-                        let _ = tx.send(UiEvent::ArtistBioLoaded { artist_name, bio, thumb: thumb.clone() }.into()).await;
+                        let _ = tx.send(UiEvent::ArtistBioLoaded {
+                            server_url: server_url.clone(),
+                            request_id,
+                            artist_name,
+                            bio,
+                            thumb: thumb.clone(),
+                        }.into()).await;
 
                         // Fetch artwork if thumb is available
                         if let Some(thumb_path) = thumb {
                             match client_clone.fetch_artwork(&thumb_path, 600).await {
                                 Ok(data) => {
-                                    let _ = tx.send(UiEvent::ArtistBioArtworkLoaded { data, thumb: thumb_path }.into()).await;
+                                    let _ = tx.send(UiEvent::ArtistBioArtworkLoaded {
+                                        server_url,
+                                        request_id,
+                                        data,
+                                        thumb: thumb_path,
+                                    }.into()).await;
                                 }
                                 Err(e) => {
                                     tracing::warn!("Failed to fetch artist artwork: {}", e);
@@ -846,6 +862,8 @@ pub async fn dispatch(
                     Err(e) => {
                         tracing::warn!("Failed to fetch artist bio: {}", e);
                         let _ = tx.send(UiEvent::ArtistBioLoaded {
+                            server_url,
+                            request_id,
                             artist_name,
                             bio: format!("Failed to load biography: {}", e),
                             thumb: None,
@@ -1159,94 +1177,179 @@ pub fn resolve_global_index(results: &SearchResults, global_idx: usize) -> (Sear
     (SearchTab::Artists, 0)
 }
 
-/// Execute inline list filter with debounce.
-async fn execute_list_filter(
+/// Schedule inline list filtering without cloning the source column on every
+/// keystroke. Only the debounce generation that survives snapshots the data.
+fn schedule_list_filter(
     event_tx: &mpsc::Sender<Event>,
     state: &mut AppState,
 ) -> Result<()> {
-    use crate::services::{filter_browse_items, filter_folder_items, DEFAULT_MAX_RESULTS};
-
     state.list_filter.version = state.list_filter.version.wrapping_add(1);
     let version = state.list_filter.version;
-    let query = state.list_filter.query.clone();
 
-    if query.is_empty() {
+    if state.list_filter.query.is_empty() {
         state.list_filter.results = None;
+        state.list_filter.column_results.clear();
         state.list_filter.loading = false;
         return Ok(());
     }
 
     state.list_filter.loading = true;
+    state.list_filter.results = None;
+    state.list_filter.column_results.clear();
 
-    let event_tx = event_tx.clone();
-    let category = state.list_filter.category;
-    let column = state.list_filter.column;
-
-    let aliases = state.library.artist_aliases.clone();
-    let comp_keys = state.library.compilations.artist_keys.clone();
-    let empty_comp_keys = std::collections::HashSet::new();
-
-    match category {
-        BrowseCategory::Library => {
-            if let Some(col) = state.artist_nav.columns.get(column) {
-                let items: Vec<_> = col.items.clone();
-                let aliases = aliases.clone();
-                let comp_keys = comp_keys.clone();
-                tokio::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-                    let results = filter_browse_items(&items, &query, DEFAULT_MAX_RESULTS, &aliases, &comp_keys);
-                    let _ = event_tx.send(UiEvent::ListFilterCompleted { version, results }.into()).await;
-                });
-            }
-        }
-        BrowseCategory::Playlists => {
-            if let Some(col) = state.playlist_nav.columns.get(column) {
-                let items: Vec<_> = col.items.clone();
-                let aliases = aliases.clone();
-                let empty = empty_comp_keys.clone();
-                tokio::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-                    let results = filter_browse_items(&items, &query, DEFAULT_MAX_RESULTS, &aliases, &empty);
-                    let _ = event_tx.send(UiEvent::ListFilterCompleted { version, results }.into()).await;
-                });
-            }
-        }
-        cat if cat.is_tag_section() => {
-            if let Some(col) = state.tag_nav.columns.get(column) {
-                let items: Vec<_> = col.items.clone();
-                let aliases = aliases.clone();
-                let empty = empty_comp_keys.clone();
-                tokio::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-                    let results = filter_browse_items(&items, &query, DEFAULT_MAX_RESULTS, &aliases, &empty);
-                    let _ = event_tx.send(UiEvent::ListFilterCompleted { version, results }.into()).await;
-                });
-            }
-        }
-        BrowseCategory::Folders => {
-            if let Some(ref folder_state) = state.folder_state {
-                if let Some(col) = folder_state.columns.get(column) {
-                    let items: Vec<_> = col.items.clone();
-                    tokio::spawn(async move {
-                        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-                        let results = filter_folder_items(&items, &query, DEFAULT_MAX_RESULTS);
-                        let _ = event_tx.send(UiEvent::ListFilterCompleted { version, results }.into()).await;
-                    });
-                }
-            }
-        }
-        _ => {}
-    }
+    let tx = event_tx.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        let _ = tx
+            .send(Event::Effect(SearchAction::RunListFilter { version }.into()))
+            .await;
+    });
 
     Ok(())
 }
 
+/// Snapshot and filter the winning debounce generation on a blocking worker.
+fn run_list_filter(event_tx: &mpsc::Sender<Event>, state: &mut AppState, version: u64) {
+    use crate::services::{
+        browse_filter_records, filter_browse_records, filter_with_priority,
+        DEFAULT_MAX_RESULTS,
+    };
+
+    if version != state.list_filter.version
+        || !state.list_filter.active
+        || state.list_filter.query.is_empty()
+    {
+        return;
+    }
+
+    let query = state.list_filter.query.clone();
+    let tx = event_tx.clone();
+    match state.list_filter.category {
+        BrowseCategory::Library => {
+            let columns: Vec<_> = state
+                .artist_nav
+                .columns
+                .iter()
+                .map(|column| browse_filter_records(&column.items))
+                .collect();
+            let aliases = state.library.artist_aliases.clone();
+            let comp_keys = state.library.compilations.artist_keys.clone();
+            tokio::task::spawn_blocking(move || {
+                let column_results = columns
+                    .iter()
+                    .map(|items| {
+                        filter_browse_records(
+                            items,
+                            &query,
+                            DEFAULT_MAX_RESULTS,
+                            &aliases,
+                            &comp_keys,
+                        )
+                    })
+                    .collect();
+                let _ = tx.blocking_send(
+                    UiEvent::ListFilterCompleted { version, column_results }.into(),
+                );
+            });
+        }
+        BrowseCategory::Playlists => {
+            let columns: Vec<_> = state
+                .playlist_nav
+                .columns
+                .iter()
+                .map(|column| browse_filter_records(&column.items))
+                .collect();
+            tokio::task::spawn_blocking(move || {
+                let empty_aliases = std::collections::HashMap::new();
+                let empty_keys = std::collections::HashSet::new();
+                let column_results = columns
+                    .iter()
+                    .map(|items| {
+                        filter_browse_records(
+                            items,
+                            &query,
+                            DEFAULT_MAX_RESULTS,
+                            &empty_aliases,
+                            &empty_keys,
+                        )
+                    })
+                    .collect();
+                let _ = tx.blocking_send(
+                    UiEvent::ListFilterCompleted { version, column_results }.into(),
+                );
+            });
+        }
+        cat if cat.is_tag_section() => {
+            let columns: Vec<_> = state
+                .tag_nav
+                .columns
+                .iter()
+                .map(|column| browse_filter_records(&column.items))
+                .collect();
+            tokio::task::spawn_blocking(move || {
+                let empty_aliases = std::collections::HashMap::new();
+                let empty_keys = std::collections::HashSet::new();
+                let column_results = columns
+                    .iter()
+                    .map(|items| {
+                        filter_browse_records(
+                            items,
+                            &query,
+                            DEFAULT_MAX_RESULTS,
+                            &empty_aliases,
+                            &empty_keys,
+                        )
+                    })
+                    .collect();
+                let _ = tx.blocking_send(
+                    UiEvent::ListFilterCompleted { version, column_results }.into(),
+                );
+            });
+        }
+        BrowseCategory::Folders => {
+            let columns: Vec<Vec<String>> = state
+                .folder_state
+                .as_ref()
+                .map(|folder_state| {
+                    folder_state
+                        .columns
+                        .iter()
+                        .map(|column| {
+                            column.items.iter().map(|item| item.title.clone()).collect()
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            tokio::task::spawn_blocking(move || {
+                let column_results = columns
+                    .iter()
+                    .map(|items| {
+                        filter_with_priority(
+                            items,
+                            &query,
+                            |title| title.as_str(),
+                            DEFAULT_MAX_RESULTS,
+                        )
+                    })
+                    .collect();
+                let _ = tx.blocking_send(
+                    UiEvent::ListFilterCompleted { version, column_results }.into(),
+                );
+            });
+        }
+        _ => {
+            state.list_filter.loading = false;
+        }
+    }
+}
+
 /// Adventure launcher: perform search (local artists/albums + async API tracks).
-async fn adventure_launcher_search(
+fn adventure_launcher_search(
     event_tx: &mpsc::Sender<Event>,
     state: &mut AppState,
     client: &mut PlexClient,
 ) -> Result<()> {
+    state.adventure_launcher_request_id = state.adventure_launcher_request_id.wrapping_add(1);
     let launcher = match state.popups.adventure_launcher.as_mut() {
         Some(l) => l,
         None => return Ok(()),
@@ -1339,13 +1442,14 @@ async fn adventure_launcher_search(
 }
 
 /// Adventure launcher: select track from current drill level.
-async fn adventure_launcher_select_track(
+fn adventure_launcher_select_track(
     _event_tx: &mpsc::Sender<Event>,
     state: &mut AppState,
     _client: &mut PlexClient,
 ) -> Result<Vec<Action>> {
     use crate::app::state::{AdventureStep, AdventureDrillLevel};
 
+    state.adventure_launcher_request_id = state.adventure_launcher_request_id.wrapping_add(1);
     let launcher = match state.popups.adventure_launcher.as_mut() {
         Some(l) => l,
         None => return Ok(vec![]),
@@ -1434,7 +1538,8 @@ async fn adventure_launcher_select_track(
 /// count). Mirrors the inline behaviour the old multi-step launcher
 /// triggered on FindEndTrack select, but now fires from an explicit
 /// "Generate" button instead.
-pub async fn adventure_launcher_generate(
+pub fn adventure_launcher_generate(
+    event_tx: &mpsc::Sender<Event>,
     state: &mut AppState,
     client: &mut PlexClient,
 ) -> Result<Vec<Action>> {
@@ -1457,26 +1562,43 @@ pub async fn adventure_launcher_generate(
         }
     };
     let count = launcher.track_count_input.parse::<usize>().unwrap_or(20).clamp(5, 100);
+    state.adventure_launcher_request_id = state.adventure_launcher_request_id.wrapping_add(1);
     state.popups.adventure_launcher = None;
+    state.adventure.generating = true;
+    state.adventure_request_id = state.adventure_request_id.wrapping_add(1);
+    let request_id = state.adventure_request_id;
     state.set_status("Adventure: generating sonic bridge...".to_string());
 
-    match crate::services::generate_adventure_for_library(client, &start, &end, count, state.active_library.as_deref()).await {
-        Ok(tracks) => {
-            if tracks.len() <= 2 {
-                state.set_error("Adventure: no similar tracks found for these songs. Try different tracks with sonic analysis data.".to_string());
-                Ok(vec![])
-            } else {
-                Ok(vec![SettingsAction::AdventureComplete(tracks).into()])
-            }
-        }
-        Err(e) => Ok(vec![SettingsAction::AdventureError(format!("{}", e)).into()]),
-    }
+    let request_client = client.clone();
+    let library_key = state.active_library.clone();
+    let tx = event_tx.clone();
+    tokio::spawn(async move {
+        let result = crate::services::generate_adventure_for_library(
+            &request_client,
+            &start,
+            &end,
+            count,
+            library_key.as_deref(),
+        )
+        .await
+        .map_err(|error| {
+            crate::app::action::AsyncError::from_api("Adventure generation failed", &error)
+        });
+        let _ = tx
+            .send(Event::Effect(
+                SettingsAction::AdventureGenerated { request_id, result }.into(),
+            ))
+            .await;
+    });
+
+    Ok(vec![])
 }
 
 /// Adventure launcher: handle back navigation.
 fn adventure_launcher_back(state: &mut AppState) {
     use crate::app::state::{AdventureStep, AdventureDrillLevel};
 
+    state.adventure_launcher_request_id = state.adventure_launcher_request_id.wrapping_add(1);
     let launcher = match state.popups.adventure_launcher.as_mut() {
         Some(l) => l,
         None => return,

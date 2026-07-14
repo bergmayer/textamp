@@ -14,7 +14,9 @@
 //!
 //! This service provides helpers for steps 1-2 to reduce boilerplate.
 
-use crate::plex::PlexClient;
+use crate::plex::{ApiError, PlexClient};
+use crate::util::SecretString;
+use std::sync::Arc;
 
 /// Connection parameters needed to create a PlexClient in a background task.
 ///
@@ -25,7 +27,7 @@ pub struct ConnectionParams {
     /// Server URL.
     pub server_url: String,
     /// Auth token (optional).
-    pub token: Option<String>,
+    pub token: Option<Arc<SecretString>>,
     /// Client identifier - must match token's issuance identifier.
     pub client_identifier: String,
 }
@@ -37,14 +39,18 @@ impl ConnectionParams {
     pub fn from_client(client: &PlexClient) -> Option<Self> {
         client.server_url().map(|url| Self {
             server_url: url.to_string(),
-            token: client.token().map(|s| s.to_string()),
+            token: client.shared_token(),
             client_identifier: client.client_identifier().to_string(),
         })
     }
 
     /// Create a new PlexClient with these connection parameters.
-    pub fn create_client(&self) -> PlexClient {
-        PlexClient::new_with_url(&self.server_url, self.token.as_deref(), &self.client_identifier)
+    pub fn create_client(&self) -> Result<PlexClient, ApiError> {
+        PlexClient::new_with_url(
+            &self.server_url,
+            self.token.as_ref().map(|token| token.as_str()),
+            &self.client_identifier,
+        )
     }
 }
 
@@ -70,30 +76,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_connection_params_create_client() {
+    fn test_connection_params_create_client() -> Result<(), ApiError> {
         let params = ConnectionParams {
             server_url: "http://localhost:32400".to_string(),
-            token: Some("test-token".to_string()),
+            token: Some(Arc::new(SecretString::from("test-token"))),
             client_identifier: "test-client-id".to_string(),
         };
 
-        let client = params.create_client();
+        let client = params.create_client()?;
         assert_eq!(client.server_url(), Some("http://localhost:32400"));
         assert_eq!(client.token(), Some("test-token"));
         assert_eq!(client.client_identifier(), "test-client-id");
+        Ok(())
     }
 
     #[test]
-    fn test_connection_params_no_token() {
+    fn test_connection_params_no_token() -> Result<(), ApiError> {
         let params = ConnectionParams {
             server_url: "http://localhost:32400".to_string(),
             token: None,
             client_identifier: "test-client-id".to_string(),
         };
 
-        let client = params.create_client();
+        let client = params.create_client()?;
         assert_eq!(client.server_url(), Some("http://localhost:32400"));
         assert_eq!(client.token(), None);
         assert_eq!(client.client_identifier(), "test-client-id");
+        Ok(())
     }
 }

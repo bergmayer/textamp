@@ -1,8 +1,9 @@
 //! Miller column dispatch handlers for all *ForMiller and *FromMiller actions.
 
 use crate::app::event::*;
+use crate::app::event::LibraryEventSender;
 use crate::app::{Action, AppState, Event};
-use crate::app::action::{MillerAction, SystemAction};
+use crate::app::action::{AsyncError, MillerAction, SystemAction};
 use crate::app::state::{BrowseColumn, BrowseItem};
 use crate::plex::PlexClient;
 use crate::plex::models::Track;
@@ -143,8 +144,9 @@ pub async fn dispatch(
         MillerAction::LoadArtistAlbumsForMiller { artist_key, replace_child } => {
             // Load albums for artist and add as new column in artist_nav
             // Prepend "All Tracks" entry before albums (same as old render path)
-            let auto_drill = replace_child;
             state.artist_nav.loading = true;
+            state.artist_nav_request_id = state.artist_nav_request_id.wrapping_add(1);
+            let request_id = state.artist_nav_request_id;
 
             // Sync `selected_artist_name` from the cached artist roster
             // before any column titles are formatted. Some callers (the
@@ -166,16 +168,60 @@ pub async fn dispatch(
             // Check if this is a derived track-artist without a real Plex artist entry
             let is_plex_artist = state.library.artists.iter().any(|a| a.rating_key == artist_key);
 
-            let albums_result = if is_plex_artist {
-                // Real Plex artist: use API
-                client.get_artist_albums(&artist_key).await
-            } else {
-                // Derived artist: build album list from all_tracks
-                Ok(build_albums_from_tracks(&artist_key, &state.library.selected_artist_name, &state.library.all_tracks, &state.library.albums))
-            };
+            if !is_plex_artist {
+                let albums = build_albums_from_tracks(
+                    &artist_key,
+                    &state.library.selected_artist_name,
+                    &state.library.all_tracks,
+                    &state.library.albums,
+                );
+                return Ok(vec![MillerAction::ArtistAlbumsForMillerLoaded {
+                    request_id,
+                    artist_key,
+                    replace_child,
+                    is_plex_artist,
+                    result: Ok(albums),
+                }
+                .into()]);
+            }
 
-            match albums_result {
+            let tx = LibraryEventSender::new(event_tx.clone(), state.library_generation);
+            let request_client = client.clone();
+            tokio::spawn(async move {
+                let result = request_client
+                    .get_artist_albums(&artist_key)
+                    .await
+                    .map_err(|error| AsyncError::from_api("Failed to load albums", &error));
+                let _ = tx
+                    .send(Event::Effect(
+                        MillerAction::ArtistAlbumsForMillerLoaded {
+                            request_id,
+                            artist_key,
+                            replace_child,
+                            is_plex_artist,
+                            result,
+                        }
+                        .into(),
+                    ))
+                    .await;
+            });
+        }
+
+        MillerAction::ArtistAlbumsForMillerLoaded {
+            request_id,
+            artist_key,
+            replace_child,
+            is_plex_artist,
+            result,
+        } => {
+            if state.artist_nav_request_id != request_id {
+                return Ok(vec![]);
+            }
+            match result {
                 Ok(albums) => {
+                    if is_plex_artist {
+                        state.connection.mark_healthy();
+                    }
                     // Albums first, then pinned action rows at the
                     // bottom. Order: Albums → ArtistRadio → AllTracks
                     // → CompilationTracks. Action rows carry no thumb
@@ -246,7 +292,7 @@ pub async fn dispatch(
                     let title = format!("albums \u{2014} {}", state.library.selected_artist_name);
                     let mut col = BrowseColumn::new(title, items);
                     col.artwork_visible = state.artwork.default_visible;
-                    state.artist_nav.drill_column(col, auto_drill);
+                    state.artist_nav.drill_column(col, replace_child);
 
                     // Preload all album art for the newly pushed column
                     let art_batch = if state.artwork.default_visible {
@@ -269,6 +315,7 @@ pub async fn dispatch(
                                 if !art_batch.is_empty() {
                                     actions.push(SystemAction::LoadAlbumArt(art_batch).into());
                                 }
+                                state.artist_nav.loading = false;
                                 return Ok(actions);
                             }
                         }
@@ -279,8 +326,11 @@ pub async fn dispatch(
                         return Ok(vec![SystemAction::LoadAlbumArt(art_batch).into()]);
                     }
                 }
-                Err(e) => {
-                    state.set_error(format!("Failed to load albums: {}", e));
+                Err(error) => {
+                    if error.connection_error {
+                        state.connection.mark_degraded(error.message.clone());
+                    }
+                    state.set_error(error.message);
                 }
             }
             state.artist_nav.loading = false;
@@ -288,21 +338,55 @@ pub async fn dispatch(
 
         MillerAction::LoadAlbumTracksForMiller { album_key, replace_child } => {
             // Load tracks for album and add as new column in artist_nav
-            let auto_drill = replace_child;
             state.artist_nav.loading = true;
+            state.artist_nav_request_id = state.artist_nav_request_id.wrapping_add(1);
+            let request_id = state.artist_nav_request_id;
+            let album_title = state.library.selected_album_title.clone();
+            let tx = LibraryEventSender::new(event_tx.clone(), state.library_generation);
+            let request_client = client.clone();
+            tokio::spawn(async move {
+                let result = request_client
+                    .get_album_tracks(&album_key)
+                    .await
+                    .map_err(|error| AsyncError::from_api("Failed to load tracks", &error));
+                let _ = tx
+                    .send(Event::Effect(
+                        MillerAction::AlbumTracksForMillerLoaded {
+                            request_id,
+                            album_key,
+                            album_title,
+                            replace_child,
+                            result,
+                        }
+                        .into(),
+                    ))
+                    .await;
+            });
+        }
 
-            match client.get_album_tracks(&album_key).await {
+        MillerAction::AlbumTracksForMillerLoaded {
+            request_id,
+            album_key,
+            album_title,
+            replace_child,
+            result,
+        } => {
+            if state.artist_nav_request_id != request_id {
+                return Ok(vec![]);
+            }
+            match result {
                 Ok(tracks) => {
+                    state.connection.mark_healthy();
                     let items = BrowseItem::from_tracks(&tracks);
-                    let title = format!("tracks \u{2014} {}", state.library.selected_album_title);
+                    let title = format!("tracks \u{2014} {}", album_title);
                     // Store full tracks for playback (includes media info)
                     let mut col = BrowseColumn::new_with_tracks(title, items, tracks);
                     col.play_all_row = Some(crate::app::state::PlayAllRow::Album {
                         rating_key: album_key.clone(),
-                        title: state.library.selected_album_title.clone(),
+                        title: album_title,
                     });
                     col.on_play_row = true;
-                    state.artist_nav.drill_column(col, auto_drill);
+                    state.artist_nav.drill_column(col, replace_child);
 
                     // Auto-select track if pending from search navigation
                     if let Some(ref tk) = state.search.pending_track_key {
@@ -314,8 +398,11 @@ pub async fn dispatch(
                         state.search.pending_track_key = None;
                     }
                 }
-                Err(e) => {
-                    state.set_error(format!("Failed to load tracks: {}", e));
+                Err(error) => {
+                    if error.connection_error {
+                        state.connection.mark_degraded(error.message.clone());
+                    }
+                    state.set_error(error.message);
                 }
             }
             state.artist_nav.loading = false;
@@ -324,11 +411,40 @@ pub async fn dispatch(
         MillerAction::LoadArtistAllTracksForMiller { artist_key, replace_child } => {
             // Load all tracks by an artist and add as new column in artist_nav
             // This is triggered by selecting "All Tracks" entry in the albums column
-            let auto_drill = replace_child;
             state.artist_nav.loading = true;
+            state.artist_nav_request_id = state.artist_nav_request_id.wrapping_add(1);
+            let request_id = state.artist_nav_request_id;
+            let tx = LibraryEventSender::new(event_tx.clone(), state.library_generation);
+            let request_client = client.clone();
+            tokio::spawn(async move {
+                let result = request_client
+                    .get_artist_all_tracks(&artist_key)
+                    .await
+                    .map_err(|error| AsyncError::from_api("Failed to load tracks", &error));
+                let _ = tx
+                    .send(Event::Effect(
+                        MillerAction::ArtistAllTracksForMillerLoaded {
+                            request_id,
+                            replace_child,
+                            result,
+                        }
+                        .into(),
+                    ))
+                    .await;
+            });
+        }
 
-            match client.get_artist_all_tracks(&artist_key).await {
+        MillerAction::ArtistAllTracksForMillerLoaded {
+            request_id,
+            replace_child,
+            result,
+        } => {
+            if state.artist_nav_request_id != request_id {
+                return Ok(vec![]);
+            }
+            match result {
                 Ok(tracks) => {
+                    state.connection.mark_healthy();
                     let items = BrowseItem::from_tracks(&tracks);
                     let title = format!("tracks ({})", tracks.len());
                     // Store full tracks for playback (includes media info).
@@ -337,10 +453,13 @@ pub async fn dispatch(
                         label: "Play all tracks".to_string(),
                     });
                     col.on_play_row = true;
-                    state.artist_nav.drill_column(col, auto_drill);
+                    state.artist_nav.drill_column(col, replace_child);
                 }
-                Err(e) => {
-                    state.set_error(format!("Failed to load tracks: {}", e));
+                Err(error) => {
+                    if error.connection_error {
+                        state.connection.mark_degraded(error.message.clone());
+                    }
+                    state.set_error(error.message);
                 }
             }
             state.artist_nav.loading = false;
@@ -352,17 +471,28 @@ pub async fn dispatch(
             let auto_drill = replace_child;
             if state.library.albums.is_empty() {
                 state.artist_nav.loading = true;
+                state.artist_nav_request_id = state.artist_nav_request_id.wrapping_add(1);
+                let request_id = state.artist_nav_request_id;
                 // Fetch in background to avoid blocking the event loop
-                let tx = event_tx.clone();
+                let tx = LibraryEventSender::new(event_tx.clone(), state.library_generation);
                 let client_clone = client.clone();
                 let lib_key = state.active_library.clone().unwrap_or_default();
                 tokio::spawn(async move {
                     match client_clone.get_albums(&lib_key).await {
                         Ok(albums) => {
-                            let _ = tx.send(DataEvent::AllAlbumsForMillerLoaded(albums).into()).await;
+                            let _ = tx.send(DataEvent::AllAlbumsForMillerLoaded {
+                                library_key: lib_key,
+                                request_id,
+                                replace_child,
+                                albums,
+                            }.into()).await;
                         }
                         Err(e) => {
-                            let _ = tx.send(DataEvent::DataLoadError(format!("Failed to load albums: {}", e)).into()).await;
+                            let _ = tx.send(DataEvent::AllAlbumsForMillerFailed {
+                                library_key: lib_key,
+                                request_id,
+                                error: AsyncError::from_api("Failed to load albums", &e),
+                            }.into()).await;
                         }
                     }
                 });
@@ -393,7 +523,7 @@ pub async fn dispatch(
             if let Some(col) = state.artist_nav.columns.get(column_index) {
                 let tracks = collect_tracks_from_column(col, track_index, single_track);
                 if !tracks.is_empty() {
-                    helpers::queue_and_play(event_tx, state, client, audio, tracks, 0).await;
+                    helpers::queue_and_play(event_tx, state, client, audio, tracks, 0);
                 }
             }
         }
@@ -403,34 +533,69 @@ pub async fn dispatch(
         MillerAction::LoadGenreAlbumsForMiller { genre_key, replace_child } => {
             // Load albums for the selected tag in the active section,
             // and push a new column into tag_nav.
-            let auto_drill = replace_child;
             state.tag_nav.loading = true;
+            state.tag_nav_request_id = state.tag_nav_request_id.wrapping_add(1);
+            let request_id = state.tag_nav_request_id;
 
             if let Some(lib_key) = &state.active_library.clone() {
                 use crate::app::state::BrowseCategory;
-                let albums_result = match state.browse_category {
-                    BrowseCategory::AlbumGenres | BrowseCategory::ArtistGenres => {
-                        client.get_genre_albums(lib_key, &genre_key).await
+                let section = state.browse_category;
+                let genre_name = state
+                    .tag_nav
+                    .focused()
+                    .and_then(|column| column.selected_item())
+                    .map(|item| item.title().to_string())
+                    .unwrap_or_default();
+                let library_key = lib_key.clone();
+                let tx = LibraryEventSender::new(event_tx.clone(), state.library_generation);
+                let request_client = client.clone();
+                tokio::spawn(async move {
+                    let result = match section {
+                        BrowseCategory::AlbumGenres | BrowseCategory::ArtistGenres => {
+                            request_client.get_genre_albums(&library_key, &genre_key).await
+                        }
+                        BrowseCategory::Moods => request_client.get_mood_albums(&library_key, &genre_key).await,
+                        BrowseCategory::Styles => request_client.get_style_albums(&library_key, &genre_key).await,
+                        BrowseCategory::Decades => request_client.get_decade_albums(&library_key, &genre_key).await,
+                        BrowseCategory::Years => request_client.get_year_albums(&library_key, &genre_key).await,
+                        BrowseCategory::Collections => request_client.get_collection_albums(&library_key, &genre_key).await,
+                        BrowseCategory::Countries => request_client.get_country_albums(&library_key, &genre_key).await,
+                        BrowseCategory::Labels => request_client.get_label_albums(&library_key, &genre_key).await,
+                        BrowseCategory::Formats => request_client.get_format_albums(&library_key, &genre_key).await,
+                        BrowseCategory::Studios => request_client.get_studio_albums(&library_key, &genre_key).await,
+                        _ => request_client.get_genre_albums(&library_key, &genre_key).await,
                     }
-                    BrowseCategory::Moods => client.get_mood_albums(lib_key, &genre_key).await,
-                    BrowseCategory::Styles => client.get_style_albums(lib_key, &genre_key).await,
-                    BrowseCategory::Decades => client.get_decade_albums(lib_key, &genre_key).await,
-                    BrowseCategory::Years => client.get_year_albums(lib_key, &genre_key).await,
-                    BrowseCategory::Collections => client.get_collection_albums(lib_key, &genre_key).await,
-                    BrowseCategory::Countries => client.get_country_albums(lib_key, &genre_key).await,
-                    BrowseCategory::Labels => client.get_label_albums(lib_key, &genre_key).await,
-                    BrowseCategory::Formats => client.get_format_albums(lib_key, &genre_key).await,
-                    BrowseCategory::Studios => client.get_studio_albums(lib_key, &genre_key).await,
-                    _ => client.get_genre_albums(lib_key, &genre_key).await,
-                };
+                    .map_err(|error| AsyncError::from_api("Failed to load albums", &error));
+                    let _ = tx
+                        .send(Event::Effect(
+                            MillerAction::GenreAlbumsForMillerLoaded {
+                                request_id,
+                                genre_name,
+                                replace_child,
+                                result,
+                            }
+                            .into(),
+                        ))
+                        .await;
+                });
+            } else {
+                state.tag_nav.loading = false;
+            }
+        }
 
-                match albums_result {
+        MillerAction::GenreAlbumsForMillerLoaded {
+            request_id,
+            genre_name,
+            replace_child,
+            result,
+        } => {
+            if state.tag_nav_request_id != request_id {
+                return Ok(vec![]);
+            }
+            match result {
                     Ok(albums) => {
+                        state.connection.mark_healthy();
                         let items = BrowseItem::from_albums(&albums, &state.library.album_display_artist);
-                        let genre_name = state.tag_nav.focused()
-                            .and_then(|c| c.selected_item())
-                            .map(|item| item.title().to_string())
-                            .unwrap_or_default();
                         let title = if genre_name.is_empty() {
                             "albums".to_string()
                         } else {
@@ -438,7 +603,7 @@ pub async fn dispatch(
                         };
                         let mut col = BrowseColumn::new(title, items);
                         col.artwork_visible = state.artwork.default_visible;
-                        state.tag_nav.drill_column(col, auto_drill);
+                        state.tag_nav.drill_column(col, replace_child);
 
                         // Preload all album art for the newly pushed column
                         if state.artwork.default_visible {
@@ -449,18 +614,21 @@ pub async fn dispatch(
                             }
                         }
                     }
-                    Err(e) => {
-                        state.set_error(format!("Failed to load albums: {}", e));
+                    Err(error) => {
+                        if error.connection_error {
+                            state.connection.mark_degraded(error.message.clone());
+                        }
+                        state.set_error(error.message);
                     }
                 }
-            }
             state.tag_nav.loading = false;
         }
 
         MillerAction::LoadGenreTracksForMiller { album_key, replace_child } => {
             // Load tracks for album and add as new column in genre_nav
-            let auto_drill = replace_child;
             state.tag_nav.loading = true;
+            state.tag_nav_request_id = state.tag_nav_request_id.wrapping_add(1);
+            let request_id = state.tag_nav_request_id;
 
             // Get album name from the focused item for the column title
             let album_name = state.tag_nav.focused()
@@ -468,8 +636,41 @@ pub async fn dispatch(
                 .map(|item| item.title().to_string())
                 .unwrap_or_default();
 
-            match client.get_album_tracks(&album_key).await {
+            let tx = LibraryEventSender::new(event_tx.clone(), state.library_generation);
+            let request_client = client.clone();
+            tokio::spawn(async move {
+                let result = request_client
+                    .get_album_tracks(&album_key)
+                    .await
+                    .map_err(|error| AsyncError::from_api("Failed to load tracks", &error));
+                let _ = tx
+                    .send(Event::Effect(
+                        MillerAction::GenreTracksForMillerLoaded {
+                            request_id,
+                            album_key,
+                            album_name,
+                            replace_child,
+                            result,
+                        }
+                        .into(),
+                    ))
+                    .await;
+            });
+        }
+
+        MillerAction::GenreTracksForMillerLoaded {
+            request_id,
+            album_key,
+            album_name,
+            replace_child,
+            result,
+        } => {
+            if state.tag_nav_request_id != request_id {
+                return Ok(vec![]);
+            }
+            match result {
                 Ok(tracks) => {
+                    state.connection.mark_healthy();
                     let items = BrowseItem::from_tracks(&tracks);
                     let title = if album_name.is_empty() {
                         "tracks".to_string()
@@ -483,10 +684,13 @@ pub async fn dispatch(
                         title: album_name.clone(),
                     });
                     col.on_play_row = true;
-                    state.tag_nav.drill_column(col, auto_drill);
+                    state.tag_nav.drill_column(col, replace_child);
                 }
-                Err(e) => {
-                    state.set_error(format!("Failed to load tracks: {}", e));
+                Err(error) => {
+                    if error.connection_error {
+                        state.connection.mark_degraded(error.message.clone());
+                    }
+                    state.set_error(error.message);
                 }
             }
             state.tag_nav.loading = false;
@@ -496,7 +700,7 @@ pub async fn dispatch(
             if let Some(col) = state.tag_nav.columns.get(column_index) {
                 let tracks = collect_tracks_from_column(col, track_index, single_track);
                 if !tracks.is_empty() {
-                    helpers::queue_and_play(event_tx, state, client, audio, tracks, 0).await;
+                    helpers::queue_and_play(event_tx, state, client, audio, tracks, 0);
                 }
             }
         }
@@ -520,32 +724,56 @@ pub async fn dispatch(
             if state.playlist_nav.columns.len() <= state.playlist_nav.focused_column + 1 {
                 state.playlist_nav.loading = true;
             }
-            let tx = event_tx.clone();
+            state.playlist_nav_request_id = state.playlist_nav_request_id.wrapping_add(1);
+            let request_id = state.playlist_nav_request_id;
+            let tx = LibraryEventSender::new(event_tx.clone(), state.library_generation);
             let client_clone = client.clone();
+            let library_key = state.active_library.clone().unwrap_or_default();
             let pk = playlist_key.clone();
             tokio::spawn(async move {
                 let backoff = [1u64, 2, 4];
-                let mut last_err = String::new();
+                let mut last_error = None;
                 for attempt in 0..3u32 {
                     match client_clone.get_playlist_tracks_page(&pk, 0, FIRST_PAGE).await {
                         Ok((tracks, total)) => {
                             let _ = tx.send(RadioEvent::PlaylistFirstPageLoaded {
-                                playlist_key: pk, tracks, total,
+                                library_key,
+                                request_id,
+                                playlist_key: pk,
+                                tracks,
+                                total,
                             }.into()).await;
                             return;
                         }
-                        Err(e) => {
-                            last_err = format!("{}", e);
-                            if attempt < 2 {
+                        Err(error) => {
+                            let retry = error.is_connection_error() && attempt < 2;
+                            let async_error = AsyncError::from_api(
+                                "Failed to load playlist",
+                                &error,
+                            );
+                            tracing::debug!(
+                                "Playlist load attempt {} failed: {}",
+                                attempt + 1,
+                                async_error.message,
+                            );
+                            last_error = Some(async_error);
+                            if retry {
                                 let delay = backoff[attempt as usize];
-                                tracing::debug!("Playlist load failed (attempt {}), retrying in {}s: {}", attempt + 1, delay, last_err);
                                 tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                            } else {
+                                break;
                             }
                         }
                     }
                 }
                 let _ = tx.send(RadioEvent::PlaylistTracksForMillerFailed {
-                    playlist_key: pk, error: last_err,
+                    library_key,
+                    request_id,
+                    playlist_key: pk,
+                    error: last_error.unwrap_or(AsyncError {
+                        message: "Failed to load playlist".to_string(),
+                        connection_error: false,
+                    }),
                 }.into()).await;
             });
         }
@@ -560,19 +788,27 @@ pub async fn dispatch(
             {
                 lazy.loading = true;
             }
-            let tx = event_tx.clone();
+            let tx = LibraryEventSender::new(event_tx.clone(), state.library_generation);
             let client_clone = client.clone();
+            let library_key = state.active_library.clone().unwrap_or_default();
             let pk = playlist_key.clone();
             tokio::spawn(async move {
                 match client_clone.get_playlist_tracks_page(&pk, offset, PAGE).await {
                     Ok((tracks, total)) => {
                         let _ = tx.send(RadioEvent::PlaylistMorePageLoaded {
-                            playlist_key: pk, tracks, total,
+                            library_key,
+                            playlist_key: pk,
+                            offset,
+                            tracks,
+                            total,
                         }.into()).await;
                     }
                     Err(e) => {
                         let _ = tx.send(RadioEvent::PlaylistMorePageFailed {
-                            playlist_key: pk, error: format!("{}", e),
+                            library_key,
+                            playlist_key: pk,
+                            offset,
+                            error: AsyncError::from_api("Playlist page fetch failed", &e),
                         }.into()).await;
                     }
                 }
@@ -583,7 +819,7 @@ pub async fn dispatch(
             if let Some(col) = state.playlist_nav.columns.get(column_index) {
                 let tracks = collect_tracks_from_column(col, track_index, single_track);
                 if !tracks.is_empty() {
-                    helpers::queue_and_play(event_tx, state, client, audio, tracks, 0).await;
+                    helpers::queue_and_play(event_tx, state, client, audio, tracks, 0);
                 }
             }
         }
@@ -701,7 +937,13 @@ pub async fn dispatch(
                 if let Some(ref lib_key) = state.active_library.clone() {
                     state.cache_mgmt.preloads_in_progress.insert("Tracks".to_string());
                     if state.cache_mgmt.preloads_total == 0 { state.cache_mgmt.preloads_total = 1; }
-                    helpers::preload_data(event_tx, helpers::PreloadType::AllTracks, lib_key, client);
+                    helpers::preload_data(
+                        event_tx,
+                        helpers::PreloadType::AllTracks,
+                        lib_key,
+                        client,
+                        state.library_generation,
+                    );
                 }
                 return Ok(vec![]);
             }
@@ -718,8 +960,52 @@ pub async fn dispatch(
         MillerAction::RefreshAlbumTracks { album_key } => {
             // Refresh album tracks in the currently focused Miller column.
             // Works for both artist_nav and genre_nav.
-            match client.get_album_tracks(&album_key).await {
+            let tag_section = state.browse_category.is_tag_section();
+            let (request_id, column_index) = if tag_section {
+                state.tag_nav_request_id = state.tag_nav_request_id.wrapping_add(1);
+                (state.tag_nav_request_id, state.tag_nav.focused_column)
+            } else {
+                state.artist_nav_request_id = state.artist_nav_request_id.wrapping_add(1);
+                (state.artist_nav_request_id, state.artist_nav.focused_column)
+            };
+            let tx = LibraryEventSender::new(event_tx.clone(), state.library_generation);
+            let request_client = client.clone();
+            tokio::spawn(async move {
+                let result = request_client
+                    .get_album_tracks(&album_key)
+                    .await
+                    .map_err(|error| AsyncError::from_api("Failed to refresh album tracks", &error));
+                let _ = tx
+                    .send(Event::Effect(
+                        MillerAction::AlbumTracksRefreshed {
+                            request_id,
+                            tag_section,
+                            column_index,
+                            result,
+                        }
+                        .into(),
+                    ))
+                    .await;
+            });
+        }
+
+        MillerAction::AlbumTracksRefreshed {
+            request_id,
+            tag_section,
+            column_index,
+            result,
+        } => {
+            let current_request_id = if tag_section {
+                state.tag_nav_request_id
+            } else {
+                state.artist_nav_request_id
+            };
+            if current_request_id != request_id {
+                return Ok(vec![]);
+            }
+            match result {
                 Ok(tracks) => {
+                    state.connection.mark_healthy();
                     let items = BrowseItem::from_tracks(&tracks);
 
                     // Determine which nav owns the focused track column
@@ -729,7 +1015,7 @@ pub async fn dispatch(
                         &mut state.artist_nav
                     };
 
-                    if let Some(col) = nav.columns.get_mut(nav.focused_column) {
+                    if let Some(col) = nav.columns.get_mut(column_index) {
                         let old_idx = col.selected_index;
                         col.items = items;
                         col.tracks = tracks;
@@ -737,8 +1023,11 @@ pub async fn dispatch(
                     }
                     state.set_status("Album tracks refreshed".to_string());
                 }
-                Err(e) => {
-                    state.set_error(format!("Failed to refresh album tracks: {}", e));
+                Err(error) => {
+                    if error.connection_error {
+                        state.connection.mark_degraded(error.message.clone());
+                    }
+                    state.set_error(error.message);
                 }
             }
         }

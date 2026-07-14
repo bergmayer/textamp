@@ -15,11 +15,11 @@ use tokio::sync::mpsc;
 /// already run or is not needed, it returns immediately.
 pub fn maybe_detect(
     event_tx: &mpsc::Sender<Event>,
-    state: &AppState,
+    state: &mut AppState,
     _client: &PlexClient,
 ) {
     // Already detected (or currently detecting)
-    if state.library.compilations.detected {
+    if state.library.compilations.detected || state.library.compilations.detecting {
         return;
     }
     // Need artists, albums, and all_tracks loaded
@@ -38,26 +38,44 @@ pub fn maybe_detect(
         state.library.all_tracks.len()
     );
 
-    // Pure function — no API calls needed
-    let result = detect_compilations_from_tracks(
-        &state.library.albums,
-        &state.library.all_tracks,
-        &state.library.artists,
-        &state.library.artist_aliases,
-    );
-
+    state.library.compilations.detecting = true;
+    state.library.compilations.detection_request_id = state
+        .library
+        .compilations
+        .detection_request_id
+        .wrapping_add(1);
+    let request_id = state.library.compilations.detection_request_id;
+    let albums = state.library.albums.clone();
+    let all_tracks = state.library.all_tracks.clone();
+    let artists = state.library.artists.clone();
+    let artist_aliases = state.library.artist_aliases.clone();
     let tx = event_tx.clone();
-    // Send result via event (keeps same pattern, could be made sync but event
-    // pattern ensures consistent state update path)
     tokio::spawn(async move {
-        let _ = tx.send(PreloadEvent::CompilationsDetected {
-            library_key: lib_key,
-            albums: result.confirmed_compilations,
-            artist_only_keys: result.artist_only_keys,
-            track_artist_keys: result.compilation_track_artist_keys,
-            artist_compilation_map: result.artist_compilation_map,
-            single_artist_compilations: result.single_artist_compilations,
-        }.into()).await;
+        let worker = tokio::task::spawn_blocking(move || {
+            detect_compilations_from_tracks(
+                &albums,
+                &all_tracks,
+                &artists,
+                &artist_aliases,
+            )
+        }).await;
+        let event: Event = match worker {
+            Ok(result) => PreloadEvent::CompilationsDetected {
+                library_key: lib_key,
+                request_id,
+                albums: result.confirmed_compilations,
+                artist_only_keys: result.artist_only_keys,
+                track_artist_keys: result.compilation_track_artist_keys,
+                artist_compilation_map: result.artist_compilation_map,
+                single_artist_compilations: result.single_artist_compilations,
+            }.into(),
+            Err(error) => PreloadEvent::CompilationDetectionFailed {
+                library_key: lib_key,
+                request_id,
+                error: error.to_string(),
+            }.into(),
+        };
+        let _ = tx.send(event).await;
     });
 }
 
@@ -158,12 +176,13 @@ fn detect_compilations_from_tracks(
             }
         } else if track_artists.len() == 1 {
             // Single-artist "compilation" — map to the actual artist
-            let artist_name = track_artists.iter().next().unwrap(); // lowercase
-            if let Some(real_key) = resolve_artist_key(artist_name) {
-                single_artist_compilations
-                    .entry(real_key.clone())
-                    .or_default()
-                    .push((*album).clone());
+            if let Some(artist_name) = track_artists.iter().next() {
+                if let Some(real_key) = resolve_artist_key(artist_name) {
+                    single_artist_compilations
+                        .entry(real_key.clone())
+                        .or_default()
+                        .push((*album).clone());
+                }
             }
         }
     }

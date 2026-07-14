@@ -6,12 +6,11 @@
 use crate::app::event::*;
 use crate::app::{Action, AppState, Event};
 use crate::app::action::{BrowseAction, DataAction};
-use crate::app::state::{BrowseCategory, BrowseItem, Focus, RightPanelMode, View};
+use crate::app::state::{BrowseCategory, Focus, RightPanelMode, View};
 use crate::plex::PlexClient;
 use crate::plex::models::Track;
-use crate::plex::{CacheData, LibraryCache};
+use crate::plex::LibraryCache;
 use crate::config::Config;
-use crate::services::{FolderColumn, FolderNavigationState, FolderService};
 
 use anyhow::Result;
 use tokio::sync::mpsc;
@@ -50,53 +49,54 @@ pub async fn dispatch(
 
             // If we have a saved library key, load from cache immediately (no network)
             if let Some(ref lib_key) = saved_key {
+                state.advance_library_generation();
                 state.active_library = Some(lib_key.clone());
                 state.keep_subfolder_cache = config.libraries.per_library
                     .get(lib_key.as_str())
                     .map(|s| s.keep_subfolder_cache)
                     .unwrap_or(false);
 
-                if let Some(cache) = LibraryCache::new() {
-                    if let Some(cached) = cache.load(lib_key) {
-                        if cached.library_key != *lib_key {
-                            tracing::warn!("Cache library_key mismatch: expected {}, got {} - ignoring cache",
-                                lib_key, cached.library_key);
-                        } else {
-                            tracing::info!("Loading from cache: {} artists, {} albums, {} folders, {} genres",
-                                cached.artists.len(), cached.albums.len(), cached.root_folders.len(), cached.genres.len());
-
-                            let lib_title = "Music".to_string();
-                            load_from_cache(state, cached, lib_key, &lib_title);
-
-                            // No auto-drill on cache load — leave the
-                            // user on a clean cat+artists 2-col view
-                            // and let them drill explicitly.
-
-                            // Trigger compilation detection if cache had no compilation data
-                            helpers::maybe_detect_compilations(event_tx, state, client);
-
-                            // Use two-tier staleness check for the current view
-                            if let Some(tier1_cat) = helpers::current_view_category(state) {
-                                helpers::check_staleness_on_view_load(event_tx, state, client, tier1_cat);
-                            }
-                        }
-                    }
-                }
+                // A library cache is ~19 MiB and JSON decoding is blocking. Load
+                // it off the runtime/UI thread and version the result by library.
+                state.library_loading = true;
+                let tx = event_tx.clone();
+                let cache_library_key = lib_key.clone();
+                let cache_generation = state.library_generation;
+                let cache_server_id = state.active_server_id.clone();
+                tokio::task::spawn_blocking(move || {
+                    let result = LibraryCache::new().and_then(|cache| {
+                        cache.load_scoped(cache_server_id.as_deref(), &cache_library_key)
+                    });
+                    let event: Event = match result {
+                        Some(cached) => PreloadEvent::LibraryCacheLoaded {
+                            library_key: cache_library_key,
+                            cached: Box::new(cached),
+                        }.into(),
+                        None => PreloadEvent::LibraryCacheLoadFailed {
+                            library_key: cache_library_key,
+                        }.into(),
+                    };
+                    let _ = tx.blocking_send(Event::for_library(cache_generation, event));
+                });
             }
 
             // Fetch libraries from API in background (non-blocking)
-            let tx = event_tx.clone();
+            let tx = LibraryEventSender::new(
+                event_tx.clone(),
+                state.library_generation,
+            );
             let client_clone = client.clone();
             tokio::spawn(async move {
-                match client_clone.get_libraries().await {
-                    Ok(libs) => {
-                        let _ = tx.send(DataEvent::LibrariesLoaded(libs).into()).await;
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to load libraries: {}", e);
-                        let _ = tx.send(DataEvent::DataLoadError(format!("Failed to load libraries: {}", e)).into()).await;
-                    }
-                }
+                let server_url = client_clone.server_url().map(str::to_owned);
+                let result = client_clone.get_libraries().await.map_err(|error| {
+                    crate::app::action::AsyncError::from_api(
+                        "Failed to load libraries",
+                        &error,
+                    )
+                });
+                let _ = tx
+                    .send(DataEvent::LibrariesLoaded { server_url, result }.into())
+                    .await;
             });
         }
         DataAction::LoadArtists => {
@@ -120,10 +120,13 @@ pub async fn dispatch(
             state.library.right_panel_mode = RightPanelMode::ArtistAlbums;
             state.library.selected_artist_albums.clear();
             state.list_state.right_albums_index = 0;
+            let request_key = format!("artist-albums:{artist_key}");
+            state.library.right_panel_request_key = Some(request_key.clone());
 
-            helpers::spawn_api_call(event_tx, client,
+            helpers::spawn_scoped_api_call(event_tx, state.library_generation, client, request_key,
                 move |c| async move { c.get_artist_albums(&artist_key).await },
-                |x| DataEvent::ArtistAlbumsLoaded(x).into(), "Failed to load albums",
+                |request_key, albums| DataEvent::ArtistAlbumsLoaded { request_key, albums }.into(),
+                "Failed to load albums",
             );
         }
         DataAction::LoadArtistAllTracks => {
@@ -135,10 +138,13 @@ pub async fn dispatch(
                 state.library.right_panel_mode = RightPanelMode::AlbumTracks;
                 state.library.selected_album_tracks.clear();
                 state.list_state.tracks_index = 0;
+                let request_key = format!("artist-tracks:{artist_key}");
+                state.library.right_panel_request_key = Some(request_key.clone());
 
-                helpers::spawn_api_call(event_tx, client,
+                helpers::spawn_scoped_api_call(event_tx, state.library_generation, client, request_key,
                     move |c| async move { c.get_artist_all_tracks(&artist_key).await },
-                    |x| DataEvent::ArtistAllTracksLoaded(x).into(), "Failed to load tracks",
+                    |request_key, tracks| DataEvent::ArtistAllTracksLoaded { request_key, tracks }.into(),
+                    "Failed to load tracks",
                 );
             }
         }
@@ -153,10 +159,13 @@ pub async fn dispatch(
                 state.library.right_panel_mode = RightPanelMode::AlbumTracks;
                 state.library.selected_album_tracks.clear();
                 state.list_state.tracks_index = 0;
+                let request_key = format!("album-tracks:{album_key}");
+                state.library.right_panel_request_key = Some(request_key.clone());
 
-                helpers::spawn_api_call(event_tx, client,
+                helpers::spawn_scoped_api_call(event_tx, state.library_generation, client, request_key,
                     move |c| async move { c.get_album_tracks(&album_key).await },
-                    |x| DataEvent::AlbumTracksLoaded(x).into(), "Failed to load tracks",
+                    |request_key, tracks| DataEvent::AlbumTracksLoaded { request_key, tracks }.into(),
+                    "Failed to load tracks",
                 );
             }
         }
@@ -166,10 +175,13 @@ pub async fn dispatch(
             state.library.right_panel_mode = RightPanelMode::AlbumTracks;
             state.library.selected_album_tracks.clear();
             state.list_state.tracks_index = 0;
+            let request_key = format!("album-tracks:{rating_key}");
+            state.library.right_panel_request_key = Some(request_key.clone());
 
-            helpers::spawn_api_call(event_tx, client,
+            helpers::spawn_scoped_api_call(event_tx, state.library_generation, client, request_key,
                 move |c| async move { c.get_album_tracks(&rating_key).await },
-                |x| DataEvent::AlbumTracksLoaded(x).into(), "Failed to load album tracks",
+                |request_key, tracks| DataEvent::AlbumTracksLoaded { request_key, tracks }.into(),
+                "Failed to load album tracks",
             );
         }
         DataAction::LoadCategoryTracks => {
@@ -179,27 +191,14 @@ pub async fn dispatch(
             match state.browse_category {
                 BrowseCategory::Library => {
                     if state.library.artists.is_empty() && !state.library.artists_loading {
-                        state.library.artists_loading = true;
-                        if let Some(lib_key) = &state.active_library {
-                            match client.get_artists(lib_key).await {
-                                Ok(mut artists) => {
-                                    artists.sort_by(|a, b| helpers::sort_key(&a.title).cmp(&helpers::sort_key(&b.title)));
-                                    state.library.artists = artists;
-                                }
-                                Err(e) => {
-                                    tracing::error!("Failed to load artists: {}", e);
-                                }
-                            }
-                        }
-                        state.library.artists_loading = false;
+                        helpers::load_artists(event_tx, state, client);
+                        return Ok(vec![]);
                     }
                 }
                 BrowseCategory::Playlists => {
                     if state.library.playlists.is_empty() {
-                        let section_id = state.active_library.as_deref();
-                        if let Ok(playlists) = client.get_playlists(section_id).await {
-                            state.library.playlists = playlists;
-                        }
+                        helpers::load_playlists(event_tx, state, client);
+                        return Ok(vec![]);
                     }
                 }
                 BrowseCategory::Folders => {
@@ -233,8 +232,13 @@ pub async fn dispatch(
                 let _playlist_title = state.selected_category_title()
                     .map(|s| s.to_lowercase());
                 let lib_key = state.active_library.clone();
+                let request_key = format!("category-tracks:{browse_category:?}:{key}");
+                state.library.right_panel_request_key = Some(request_key.clone());
 
-                let event_tx = event_tx.clone();
+                let event_tx = LibraryEventSender::new(
+                    event_tx.clone(),
+                    state.library_generation,
+                );
                 let client = client.clone();
                 tokio::spawn(async move {
                     let result = match browse_category {
@@ -266,7 +270,10 @@ pub async fn dispatch(
 
                     match result {
                         Ok(Either::Tracks(tracks)) => {
-                            let _ = event_tx.send(DataEvent::CategoryTracksLoaded(tracks).into()).await;
+                            let _ = event_tx.send(DataEvent::CategoryTracksLoaded {
+                                request_key,
+                                tracks,
+                            }.into()).await;
                         }
                         Err(e) => {
                             let error_str = e.to_string();
@@ -275,7 +282,11 @@ pub async fn dispatch(
                             } else {
                                 format!("Failed to load tracks: {}", e)
                             };
-                            let _ = event_tx.send(DataEvent::DataLoadError(clean_error).into()).await;
+                            let _ = event_tx.send(DataEvent::ScopedLoadError {
+                                request_key,
+                                message: clean_error,
+                                connection_error: e.is_connection_error(),
+                            }.into()).await;
                         }
                     }
                 });
@@ -293,7 +304,9 @@ pub async fn dispatch(
             }
         }
         DataAction::LoadSimilarAlbums { rating_key, title } => {
+            let request_key = format!("similar-albums:{rating_key}");
             state.similar.source_title = title;
+            state.similar.request_key = Some(request_key.clone());
             state.similar.loading = true;
             state.similar.albums.clear();
             state.list_state.similar_index = 0;
@@ -302,13 +315,16 @@ pub async fn dispatch(
                 state.set_view(View::Similar);
             }
 
-            helpers::spawn_api_call(event_tx, client,
+            helpers::spawn_scoped_api_call(event_tx, state.library_generation, client, request_key,
                 move |c| async move { c.get_similar_albums(&rating_key, 50).await },
-                |x| DataEvent::SimilarAlbumsLoaded(x).into(), "Failed to load similar albums",
+                |request_key, albums| DataEvent::SimilarAlbumsLoaded { request_key, albums }.into(),
+                "Failed to load similar albums",
             );
         }
         DataAction::LoadSimilarTracks { rating_key, title } => {
+            let request_key = format!("similar-tracks:{rating_key}");
             state.similar.source_title = title;
+            state.similar.request_key = Some(request_key.clone());
             state.similar.loading = true;
             state.similar.tracks.clear();
             state.list_state.similar_index = 0;
@@ -317,9 +333,10 @@ pub async fn dispatch(
                 state.set_view(View::Similar);
             }
 
-            helpers::spawn_api_call(event_tx, client,
+            helpers::spawn_scoped_api_call(event_tx, state.library_generation, client, request_key,
                 move |c| async move { c.get_similar_tracks(&rating_key, 50).await },
-                |x| DataEvent::SimilarTracksLoaded(x).into(), "Failed to load similar tracks",
+                |request_key, tracks| DataEvent::SimilarTracksLoaded { request_key, tracks }.into(),
+                "Failed to load similar tracks",
             );
         }
         DataAction::LoadTrackPaneSimilar { rating_key } => {
@@ -330,18 +347,38 @@ pub async fn dispatch(
                 return Ok(vec![]);
             }
             state.track_pane_similar_loading.insert(rating_key.clone());
-            let key_for_event = rating_key.clone();
-            helpers::spawn_api_call(event_tx, client,
-                move |c| async move { c.get_similar_tracks(&rating_key, 12).await },
-                move |tracks| DataEvent::TrackPaneSimilarLoaded {
-                    rating_key: key_for_event.clone(),
-                    tracks,
-                }.into(),
-                "Failed to load track-pane similar tracks",
+            let tx = LibraryEventSender::new(
+                event_tx.clone(),
+                state.library_generation,
             );
+            let request_client = client.clone();
+            tokio::spawn(async move {
+                let server_url = request_client.server_url().map(str::to_owned);
+                let result = request_client
+                    .get_similar_tracks(&rating_key, 12)
+                    .await
+                    .map_err(|error| {
+                        crate::app::action::AsyncError::from_api(
+                            "Failed to load similar tracks",
+                            &error,
+                        )
+                    });
+                let _ = tx
+                    .send(
+                        DataEvent::TrackPaneSimilarLoaded {
+                            server_url,
+                            rating_key,
+                            result,
+                        }
+                        .into(),
+                    )
+                    .await;
+            });
         }
         DataAction::LoadSimilarArtists { artist_key, title } => {
+            let request_key = format!("similar-artists:{artist_key}");
             state.similar.source_title = title;
+            state.similar.request_key = Some(request_key.clone());
             state.similar.loading = true;
             state.similar.artists.clear();
             state.list_state.similar_index = 0;
@@ -351,9 +388,10 @@ pub async fn dispatch(
                 state.set_view(View::Similar);
             }
 
-            helpers::spawn_api_call(event_tx, client,
+            helpers::spawn_scoped_api_call(event_tx, state.library_generation, client, request_key,
                 move |c| async move { c.get_similar_artists(&artist_key, 50).await },
-                |x| DataEvent::SimilarArtistsLoaded(x).into(), "Failed to load similar artists",
+                |request_key, artists| DataEvent::SimilarArtistsLoaded { request_key, artists }.into(),
+                "Failed to load similar artists",
             );
         }
         DataAction::LoadRelated { artist_key, title } => {
@@ -441,7 +479,11 @@ pub async fn dispatch(
                 }
             }
 
-            let tx = event_tx.clone();
+            let tx = LibraryEventSender::new(
+                event_tx.clone(),
+                state.library_generation,
+            );
+            let request_key = artist_key.clone();
             let c = client.clone();
             tokio::spawn(async move {
                 let mut groups = Vec::new();
@@ -673,7 +715,7 @@ pub async fn dispatch(
                 //    albums derived from source artist's library)
                 groups.extend(synthetic_alias_groups);
 
-                let _ = tx.send(DataEvent::RelatedDataLoaded { groups }.into()).await;
+                let _ = tx.send(DataEvent::RelatedDataLoaded { request_key, groups }.into()).await;
             });
         }
         DataAction::ListUp => {
@@ -682,14 +724,14 @@ pub async fn dispatch(
         DataAction::ListDown => {
             helpers::adjust_list_index(state, 1);
             // Lazy load more if needed
-            helpers::maybe_load_more(state, client).await;
+            helpers::maybe_load_more(event_tx, state, client);
         }
         DataAction::ListPageUp => {
             helpers::adjust_list_index(state, -10);
         }
         DataAction::ListPageDown => {
             helpers::adjust_list_index(state, 10);
-            helpers::maybe_load_more(state, client).await;
+            helpers::maybe_load_more(event_tx, state, client);
         }
         DataAction::ListTop => {
             helpers::set_list_index(state, 0);
@@ -700,137 +742,3 @@ pub async fn dispatch(
     }
     Ok(vec![])
 }
-
-/// Load cached library data into state for instant startup.
-/// Mirrors the LibraryCacheLoaded event handler logic.
-fn load_from_cache(state: &mut AppState, cached: CacheData, lib_key: &str, lib_title: &str) {
-    // Load per-category timestamps (with backward compat migration)
-    if !cached.category_timestamps.is_empty() {
-        for (key, ts) in &cached.category_timestamps {
-            if let Some(cat) = crate::app::state::RefreshCategory::from_cache_key(key) {
-                state.cache_mgmt.category_timestamps.insert(cat, *ts);
-            }
-        }
-    } else {
-        // Migrate from legacy shared timestamps
-        let lib_ts = cached.timestamp;
-        let playlist_ts = if cached.playlist_timestamp > 0 { cached.playlist_timestamp } else { lib_ts };
-        if lib_ts > 0 {
-            use crate::app::state::RefreshCategory;
-            for cat in RefreshCategory::all() {
-                let ts = if cat.is_playlist_group() { playlist_ts } else { lib_ts };
-                state.cache_mgmt.category_timestamps.insert(*cat, ts);
-            }
-        }
-    }
-
-    // Core library data - IMPORTANT: Always re-sort after loading from cache
-    if !cached.artists.is_empty() {
-        state.library.artists = cached.artists;
-        state.library.artists.sort_by(|a, b| helpers::sort_key(&a.title).cmp(&helpers::sort_key(&b.title)));
-        state.library.artists_total = state.library.artists.len() as u32;
-        let items = state.build_artist_root_items();
-        state.artist_nav.reset("artists", items);
-    }
-    if !cached.albums.is_empty() {
-        state.library.albums = cached.albums;
-        state.library.albums.sort_by(|a, b| helpers::sort_key(&a.title).cmp(&helpers::sort_key(&b.title)));
-        state.library.albums_total = state.library.albums.len() as u32;
-    }
-    if !cached.playlists.is_empty() {
-        let mut playlists = cached.playlists.clone();
-        // Move "Recently Played" to top (matches PlaylistsLoaded behavior)
-        if let Some(pos) = playlists.iter().position(|p| p.title == "Recently Played") {
-            if pos > 0 {
-                let rp = playlists.remove(pos);
-                playlists.insert(0, rp);
-            }
-        }
-        state.library.playlists = playlists;
-        let items = BrowseItem::from_playlists(&state.library.playlists);
-        state.playlist_nav.reset("playlists", items);
-    }
-    if !cached.playlist_tracks.is_empty() {
-        state.playlist_tracks_cache = cached.playlist_tracks;
-    }
-
-    // Folders
-    if !cached.root_folders.is_empty() {
-        let folders = FolderService::filter_invalid(cached.root_folders);
-        let root_column = FolderColumn::new(None, lib_title.to_string(), folders);
-        let mut fs = FolderNavigationState::with_root(lib_key.to_string(), root_column);
-        fs.ensure_placeholder();
-        state.folder_state = Some(fs);
-    }
-    if !cached.folder_contents.is_empty() {
-        state.folder_contents_cache = cached.folder_contents;
-        // Stale entries are kept as a warm cache; the subfolder preload
-        // crawl will re-fetch and overwrite them incrementally.
-    } else {
-        state.folder_contents_cache.clear();
-    }
-
-    // Genres, artist genres, album genres, moods, styles
-    // Just store the data — genre_nav is populated lazily via DrillGenreCategory
-    if !cached.genres.is_empty() { state.library.album_genres = cached.genres; }
-    if !cached.artist_genres.is_empty() { state.library.artist_genres = cached.artist_genres; }
-    if !cached.album_genres.is_empty() { state.library.album_genres = cached.album_genres; }
-    if !cached.moods.is_empty() { state.library.moods = cached.moods; }
-    if !cached.styles.is_empty() { state.library.styles = cached.styles; }
-
-    // Stations — validate cached data is root stations (not corrupted drilled children)
-    let stations_valid = !cached.stations.is_empty()
-        && cached.stations.iter().any(|s| s.identifier.as_deref() == Some("library"));
-    if stations_valid {
-        let mut stations = cached.stations;
-        helpers::append_station_action_items(&mut stations, state.queue.shuffle_undo_queue.is_some());
-        state.stations = stations.clone();
-        state.station_nav.columns.clear();
-        state.station_nav.columns.push(crate::app::state::StationColumn::new(
-            None,
-            "Radio".to_string(),
-            stations,
-        ));
-        state.station_nav.focused_column = 0;
-    } else if !cached.stations.is_empty() {
-        tracing::warn!("Ignoring corrupted station cache ({} items, missing root identifiers)", cached.stations.len());
-    }
-    if !cached.station_children.is_empty() {
-        state.station_children_cache = cached.station_children;
-    }
-
-    // All tracks + track-level artists
-    if !cached.all_tracks.is_empty() {
-        state.library.all_tracks = cached.all_tracks;
-        tracing::debug!("Cache load: {} tracks", state.library.all_tracks.len());
-    }
-    if !cached.track_artists.is_empty() {
-        state.library.track_artists = cached.track_artists;
-        tracing::debug!("Cache load: {} track artists", state.library.track_artists.len());
-    }
-
-    // Artist aliases
-    if !cached.artist_aliases.is_empty() {
-        state.library.artist_aliases = cached.artist_aliases;
-        state.library.album_display_artist = cached.album_display_artist;
-        tracing::debug!("Cache load: {} artist aliases", state.library.artist_aliases.len());
-    } else if !state.library.all_tracks.is_empty() && !state.library.albums.is_empty() {
-        // Recompute from tracks if not cached
-        state.build_artist_aliases();
-    }
-
-    // Compilation detection results
-    if !cached.compilation_albums.is_empty() || !cached.compilation_artist_keys.is_empty() {
-        state.library.compilations.albums = cached.compilation_albums;
-        state.library.compilations.artist_keys = cached.compilation_artist_keys;
-        state.library.compilations.track_artist_keys = cached.compilation_track_artist_keys;
-        state.library.compilations.artist_map = cached.artist_compilation_map;
-        state.library.compilations.single_artist = cached.single_artist_compilations;
-        state.library.compilations.detected = true;
-        // Re-build artist root items with compilation data
-        let items = state.build_artist_root_items();
-        state.artist_nav.update_root_items("artists", items);
-    }
-
-}
-

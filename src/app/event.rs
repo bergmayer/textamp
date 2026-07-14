@@ -7,6 +7,7 @@
 pub use crate::app::event_core::*;
 
 use crossterm::event::{KeyEvent, MouseEvent};
+use tokio::sync::mpsc;
 
 /// Top-level application event.
 ///
@@ -22,6 +23,21 @@ pub enum Event {
     /// Terminal resized to (cols, rows).
     Resize(u16, u16),
 
+    /// Completion command emitted by a background effect. Reducers remain
+    /// single-threaded; only I/O and CPU work run outside the event loop.
+    Effect(crate::app::Action),
+
+    /// Result tied to the currently selected Plex server/library pair.
+    ///
+    /// Plex section keys are only unique within a server (different servers
+    /// commonly both use `"1"`).  Wrapping background results with this
+    /// generation lets the event loop discard a completion from an earlier
+    /// library context before it reaches any reducer.
+    LibraryResult {
+        generation: u64,
+        event: Box<Event>,
+    },
+
     // Core events -------------------------------------------------------
     /// Periodic tick for animations/updates.
     Tick,
@@ -36,6 +52,39 @@ pub enum Event {
     Radio(RadioEvent),
     Ui(UiEvent),
     Remote(RemoteEvent),
+}
+
+impl Event {
+    /// Scope an asynchronous completion to a server/library generation.
+    pub fn for_library(generation: u64, event: impl Into<Event>) -> Self {
+        Self::LibraryResult {
+            generation,
+            event: Box::new(event.into()),
+        }
+    }
+}
+
+/// Sender facade that automatically scopes every completion to the library
+/// generation that launched its task.
+#[derive(Clone)]
+pub(crate) struct LibraryEventSender {
+    sender: mpsc::Sender<Event>,
+    generation: u64,
+}
+
+impl LibraryEventSender {
+    pub(crate) fn new(sender: mpsc::Sender<Event>, generation: u64) -> Self {
+        Self { sender, generation }
+    }
+
+    pub(crate) async fn send(
+        &self,
+        event: Event,
+    ) -> Result<(), mpsc::error::SendError<Event>> {
+        self.sender
+            .send(Event::for_library(self.generation, event))
+            .await
+    }
 }
 
 // ============================================================================

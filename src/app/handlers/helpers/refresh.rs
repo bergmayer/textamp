@@ -1,6 +1,7 @@
 //! View refresh, stale data detection, and background category refresh.
 
 use crate::app::event::*;
+use crate::app::event::LibraryEventSender;
 use crate::app::action::*;
 use crate::app::{Action, AppState, Event};
 use crate::app::state::{BrowseCategory, View};
@@ -230,7 +231,7 @@ pub fn spawn_category_refresh(
         RefreshCategory::Folders => state.folder_state.as_ref().map(|f| f.columns.first().map(|c| c.items.len()).unwrap_or(0)).unwrap_or(0),
     };
 
-    let event_tx = event_tx.clone();
+    let event_tx = LibraryEventSender::new(event_tx.clone(), state.library_generation);
     let lib_key = lib_key.to_string();
     let client = client.clone();
 
