@@ -3,12 +3,15 @@
 use crate::app::action::*;
 use crossterm::event::{self, KeyCode};
 
-use crate::app::Action;
 use crate::app::state::View;
+use crate::app::Action;
 use crate::app::AppState;
 
 /// Handle Similar view keys.
-pub(in crate::app::handlers) fn handle_similar_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
+pub(in crate::app::handlers) fn handle_similar_keys(
+    key: event::KeyEvent,
+    state: &mut AppState,
+) -> Vec<Action> {
     use crate::app::state::SimilarMode;
 
     match key.code {
@@ -17,14 +20,32 @@ pub(in crate::app::handlers) fn handle_similar_keys(key: event::KeyEvent, state:
             let target = state.previous_view.take().unwrap_or(View::Browse);
             vec![NavigationAction::SetView(target).into()]
         }
-        KeyCode::F(1) | KeyCode::Char('?') => vec![NavigationAction::SetView(View::Help).into()],
+        KeyCode::F(1) => vec![NavigationAction::SetView(View::Help).into()],
 
-        KeyCode::Up => { state.scroll.similar = None; vec![DataAction::ListUp.into()] }
-        KeyCode::Down => { state.scroll.similar = None; vec![DataAction::ListDown.into()] }
-        KeyCode::PageUp => { state.scroll.similar = None; vec![DataAction::ListPageUp.into()] }
-        KeyCode::PageDown => { state.scroll.similar = None; vec![DataAction::ListPageDown.into()] }
-        KeyCode::Home => { state.scroll.similar = None; vec![DataAction::ListTop.into()] }
-        KeyCode::End => { state.scroll.similar = None; vec![DataAction::ListBottom.into()] }
+        KeyCode::Up => {
+            state.scroll.similar = None;
+            vec![DataAction::ListUp.into()]
+        }
+        KeyCode::Down => {
+            state.scroll.similar = None;
+            vec![DataAction::ListDown.into()]
+        }
+        KeyCode::PageUp => {
+            state.scroll.similar = None;
+            vec![DataAction::ListPageUp.into()]
+        }
+        KeyCode::PageDown => {
+            state.scroll.similar = None;
+            vec![DataAction::ListPageDown.into()]
+        }
+        KeyCode::Home => {
+            state.scroll.similar = None;
+            vec![DataAction::ListTop.into()]
+        }
+        KeyCode::End => {
+            state.scroll.similar = None;
+            vec![DataAction::ListBottom.into()]
+        }
 
         KeyCode::Enter => activate_similar_item(state),
 
@@ -37,7 +58,8 @@ pub(in crate::app::handlers) fn handle_similar_keys(key: event::KeyEvent, state:
                         return vec![DataAction::LoadSimilarAlbums {
                             rating_key: album_key,
                             title,
-                        }.into()];
+                        }
+                        .into()];
                     } else {
                         state.set_status("No album context for similar albums.".to_string());
                     }
@@ -49,7 +71,8 @@ pub(in crate::app::handlers) fn handle_similar_keys(key: event::KeyEvent, state:
                         return vec![DataAction::LoadSimilarTracks {
                             rating_key: track_key,
                             title,
-                        }.into()];
+                        }
+                        .into()];
                     } else if let Some(track) = state.current_track().cloned() {
                         let title = format!("{} - {}", track.artist_name(), track.title);
                         // Store track key for Tab back
@@ -61,7 +84,8 @@ pub(in crate::app::handlers) fn handle_similar_keys(key: event::KeyEvent, state:
                         return vec![DataAction::LoadSimilarTracks {
                             rating_key: track.rating_key.clone(),
                             title,
-                        }.into()];
+                        }
+                        .into()];
                     } else {
                         state.set_status("No track playing.".to_string());
                     }
@@ -79,7 +103,9 @@ pub(in crate::app::handlers) fn handle_similar_keys(key: event::KeyEvent, state:
             match state.similar.mode {
                 SimilarMode::Albums => {
                     if let Some(idx) = state.similar.albums.iter().position(|a| {
-                        a.title.chars().next()
+                        a.title
+                            .chars()
+                            .next()
                             .map(|ch| ch.to_ascii_lowercase() == letter_lower)
                             .unwrap_or(false)
                     }) {
@@ -88,7 +114,9 @@ pub(in crate::app::handlers) fn handle_similar_keys(key: event::KeyEvent, state:
                 }
                 SimilarMode::Tracks => {
                     if let Some(idx) = state.similar.tracks.iter().position(|t| {
-                        t.title.chars().next()
+                        t.title
+                            .chars()
+                            .next()
                             .map(|ch| ch.to_ascii_lowercase() == letter_lower)
                             .unwrap_or(false)
                     }) {
@@ -97,7 +125,9 @@ pub(in crate::app::handlers) fn handle_similar_keys(key: event::KeyEvent, state:
                 }
                 SimilarMode::Artists => {
                     if let Some(idx) = state.similar.artists.iter().position(|a| {
-                        a.title.chars().next()
+                        a.title
+                            .chars()
+                            .next()
                             .map(|ch| ch.to_ascii_lowercase() == letter_lower)
                             .unwrap_or(false)
                     }) {
@@ -129,16 +159,22 @@ pub(in crate::app::handlers) fn activate_similar_item(state: &mut AppState) -> V
                 state.set_browse_category(crate::app::state::BrowseCategory::Library, false);
                 if let Some(ref artist_key) = album.parent_rating_key {
                     // Select artist in Miller column 0
-                    if let Some(pos) = state.artist_nav.columns.first()
-                        .and_then(|col| col.items.iter().position(|i| i.key() == artist_key.as_str()))
-                    {
+                    if let Some(pos) = state.artist_nav.columns.first().and_then(|col| {
+                        col.items
+                            .iter()
+                            .position(|i| i.key() == artist_key.as_str())
+                    }) {
                         if let Some(col) = state.artist_nav.columns.first_mut() {
                             col.selected_index = pos;
                         }
                     }
                     state.artist_nav.focused_column = 0;
                     state.artist_nav.truncate_right();
-                    return vec![MillerAction::LoadArtistAlbumsForMiller { artist_key: artist_key.clone(), replace_child: false }.into()];
+                    return vec![MillerAction::LoadArtistAlbumsForMiller {
+                        artist_key: artist_key.clone(),
+                        replace_child: false,
+                    }
+                    .into()];
                 }
                 // No parent artist key — try All Artists
                 if let Some(col) = state.artist_nav.columns.first_mut() {
@@ -146,7 +182,10 @@ pub(in crate::app::handlers) fn activate_similar_item(state: &mut AppState) -> V
                 }
                 state.artist_nav.focused_column = 0;
                 state.artist_nav.truncate_right();
-                vec![MillerAction::LoadAllAlbumsForMiller { replace_child: false }.into()]
+                vec![MillerAction::LoadAllAlbumsForMiller {
+                    replace_child: false,
+                }
+                .into()]
             } else {
                 vec![]
             }
@@ -166,16 +205,22 @@ pub(in crate::app::handlers) fn activate_similar_item(state: &mut AppState) -> V
                 state.set_view(View::Browse);
                 state.set_browse_category(crate::app::state::BrowseCategory::Library, false);
                 // Select artist in Miller column 0
-                if let Some(pos) = state.artist_nav.columns.first()
-                    .and_then(|col| col.items.iter().position(|i| i.key() == artist_key.as_str()))
-                {
+                if let Some(pos) = state.artist_nav.columns.first().and_then(|col| {
+                    col.items
+                        .iter()
+                        .position(|i| i.key() == artist_key.as_str())
+                }) {
                     if let Some(col) = state.artist_nav.columns.first_mut() {
                         col.selected_index = pos;
                     }
                 }
                 state.artist_nav.focused_column = 0;
                 state.artist_nav.truncate_right();
-                vec![MillerAction::LoadArtistAlbumsForMiller { artist_key, replace_child: false }.into()]
+                vec![MillerAction::LoadArtistAlbumsForMiller {
+                    artist_key,
+                    replace_child: false,
+                }
+                .into()]
             } else {
                 vec![]
             }

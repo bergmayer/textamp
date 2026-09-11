@@ -12,7 +12,7 @@
 //! the other.
 //!
 //! The service is pure: it doesn't touch the audio backend, the
-//! Plex client, or any I/O. It mutates `AppState` only for the side
+//! server client, or any I/O. It mutates `AppState` only for the side
 //! effects that the click commits unconditionally — selection,
 //! focused column, truncating stale child columns, closing the
 //! track-details pane when drilling away from a Track row, and
@@ -20,9 +20,7 @@
 //! `state.library.selected_album_title`.
 
 use crate::app::action::{Action, BrowseAction, MillerAction, RadioAction};
-use crate::app::state::{
-    AllTracksScope, AppState, BrowseCategory, BrowseColumn, BrowseItem,
-};
+use crate::app::state::{AllTracksScope, AppState, BrowseCategory, BrowseColumn, BrowseItem};
 
 /// Inputs to `plan_drill`. The caller (TUI mouse / GUI click) gathers
 /// these from the click event and the current state. `activate` is
@@ -70,9 +68,13 @@ pub fn plan_drill(state: &mut AppState, ctx: ClickContext) -> DrillPlan {
     // payload for the rest of the function so the borrow on `nav`
     // ends before we re-borrow `state` for category-specific work.
     let (item, grouped_album_col, auto_drill) = {
-        let Some(nav) = state.browse_nav_mut() else { return empty() };
+        let Some(nav) = state.browse_nav_mut() else {
+            return empty();
+        };
         let had_child = ctx.column_index + 1 < nav.columns.len() || pane_open;
-        let Some(col) = nav.columns.get_mut(ctx.column_index) else { return empty() };
+        let Some(col) = nav.columns.get_mut(ctx.column_index) else {
+            return empty();
+        };
 
         // Leaf-style rows (AllTracks / AllArtists / Compilations /
         // CompilationTracks / Track) drill on a single click — they
@@ -108,20 +110,27 @@ pub fn plan_drill(state: &mut AppState, ctx: ClickContext) -> DrillPlan {
             return empty();
         }
 
-        let item = nav.columns.get(ctx.column_index)
-            .and_then(|c| c.items.get(ctx.item_index)).cloned();
+        let item = nav
+            .columns
+            .get(ctx.column_index)
+            .and_then(|c| c.items.get(ctx.item_index))
+            .cloned();
 
         // Playlists with `grouped_by_album` build the drill column
         // locally — the tracks already live in the playlist column,
         // no API round-trip needed.
         let grouped_album_col = if state.browse_category == BrowseCategory::Playlists {
-            state.playlist_nav.columns.get(ctx.column_index).and_then(|c| {
-                if c.grouped_by_album {
-                    grouped_album_drill(c, ctx.item_index)
-                } else {
-                    None
-                }
-            })
+            state
+                .playlist_nav
+                .columns
+                .get(ctx.column_index)
+                .and_then(|c| {
+                    if c.grouped_by_album {
+                        grouped_album_drill(c, ctx.item_index)
+                    } else {
+                        None
+                    }
+                })
         } else {
             None
         };
@@ -148,7 +157,11 @@ pub fn plan_drill(state: &mut AppState, ctx: ClickContext) -> DrillPlan {
     let actions: Vec<Action> = match item {
         BrowseItem::Artist { key, title, .. } => {
             state.library.selected_artist_name = title;
-            vec![MillerAction::LoadArtistAlbumsForMiller { artist_key: key, replace_child: true }.into()]
+            vec![MillerAction::LoadArtistAlbumsForMiller {
+                artist_key: key,
+                replace_child: true,
+            }
+            .into()]
         }
         BrowseItem::Album { key, title, .. } => {
             if let Some(new_col) = grouped_album_col {
@@ -164,9 +177,15 @@ pub fn plan_drill(state: &mut AppState, ctx: ClickContext) -> DrillPlan {
                 // onto `artist_nav` / `playlist_nav` via
                 // `LoadAlbumTracksForMiller`.
                 let action = if state.browse_category.is_tag_section() {
-                    MillerAction::LoadGenreTracksForMiller { album_key: key, replace_child: true }
+                    MillerAction::LoadGenreTracksForMiller {
+                        album_key: key,
+                        replace_child: true,
+                    }
                 } else {
-                    MillerAction::LoadAlbumTracksForMiller { album_key: key, replace_child: true }
+                    MillerAction::LoadAlbumTracksForMiller {
+                        album_key: key,
+                        replace_child: true,
+                    }
                 };
                 vec![action.into()]
             }
@@ -180,53 +199,91 @@ pub fn plan_drill(state: &mut AppState, ctx: ClickContext) -> DrillPlan {
             vec![BrowseAction::OpenTrackDetails.into()]
         }
         BrowseItem::Playlist { key, .. } => {
-            vec![MillerAction::LoadPlaylistTracksForMiller { playlist_key: key, replace_child: true }.into()]
+            vec![MillerAction::LoadPlaylistTracksForMiller {
+                playlist_key: key,
+                replace_child: true,
+            }
+            .into()]
         }
         BrowseItem::Genre { key, .. } => {
-            vec![MillerAction::LoadGenreAlbumsForMiller { genre_key: key, replace_child: true }.into()]
-        }
-        BrowseItem::AllTracks { scope, .. } => {
-            match scope {
-                AllTracksScope::Library => {
-                    state.library.selected_album_title = "All Tracks".to_string();
-                    vec![MillerAction::LoadAllLibraryTracksForMiller { replace_child: true }.into()]
-                }
-                AllTracksScope::AllCompilations => {
-                    state.library.selected_album_title = "All Tracks".to_string();
-                    vec![MillerAction::LoadAllCompilationTracksForMiller { replace_child: true }.into()]
-                }
-                AllTracksScope::CompilationsByArtist { artist_key, artist_name } => {
-                    vec![MillerAction::LoadCompilationAllTracksForMiller {
-                        artist_key,
-                        artist_name,
-                        replace_child: true,
-                    }.into()]
-                }
-                AllTracksScope::Artist { artist_key, artist_name } => {
-                    state.library.selected_album_title = format!("All tracks by {}", artist_name);
-                    vec![MillerAction::LoadArtistAllTracksForMiller { artist_key, replace_child: true }.into()]
-                }
+            vec![MillerAction::LoadGenreAlbumsForMiller {
+                genre_key: key,
+                replace_child: true,
             }
+            .into()]
         }
+        BrowseItem::AllTracks { scope, .. } => match scope {
+            AllTracksScope::Library => {
+                state.library.selected_album_title = "All Tracks".to_string();
+                vec![MillerAction::LoadAllLibraryTracksForMiller {
+                    replace_child: true,
+                }
+                .into()]
+            }
+            AllTracksScope::AllCompilations => {
+                state.library.selected_album_title = "All Tracks".to_string();
+                vec![MillerAction::LoadAllCompilationTracksForMiller {
+                    replace_child: true,
+                }
+                .into()]
+            }
+            AllTracksScope::CompilationsByArtist {
+                artist_key,
+                artist_name,
+            } => {
+                vec![MillerAction::LoadCompilationAllTracksForMiller {
+                    artist_key,
+                    artist_name,
+                    replace_child: true,
+                }
+                .into()]
+            }
+            AllTracksScope::Artist {
+                artist_key,
+                artist_name,
+            } => {
+                state.library.selected_album_title = format!("All tracks by {}", artist_name);
+                vec![MillerAction::LoadArtistAllTracksForMiller {
+                    artist_key,
+                    replace_child: true,
+                }
+                .into()]
+            }
+        },
         BrowseItem::AllArtists => {
-            vec![MillerAction::LoadAllAlbumsForMiller { replace_child: true }.into()]
+            vec![MillerAction::LoadAllAlbumsForMiller {
+                replace_child: true,
+            }
+            .into()]
         }
         BrowseItem::Compilations => {
-            vec![MillerAction::LoadCompilationsForMiller { replace_child: true }.into()]
+            vec![MillerAction::LoadCompilationsForMiller {
+                replace_child: true,
+            }
+            .into()]
         }
-        BrowseItem::CompilationTracks { artist_key, artist_name } => {
+        BrowseItem::CompilationTracks {
+            artist_key,
+            artist_name,
+        } => {
             vec![MillerAction::LoadCompilationAlbumsForMiller {
                 artist_key,
                 artist_name,
                 replace_child: true,
-            }.into()]
+            }
+            .into()]
         }
-        BrowseItem::ArtistRadio { artist_key, artist_name, .. } => {
+        BrowseItem::ArtistRadio {
+            artist_key,
+            artist_name,
+            ..
+        } => {
             is_drill_action = false;
-            vec![RadioAction::StartPlexRadio {
+            vec![RadioAction::StartArtistRadio {
                 key: artist_key,
                 title: artist_name,
-            }.into()]
+            }
+            .into()]
         }
         BrowseItem::GenreCategory { .. } => {
             // Tag-style drilling no longer goes through a category
@@ -242,7 +299,10 @@ pub fn plan_drill(state: &mut AppState, ctx: ClickContext) -> DrillPlan {
 }
 
 fn empty() -> DrillPlan {
-    DrillPlan { actions: Vec::new(), did_drill: false }
+    DrillPlan {
+        actions: Vec::new(),
+        did_drill: false,
+    }
 }
 
 /// Build the local "tracks for this grouped-album row" column for

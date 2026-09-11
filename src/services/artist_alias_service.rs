@@ -1,16 +1,16 @@
 //! Artist alias resolution service.
 //!
 //! Pure functions for name normalization, alias computation, and artist key resolution.
-//! Used to match track-level artist names (e.g. "Ramones") to Plex album artists
+//! Used to match track-level artist names (e.g. "Ramones") to server album artists
 //! (e.g. "The Ramones") via normalized matching.
 
 use std::collections::{HashMap, HashSet};
 
-use crate::plex::models::{Album, Artist, Track};
+use crate::library::models::{Album, Artist, Track};
 
 /// Normalize artist name for matching: lowercase + strip leading "The ".
 pub fn normalize_artist_name(name: &str) -> String {
-    let lower = name.to_lowercase();
+    let lower = name.trim().to_lowercase();
     if lower.starts_with("the ") && lower.len() > 4 {
         lower[4..].to_string()
     } else {
@@ -20,7 +20,7 @@ pub fn normalize_artist_name(name: &str) -> String {
 
 /// Compute artist aliases from bulk track data.
 ///
-/// For each non-compilation album, if all tracks with `original_title` set
+/// For each complete non-compilation album, if all tracks have `original_title` set and
 /// agree on a single name that differs from the album artist, that name
 /// is an alias of the album artist.
 ///
@@ -37,24 +37,31 @@ pub fn compute_aliases(
     }
 
     // Build album key → Album lookup for compilation check
-    let album_by_key: HashMap<&str, &Album> = albums.iter()
-        .map(|a| (a.rating_key.as_str(), a))
-        .collect();
+    let album_by_key: HashMap<&str, &Album> =
+        albums.iter().map(|a| (a.rating_key.as_str(), a)).collect();
 
     // Group tracks by album (parent_rating_key)
     let mut album_tracks: HashMap<String, Vec<&Track>> = HashMap::new();
     for track in all_tracks {
         if let Some(ref album_key) = track.parent_rating_key {
-            album_tracks.entry(album_key.clone()).or_default().push(track);
+            album_tracks
+                .entry(album_key.clone())
+                .or_default()
+                .push(track);
         }
     }
 
     for (album_key, tracks) in &album_tracks {
         // Skip compilation candidates
-        if let Some(album) = album_by_key.get(album_key.as_str()) {
-            if album.is_compilation_candidate() {
-                continue;
-            }
+        let Some(album) = album_by_key.get(album_key.as_str()) else {
+            continue;
+        };
+        if album.is_compilation_candidate()
+            || album
+                .leaf_count
+                .is_some_and(|count| count as usize != tracks.len())
+        {
+            continue;
         }
 
         // Collect unique original_title values (track artists).
@@ -70,15 +77,17 @@ pub fn compute_aliases(
         }
 
         // Need at least one track with original_title, and all must agree
-        if with_original_title == 0 || track_artist_names.len() != 1 {
+        if with_original_title != tracks.len() || track_artist_names.len() != 1 {
             continue;
         }
 
         let uniform_name = track_artist_names.into_iter().next().unwrap();
 
-        // Get album artist name from the tracks' grandparent
-        let album_artist_name = tracks[0].artist_name();
-        let artist_key = tracks[0].grandparent_rating_key.clone().unwrap_or_default();
+        // Song artist IDs identify performers on OpenSubsonic, not album owners.
+        let album_artist_name = album.artist_name();
+        let Some(artist_key) = album.parent_rating_key.clone() else {
+            continue;
+        };
 
         // Only create alias if the track artist differs from the album artist
         // Use normalized comparison so "Ramones" vs "The Ramones" are treated as same
@@ -92,8 +101,9 @@ pub fn compute_aliases(
         }
 
         // Record the alias
-        artist_aliases.entry(artist_key)
-            .or_insert_with(HashSet::new)
+        artist_aliases
+            .entry(artist_key)
+            .or_default()
             .insert(uniform_name.to_string());
         album_display_artist.insert(album_key.clone(), uniform_name.to_string());
     }
@@ -114,24 +124,26 @@ pub fn build_artist_lookup(
 
     // All artists: normalize(artist.title) → artist.rating_key
     for artist in artists {
-        lookup.insert(normalize_artist_name(&artist.title), artist.rating_key.clone());
+        lookup.insert(
+            normalize_artist_name(&artist.title),
+            artist.rating_key.clone(),
+        );
     }
 
     // All aliases: for each (artist_key, alias_names), normalize(alias) → artist_key
     for (artist_key, alias_names) in aliases {
         for alias in alias_names {
-            lookup.insert(normalize_artist_name(alias), artist_key.clone());
+            lookup
+                .entry(normalize_artist_name(alias))
+                .or_insert_with(|| artist_key.clone());
         }
     }
 
     lookup
 }
 
-/// Resolve a track artist name to a real Plex artist key.
-pub fn resolve_artist_key(
-    track_artist: &str,
-    lookup: &HashMap<String, String>,
-) -> Option<String> {
+/// Resolve a track artist name to a real server artist key.
+pub fn resolve_artist_key(track_artist: &str, lookup: &HashMap<String, String>) -> Option<String> {
     lookup.get(&normalize_artist_name(track_artist)).cloned()
 }
 
@@ -149,6 +161,49 @@ mod tests {
         assert_eq!(normalize_artist_name("The The"), "the");
         // Don't strip if name is just "The"
         assert_eq!(normalize_artist_name("The"), "the");
+    }
+
+    #[test]
+    fn aliases_use_album_owner_and_do_not_override_real_artist_identities() {
+        let tracks = [make_track(
+            "t",
+            "album",
+            "performer",
+            "Owner",
+            Some("Performer"),
+        )];
+        let albums = [make_album("album", "owner", "Owner")];
+        let (aliases, _) = compute_aliases(&tracks, &albums);
+        assert!(aliases["owner"].contains("Performer"));
+        assert!(!aliases.contains_key("performer"));
+        let artists = [Artist {
+            rating_key: "performer".into(),
+            title: "Performer".into(),
+            ..Default::default()
+        }];
+        assert_eq!(
+            build_artist_lookup(&artists, &aliases)["performer"],
+            "performer"
+        );
+    }
+
+    #[test]
+    fn aliases_are_not_inferred_from_incomplete_albums() {
+        let tracks = [make_track(
+            "t",
+            "album",
+            "performer",
+            "Owner",
+            Some("Performer"),
+        )];
+        let mut album = make_album("album", "owner", "Owner");
+        album.leaf_count = Some(2);
+        assert!(compute_aliases(&tracks, &[album.clone()]).0.is_empty());
+        let tracks = [
+            tracks[0].clone(),
+            make_track("missing", "album", "owner", "Owner", None),
+        ];
+        assert!(compute_aliases(&tracks, &[album]).0.is_empty());
     }
 
     fn make_track(
@@ -181,8 +236,20 @@ mod tests {
     fn test_compute_aliases() {
         // Album "Bee Thousand" by "Robert Pollard" where all tracks have original_title "Guided by Voices"
         let tracks = vec![
-            make_track("t1", "album1", "artist1", "Robert Pollard", Some("Guided by Voices")),
-            make_track("t2", "album1", "artist1", "Robert Pollard", Some("Guided by Voices")),
+            make_track(
+                "t1",
+                "album1",
+                "artist1",
+                "Robert Pollard",
+                Some("Guided by Voices"),
+            ),
+            make_track(
+                "t2",
+                "album1",
+                "artist1",
+                "Robert Pollard",
+                Some("Guided by Voices"),
+            ),
         ];
         let albums = vec![make_album("album1", "artist1", "Robert Pollard")];
 
@@ -197,8 +264,20 @@ mod tests {
     fn test_compute_aliases_mixed() {
         // Album with mixed original_title → no alias
         let tracks = vec![
-            make_track("t1", "album1", "artist1", "Robert Pollard", Some("Guided by Voices")),
-            make_track("t2", "album1", "artist1", "Robert Pollard", Some("Boston Spaceships")),
+            make_track(
+                "t1",
+                "album1",
+                "artist1",
+                "Robert Pollard",
+                Some("Guided by Voices"),
+            ),
+            make_track(
+                "t2",
+                "album1",
+                "artist1",
+                "Robert Pollard",
+                Some("Boston Spaceships"),
+            ),
         ];
         let albums = vec![make_album("album1", "artist1", "Robert Pollard")];
 
@@ -227,11 +306,22 @@ mod tests {
     #[test]
     fn test_build_artist_lookup() {
         let artists = vec![
-            Artist { rating_key: "k1".to_string(), title: "The Ramones".to_string(), ..Artist::default() },
-            Artist { rating_key: "k2".to_string(), title: "U2".to_string(), ..Artist::default() },
+            Artist {
+                rating_key: "k1".to_string(),
+                title: "The Ramones".to_string(),
+                ..Artist::default()
+            },
+            Artist {
+                rating_key: "k2".to_string(),
+                title: "U2".to_string(),
+                ..Artist::default()
+            },
         ];
         let mut aliases: HashMap<String, HashSet<String>> = HashMap::new();
-        aliases.insert("k3".to_string(), HashSet::from(["Guided by Voices".to_string()]));
+        aliases.insert(
+            "k3".to_string(),
+            HashSet::from(["Guided by Voices".to_string()]),
+        );
 
         let lookup = build_artist_lookup(&artists, &aliases);
 
@@ -243,15 +333,23 @@ mod tests {
 
     #[test]
     fn test_resolve_artist_key() {
-        let artists = vec![
-            Artist { rating_key: "k1".to_string(), title: "The Ramones".to_string(), ..Artist::default() },
-        ];
+        let artists = vec![Artist {
+            rating_key: "k1".to_string(),
+            title: "The Ramones".to_string(),
+            ..Artist::default()
+        }];
         let aliases = HashMap::new();
         let lookup = build_artist_lookup(&artists, &aliases);
 
         // "Ramones" resolves to "The Ramones" key because both normalize to "ramones"
-        assert_eq!(resolve_artist_key("Ramones", &lookup), Some("k1".to_string()));
-        assert_eq!(resolve_artist_key("The Ramones", &lookup), Some("k1".to_string()));
+        assert_eq!(
+            resolve_artist_key("Ramones", &lookup),
+            Some("k1".to_string())
+        );
+        assert_eq!(
+            resolve_artist_key("The Ramones", &lookup),
+            Some("k1".to_string())
+        );
         assert_eq!(resolve_artist_key("Unknown Band", &lookup), None);
     }
 }

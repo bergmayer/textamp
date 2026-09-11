@@ -15,7 +15,11 @@ pub trait DisplayItem {
 }
 
 /// Calculate scroll offset to keep selected item visible in the viewport.
-pub fn calculate_scroll_offset(selected: usize, viewport_height: usize, total_items: usize) -> usize {
+pub fn calculate_scroll_offset(
+    selected: usize,
+    viewport_height: usize,
+    total_items: usize,
+) -> usize {
     if total_items == 0 || viewport_height == 0 {
         return 0;
     }
@@ -107,38 +111,38 @@ pub fn render_position_footer(frame: &mut Frame, selected: usize, total: usize, 
 
 // Implement DisplayItem for common types
 
-impl DisplayItem for crate::plex::models::Artist {
+impl DisplayItem for crate::library::models::Artist {
     fn display_text(&self) -> Cow<'_, str> {
         Cow::Borrowed(&self.title)
     }
 }
 
-impl DisplayItem for crate::plex::models::Album {
+impl DisplayItem for crate::library::models::Album {
     fn display_text(&self) -> Cow<'_, str> {
         let year = self.year.map(|y| format!(" ({})", y)).unwrap_or_default();
         Cow::Owned(format!("{} - {}{}", self.artist_name(), self.title, year))
     }
 }
 
-impl DisplayItem for crate::plex::models::Track {
+impl DisplayItem for crate::library::models::Track {
     fn display_text(&self) -> Cow<'_, str> {
         Cow::Owned(format!("{} - {}", self.track_artist(), self.title))
     }
 }
 
-impl DisplayItem for crate::plex::models::Playlist {
+impl DisplayItem for crate::library::models::Playlist {
     fn display_text(&self) -> Cow<'_, str> {
         Cow::Owned(format!("{} ({} tracks)", self.title, self.track_count()))
     }
 }
 
-impl DisplayItem for crate::plex::models::Genre {
+impl DisplayItem for crate::library::models::Genre {
     fn display_text(&self) -> Cow<'_, str> {
         Cow::Borrowed(&self.title)
     }
 }
 
-impl DisplayItem for crate::plex::models::Station {
+impl DisplayItem for crate::library::models::Station {
     fn display_text(&self) -> Cow<'_, str> {
         Cow::Borrowed(&self.title)
     }

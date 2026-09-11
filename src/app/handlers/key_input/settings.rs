@@ -3,16 +3,27 @@
 use crate::app::action::*;
 use crossterm::event::{self, KeyCode};
 
-use crate::app::Action;
 use crate::app::state::View;
+use crate::app::Action;
 use crate::app::AppState;
-use zeroize::Zeroize;
 
 /// Handle Help view keys.
 pub(super) fn handle_help_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
+    let visible = state
+        .hit_regions
+        .help
+        .as_ref()
+        .map_or(state.terminal_height.saturating_sub(2), |r| {
+            r.visible as u16
+        });
+    let max_scroll = state.hit_regions.help.as_ref().map_or_else(
+        || (crate::util::help_text::total_lines() as u16).saturating_sub(visible),
+        |r| r.max_scroll(),
+    );
+    state.help_scroll = state.help_scroll.min(max_scroll);
     match key.code {
-        KeyCode::Esc | KeyCode::F(1) | KeyCode::Char('?') => {
-            state.help_scroll = 0;  // Reset scroll when closing
+        KeyCode::Esc | KeyCode::F(1) => {
+            state.help_scroll = 0; // Reset scroll when closing
             vec![NavigationAction::SetView(View::Browse).into()]
         }
         KeyCode::Up => {
@@ -20,19 +31,15 @@ pub(super) fn handle_help_keys(key: event::KeyEvent, state: &mut AppState) -> Ve
             vec![]
         }
         KeyCode::Down => {
-            // Cap at max reasonable scroll (help text is ~140 lines)
-            let max_scroll = 140u16.saturating_sub(state.terminal_height.saturating_sub(4));
             state.help_scroll = state.help_scroll.saturating_add(1).min(max_scroll);
             vec![]
         }
         KeyCode::PageUp => {
-            state.help_scroll = state.help_scroll.saturating_sub(20);
+            state.help_scroll = state.help_scroll.saturating_sub(visible);
             vec![]
         }
         KeyCode::PageDown => {
-            // Cap at max reasonable scroll (help text is ~140 lines)
-            let max_scroll = 140u16.saturating_sub(state.terminal_height.saturating_sub(4));
-            state.help_scroll = state.help_scroll.saturating_add(20).min(max_scroll);
+            state.help_scroll = state.help_scroll.saturating_add(visible).min(max_scroll);
             vec![]
         }
         KeyCode::Home => {
@@ -40,8 +47,6 @@ pub(super) fn handle_help_keys(key: event::KeyEvent, state: &mut AppState) -> Ve
             vec![]
         }
         KeyCode::End => {
-            // Set to max scroll based on terminal height
-            let max_scroll = 140u16.saturating_sub(state.terminal_height.saturating_sub(4));
             state.help_scroll = max_scroll;
             vec![]
         }
@@ -50,76 +55,54 @@ pub(super) fn handle_help_keys(key: event::KeyEvent, state: &mut AppState) -> Ve
 }
 
 /// Handle Settings view keys.
-pub(super) fn handle_settings_keys(key: event::KeyEvent, state: &mut AppState, config: &crate::config::Config) -> Vec<Action> {
-    use crate::app::state::{CredentialField, SettingsFocus, SettingsSection};
+pub(super) fn handle_settings_keys(
+    key: event::KeyEvent,
+    state: &mut AppState,
+    _config: &crate::config::Config,
+) -> Vec<Action> {
+    use crate::app::state::{SettingsFocus, SettingsSection};
 
-    // Handle credential editing mode first
-    if let Some(field) = state.settings_state.editing_credential {
+    if matches!(
+        key.code,
+        KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::PageUp
+            | KeyCode::PageDown
+            | KeyCode::Home
+            | KeyCode::End
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Tab
+            | KeyCode::BackTab
+    ) {
+        state.scroll.settings_textamp = None;
+    }
+    if matches!(state.settings_state.section, SettingsSection::Textamp)
+        && state.settings_state.focus == SettingsFocus::Content
+    {
+        let last = state.textamp_settings().len().saturating_sub(1);
+        let index = state.settings_state.item_index;
         match key.code {
-            KeyCode::Esc => {
-                // Cancel editing, restore original value
-                state.settings_state.editing_credential = None;
-                // Restore from in-memory account/config state; key handling
-                // must never perform filesystem I/O.
-                state.settings_state.username_input = match &state.connection {
-                    crate::app::state::ConnectionState::Connected { username, .. }
-                    | crate::app::state::ConnectionState::Degraded { username, .. } => {
-                        Some(username.clone())
-                    }
-                    _ => None,
-                }
-                    .or_else(|| config.plex.username.clone())
-                    .unwrap_or_default();
-                state.settings_state.password_input.zeroize();
-                return vec![];
+            KeyCode::PageUp => state.settings_state.item_index = index.saturating_sub(10),
+            KeyCode::PageDown => {
+                state.settings_state.item_index = index.saturating_add(10).min(last)
             }
-            KeyCode::Enter => {
-                // Save credential and exit edit mode
-                state.settings_state.editing_credential = None;
-                return vec![SettingsAction::SaveCredentials.into()];
-            }
-            KeyCode::Backspace => {
-                // Delete last character
-                match field {
-                    CredentialField::Username => {
-                        state.settings_state.username_input.pop();
-                    }
-                    CredentialField::Password => {
-                        state.settings_state.password_input.pop();
-                    }
-                }
-                return vec![];
-            }
-            KeyCode::Char(c) => {
-                // Add character to input
-                match field {
-                    CredentialField::Username => {
-                        state.settings_state.username_input.push(c);
-                    }
-                    CredentialField::Password => {
-                        state.settings_state.password_input.push(c);
-                    }
-                }
-                return vec![];
-            }
-            _ => return vec![],
+            KeyCode::Home => state.settings_state.item_index = 0,
+            KeyCode::End => state.settings_state.item_index = last,
+            _ => {}
         }
     }
-
     match key.code {
-        KeyCode::Esc => {
-            if state.settings_state.signing_in {
-                // Cancel sign-in mode, go back to Account view
-                state.settings_state.signing_in = false;
-                state.settings_state.item_index = 0;
-                state.settings_state.editing_credential = None;
-                vec![]
-            } else {
-                vec![NavigationAction::SetView(View::Browse).into()]
-            }
+        KeyCode::Esc => vec![NavigationAction::SetView(View::Browse).into()],
+        // Tab/Shift+Tab always switch sidebar/content; arrows navigate within it.
+        KeyCode::Tab | KeyCode::BackTab => {
+            state.settings_state.focus = match state.settings_state.focus {
+                SettingsFocus::Sections => SettingsFocus::Content,
+                SettingsFocus::Content => SettingsFocus::Sections,
+            };
+            vec![]
         }
-        // Panel switching
-        KeyCode::Tab | KeyCode::Right => {
+        KeyCode::Right => {
             if state.settings_state.focus == SettingsFocus::Sections {
                 state.settings_state.focus = SettingsFocus::Content;
                 state.settings_state.item_index = 0;
@@ -127,10 +110,11 @@ pub(super) fn handle_settings_keys(key: event::KeyEvent, state: &mut AppState, c
             }
             vec![]
         }
-        KeyCode::BackTab | KeyCode::Left => {
+        KeyCode::Left => {
             if state.settings_state.focus == SettingsFocus::Content {
                 state.settings_state.focus = SettingsFocus::Sections;
                 state.settings_state.scroll = 0;
+                state.sources.picker_scroll_pin = None;
             }
             vec![]
         }
@@ -171,29 +155,10 @@ pub(super) fn handle_settings_keys(key: event::KeyEvent, state: &mut AppState, c
                     } else {
                         // Navigate items within section with bounds check
                         let max_index = match state.settings_state.section {
-                            SettingsSection::Account => {
-                                if state.settings_state.signing_in {
-                                    // username(0), password(1), sign in(2), then servers(3+)
-                                    2 + state.available_servers.len()
-                                } else if state.connection.is_authenticated() {
-                                    // libraries(0..lib_count-1), actions(lib_count..lib_count+4), sign out(lib_count+5)
-                                    (state.libraries.len() + 6).saturating_sub(1)
-                                } else {
-                                    0 // Sign In(0)
-                                }
-                            }
                             SettingsSection::Textamp => {
-                                // Themes + Artwork modes + Local + remotes
-                                // + Refresh + Transcode + 3 external-search
-                                // toggles (Apple Music / Spotify / YouTube).
-                                let theme_count = crate::app::theme::ThemeName::all().len();
-                                let artwork_count = crate::app::state::ArtworkMode::all().len();
-                                theme_count + artwork_count + 1 + state.remote.players.len() + 1 + 3
+                                state.textamp_settings().len().saturating_sub(1)
                             }
-                            SettingsSection::Sections => {
-                                crate::app::state::BrowseCategory::all().len().saturating_sub(1)
-                            }
-                            SettingsSection::Cache => 0,
+                            SettingsSection::Libraries => 0,
                             SettingsSection::About => 0,
                         };
                         if state.settings_state.item_index < max_index {
@@ -205,25 +170,33 @@ pub(super) fn handle_settings_keys(key: event::KeyEvent, state: &mut AppState, c
             vec![]
         }
         KeyCode::PageUp => {
-            if state.settings_state.section == SettingsSection::About && state.settings_state.focus == SettingsFocus::Content {
+            if state.settings_state.section == SettingsSection::About
+                && state.settings_state.focus == SettingsFocus::Content
+            {
                 state.settings_state.scroll = state.settings_state.scroll.saturating_sub(10);
             }
             vec![]
         }
         KeyCode::PageDown => {
-            if state.settings_state.section == SettingsSection::About && state.settings_state.focus == SettingsFocus::Content {
+            if state.settings_state.section == SettingsSection::About
+                && state.settings_state.focus == SettingsFocus::Content
+            {
                 state.settings_state.scroll = state.settings_state.scroll.saturating_add(10);
             }
             vec![]
         }
         KeyCode::Home => {
-            if state.settings_state.section == SettingsSection::About && state.settings_state.focus == SettingsFocus::Content {
+            if state.settings_state.section == SettingsSection::About
+                && state.settings_state.focus == SettingsFocus::Content
+            {
                 state.settings_state.scroll = 0;
             }
             vec![]
         }
         KeyCode::End => {
-            if state.settings_state.section == SettingsSection::About && state.settings_state.focus == SettingsFocus::Content {
+            if state.settings_state.section == SettingsSection::About
+                && state.settings_state.focus == SettingsFocus::Content
+            {
                 state.settings_state.scroll = u16::MAX; // renderer will clamp
             }
             vec![]
@@ -234,28 +207,6 @@ pub(super) fn handle_settings_keys(key: event::KeyEvent, state: &mut AppState, c
                 state.settings_state.focus = SettingsFocus::Content;
                 state.settings_state.item_index = 0;
                 vec![]
-            } else if state.settings_state.section == SettingsSection::Account && state.settings_state.signing_in {
-                // In sign-in mode: handle credential fields vs sign in vs server selection
-                match state.settings_state.item_index {
-                    0 => {
-                        // Username field - start editing
-                        state.settings_state.editing_credential = Some(CredentialField::Username);
-                        vec![]
-                    }
-                    1 => {
-                        // Password field - start editing
-                        state.settings_state.editing_credential = Some(CredentialField::Password);
-                        vec![]
-                    }
-                    2 => {
-                        // Sign In button - authenticate with entered credentials
-                        vec![SettingsAction::SettingsSignIn.into()]
-                    }
-                    _ => {
-                        // Server selection (index 3+)
-                        vec![SettingsAction::SettingsSelect.into()]
-                    }
-                }
             } else {
                 // Enter on content -> select item
                 vec![SettingsAction::SettingsSelect.into()]

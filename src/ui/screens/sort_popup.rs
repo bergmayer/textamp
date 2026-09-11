@@ -1,8 +1,8 @@
 //! Sort popup renderer (Ctrl+S).
 
 use crate::app::state::{ColumnSortMode, SortPopupOption};
-use crate::app::AppState;
 use crate::ui::theme::theme;
+use crate::ui::RenderState as AppState;
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem};
@@ -21,7 +21,12 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
 
     let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
     let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
-    let popup_area = Rect::new(x, y, popup_width.min(area.width), popup_height.min(area.height));
+    let popup_area = Rect::new(
+        x,
+        y,
+        popup_width.min(area.width),
+        popup_height.min(area.height),
+    );
 
     frame.render_widget(Clear, popup_area);
 
@@ -30,7 +35,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         let mut hr = state.hit_regions.borrow_mut();
         let block_tmp = Block::default().borders(Borders::ALL);
         let inner_tmp = block_tmp.inner(popup_area);
-        hr.sort_popup = Some(crate::ui::hit_regions::SortPopupRegions {
+        hr.sort_popup = Some(crate::app::presentation::SortPopupRegions {
             outer: popup_area,
             inner: inner_tmp,
             option_count: popup.options.len(),
@@ -48,51 +53,78 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     frame.render_widget(block, popup_area);
 
     // Get current column state for display
-    let (current_mode, ascending, artwork_visible, grouped_by_album) = state.browse_nav()
+    let (current_mode, ascending, artwork_visible, grouped_by_album) = state
+        .browse_nav()
         .and_then(|nav| nav.columns.get(popup.column_idx))
-        .map(|col| (col.sort_mode, col.sort_ascending, col.artwork_visible, col.grouped_by_album))
+        .map(|col| {
+            (
+                col.sort_mode,
+                col.sort_ascending,
+                col.artwork_visible,
+                col.grouped_by_album,
+            )
+        })
         .unwrap_or((ColumnSortMode::Default, true, false, false));
 
     // Build list items
-    let items: Vec<ListItem> = popup.options.iter().enumerate().map(|(i, option)| {
-        let is_selected = i == popup.selected_index;
+    let items: Vec<ListItem> = popup
+        .options
+        .iter()
+        .enumerate()
+        .map(|(i, option)| {
+            let is_selected = i == popup.selected_index;
 
-        let (prefix, label) = match option {
-            SortPopupOption::SortMode(mode) => {
-                let radio = if *mode == current_mode { "\u{25cf}" } else { "\u{25cb}" };
-                let name = match mode {
-                    ColumnSortMode::Default => popup.default_label,
-                    ColumnSortMode::ByArtist => "By artist",
-                    ColumnSortMode::ByAlbum => "By album",
-                    ColumnSortMode::ByTitle => "By title",
-                    ColumnSortMode::ByDuration => "By duration",
-                    ColumnSortMode::Shuffled => "Shuffled",
-                };
-                (radio.to_string(), name.to_string())
-            }
-            SortPopupOption::Direction => {
-                let arrow = if ascending { "\u{2191}" } else { "\u{2193}" };
-                let label = if ascending { "Ascending" } else { "Descending" };
-                (format!(" {}", arrow), label.to_string())
-            }
-            SortPopupOption::Artwork => {
-                let check = if artwork_visible { "\u{2611}" } else { "\u{2610}" };
-                (check.to_string(), "Artwork".to_string())
-            }
-            SortPopupOption::GroupByAlbum => {
-                let check = if grouped_by_album { "\u{2611}" } else { "\u{2610}" };
-                (check.to_string(), "Group by album".to_string())
-            }
-        };
+            let (prefix, label) = match option {
+                SortPopupOption::SortMode(mode) => {
+                    let radio = if *mode == current_mode {
+                        "\u{25cf}"
+                    } else {
+                        "\u{25cb}"
+                    };
+                    let name = match mode {
+                        ColumnSortMode::Default => popup.default_label,
+                        ColumnSortMode::ByArtist => "By artist",
+                        ColumnSortMode::ByAlbum => "By album",
+                        ColumnSortMode::ByTitle => "By title",
+                        ColumnSortMode::ByDuration => "By duration",
+                        ColumnSortMode::Shuffled => "Shuffled",
+                    };
+                    (radio.to_string(), name.to_string())
+                }
+                SortPopupOption::Direction => {
+                    let arrow = if ascending { "\u{2191}" } else { "\u{2193}" };
+                    let label = if ascending { "Ascending" } else { "Descending" };
+                    (format!(" {}", arrow), label.to_string())
+                }
+                SortPopupOption::Artwork => {
+                    let check = if artwork_visible {
+                        "\u{2611}"
+                    } else {
+                        "\u{2610}"
+                    };
+                    (check.to_string(), "Artwork".to_string())
+                }
+                SortPopupOption::GroupByAlbum => {
+                    let check = if grouped_by_album {
+                        "\u{2611}"
+                    } else {
+                        "\u{2610}"
+                    };
+                    (check.to_string(), "Group by album".to_string())
+                }
+            };
 
-        let text = format!(" {} {}", prefix, label);
-        let style = if is_selected {
-            Style::default().bg(t.colors.bg_selection).fg(t.colors.fg_primary)
-        } else {
-            Style::default().fg(t.colors.fg_primary)
-        };
-        ListItem::new(Line::from(Span::styled(text, style)))
-    }).collect();
+            let text = format!(" {} {}", prefix, label);
+            let style = if is_selected {
+                Style::default()
+                    .bg(t.colors.bg_selection)
+                    .fg(t.colors.fg_primary)
+            } else {
+                Style::default().fg(t.colors.fg_primary)
+            };
+            ListItem::new(Line::from(Span::styled(text, style)))
+        })
+        .collect();
 
     if inner.height > 0 {
         let list = List::new(items);

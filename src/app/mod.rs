@@ -9,7 +9,6 @@ pub mod action;
 pub mod dispatch;
 pub mod event;
 pub mod event_core;
-mod event_loop;
 pub mod handlers;
 
 pub mod state;
@@ -17,6 +16,12 @@ pub mod theme;
 
 pub use action::Action;
 pub use event::Event;
-pub use event_loop::EventLoop;
-pub use state::{AppState, AuthState, AuthStep, ConnectionState, PlayStatus, View, BrowseCategory, Focus, RightPanelMode};
-pub use handlers::key_input::{AltCommand, available_alt_commands, CommandModifier};
+pub use handlers::key_input::{available_alt_commands, AltCommand, CommandModifier};
+pub use state::{AppState, BrowseCategory, Focus, PlayStatus, RightPanelMode, View};
+pub mod command_palette;
+pub mod presentation;
+pub mod scrollbar;
+pub mod tasks;
+
+pub mod meters;
+pub mod sources;

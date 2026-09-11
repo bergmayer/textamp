@@ -24,7 +24,7 @@
 //! example) without the shared module needing to know which.
 
 use crate::app::state::{AppState, BrowseCategory, View};
-use crate::plex::models::Track;
+use crate::library::models::Track;
 use crate::services::external_search::SearchTarget;
 
 /// One row in a contextual entry list. Renderers consume this.
@@ -77,8 +77,13 @@ pub enum ContextKind {
     /// Open the Sonic Adventure launcher pre-seeded with this track
     /// as the starting song.
     SonicAdventure,
+    /// Continue sonic radio from this track (preserving it if already playing).
+    SonicRadio,
     /// Show the artist biography for this track's artist.
-    ArtistBio { artist_key: String, artist_name: String },
+    ArtistBio {
+        artist_key: String,
+        artist_name: String,
+    },
 
     /// Open the system browser to search the named external service
     /// for this track. UIs build the query string from current state
@@ -94,11 +99,7 @@ pub enum ContextKind {
 /// surface "Open in Library" near the top regardless of the active
 /// view category. Floating also drops "Play track and following" —
 /// floating rows aren't part of an ordered list to follow.
-pub fn track_context_entries(
-    state: &AppState,
-    track: &Track,
-    floating: bool,
-) -> Vec<ContextEntry> {
+pub fn track_context_entries(state: &AppState, track: &Track, floating: bool) -> Vec<ContextEntry> {
     let mut out: Vec<ContextEntry> = Vec::new();
 
     let track_key = track.rating_key.clone();
@@ -109,7 +110,11 @@ pub fn track_context_entries(
     let artist_name = track.artist_name().to_string();
 
     // 1. Playback actions.
-    out.push(ContextEntry { label: "Play track".to_string(), hint: None, kind: ContextKind::PlayTrack });
+    out.push(ContextEntry {
+        label: "Play track".to_string(),
+        hint: None,
+        kind: ContextKind::PlayTrack,
+    });
     if !floating {
         out.push(ContextEntry {
             label: "Play track and following".to_string(),
@@ -145,7 +150,11 @@ pub fn track_context_entries(
         });
     }
 
-    out.push(ContextEntry { label: String::new(), hint: None, kind: ContextKind::Separator });
+    out.push(ContextEntry {
+        label: String::new(),
+        hint: None,
+        kind: ContextKind::Separator,
+    });
 
     // 3. Similar / related explorers.
     out.push(ContextEntry {
@@ -161,7 +170,10 @@ pub fn track_context_entries(
             out.push(ContextEntry {
                 label: "Show Similar Albums".to_string(),
                 hint: None,
-                kind: ContextKind::ShowSimilarAlbums { rating_key: ak, title: at },
+                kind: ContextKind::ShowSimilarAlbums {
+                    rating_key: ak,
+                    title: at,
+                },
             });
         }
     }
@@ -170,12 +182,20 @@ pub fn track_context_entries(
             out.push(ContextEntry {
                 label: "Related Artists".to_string(),
                 hint: None,
-                kind: ContextKind::ShowRelatedArtists { artist_key: ak, title: artist_name.clone() },
+                kind: ContextKind::ShowRelatedArtists {
+                    artist_key: ak,
+                    title: artist_name.clone(),
+                },
             });
         }
     }
 
-    // 4. Sonic Adventure.
+    // 4. Track-seeded sonic playback. Shared by palette and right-click.
+    out.push(ContextEntry {
+        label: "Start Sonic Radio based on track".into(),
+        hint: None,
+        kind: ContextKind::SonicRadio,
+    });
     out.push(ContextEntry {
         label: "Sonic Adventure\u{2026}".to_string(),
         hint: None,
@@ -183,13 +203,20 @@ pub fn track_context_entries(
     });
 
     // 5. Artist Bio.
-    if let Some(ak) = artist_key {
+    if let Some(ak) = artist_key.or_else(|| track.grandparent_title.is_some().then(String::new)) {
         if !artist_name.is_empty() {
-            out.push(ContextEntry { label: String::new(), hint: None, kind: ContextKind::Separator });
+            out.push(ContextEntry {
+                label: String::new(),
+                hint: None,
+                kind: ContextKind::Separator,
+            });
             out.push(ContextEntry {
                 label: "Show Artist Bio".to_string(),
                 hint: Some("F4".to_string()),
-                kind: ContextKind::ArtistBio { artist_key: ak, artist_name: artist_name.clone() },
+                kind: ContextKind::ArtistBio {
+                    artist_key: ak,
+                    artist_name: artist_name.clone(),
+                },
             });
         }
     }
@@ -199,7 +226,11 @@ pub fn track_context_entries(
     let mut sep_added = false;
     let mut push_external = |out: &mut Vec<ContextEntry>, label: &str, target: SearchTarget| {
         if !sep_added {
-            out.push(ContextEntry { label: String::new(), hint: None, kind: ContextKind::Separator });
+            out.push(ContextEntry {
+                label: String::new(),
+                hint: None,
+                kind: ContextKind::Separator,
+            });
             sep_added = true;
         }
         out.push(ContextEntry {
@@ -218,5 +249,6 @@ pub fn track_context_entries(
         push_external(&mut out, "YouTube", SearchTarget::YouTube);
     }
 
+    out.retain(|entry| crate::app::sources::sonic::context_visible(state, &entry.kind));
     out
 }

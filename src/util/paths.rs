@@ -1,7 +1,7 @@
 //! Path utilities for XDG-compliant directory resolution.
 //!
 //! Provides cache and data directory resolution following XDG Base Directory spec.
-//! Used by both plex module (for portability) and config module.
+//! Used by both media module (for portability) and config module.
 
 use std::path::PathBuf;
 

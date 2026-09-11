@@ -1,14 +1,19 @@
-//! textamp - a Plex Music client for the terminal.
+//! textamp - a music player for the terminal.
 //!
-//! The `textamp` binary uses ratatui + crossterm. Core modules
-//! (`app`, `audio`, `config`, `plex`, `services`, `miller`, `util`)
-//! carry no UI-specific types — the `ui` module is the only renderer.
+//! The `textamp` binary uses ratatui + crossterm. The app module owns state
+//! and orchestration, including terminal input adapters. The ui module renders
+//! it; audio, config, server access, and services provide the underlying operations.
 
 pub mod app;
 pub mod audio;
+pub mod audiomuse;
 pub mod config;
+pub mod library;
+pub mod media;
 pub mod miller;
-pub mod plex;
 pub mod services;
 pub mod ui;
 pub mod util;
+
+pub mod navidrome;
+pub mod tui;

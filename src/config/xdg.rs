@@ -24,10 +24,14 @@ impl XdgPaths {
     /// Checks XDG environment variables first, then falls back to platform defaults.
     pub fn new(app_name: &str) -> Self {
         Self {
-            config_dir: paths::get_config_dir(app_name).unwrap_or_else(|| PathBuf::from(".config").join(app_name)),
-            data_dir: paths::get_data_dir(app_name).unwrap_or_else(|| PathBuf::from(".local/share").join(app_name)),
-            cache_dir: paths::get_cache_dir(app_name).unwrap_or_else(|| PathBuf::from(".cache").join(app_name)),
-            state_dir: paths::get_state_dir(app_name).unwrap_or_else(|| PathBuf::from(".local/state").join(app_name)),
+            config_dir: paths::get_config_dir(app_name)
+                .unwrap_or_else(|| PathBuf::from(".config").join(app_name)),
+            data_dir: paths::get_data_dir(app_name)
+                .unwrap_or_else(|| PathBuf::from(".local/share").join(app_name)),
+            cache_dir: paths::get_cache_dir(app_name)
+                .unwrap_or_else(|| PathBuf::from(".cache").join(app_name)),
+            state_dir: paths::get_state_dir(app_name)
+                .unwrap_or_else(|| PathBuf::from(".local/state").join(app_name)),
         }
     }
 

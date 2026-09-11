@@ -80,11 +80,11 @@ pub fn truncate_to_boundary(s: &str, max_bytes: usize) -> &str {
 /// (zero-width joiners / directionality marks / language tags),
 /// private-use codepoints, and the misc emoji-format selectors.
 ///
-/// Plex artist / album / track titles occasionally carry these as
+/// server artist / album / track titles occasionally carry these as
 /// metadata leftovers (especially the format-category and
 /// private-use ones); the system font has no glyph for them, so
 /// they show up as mystery shapes — small boxes, stacks of
-/// horizontal lines, etc. — that don't appear in Plex's web client
+/// horizontal lines, etc. — that don't appear in server's web client
 /// because the web stack is also stripping them.
 ///
 /// Allocation-free fast path for clean ASCII / Latin titles via
@@ -119,7 +119,7 @@ fn needs_strip(c: char) -> bool {
     if matches!(cp, 0xFE00..=0xFE0F | 0x200D | 0xE0020..=0xE007F) {
         return true;
     }
-    // C0 / C1 control characters (keep \t / \n / \r — Plex titles
+    // C0 / C1 control characters (keep \t / \n / \r — server titles
     // sometimes use them and the renderer collapses to spaces).
     if (cp <= 0x1F && !matches!(cp, 0x09 | 0x0A | 0x0D)) || (0x7F..=0x9F).contains(&cp) {
         return true;
@@ -173,7 +173,9 @@ fn needs_strip(c: char) -> bool {
 pub fn force_text_presentation(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 4);
     for c in s.chars() {
-        if c == '\u{fe0f}' { continue; }
+        if c == '\u{fe0f}' {
+            continue;
+        }
         out.push(c);
         match c {
             '\u{2764}' | '\u{2665}' | '\u{2661}' | '\u{1f90d}' | '\u{1f5a4}' => {
@@ -211,7 +213,7 @@ pub fn truncate_middle(s: &str, max_len: usize) -> String {
     // We need 1 char for the ellipsis, leaving (max_len - 1) chars for content
     // Split roughly evenly, with start getting the extra char if odd
     let content_len = max_len - 1;
-    let start_len = (content_len + 1) / 2;
+    let start_len = content_len.div_ceil(2);
     let end_len = content_len / 2;
 
     let start: String = s.chars().take(start_len).collect();

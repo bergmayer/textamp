@@ -5,10 +5,10 @@
 //! 2. Search and select artists from cached library
 
 use crate::app::state::{ArtistRadioPickerStep, SearchFocus};
-use crate::app::AppState;
 use crate::services::NavigationService;
 use crate::ui::layout::centered_rect;
 use crate::ui::theme::theme;
+use crate::ui::RenderState as AppState;
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
@@ -30,10 +30,14 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         let block_tmp = ratatui::widgets::Block::default().borders(ratatui::widgets::Borders::ALL);
         let inner_tmp = block_tmp.inner(popup_area);
         // For SelectArtists step: results start at inner_y + 5 (2 selected + 3 input)
-        let results_y_offset = if matches!(picker.step, ArtistRadioPickerStep::SelectArtists) { 5 } else { 0 };
+        let results_y_offset = if matches!(picker.step, ArtistRadioPickerStep::SelectArtists) {
+            5
+        } else {
+            0
+        };
         let results_height = inner_tmp.height.saturating_sub(results_y_offset);
         let mut hr = state.hit_regions.borrow_mut();
-        hr.artist_radio_picker = Some(crate::ui::hit_regions::PopupListRegions {
+        hr.artist_radio_picker = Some(crate::app::presentation::PopupListRegions {
             outer: popup_area,
             items_area: ratatui::layout::Rect::new(
                 inner_tmp.x,
@@ -99,8 +103,7 @@ fn render_count_step(
     frame.render_widget(input_block, chunks[1]);
 
     let input_text = format!("{}▋", picker.count_input);
-    let input = Paragraph::new(input_text)
-        .style(Style::default().fg(t.colors.fg_primary));
+    let input = Paragraph::new(input_text).style(Style::default().fg(t.colors.fg_primary));
     frame.render_widget(input, input_inner);
 }
 
@@ -137,7 +140,9 @@ fn render_select_step(
         .split(inner);
 
     // Selected artists display + launch hint
-    let selected_names: Vec<&str> = picker.selected_artists.iter()
+    let selected_names: Vec<&str> = picker
+        .selected_artists
+        .iter()
         .map(|a| a.title.as_str())
         .collect();
     let selected_text = if selected_names.is_empty() {
@@ -184,7 +189,11 @@ fn render_select_step(
     } else {
         picker.query.clone()
     };
-    let fg = if is_focused { t.colors.fg_primary } else { t.colors.fg_muted };
+    let fg = if is_focused {
+        t.colors.fg_primary
+    } else {
+        t.colors.fg_muted
+    };
     let input = Paragraph::new(query_text).style(Style::default().fg(fg));
     frame.render_widget(input, input_inner);
 
@@ -217,11 +226,15 @@ fn render_artist_list(
     };
 
     // Build set of selected artist keys for quick lookup
-    let selected_keys: std::collections::HashSet<&str> = picker.selected_artists.iter()
+    let selected_keys: std::collections::HashSet<&str> = picker
+        .selected_artists
+        .iter()
         .map(|a| a.rating_key.as_str())
         .collect();
 
-    let items: Vec<ListItem> = picker.filtered_artists.iter()
+    let items: Vec<ListItem> = picker
+        .filtered_artists
+        .iter()
         .enumerate()
         .skip(scroll_offset)
         .take(visible_height)
@@ -233,7 +246,9 @@ fn render_artist_list(
             let text = format!("{}{}", prefix, artist.title);
 
             let style = if is_selected_item {
-                Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
+                Style::default()
+                    .fg(t.colors.selection_text)
+                    .bg(t.colors.selection_bar_bg)
             } else if is_picked {
                 Style::default().fg(t.colors.fg_accent)
             } else {
@@ -247,7 +262,12 @@ fn render_artist_list(
 
     // Scrollbar for long lists
     if total > visible_height {
-        crate::ui::widgets::render_scrollbar_borderless(frame, area, total, visible_height, scroll_offset);
+        crate::ui::widgets::render_scrollbar_borderless(
+            frame,
+            area,
+            total,
+            visible_height,
+            scroll_offset,
+        );
     }
 }
-

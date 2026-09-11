@@ -1,5 +1,6 @@
 //! Reusable UI widgets.
 
+pub mod logo;
 pub mod progress_bar;
 pub mod scrollbar;
 pub mod selectable_list;

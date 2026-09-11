@@ -1,20 +1,20 @@
-//! textamp — keyboard-driven Plex Music client (terminal front-end).
+//! textamp — keyboard-driven music player (terminal front-end).
 //!
-//! This binary is the TUI. The GUI sibling (`textamp-gui`) shares everything
-//! except the rendering/input layer. A process lock in the platform state
-//! directory prevents both binaries from running at the same time against
-//! the shared caches.
+//! A process lock in the platform state directory prevents multiple instances
+//! from writing the same caches.
 
 use anyhow::Result;
 use std::env;
-use textamp::plex::{PlexAuth, PlexClient, PlexClientInfo};
-use textamp::app::{AppState, EventLoop};
+use textamp::app::AppState;
 use textamp::audio::AudioPlayer;
 use textamp::config::{self, Config};
-use textamp::util::{install_panic_hook, restore_terminal, setup_logging, setup_terminal, LockError, ProcessLock};
 
-#[tokio::main]
-async fn main() -> Result<()> {
+use textamp::tui::EventLoop;
+use textamp::util::{
+    install_panic_hook, restore_terminal, setup_logging, setup_terminal, LockError, ProcessLock,
+};
+
+fn main() -> Result<()> {
     let verbose = env::args().any(|a| a == "--verbose" || a == "-v");
 
     // Acquire the cross-platform process lock before doing anything else.
@@ -36,38 +36,40 @@ async fn main() -> Result<()> {
         }
     };
 
-    run_tui_mode(verbose).await
+    let _logging = setup_logging(verbose);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let result = runtime.block_on(async {
+        let result = run_tui_mode().await;
+        let drained = textamp::app::tasks::finish_blocking(std::time::Duration::from_secs(3)).await;
+        if !drained {
+            eprintln!(
+                "Background filesystem/CPU work did not finish; recent changes may not be saved."
+            );
+            tracing::error!("Background work exceeded the shutdown deadline");
+        }
+        result.and(if drained {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Background work timed out at shutdown"))
+        })
+    });
+    // Blocking/native calls cannot be forcibly cancelled safely.
+    runtime.shutdown_timeout(std::time::Duration::from_millis(100));
+    result
 }
 
 /// Normal TUI mode
-async fn run_tui_mode(verbose: bool) -> Result<()> {
+async fn run_tui_mode() -> Result<()> {
     // Load configuration
     let config = config::load_config()?;
-
-    // Setup logging
-    let _guard = setup_logging(verbose);
 
     tracing::info!("Starting textamp v{}", env!("CARGO_PKG_VERSION"));
 
     // Complete filesystem/client/audio initialization before entering raw
     // mode. A slow credential volume or a wedged CoreAudio device must not
     // leave the user staring at an unresponsive alternate screen.
-    let stored_auth = tokio::task::spawn_blocking(PlexAuth::load_token)
-        .await
-        .map_err(|error| anyhow::anyhow!("Stored-auth worker failed: {error}"))?;
-    let client_info = if let Some(stored) = stored_auth {
-        tracing::info!("Loaded stored client_identifier: {}", stored.client_identifier);
-        PlexClientInfo {
-            client_identifier: stored.client_identifier,
-            ..Default::default()
-        }
-    } else {
-        tracing::info!("No stored auth, using new client_identifier");
-        PlexClientInfo::default()
-    };
-    let client = PlexClient::new(client_info)?;
-    tracing::info!("PlexClient created with client_identifier: {}", client.client_identifier());
-
     let mut audio = match tokio::task::spawn_blocking(AudioPlayer::new).await {
         Ok(Ok(audio)) => audio,
         Ok(Err(error)) => {
@@ -104,12 +106,13 @@ async fn run_tui_mode(verbose: bool) -> Result<()> {
 
     // Resolve artwork mode from config, with Apple Terminal defaulting to Braille
     let configured_mode = textamp::app::state::ArtworkMode::from_config(&config.ui.artwork_mode);
-    let effective_mode = if configured_mode == textamp::app::state::ArtworkMode::Auto && is_apple_terminal {
-        tracing::info!("Apple Terminal detected, defaulting to Braille artwork mode");
-        textamp::app::state::ArtworkMode::Braille
-    } else {
-        configured_mode
-    };
+    let effective_mode =
+        if configured_mode == textamp::app::state::ArtworkMode::Auto && is_apple_terminal {
+            tracing::info!("Apple Terminal detected, defaulting to Braille artwork mode");
+            textamp::app::state::ArtworkMode::Braille
+        } else {
+            configured_mode
+        };
 
     let picker_result = if is_apple_terminal {
         tracing::info!("Apple Terminal detected, using halfblocks protocol for fallback");
@@ -119,7 +122,11 @@ async fn run_tui_mode(verbose: bool) -> Result<()> {
     };
     if let Ok(picker) = picker_result {
         // Init renderers BEFORE overriding protocol so native type is stored
-        tracing::info!("Native protocol: {:?}, Artwork mode: {:?}", picker.protocol_type(), effective_mode);
+        tracing::info!(
+            "Native protocol: {:?}, Artwork mode: {:?}",
+            picker.protocol_type(),
+            effective_mode
+        );
         textamp::ui::artwork::init_grid_renderer(picker.clone());
         textamp::ui::screens::now_playing::init_artwork_renderer(picker.clone());
         textamp::ui::init_bio_artwork_renderer(picker.clone());
@@ -138,7 +145,8 @@ async fn run_tui_mode(verbose: bool) -> Result<()> {
     }
 
     // Run the app and ensure terminal is always restored
-    let (result, pending_cache) = run_app(&mut terminal, config, client, &mut audio).await;
+    let result = run_app(&mut terminal, config, &mut audio).await;
+    audio.stop();
 
     // Always restore terminal, even on error
     if let Err(error) = restore_terminal(&mut terminal) {
@@ -148,29 +156,9 @@ async fn run_tui_mode(verbose: bool) -> Result<()> {
     // Display exit logo (clear screen, show ANSI art)
     display_exit_logo();
 
-    // Save cache to disk on a background thread (runs while exit logo is displayed)
-    let cache_thread = pending_cache.map(|cache_data| {
-        std::thread::spawn(move || {
-            if let Some(cache) = textamp::plex::LibraryCache::new() {
-                if cache.save_preserving_unloaded(cache_data) {
-                    tracing::info!("Cache saved on quit");
-                }
-            }
-        })
-    });
-
-    // Now handle any errors
-    if let Err(e) = result {
-        eprintln!("Error: {}", e);
-    }
-
-    // Wait for cache write to finish before exiting
-    if let Some(handle) = cache_thread {
-        let _ = handle.join();
-    }
-
     tracing::info!("textamp shutdown complete");
-    Ok(())
+    // Preserve an event-loop failure as the process exit status.
+    result
 }
 
 /// Display the ANSI art logo on exit (Cubic Player style).
@@ -207,8 +195,10 @@ fn display_exit_logo() {
     println!("{DIM_GRAY}{line}.- {PURPLE}P L A Y E R{DIM_GRAY}{suffix}{RESET}");
 
     // Two-column layout within 72 cols, divider at ~col 33
-    println!(" {BRIGHT_CYAN}http://bergmayer.net/textamp{RESET}     {DARK_GRAY}Why be bleak{RESET}");
-    println!("      {DIM_CYAN}https://app.plex.tv/{RESET}      {DIM_GRAY}|{RESET}     when you can be Blake?");
+    println!(
+        " {BRIGHT_CYAN}http://bergmayer.net/textamp{RESET}     {DARK_GRAY}Why be bleak{RESET}"
+    );
+    println!("      {DIM_CYAN}music, locally.    {RESET}      {DIM_GRAY}|{RESET}     when you can be Blake?");
     println!("                                {DIM_GRAY}. {DARK_GRAY}Jhon Balance{RESET}                         {DIM_GRAY}.{RESET}");
 
     // Bottom corners (two-box Cubic Player style, 72 cols)
@@ -224,9 +214,9 @@ fn display_exit_logo() {
 async fn run_app(
     terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
     config: Config,
-    mut client: PlexClient,
+
     audio: &mut AudioPlayer,
-) -> (Result<()>, Option<textamp::plex::CacheData>) {
+) -> Result<()> {
     // Create application state
     let mut state = AppState::new();
     state.audio_available = audio.has_audio();
@@ -237,7 +227,7 @@ async fn run_app(
     // Get terminal size
     let size = match terminal.size() {
         Ok(s) => s,
-        Err(e) => return (Err(e.into()), None),
+        Err(e) => return Err(e.into()),
     };
     state.terminal_width = size.width;
     state.terminal_height = size.height;
@@ -251,9 +241,7 @@ async fn run_app(
 
     // Run event loop
     let mut event_loop = EventLoop::new(config);
-    let result = event_loop.run(terminal, &mut state, &mut client, audio).await;
+    let result = event_loop.run(terminal, &mut state, audio).await;
 
-    // Extract pending cache save (built during Action::Quit, deferred for fast exit)
-    let pending_cache = state.pending_cache_save.take();
-    (result, pending_cache)
+    result
 }

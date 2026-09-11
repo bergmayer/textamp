@@ -50,7 +50,10 @@ impl ProcessLock {
     pub fn acquire() -> Result<Self, LockError> {
         let state_dir = XdgPaths::new("textamp").state_dir.clone();
         if let Err(e) = std::fs::create_dir_all(&state_dir) {
-            return Err(LockError::Io { path: state_dir, source: e });
+            return Err(LockError::Io {
+                path: state_dir,
+                source: e,
+            });
         }
         let path = state_dir.join("textamp.lock");
 
@@ -60,7 +63,10 @@ impl ProcessLock {
             .write(true)
             .truncate(false)
             .open(&path)
-            .map_err(|source| LockError::Io { path: path.clone(), source })?;
+            .map_err(|source| LockError::Io {
+                path: path.clone(),
+                source,
+            })?;
 
         match file.try_lock_exclusive() {
             Ok(()) => {

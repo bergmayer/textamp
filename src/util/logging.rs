@@ -24,13 +24,16 @@ pub fn setup_logging(verbose: bool) -> Option<WorkerGuard> {
         prune_logs(&log_dir);
     }
 
-    let prefix = if verbose { "textamp-verbose.log" } else { "textamp.log" };
+    let prefix = if verbose {
+        "textamp-verbose.log"
+    } else {
+        "textamp.log"
+    };
     let file_appender = tracing_appender::rolling::daily(&log_dir, prefix);
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
     let level = if verbose { "info" } else { "error" };
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(level));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
 
     tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -66,7 +69,8 @@ fn prune_logs(log_dir: &Path) {
             || name.starts_with("textamp-verbose.log.");
 
         if is_log {
-            let modified = path.metadata()
+            let modified = path
+                .metadata()
                 .and_then(|m| m.modified())
                 .unwrap_or(std::time::UNIX_EPOCH);
             all_logs.push((path, modified));

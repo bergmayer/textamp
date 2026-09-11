@@ -1,6 +1,6 @@
 //! Track list widget.
 
-use crate::plex::models::Track;
+use crate::library::models::Track;
 use crate::ui::theme::theme;
 use crate::ui::widgets::selectable_list::calculate_scroll_offset;
 
@@ -35,7 +35,9 @@ pub fn render(
             let style = if is_playing {
                 Style::default().fg(t.colors.fg_accent)
             } else if is_selected {
-                Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
+                Style::default()
+                    .fg(t.colors.selection_text)
+                    .bg(t.colors.selection_bar_bg)
             } else {
                 Style::default().fg(t.colors.fg_primary)
             };
@@ -62,8 +64,16 @@ pub fn render(
 
     let table = Table::new(rows, widths)
         .header(header)
-        .block(Block::default().borders(Borders::NONE).style(Style::default().bg(t.colors.bg_primary)))
-        .row_highlight_style(Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg));
+        .block(
+            Block::default()
+                .borders(Borders::NONE)
+                .style(Style::default().bg(t.colors.bg_primary)),
+        )
+        .row_highlight_style(
+            Style::default()
+                .fg(t.colors.selection_text)
+                .bg(t.colors.selection_bar_bg),
+        );
 
     frame.render_widget(table, area);
 

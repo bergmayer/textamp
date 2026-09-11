@@ -121,7 +121,12 @@ impl ArtworkRenderer {
 
     /// Load an image with the top portion cropped (for scrolling).
     /// `crop_fraction` is 0.0..1.0 indicating how much of the top to remove.
-    pub fn load_image_cropped(&mut self, image_data: &[u8], thumb_path: &str, crop_fraction: f32) -> bool {
+    pub fn load_image_cropped(
+        &mut self,
+        image_data: &[u8],
+        thumb_path: &str,
+        crop_fraction: f32,
+    ) -> bool {
         if crop_fraction <= 0.0 {
             return self.load_image(image_data, thumb_path);
         }
@@ -133,9 +138,12 @@ impl ArtworkRenderer {
             return self.has_image();
         }
 
-        let Ok(img) = image::load_from_memory(image_data) else { return false; };
+        let Ok(img) = image::load_from_memory(image_data) else {
+            return false;
+        };
 
-        let crop_pixels = (img.height() as f32 * crop_fraction).min(img.height() as f32 - 1.0) as u32;
+        let crop_pixels =
+            (img.height() as f32 * crop_fraction).min(img.height() as f32 - 1.0) as u32;
         let cropped = if crop_pixels > 0 && crop_pixels < img.height() {
             img.crop_imm(0, crop_pixels, img.width(), img.height() - crop_pixels)
         } else {
@@ -150,7 +158,9 @@ impl ArtworkRenderer {
             return true;
         }
 
-        let Some(ref mut picker) = self.picker else { return false; };
+        let Some(ref mut picker) = self.picker else {
+            return false;
+        };
         self.protocol = Some(picker.new_resize_protocol(cropped));
         self.braille_image = None;
         self.current_thumb = Some(crop_key);
@@ -172,7 +182,7 @@ impl ArtworkRenderer {
     /// in ratatui-image 9 only `Scale` actually upscales when the
     /// source image is smaller than the render area — the other two
     /// cap at source pixel size and leave a tiny cover drifting in the
-    /// upper-left of a much larger box. Plex thumbs come back at
+    /// upper-left of a much larger box. server thumbs come back at
     /// 300–600 px while the now-playing panel can easily be 800+ px
     /// tall on a wide terminal, so without `Scale` the cover doesn't
     /// fill its square.
@@ -322,7 +332,8 @@ fn build_braille_render(
     for y in 0..pixel_h {
         for x in 0..pixel_w {
             let pixel = resized.get_pixel(x, y);
-            let lum = (pixel[0] as u32 * 299 + pixel[1] as u32 * 587 + pixel[2] as u32 * 114) / 1000;
+            let lum =
+                (pixel[0] as u32 * 299 + pixel[1] as u32 * 587 + pixel[2] as u32 * 114) / 1000;
             histogram[lum.min(255) as usize] += 1;
         }
     }
@@ -395,20 +406,20 @@ fn build_braille_render(
             }
 
             let ch = char::from_u32(0x2800 + pattern as u32).unwrap_or(' ');
-            let fg_color = if bright_count > 0 {
+            let fg_color = if let Some(count) = std::num::NonZeroU32::new(bright_count) {
                 Color::Rgb(
-                    (fg_r / bright_count) as u8,
-                    (fg_g / bright_count) as u8,
-                    (fg_b / bright_count) as u8,
+                    (fg_r / count.get()) as u8,
+                    (fg_g / count.get()) as u8,
+                    (fg_b / count.get()) as u8,
                 )
             } else {
                 Color::Rgb(0, 0, 0)
             };
-            let bg_color = if dark_count > 0 {
+            let bg_color = if let Some(count) = std::num::NonZeroU32::new(dark_count) {
                 Color::Rgb(
-                    (bg_r / dark_count) as u8,
-                    (bg_g / dark_count) as u8,
-                    (bg_b / dark_count) as u8,
+                    (bg_r / count.get()) as u8,
+                    (bg_g / count.get()) as u8,
+                    (bg_b / count.get()) as u8,
                 )
             } else {
                 fg_color
@@ -544,12 +555,12 @@ impl<K: Clone + Eq + Hash, V> BoundedCache<K, V> {
 }
 
 thread_local! {
-    static GRID_PICKER: RefCell<Option<Picker>> = RefCell::new(None);
+    static GRID_PICKER: RefCell<Option<Picker>> = const { RefCell::new(None) };
     static GRID_PROTOCOLS: RefCell<BoundedCache<u64, StatefulProtocol>> = RefCell::new(BoundedCache::new(MAX_RENDERED_ARTWORK_ENTRIES));
     static GRID_BRAILLE_IMAGES: RefCell<BoundedCache<u64, DynamicImage>> = RefCell::new(BoundedCache::new(MAX_RENDERED_ARTWORK_ENTRIES));
     static BRAILLE_RENDERS: RefCell<BoundedCache<BrailleRenderKey, BrailleRender>> = RefCell::new(BoundedCache::new(MAX_RENDERED_ARTWORK_ENTRIES));
-    static GRID_ARTWORK_MODE: RefCell<ArtworkMode> = RefCell::new(ArtworkMode::Auto);
-    static GRID_NATIVE_PROTOCOL: RefCell<Option<ratatui_image::picker::ProtocolType>> = RefCell::new(None);
+    static GRID_ARTWORK_MODE: RefCell<ArtworkMode> = const { RefCell::new(ArtworkMode::Auto) };
+    static GRID_NATIVE_PROTOCOL: RefCell<Option<ratatui_image::picker::ProtocolType>> = const { RefCell::new(None) };
 }
 
 /// Initialize the grid renderer with a Picker clone.
@@ -576,8 +587,12 @@ pub fn render_grid_image(frame: &mut Frame, area: Rect, key: &str, data: &[u8]) 
     if !has_protocol {
         let created = GRID_PICKER.with(|picker_cell| {
             let mut picker_ref = picker_cell.borrow_mut();
-            let Some(picker) = picker_ref.as_mut() else { return false; };
-            let Ok(img) = image::load_from_memory(data) else { return false; };
+            let Some(picker) = picker_ref.as_mut() else {
+                return false;
+            };
+            let Ok(img) = image::load_from_memory(data) else {
+                return false;
+            };
             let protocol = picker.new_resize_protocol(img);
             GRID_PROTOCOLS.with(|protos| {
                 protos.borrow_mut().insert(image_id, protocol);
@@ -595,7 +610,7 @@ pub fn render_grid_image(frame: &mut Frame, area: Rect, key: &str, data: &[u8]) 
             // `Resize::Scale` upscales when the source thumbnail is
             // smaller than the render area; `Resize::Crop`/`Resize::Fit`
             // both cap at the source image size in ratatui-image 9, which
-            // is why the cached 300 px Plex thumbs used to render as a
+            // is why the cached 300 px server thumbs used to render as a
             // tiny square in the upper-left of a much larger row.
             let image = StatefulImage::new().resize(Resize::Scale(None));
             frame.render_stateful_widget(image, area, protocol);
@@ -612,7 +627,9 @@ fn render_grid_braille(frame: &mut Frame, area: Rect, key: &str, data: &[u8]) ->
     let has_image = GRID_BRAILLE_IMAGES.with(|imgs| imgs.borrow().contains_key(&image_id));
 
     if !has_image {
-        let Ok(img) = image::load_from_memory(data) else { return false; };
+        let Ok(img) = image::load_from_memory(data) else {
+            return false;
+        };
         GRID_BRAILLE_IMAGES.with(|imgs| {
             imgs.borrow_mut().insert(image_id, img);
         });

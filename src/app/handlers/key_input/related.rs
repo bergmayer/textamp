@@ -3,26 +3,47 @@
 use crate::app::action::*;
 use crossterm::event::{self, KeyCode};
 
-use crate::app::Action;
-use crate::app::state::View;
-use crate::app::AppState;
 use super::super::helpers::navigation::related_flat_resolve;
+use crate::app::state::View;
+use crate::app::Action;
+use crate::app::AppState;
 
 /// Handle Related view keys.
-pub(in crate::app::handlers) fn handle_related_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
+pub(in crate::app::handlers) fn handle_related_keys(
+    key: event::KeyEvent,
+    state: &mut AppState,
+) -> Vec<Action> {
     match key.code {
         KeyCode::Esc => {
             let target = state.previous_view.take().unwrap_or(View::Browse);
             vec![NavigationAction::SetView(target).into()]
         }
-        KeyCode::F(1) | KeyCode::Char('?') => vec![NavigationAction::SetView(View::Help).into()],
+        KeyCode::F(1) => vec![NavigationAction::SetView(View::Help).into()],
 
-        KeyCode::Up => { state.scroll.related = None; vec![DataAction::ListUp.into()] }
-        KeyCode::Down => { state.scroll.related = None; vec![DataAction::ListDown.into()] }
-        KeyCode::PageUp => { state.scroll.related = None; vec![DataAction::ListPageUp.into()] }
-        KeyCode::PageDown => { state.scroll.related = None; vec![DataAction::ListPageDown.into()] }
-        KeyCode::Home => { state.scroll.related = None; vec![DataAction::ListTop.into()] }
-        KeyCode::End => { state.scroll.related = None; vec![DataAction::ListBottom.into()] }
+        KeyCode::Up => {
+            state.scroll.related = None;
+            vec![DataAction::ListUp.into()]
+        }
+        KeyCode::Down => {
+            state.scroll.related = None;
+            vec![DataAction::ListDown.into()]
+        }
+        KeyCode::PageUp => {
+            state.scroll.related = None;
+            vec![DataAction::ListPageUp.into()]
+        }
+        KeyCode::PageDown => {
+            state.scroll.related = None;
+            vec![DataAction::ListPageDown.into()]
+        }
+        KeyCode::Home => {
+            state.scroll.related = None;
+            vec![DataAction::ListTop.into()]
+        }
+        KeyCode::End => {
+            state.scroll.related = None;
+            vec![DataAction::ListBottom.into()]
+        }
 
         KeyCode::Enter => activate_related_item(state),
 
@@ -30,8 +51,12 @@ pub(in crate::app::handlers) fn handle_related_keys(key: event::KeyEvent, state:
         KeyCode::Char(c) if c.is_ascii_alphabetic() && key.modifiers.is_empty() => {
             let letter_lower = c.to_ascii_lowercase();
             let mut offset = 0;
-            for (_gi, group) in state.related.groups.iter().enumerate() {
-                if group.artist.title.chars().next()
+            for group in state.related.groups.iter() {
+                if group
+                    .artist
+                    .title
+                    .chars()
+                    .next()
                     .map(|ch| ch.to_ascii_lowercase() == letter_lower)
                     .unwrap_or(false)
                 {
@@ -78,7 +103,12 @@ pub(in crate::app::handlers) fn activate_related_item(state: &mut AppState) -> V
             } else {
                 ak.clone()
             };
-            (effective_artist_key, an, Some(album.rating_key.clone()), Some(album.title.clone()))
+            (
+                effective_artist_key,
+                an,
+                Some(album.rating_key.clone()),
+                Some(album.title.clone()),
+            )
         }
     };
 
@@ -98,14 +128,20 @@ pub(in crate::app::handlers) fn activate_related_item(state: &mut AppState) -> V
         state.library.selected_album_title = album_title.unwrap_or_default();
     }
 
-    if let Some(pos) = state.artist_nav.columns.first()
-        .and_then(|col| col.items.iter().position(|i| i.key() == nav_artist_key.as_str()))
-    {
+    if let Some(pos) = state.artist_nav.columns.first().and_then(|col| {
+        col.items
+            .iter()
+            .position(|i| i.key() == nav_artist_key.as_str())
+    }) {
         if let Some(col) = state.artist_nav.columns.first_mut() {
             col.selected_index = pos;
         }
     }
     state.artist_nav.focused_column = 0;
     state.artist_nav.truncate_right();
-    vec![MillerAction::LoadArtistAlbumsForMiller { artist_key: nav_artist_key, replace_child: false }.into()]
+    vec![MillerAction::LoadArtistAlbumsForMiller {
+        artist_key: nav_artist_key,
+        replace_child: false,
+    }
+    .into()]
 }

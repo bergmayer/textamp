@@ -3,11 +3,11 @@
 //! Local-first search with tabs: All | Artists | Albums | Playlists | Tracks | Genres
 
 use crate::app::state::{SearchFocus, SearchTab};
-use crate::app::AppState;
-use crate::plex::models::SearchResults;
+use crate::library::models::SearchResults;
 use crate::services::NavigationService;
 use crate::ui::layout::centered_rect;
 use crate::ui::theme::theme;
+use crate::ui::RenderState as AppState;
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs};
@@ -44,7 +44,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     // Register hit regions for mouse handler
     {
         let mut hr = state.hit_regions.borrow_mut();
-        hr.search_popup = Some(crate::ui::hit_regions::SearchPopupRegions {
+        hr.search_popup = Some(crate::app::presentation::SearchPopupRegions {
             outer: popup_area,
             tab_area: chunks[0],
             input_area: chunks[1],
@@ -64,6 +64,14 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
 
 fn render_tabs(frame: &mut Frame, state: &AppState, area: Rect) {
     let t = theme();
+    if state.sources.active.folder().is_some() {
+        frame.render_widget(
+            Paragraph::new("Audio files in current folder · / filters folders")
+                .style(Style::default().fg(t.colors.fg_muted)),
+            area,
+        );
+        return;
+    }
 
     let labels = SearchTab::all();
     let selected_idx = match state.search.tab {
@@ -77,33 +85,41 @@ fn render_tabs(frame: &mut Frame, state: &AppState, area: Rect) {
 
     let is_tab_focused = state.search.focus == SearchFocus::Input;
 
-    let titles: Vec<Line> = labels.iter().enumerate().map(|(i, tab)| {
-        if i == selected_idx && is_tab_focused {
-            Line::from(Span::styled(
-                format!(" {} ", tab.name()),
-                Style::default()
-                    .fg(t.colors.selection_text)
-                    .bg(t.colors.selection_bar_bg),
-            ))
-        } else if i == selected_idx {
-            Line::from(Span::styled(
-                format!(" {} ", tab.name()),
-                Style::default()
-                    .fg(t.colors.fg_accent)
-                    .add_modifier(Modifier::BOLD),
-            ))
-        } else {
-            Line::from(Span::styled(
-                format!(" {} ", tab.name()),
-                Style::default().fg(t.colors.fg_muted),
-            ))
-        }
-    }).collect();
+    let titles: Vec<Line> = labels
+        .iter()
+        .enumerate()
+        .map(|(i, tab)| {
+            if i == selected_idx && is_tab_focused {
+                Line::from(Span::styled(
+                    format!(" {} ", tab.name()),
+                    Style::default()
+                        .fg(t.colors.selection_text)
+                        .bg(t.colors.selection_bar_bg),
+                ))
+            } else if i == selected_idx {
+                Line::from(Span::styled(
+                    format!(" {} ", tab.name()),
+                    Style::default()
+                        .fg(t.colors.fg_accent)
+                        .add_modifier(Modifier::BOLD),
+                ))
+            } else {
+                Line::from(Span::styled(
+                    format!(" {} ", tab.name()),
+                    Style::default().fg(t.colors.fg_muted),
+                ))
+            }
+        })
+        .collect();
 
     let tabs = Tabs::new(titles)
         .select(selected_idx)
         .highlight_style(Style::default())
-        .style(Style::default().bg(t.colors.bg_primary).fg(t.colors.fg_muted))
+        .style(
+            Style::default()
+                .bg(t.colors.bg_primary)
+                .fg(t.colors.fg_muted),
+        )
         .divider(Span::styled(" │ ", Style::default().fg(t.colors.fg_muted)))
         .padding("", "");
 
@@ -134,7 +150,11 @@ fn render_search_input(frame: &mut Frame, state: &AppState, area: Rect) {
     } else {
         state.search.query.clone()
     };
-    let fg = if is_input_focused { t.colors.fg_primary } else { t.colors.fg_muted };
+    let fg = if is_input_focused {
+        t.colors.fg_primary
+    } else {
+        t.colors.fg_muted
+    };
     let input = Paragraph::new(query_text).style(Style::default().fg(fg));
     frame.render_widget(input, input_inner);
 }
@@ -163,13 +183,33 @@ fn render_results(frame: &mut Frame, state: &AppState, area: Rect) {
     let selected_idx = state.list_state.search_item_index;
 
     match state.search.tab {
-        SearchTab::Global => render_all_tab(frame, results, is_results_focused, selected_idx, scroll_pin, area),
+        SearchTab::Global => render_all_tab(
+            frame,
+            results,
+            is_results_focused,
+            selected_idx,
+            scroll_pin,
+            area,
+        ),
         SearchTab::Artists => render_single_section(
-            frame, &results.artists, |a| if a.title.is_empty() { "Unknown Artist".to_string() } else { a.title.clone() },
-            is_results_focused, selected_idx, scroll_pin, area,
+            frame,
+            &results.artists,
+            |a| {
+                if a.title.is_empty() {
+                    "Unknown Artist".to_string()
+                } else {
+                    a.title.clone()
+                }
+            },
+            is_results_focused,
+            selected_idx,
+            scroll_pin,
+            area,
         ),
         SearchTab::Albums => render_single_section(
-            frame, &results.albums, |a| {
+            frame,
+            &results.albums,
+            |a| {
                 let artist = a.artist_name();
                 let title = if a.title.is_empty() {
                     format!("Unknown Album ({})", artist)
@@ -180,35 +220,46 @@ fn render_results(frame: &mut Frame, state: &AppState, area: Rect) {
                 };
                 format!("{} - {}", title, artist)
             },
-            is_results_focused, selected_idx, scroll_pin, area,
+            is_results_focused,
+            selected_idx,
+            scroll_pin,
+            area,
         ),
         SearchTab::Playlists => render_single_section(
-            frame, &results.playlists, |p| p.title.clone(),
-            is_results_focused, selected_idx, scroll_pin, area,
+            frame,
+            &results.playlists,
+            |p| p.title.clone(),
+            is_results_focused,
+            selected_idx,
+            scroll_pin,
+            area,
         ),
         SearchTab::Tracks => {
-            if state.search.track_loading && results.tracks.is_empty() {
-                let loading = Paragraph::new("Searching tracks...")
-                    .style(Style::default().fg(t.colors.fg_muted))
-                    .alignment(Alignment::Center);
-                frame.render_widget(loading, area);
-            } else {
-                render_single_section(
-                    frame, &results.tracks, |tr| {
-                        let title = if tr.title.is_empty() {
-                            tr.file_name().unwrap_or("Unknown Track")
-                        } else {
-                            &tr.title
-                        };
-                        format!("{} - {}", title, tr.track_artist())
-                    },
-                    is_results_focused, selected_idx, scroll_pin, area,
-                );
-            }
+            render_single_section(
+                frame,
+                &results.tracks,
+                |tr| {
+                    let title = if tr.title.is_empty() {
+                        tr.file_name().unwrap_or("Unknown Track")
+                    } else {
+                        &tr.title
+                    };
+                    format!("{} - {}", title, tr.track_artist())
+                },
+                is_results_focused,
+                selected_idx,
+                scroll_pin,
+                area,
+            );
         }
         SearchTab::Genres => render_single_section(
-            frame, &results.genres, |g| g.title.clone(),
-            is_results_focused, selected_idx, scroll_pin, area,
+            frame,
+            &results.genres,
+            |g| g.title.clone(),
+            is_results_focused,
+            selected_idx,
+            scroll_pin,
+            area,
         ),
     }
 }
@@ -266,7 +317,9 @@ fn render_all_tab(
     };
     let scroll_offset = match scroll_pin {
         Some(pinned) => pinned,
-        None => NavigationService::calc_scroll_offset(display_selected, visible_height, total_entries),
+        None => {
+            NavigationService::calc_scroll_offset(display_selected, visible_height, total_entries)
+        }
     };
 
     let mut items = Vec::with_capacity(visible_height.min(total_entries));
@@ -332,7 +385,13 @@ fn render_all_tab(
 
     // Scrollbar for long lists
     if total_entries > visible_height {
-        crate::ui::widgets::render_scrollbar_borderless(frame, area, total_entries, visible_height, scroll_offset);
+        crate::ui::widgets::render_scrollbar_borderless(
+            frame,
+            area,
+            total_entries,
+            visible_height,
+            scroll_offset,
+        );
     }
 }
 
@@ -366,14 +425,17 @@ fn render_single_section<T, F>(
         None => NavigationService::calc_scroll_offset(selected_idx, visible_height, total),
     };
 
-    let list_items: Vec<ListItem> = items.iter()
+    let list_items: Vec<ListItem> = items
+        .iter()
         .enumerate()
         .skip(scroll_offset)
         .take(visible_height)
         .map(|(i, item)| {
             let is_selected = is_focused && i == selected_idx;
             let style = if is_selected {
-                Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
+                Style::default()
+                    .fg(t.colors.selection_text)
+                    .bg(t.colors.selection_bar_bg)
             } else {
                 Style::default().fg(t.colors.fg_primary)
             };
@@ -385,6 +447,12 @@ fn render_single_section<T, F>(
 
     // Scrollbar for long lists
     if total > visible_height {
-        crate::ui::widgets::render_scrollbar_borderless(frame, area, total, visible_height, scroll_offset);
+        crate::ui::widgets::render_scrollbar_borderless(
+            frame,
+            area,
+            total,
+            visible_height,
+            scroll_offset,
+        );
     }
 }

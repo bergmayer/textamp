@@ -1,27 +1,27 @@
 //! Navigation dispatch handlers: SetView, NextView, PrevView, NextMode, PrevMode,
 //! SetCategory, ToggleFocus.
 
-use crate::app::{Action, AppState, Event};
-use crate::app::action::{NavigationAction, BrowseAction, FolderAction, SystemAction};
+use crate::app::action::{BrowseAction, FolderAction, NavigationAction, SystemAction};
 use crate::app::state::{BrowseCategory, Focus, RightPanelMode, View};
-use crate::plex::PlexClient;
+use crate::app::{Action, AppState, Event};
 
 use anyhow::Result;
 use tokio::sync::mpsc;
 
-use super::helpers;
-
 /// Dispatch navigation actions. Returns follow-up actions.
 pub async fn dispatch(
-    event_tx: &mpsc::Sender<Event>,
+    _event_tx: &mpsc::Sender<Event>,
     action: NavigationAction,
     state: &mut AppState,
-    client: &mut PlexClient,
 ) -> Result<Vec<Action>> {
     let mut follow_ups = vec![];
 
     // Deactivate inline filter on view or category change
-    if matches!(action, NavigationAction::SetView(_) | NavigationAction::SetCategory { .. }) && state.list_filter.active {
+    if matches!(
+        action,
+        NavigationAction::SetView(_) | NavigationAction::SetCategory { .. }
+    ) && state.list_filter.active
+    {
         state.list_filter.deactivate();
     }
 
@@ -29,9 +29,7 @@ pub async fn dispatch(
         NavigationAction::SetView(view) => {
             // Clear artwork cache when leaving Similar view to force re-render
             // (Similar popup's Clear widget can corrupt terminal images)
-            if state.view == View::Similar {
-                crate::ui::screens::now_playing::clear_artwork_cache();
-            }
+
             state.set_view(view);
             // Load stations when entering Queue view if not already loaded
             if view == View::Queue
@@ -72,7 +70,10 @@ pub async fn dispatch(
                 state.set_view(View::Browse);
             }
         }
-        NavigationAction::SetCategory { category, preserve_sections_focus } => {
+        NavigationAction::SetCategory {
+            category,
+            preserve_sections_focus,
+        } => {
             // Picking a category implies "show me that part of the
             // library", so always switch to the Browse view too.
             // Without this, the View menu / Ctrl+L|P|G|O shortcuts
@@ -110,25 +111,25 @@ pub async fn dispatch(
 
                 // Load category data if needed (and not already loading)
                 match category {
-                    BrowseCategory::Library => {
-                        if state.library.artists.is_empty() && !state.library.artists_loading {
-                            helpers::load_artists(event_tx, state, client);
-                        }
+                    BrowseCategory::Library
+                        if state.library.artists.is_empty() && !state.library.artists_loading =>
+                    {
+                        return Ok(vec![crate::app::action::DataAction::LoadArtists.into()]);
                     }
                     BrowseCategory::Playlists => {
                         if state.library.playlists.is_empty() && !state.library.playlists_loading {
-                            helpers::load_playlists(event_tx, state, client);
+                            return Ok(vec![crate::app::action::DataAction::LoadPlaylists.into()]);
                         } else {
                             // Rebuild root column from state.library.playlists to ensure it's populated
                             // (guards against stale/empty nav from preload race conditions)
-                            let items = crate::app::state::BrowseItem::from_playlists(&state.library.playlists);
+                            let items = crate::app::state::BrowseItem::from_playlists(
+                                &state.library.playlists,
+                            );
                             state.playlist_nav.reset("playlists", items);
                         }
                     }
-                    BrowseCategory::Folders => {
-                        if state.folder_state.is_none() {
-                            follow_ups.push(FolderAction::LoadFolderRoot.into());
-                        }
+                    BrowseCategory::Folders if state.folder_state.is_none() => {
+                        follow_ups.push(FolderAction::LoadFolderRoot.into());
                     }
                     cat if cat.is_tag_section() => {
                         // Reset shared tag_nav for the new section.
@@ -153,128 +154,166 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plex::PlexClientInfo;
 
-    fn setup() -> (mpsc::Sender<Event>, mpsc::Receiver<Event>, AppState, PlexClient) {
+    fn setup() -> (mpsc::Sender<Event>, mpsc::Receiver<Event>, AppState) {
         let (tx, rx) = mpsc::channel(100);
         let state = AppState::new();
-        let client = PlexClient::new(PlexClientInfo::default()).unwrap();
-        (tx, rx, state, client)
+        (tx, rx, state)
     }
 
     #[tokio::test]
     async fn toggle_focus_left_to_right() {
-        let (tx, _rx, mut state, mut client) = setup();
+        let (tx, _rx, mut state) = setup();
         state.focus = Focus::Left;
 
-        dispatch(&tx, NavigationAction::ToggleFocus.into(), &mut state, &mut client).await.unwrap();
+        dispatch(&tx, NavigationAction::ToggleFocus, &mut state)
+            .await
+            .unwrap();
         assert_eq!(state.focus, Focus::Right);
     }
 
     #[tokio::test]
     async fn toggle_focus_right_to_left() {
-        let (tx, _rx, mut state, mut client) = setup();
+        let (tx, _rx, mut state) = setup();
         state.focus = Focus::Right;
 
-        dispatch(&tx, NavigationAction::ToggleFocus.into(), &mut state, &mut client).await.unwrap();
+        dispatch(&tx, NavigationAction::ToggleFocus, &mut state)
+            .await
+            .unwrap();
         assert_eq!(state.focus, Focus::Left);
     }
 
     #[tokio::test]
     async fn set_view_changes_state() {
-        let (tx, _rx, mut state, mut client) = setup();
+        let (tx, _rx, mut state) = setup();
 
-        dispatch(&tx, NavigationAction::SetView(View::Queue).into(), &mut state, &mut client).await.unwrap();
+        dispatch(&tx, NavigationAction::SetView(View::Queue), &mut state)
+            .await
+            .unwrap();
         assert_eq!(state.view, View::Queue);
 
-        dispatch(&tx, NavigationAction::SetView(View::Help).into(), &mut state, &mut client).await.unwrap();
+        dispatch(&tx, NavigationAction::SetView(View::Help), &mut state)
+            .await
+            .unwrap();
         assert_eq!(state.view, View::Help);
     }
 
     #[tokio::test]
     async fn set_view_queue_requests_load_stations() {
-        let (tx, _rx, mut state, mut client) = setup();
+        let (tx, _rx, mut state) = setup();
 
-        let follow_ups = dispatch(&tx, NavigationAction::SetView(View::Queue).into(), &mut state, &mut client).await.unwrap();
-        assert!(follow_ups.iter().any(|a| matches!(a, Action::Browse(BrowseAction::LoadStations))));
+        let follow_ups = dispatch(&tx, NavigationAction::SetView(View::Queue), &mut state)
+            .await
+            .unwrap();
+        assert!(follow_ups
+            .iter()
+            .any(|a| matches!(a, Action::Browse(BrowseAction::LoadStations))));
     }
 
     #[tokio::test]
     async fn set_view_now_playing_requests_waveform() {
-        let (tx, _rx, mut state, mut client) = setup();
+        let (tx, _rx, mut state) = setup();
 
-        let follow_ups = dispatch(&tx, NavigationAction::SetView(View::NowPlaying).into(), &mut state, &mut client).await.unwrap();
-        assert!(follow_ups.iter().any(|a| matches!(a, Action::System(SystemAction::LoadWaveform))));
-        assert!(follow_ups.iter().any(|a| matches!(a, Action::System(SystemAction::LoadSpectrogram))));
+        let follow_ups = dispatch(&tx, NavigationAction::SetView(View::NowPlaying), &mut state)
+            .await
+            .unwrap();
+        assert!(follow_ups
+            .iter()
+            .any(|a| matches!(a, Action::System(SystemAction::LoadWaveform))));
+        assert!(follow_ups
+            .iter()
+            .any(|a| matches!(a, Action::System(SystemAction::LoadSpectrogram))));
     }
 
     #[tokio::test]
     async fn next_view_browse_to_queue() {
-        let (tx, _rx, mut state, mut client) = setup();
+        let (tx, _rx, mut state) = setup();
         state.view = View::Browse;
         state.set_browse_category(BrowseCategory::Library, false);
 
-        dispatch(&tx, NavigationAction::NextView.into(), &mut state, &mut client).await.unwrap();
+        dispatch(&tx, NavigationAction::NextView, &mut state)
+            .await
+            .unwrap();
         assert_eq!(state.view, View::Queue);
     }
 
     #[tokio::test]
     async fn next_view_queue_to_now_playing() {
-        let (tx, _rx, mut state, mut client) = setup();
+        let (tx, _rx, mut state) = setup();
         state.view = View::Queue;
 
-        dispatch(&tx, NavigationAction::NextView.into(), &mut state, &mut client).await.unwrap();
+        dispatch(&tx, NavigationAction::NextView, &mut state)
+            .await
+            .unwrap();
         assert_eq!(state.view, View::NowPlaying);
     }
 
     #[tokio::test]
     async fn next_view_now_playing_to_browse() {
-        let (tx, _rx, mut state, mut client) = setup();
+        let (tx, _rx, mut state) = setup();
         state.view = View::NowPlaying;
 
-        dispatch(&tx, NavigationAction::NextView.into(), &mut state, &mut client).await.unwrap();
+        dispatch(&tx, NavigationAction::NextView, &mut state)
+            .await
+            .unwrap();
         assert_eq!(state.view, View::Browse);
     }
 
     #[tokio::test]
     async fn prev_view_library_to_now_playing() {
-        let (tx, _rx, mut state, mut client) = setup();
+        let (tx, _rx, mut state) = setup();
         state.view = View::Browse;
         state.set_browse_category(BrowseCategory::Library, false);
 
-        dispatch(&tx, NavigationAction::PrevView.into(), &mut state, &mut client).await.unwrap();
+        dispatch(&tx, NavigationAction::PrevView, &mut state)
+            .await
+            .unwrap();
         assert_eq!(state.view, View::NowPlaying);
     }
 
     #[tokio::test]
     async fn prev_view_now_playing_to_queue() {
-        let (tx, _rx, mut state, mut client) = setup();
+        let (tx, _rx, mut state) = setup();
         state.view = View::NowPlaying;
 
-        dispatch(&tx, NavigationAction::PrevView.into(), &mut state, &mut client).await.unwrap();
+        dispatch(&tx, NavigationAction::PrevView, &mut state)
+            .await
+            .unwrap();
         assert_eq!(state.view, View::Queue);
     }
 
     #[tokio::test]
     async fn set_category_changes_and_resets_focus() {
-        let (tx, _rx, mut state, mut client) = setup();
+        let (tx, _rx, mut state) = setup();
         state.view = View::Browse;
         state.set_browse_category(BrowseCategory::Library, false);
         state.focus = Focus::Right;
 
-        dispatch(&tx, NavigationAction::set_category(BrowseCategory::AlbumGenres).into(), &mut state, &mut client).await.unwrap();
+        dispatch(
+            &tx,
+            NavigationAction::set_category(BrowseCategory::AlbumGenres),
+            &mut state,
+        )
+        .await
+        .unwrap();
         assert_eq!(state.browse_category, BrowseCategory::AlbumGenres);
         assert_eq!(state.focus, Focus::Left);
     }
 
     #[tokio::test]
     async fn set_category_same_is_noop() {
-        let (tx, _rx, mut state, mut client) = setup();
+        let (tx, _rx, mut state) = setup();
         state.view = View::Browse;
         state.set_browse_category(BrowseCategory::Library, false);
         state.focus = Focus::Right; // keep right focus
 
-        dispatch(&tx, NavigationAction::set_category(BrowseCategory::Library).into(), &mut state, &mut client).await.unwrap();
+        dispatch(
+            &tx,
+            NavigationAction::set_category(BrowseCategory::Library),
+            &mut state,
+        )
+        .await
+        .unwrap();
         // Category didn't change, so focus should remain Right
         assert_eq!(state.focus, Focus::Right);
     }

@@ -33,11 +33,11 @@ macro_rules! cyclic_enum {
     };
 }
 
-use crate::plex::models::{Album, Artist, Genre, Library, Playlist, PlexServer, RemotePlayer, Station, Track, SearchResults};
-use crate::miller::{MillerColumn, MillerState};
-use crate::plex::{CachedFolder, CachedPlaylistTracks};
-use crate::services::{FolderNavigationState, WaveformData, MAX_HISTORY_SIZE};
 use crate::app::theme::ThemeName;
+use crate::library::models::{Album, Artist, Genre, Playlist, SearchResults, Station, Track};
+use crate::miller::{MillerColumn, MillerState};
+
+use crate::services::{FolderNavigationState, WaveformData, MAX_HISTORY_SIZE};
 use crate::util::SecretString;
 use std::collections::HashMap;
 
@@ -249,7 +249,7 @@ pub enum AllTracksScope {
 impl AllTracksScope {
     /// Stable identifier used by `BrowseItem::key()`. Sentinel
     /// strings preserve uniqueness for the global scopes; per-artist
-    /// scopes use the artist's Plex rating key directly (which is
+    /// scopes use the artist's server rating key directly (which is
     /// also the artwork-cache key).
     pub fn key(&self) -> &str {
         match self {
@@ -272,7 +272,7 @@ impl AllTracksScope {
         }
     }
 
-    /// Plex artist rating-key when this row is scoped to one. Used
+    /// server artist rating-key when this row is scoped to one. Used
     /// by the artwork loader to cache per-artist thumbs.
     pub fn artist_key(&self) -> Option<&str> {
         match self {
@@ -315,7 +315,7 @@ pub enum BrowseItem {
         key: String,
         title: String,
     },
-    /// Genre category selector in column 0 (All, Library, Artist, Album, Mood, Style).
+    /// Genre category selector in column 0 (All, Artist, Album, Mood, Style).
     GenreCategory {
         key: String,
         title: String,
@@ -338,7 +338,7 @@ pub enum BrowseItem {
     },
     /// "All Artists" entry - pinned at top of artist list, drills into all albums.
     AllArtists,
-    /// "Artist Radio" entry - starts Plex radio seeded from this artist.
+    /// "Artist Radio" entry - starts server radio seeded from this artist.
     ArtistRadio {
         artist_key: String,
         artist_name: String,
@@ -389,7 +389,10 @@ impl BrowseItem {
 
     pub fn is_drillable(&self) -> bool {
         // AllTracks/Compilations/CompilationTracks are drillable, Track and ArtistRadio are not
-        !matches!(self, BrowseItem::Track { .. } | BrowseItem::ArtistRadio { .. })
+        !matches!(
+            self,
+            BrowseItem::Track { .. } | BrowseItem::ArtistRadio { .. }
+        )
     }
 
     /// Whether this item is a placeholder (Textamp filled in "Unknown ..." for empty metadata).
@@ -404,17 +407,32 @@ impl BrowseItem {
     /// Convert a list of Artists to BrowseItems.
     /// Placeholder items (empty title → "Unknown Artist") are sorted to the end.
     pub fn from_artists(artists: &[Artist]) -> Vec<BrowseItem> {
-        let mut items: Vec<BrowseItem> = artists.iter().map(|a| {
-            let is_empty = a.title.is_empty();
-            BrowseItem::Artist {
-                key: a.rating_key.clone(),
-                title: if is_empty { "Unknown Artist".to_string() } else { a.title.clone() },
-                thumb: a.thumb.clone(),
-                is_placeholder: is_empty,
-            }
-        }).collect();
+        let mut items: Vec<BrowseItem> = artists
+            .iter()
+            .map(|a| {
+                let is_empty = a.title.is_empty();
+                BrowseItem::Artist {
+                    key: a.rating_key.clone(),
+                    title: if is_empty {
+                        "Unknown Artist".to_string()
+                    } else {
+                        a.title.clone()
+                    },
+                    thumb: a.thumb.clone(),
+                    is_placeholder: is_empty,
+                }
+            })
+            .collect();
         // Stable-partition: non-placeholders first, placeholders at end
-        items.sort_by_key(|item| matches!(item, BrowseItem::Artist { is_placeholder: true, .. }));
+        items.sort_by_key(|item| {
+            matches!(
+                item,
+                BrowseItem::Artist {
+                    is_placeholder: true,
+                    ..
+                }
+            )
+        });
         items
     }
 
@@ -422,66 +440,90 @@ impl BrowseItem {
     /// Placeholder items (empty title → "Unknown Album (...)") are sorted to the end.
     /// If `album_display_artist` is provided, uses it to override the artist name
     /// when all tracks on a non-compilation album share a uniform track artist.
-    pub fn from_albums(albums: &[Album], album_display_artist: &HashMap<String, String>) -> Vec<BrowseItem> {
-        let mut items: Vec<BrowseItem> = albums.iter().map(|a| {
-            let is_empty = a.title.is_empty();
-            let display_artist = album_display_artist.get(&a.rating_key)
-                .map(|s| s.as_str())
-                .unwrap_or_else(|| a.artist_name());
-            let (title, year) = if is_empty {
-                (format!("Unknown Album ({})", display_artist), None)
-            } else {
-                (a.title.clone(), a.year)
-            };
-            BrowseItem::Album {
-                key: a.rating_key.clone(),
-                title,
-                artist: display_artist.to_string(),
-                year,
-                thumb: a.thumb.clone(),
-                is_placeholder: is_empty,
-            }
-        }).collect();
+    pub fn from_albums(
+        albums: &[Album],
+        album_display_artist: &HashMap<String, String>,
+    ) -> Vec<BrowseItem> {
+        let mut items: Vec<BrowseItem> = albums
+            .iter()
+            .map(|a| {
+                let is_empty = a.title.is_empty();
+                let display_artist = album_display_artist
+                    .get(&a.rating_key)
+                    .map(|s| s.as_str())
+                    .unwrap_or_else(|| a.artist_name());
+                let (title, year) = if is_empty {
+                    (format!("Unknown Album ({})", display_artist), None)
+                } else {
+                    (a.title.clone(), a.year)
+                };
+                BrowseItem::Album {
+                    key: a.rating_key.clone(),
+                    title,
+                    artist: display_artist.to_string(),
+                    year,
+                    thumb: a.thumb.clone(),
+                    is_placeholder: is_empty,
+                }
+            })
+            .collect();
         // Stable-partition: non-placeholders first, placeholders at end
-        items.sort_by_key(|item| matches!(item, BrowseItem::Album { is_placeholder: true, .. }));
+        items.sort_by_key(|item| {
+            matches!(
+                item,
+                BrowseItem::Album {
+                    is_placeholder: true,
+                    ..
+                }
+            )
+        });
         items
     }
 
     /// Convert a list of Tracks to BrowseItems.
     pub fn from_tracks(tracks: &[Track]) -> Vec<BrowseItem> {
-        tracks.iter().map(|t| {
-            let title = if t.title.is_empty() {
-                t.file_name().unwrap_or("Unknown Track").to_string()
-            } else {
-                t.title.clone()
-            };
-            BrowseItem::Track {
-                key: t.rating_key.clone(),
-                title,
-                artist_name: Some(t.track_artist().to_string()),
-                album_name: Some(t.album_name().to_string()),
-                year: t.year.or(t.parent_year),
-                duration_ms: t.duration_ms(),
-                track_number: t.index,
-            }
-        }).collect()
+        tracks
+            .iter()
+            .map(|t| {
+                let title = if t.title.is_empty() {
+                    t.file_name().unwrap_or("Unknown Track").to_string()
+                } else {
+                    t.title.clone()
+                };
+                BrowseItem::Track {
+                    key: t.rating_key.clone(),
+                    title,
+                    artist_name: Some(t.track_artist().to_string()),
+                    album_name: Some(t.album_name().to_string()),
+                    year: t.year.or(t.parent_year),
+                    duration_ms: t.duration_ms(),
+                    track_number: t.index,
+                }
+            })
+            .collect()
     }
 
     /// Convert a list of Genres to BrowseItems.
     pub fn from_genres(genres: &[Genre]) -> Vec<BrowseItem> {
-        genres.iter().map(|g| BrowseItem::Genre {
-            key: g.key.clone(),
-            title: g.title.clone(),
-        }).collect()
+        genres
+            .iter()
+            .map(|g| BrowseItem::Genre {
+                key: g.key.clone(),
+                title: g.title.clone(),
+            })
+            .collect()
     }
 
     /// Convert a list of Playlists to BrowseItems.
     pub fn from_playlists(playlists: &[Playlist]) -> Vec<BrowseItem> {
-        playlists.iter().map(|p| BrowseItem::Playlist {
-            key: p.rating_key.clone(),
-            title: p.title.clone(),
-            track_count: p.leaf_count,
-        }).collect()
+        playlists
+            .iter()
+            .map(|p| BrowseItem::Playlist {
+                key: p.rating_key.clone(),
+                title: p.title.clone(),
+                track_count: p.leaf_count,
+            })
+            .collect()
     }
 
     /// Build artist root items: pinned items at top, then artist items.
@@ -526,11 +568,11 @@ impl BrowseItem {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ColumnSortMode {
     #[default]
-    Default,      // Alphabetical / track number / playlist order
+    Default, // Alphabetical / track number / playlist order
     ByArtist,
-    ByAlbum,      // Track columns: sort by album name
-    ByTitle,      // Sort by title
-    ByDuration,   // Sort by duration
+    ByAlbum,    // Track columns: sort by album name
+    ByTitle,    // Sort by title
+    ByDuration, // Sort by duration
     Shuffled,
 }
 
@@ -571,9 +613,26 @@ impl SortColumnType {
     pub fn available_modes(&self) -> &'static [ColumnSortMode] {
         match self {
             SortColumnType::Artist => &[ColumnSortMode::Default, ColumnSortMode::Shuffled],
-            SortColumnType::Album => &[ColumnSortMode::Default, ColumnSortMode::ByTitle, ColumnSortMode::ByArtist, ColumnSortMode::Shuffled],
-            SortColumnType::Track => &[ColumnSortMode::Default, ColumnSortMode::ByTitle, ColumnSortMode::ByDuration, ColumnSortMode::Shuffled],
-            SortColumnType::AllTracks => &[ColumnSortMode::Default, ColumnSortMode::ByArtist, ColumnSortMode::ByAlbum, ColumnSortMode::ByTitle, ColumnSortMode::ByDuration, ColumnSortMode::Shuffled],
+            SortColumnType::Album => &[
+                ColumnSortMode::Default,
+                ColumnSortMode::ByTitle,
+                ColumnSortMode::ByArtist,
+                ColumnSortMode::Shuffled,
+            ],
+            SortColumnType::Track => &[
+                ColumnSortMode::Default,
+                ColumnSortMode::ByTitle,
+                ColumnSortMode::ByDuration,
+                ColumnSortMode::Shuffled,
+            ],
+            SortColumnType::AllTracks => &[
+                ColumnSortMode::Default,
+                ColumnSortMode::ByArtist,
+                ColumnSortMode::ByAlbum,
+                ColumnSortMode::ByTitle,
+                ColumnSortMode::ByDuration,
+                ColumnSortMode::Shuffled,
+            ],
         }
     }
 
@@ -581,9 +640,21 @@ impl SortColumnType {
     pub fn default_label(&self, is_playlist: bool) -> &'static str {
         match self {
             SortColumnType::Artist => "Artist",
-            SortColumnType::Album => if is_playlist { "Title" } else { "Year" },
+            SortColumnType::Album => {
+                if is_playlist {
+                    "Title"
+                } else {
+                    "Year"
+                }
+            }
             SortColumnType::Track => "Track #",
-            SortColumnType::AllTracks => if is_playlist { "Playlist order" } else { "Library order" },
+            SortColumnType::AllTracks => {
+                if is_playlist {
+                    "Playlist order"
+                } else {
+                    "Library order"
+                }
+            }
         }
     }
 }
@@ -618,7 +689,14 @@ pub struct SortPopupState {
 
 impl SortPopupState {
     /// Build sort popup for the given column type.
-    pub fn new(column_idx: usize, column_title: String, column_type: SortColumnType, current_mode: ColumnSortMode, _artwork_visible: bool, is_playlist: bool) -> Self {
+    pub fn new(
+        column_idx: usize,
+        column_title: String,
+        column_type: SortColumnType,
+        current_mode: ColumnSortMode,
+        _artwork_visible: bool,
+        is_playlist: bool,
+    ) -> Self {
         let mut options = Vec::new();
 
         let default_label = column_type.default_label(is_playlist);
@@ -683,7 +761,10 @@ impl SortPopupState {
         // grouping again would be a no-op. Same logic for any other
         // single-album track column reached by drilling.
         if self.is_playlist
-            && matches!(self.column_type, SortColumnType::AllTracks | SortColumnType::Album)
+            && matches!(
+                self.column_type,
+                SortColumnType::AllTracks | SortColumnType::Album
+            )
         {
             self.options.push(SortPopupOption::GroupByAlbum);
         }
@@ -738,11 +819,11 @@ pub struct BrowseColumn {
     /// Currently selected index
     pub selected_index: usize,
     /// Full Track objects for track columns (used for playback with media info)
-    pub tracks: Vec<crate::plex::models::Track>,
+    pub tracks: Vec<crate::library::models::Track>,
     /// Original items before shuffle/sort (None if in original order)
     original_items: Option<Vec<BrowseItem>>,
     /// Original tracks before shuffle/sort (None if in original order)
-    original_tracks: Option<Vec<crate::plex::models::Track>>,
+    original_tracks: Option<Vec<crate::library::models::Track>>,
     /// Per-column sort mode (replaces global track_view_mode and sorted_by_artist)
     pub sort_mode: ColumnSortMode,
     /// Sort direction: true = ascending (default)
@@ -788,12 +869,12 @@ pub struct BrowseColumn {
 /// Added" can resolve to tens of thousands of tracks).
 #[derive(Debug, Clone)]
 pub struct LazyPlaylist {
-    /// Plex rating key — used to re-issue a fetch for the next page.
+    /// server rating key — used to re-issue a fetch for the next page.
     pub key: String,
     /// Total tracks the server says exist for this column. Once the
     /// in-memory `tracks.len()` reaches this number the GUI stops
     /// firing `LoadMorePlaylistTracks`. `None` means "we don't yet
-    /// know how many" (Plex didn't return `totalSize`).
+    /// know how many" (server didn't return `totalSize`).
     pub total: Option<u32>,
     /// True while a page fetch is in flight so the scroll handler
     /// doesn't fire duplicate requests.
@@ -823,7 +904,11 @@ impl BrowseColumn {
     }
 
     /// Create a column with full track objects stored for playback.
-    pub fn new_with_tracks(title: impl Into<String>, items: Vec<BrowseItem>, tracks: Vec<crate::plex::models::Track>) -> Self {
+    pub fn new_with_tracks(
+        title: impl Into<String>,
+        items: Vec<BrowseItem>,
+        tracks: Vec<crate::library::models::Track>,
+    ) -> Self {
         Self {
             title: title.into(),
             items,
@@ -871,13 +956,20 @@ impl BrowseColumn {
         self.sort_mode = ColumnSortMode::Shuffled;
         // Save originals (fresh copy each time for re-shuffle)
         self.original_items = Some(self.items.clone());
-        self.original_tracks = if self.tracks.is_empty() { None } else { Some(self.tracks.clone()) };
+        self.original_tracks = if self.tracks.is_empty() {
+            None
+        } else {
+            Some(self.tracks.clone())
+        };
 
         // Count pinned items at start (AllArtists, AllTracks, Compilations, CompilationTracks, ArtistRadio)
         let start = self.pinned_count();
 
         // Find placeholder items pinned at end
-        let placeholder_start = self.items.iter().rposition(|item| !item.is_placeholder_item())
+        let placeholder_start = self
+            .items
+            .iter()
+            .rposition(|item| !item.is_placeholder_item())
             .map(|i| i + 1)
             .unwrap_or(self.items.len());
         let end = placeholder_start;
@@ -936,19 +1028,23 @@ impl BrowseColumn {
     /// Sort album items by artist name (case-insensitive), then by year.
     /// Saves originals for restore. Pinned items at index 0 are excluded.
     pub fn sort_by_artist(&mut self) {
-        if self.sort_mode == ColumnSortMode::ByArtist { return; }
+        if self.sort_mode == ColumnSortMode::ByArtist {
+            return;
+        }
         // Save originals if not already saved
         if self.original_items.is_none() {
             self.original_items = Some(self.items.clone());
-            self.original_tracks = if self.tracks.is_empty() { None } else { Some(self.tracks.clone()) };
+            self.original_tracks = if self.tracks.is_empty() {
+                None
+            } else {
+                Some(self.tracks.clone())
+            };
         }
         // Count how many pinned items are at the start
         let start = self.pinned_count();
-        self.items[start..].sort_by_cached_key(|item| {
-            match item {
-                BrowseItem::Album { artist, year, .. } => (artist.to_lowercase(), *year),
-                _ => (String::new(), None),
-            }
+        self.items[start..].sort_by_cached_key(|item| match item {
+            BrowseItem::Album { artist, year, .. } => (artist.to_lowercase(), *year),
+            _ => (String::new(), None),
         });
         self.sort_mode = ColumnSortMode::ByArtist;
         self.selected_index = 0;
@@ -957,7 +1053,9 @@ impl BrowseColumn {
     /// Sort track items by title (case-insensitive).
     /// Saves originals for restore. Pinned items at start are excluded.
     pub fn sort_by_title(&mut self) {
-        if self.sort_mode == ColumnSortMode::ByTitle { return; }
+        if self.sort_mode == ColumnSortMode::ByTitle {
+            return;
+        }
         self.save_originals();
         let start = self.pinned_count();
         // Sort items
@@ -973,20 +1071,28 @@ impl BrowseColumn {
     /// Sort track items by duration (ascending).
     /// Saves originals for restore. Pinned items at start are excluded.
     pub fn sort_by_duration(&mut self) {
-        if self.sort_mode == ColumnSortMode::ByDuration { return; }
+        if self.sort_mode == ColumnSortMode::ByDuration {
+            return;
+        }
         self.save_originals();
         let start = self.pinned_count();
         // Sort items
         self.items[start..].sort_by(|a, b| {
-            let a_dur = if let BrowseItem::Track { duration_ms, .. } = a { *duration_ms } else { 0 };
-            let b_dur = if let BrowseItem::Track { duration_ms, .. } = b { *duration_ms } else { 0 };
+            let a_dur = if let BrowseItem::Track { duration_ms, .. } = a {
+                *duration_ms
+            } else {
+                0
+            };
+            let b_dur = if let BrowseItem::Track { duration_ms, .. } = b {
+                *duration_ms
+            } else {
+                0
+            };
             a_dur.cmp(&b_dur)
         });
         // Sort tracks in parallel
         if start < self.tracks.len() {
-            self.tracks[start..].sort_by(|a, b| {
-                a.duration_ms().cmp(&b.duration_ms())
-            });
+            self.tracks[start..].sort_by_key(|a| a.duration_ms());
         }
         self.sort_mode = ColumnSortMode::ByDuration;
         self.selected_index = 0;
@@ -995,23 +1101,26 @@ impl BrowseColumn {
     /// Sort track items by album name (case-insensitive), then track number.
     /// Saves originals for restore.
     pub fn sort_by_album(&mut self) {
-        if self.sort_mode == ColumnSortMode::ByAlbum { return; }
+        if self.sort_mode == ColumnSortMode::ByAlbum {
+            return;
+        }
         self.save_originals();
         let start = self.pinned_count();
         // Sort items
-        self.items[start..].sort_by_cached_key(|item| {
-            match item {
-                BrowseItem::Track { album_name, track_number, .. } => {
-                    (album_name.as_deref().unwrap_or("").to_lowercase(), *track_number)
-                }
-                _ => (String::new(), None),
-            }
+        self.items[start..].sort_by_cached_key(|item| match item {
+            BrowseItem::Track {
+                album_name,
+                track_number,
+                ..
+            } => (
+                album_name.as_deref().unwrap_or("").to_lowercase(),
+                *track_number,
+            ),
+            _ => (String::new(), None),
         });
         // Sort tracks in parallel
         if start < self.tracks.len() {
-            self.tracks[start..].sort_by_cached_key(|t| {
-                (t.album_name().to_lowercase(), t.index)
-            });
+            self.tracks[start..].sort_by_cached_key(|t| (t.album_name().to_lowercase(), t.index));
         }
         self.sort_mode = ColumnSortMode::ByAlbum;
         self.selected_index = 0;
@@ -1033,17 +1142,29 @@ impl BrowseColumn {
     fn save_originals(&mut self) {
         if self.original_items.is_none() {
             self.original_items = Some(self.items.clone());
-            self.original_tracks = if self.tracks.is_empty() { None } else { Some(self.tracks.clone()) };
+            self.original_tracks = if self.tracks.is_empty() {
+                None
+            } else {
+                Some(self.tracks.clone())
+            };
         }
     }
 
     /// Count pinned items at the start of the column.
     pub fn pinned_count(&self) -> usize {
-        self.items.iter().take_while(|item| {
-            matches!(item, BrowseItem::AllArtists | BrowseItem::AllTracks { .. }
-                | BrowseItem::ArtistRadio { .. } | BrowseItem::Compilations
-                | BrowseItem::CompilationTracks { .. })
-        }).count()
+        self.items
+            .iter()
+            .take_while(|item| {
+                matches!(
+                    item,
+                    BrowseItem::AllArtists
+                        | BrowseItem::AllTracks { .. }
+                        | BrowseItem::ArtistRadio { .. }
+                        | BrowseItem::Compilations
+                        | BrowseItem::CompilationTracks { .. }
+                )
+            })
+            .count()
     }
 
     /// Group tracks by album for playlist columns.
@@ -1053,7 +1174,9 @@ impl BrowseColumn {
     pub fn group_by_album(&mut self) {
         use std::collections::HashMap;
 
-        if self.tracks.is_empty() { return; }
+        if self.tracks.is_empty() {
+            return;
+        }
 
         self.save_originals();
         self.grouped_by_album = true;
@@ -1106,7 +1229,6 @@ impl BrowseColumn {
         }
         self.selected_index = 0;
     }
-
 }
 
 impl MillerColumn for BrowseColumn {
@@ -1175,43 +1297,6 @@ impl MillerState<BrowseColumn> {
     }
 }
 
-/// Authentication flow step.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum AuthStep {
-    /// Initial - checking for stored credentials
-    #[default]
-    Checking,
-    /// Username/password entry form
-    Login,
-    /// Signing in to Plex.tv
-    Authenticating,
-    /// Choose from available servers
-    ServerSelect,
-    /// Connecting to selected server
-    Connecting,
-}
-
-/// State for the authentication screen flow.
-#[derive(Debug, Clone, Default)]
-pub struct AuthState {
-    /// Current step in the auth flow
-    pub step: AuthStep,
-    /// Username input field
-    pub username_input: String,
-    /// Password input field
-    pub password_input: SecretString,
-    /// Which field is focused: 0=username, 1=password, 2=sign in button
-    pub field_index: usize,
-    /// Whether currently editing a text field
-    pub editing: bool,
-    /// Selected server index (for ServerSelect step)
-    pub server_index: usize,
-    /// Error message to display
-    pub error_message: Option<String>,
-    /// Plex Pass status (cached during auth flow for server selection)
-    pub has_plex_pass: bool,
-}
-
 /// Step in the multi-artist radio picker flow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArtistRadioPickerStep {
@@ -1240,28 +1325,31 @@ pub struct ArtistRadioPickerState {
 pub struct ArtistBioPopup {
     /// Artist name displayed in the title.
     pub artist_name: String,
-    /// Artist biography text.
-    pub bio: String,
+    pub document: crate::services::biography::Biography,
     /// Scroll offset for long bios (clamped in render).
     pub scroll: u16,
+    pub google_focused: bool,
     /// Loading state.
     pub loading: bool,
-    /// Artist artwork image data (fetched from Plex).
-    pub artwork_data: Option<Vec<u8>>,
-    /// Artist artwork thumb path (for cache keying).
-    pub artwork_thumb: Option<String>,
+    pub image_index: usize,
+    pub task: Option<crate::app::tasks::TaskLease>,
 }
 
 /// Snapshot of queue state for undo.
 #[derive(Debug, Clone)]
 pub struct QueueSnapshot {
-    pub queue: Vec<Track>,
-    pub queue_index: Option<usize>,
+    pub contents: QueueContents,
     pub description: String,
-    /// Saved radio state for undoing radio-to-queue conversion.
-    pub radio_snapshot: Option<RadioPlaybackState>,
-    /// Saved legacy RadioState (Alt+R) for undo.
-    pub radio_state_snapshot: Option<RadioState>,
+}
+
+/// Undo owns either a queue or radio session, never duplicate copies of both.
+#[derive(Debug, Clone)]
+pub enum QueueContents {
+    Queue {
+        tracks: Vec<Track>,
+        index: Option<usize>,
+    },
+    Radio(Box<RadioPlaybackState>),
 }
 
 /// How the Library screen's Miller columns share the horizontal
@@ -1312,7 +1400,11 @@ pub enum ArtworkMode {
 
 impl ArtworkMode {
     pub fn all() -> &'static [ArtworkMode] {
-        &[ArtworkMode::Auto, ArtworkMode::Halfblocks, ArtworkMode::Braille]
+        &[
+            ArtworkMode::Auto,
+            ArtworkMode::Halfblocks,
+            ArtworkMode::Braille,
+        ]
     }
 
     pub fn name(&self) -> &'static str {
@@ -1330,7 +1422,6 @@ impl ArtworkMode {
             _ => ArtworkMode::Auto,
         }
     }
-
 }
 
 cyclic_enum!(ArtworkMode, Auto, Halfblocks, Braille);
@@ -1338,32 +1429,40 @@ cyclic_enum!(ArtworkMode, Auto, Halfblocks, Braille);
 /// Cache management state.
 #[derive(Debug)]
 pub struct CacheManagement {
+    pub failures: HashMap<RefreshCategory, RefreshFailure>,
+
     /// Per-category timestamps (Unix epoch secs) for when each category was last refreshed.
     pub category_timestamps: HashMap<RefreshCategory, u64>,
     pub dirty: bool,
     pub last_input_time: std::time::Instant,
-    pub last_save: std::time::Instant,
-    pub save_in_progress: bool,
+
+    /// Cheap timestamp checks, not a network polling interval.
+    pub next_refresh_check: Option<std::time::Instant>,
+
     pub background_refresh: std::collections::HashSet<RefreshCategory>,
-    /// Categories currently being preloaded from the server (initial load, not refresh).
-    pub preloads_in_progress: std::collections::HashSet<String>,
-    /// Total number of preloads started in the current batch (for progress display).
-    pub preloads_total: usize,
 }
 
 impl Default for CacheManagement {
     fn default() -> Self {
         Self {
+            failures: HashMap::new(),
+
             category_timestamps: HashMap::new(),
             dirty: false,
             last_input_time: std::time::Instant::now(),
-            last_save: std::time::Instant::now(),
-            save_in_progress: false,
+
+            next_refresh_check: None,
+
             background_refresh: std::collections::HashSet::new(),
-            preloads_in_progress: std::collections::HashSet::new(),
-            preloads_total: 0,
         }
     }
+}
+
+#[derive(Debug)]
+pub struct RefreshFailure {
+    pub attempts: usize,
+    /// None means automatic retries are exhausted (or inappropriate).
+    pub retry_at: Option<std::time::Instant>,
 }
 
 /// Notification/toast state.
@@ -1379,12 +1478,13 @@ pub struct Notifications {
 /// Scroll pin state for viewport preservation on click.
 #[derive(Debug, Clone, Default)]
 pub struct ScrollPins {
+    pub settings_textamp: Option<usize>,
+    pub category: Option<usize>,
     pub browse: Option<(usize, usize)>,
     pub browse_click_time: Option<std::time::Instant>,
     /// Last clicked item in browse Miller columns: (col_idx, item_idx) for double-click detection.
     pub browse_last_click: Option<(usize, usize)>,
     pub search: Option<usize>,
-    pub station: Option<usize>,
     pub queue: Option<usize>,
     pub queue_click_time: Option<std::time::Instant>,
     pub similar: Option<usize>,
@@ -1395,18 +1495,18 @@ pub struct ScrollPins {
     pub art_cooldown: Option<std::time::Instant>,
     pub scroll_cooldown: Option<std::time::Instant>,
     pub scrollbar_drag: Option<ScrollbarDrag>,
-    pub station_back_highlighted: bool,
 }
 
 /// Popup state container.
 #[derive(Debug, Clone, Default)]
 pub struct Popups {
     pub sort: Option<SortPopupState>,
-    pub radio_launcher: Option<RadioLauncherState>,
     pub adventure_launcher: Option<AdventureLauncherState>,
     pub artist_radio_picker: Option<ArtistRadioPickerState>,
     pub artist_bio: Option<ArtistBioPopup>,
+    pub text: Option<TextPopup>,
     pub input_dialog: Option<InputDialog>,
+    pub library_dialog: Option<crate::app::sources::dialogs::Dialog>,
     pub confirm_dialog: Option<ConfirmDialog>,
     pub library_picker_active: bool,
     pub library_picker_index: usize,
@@ -1417,12 +1517,13 @@ impl Popups {
     /// Close all modal popups. Call before opening a new popup so only one
     /// is ever visible at a time.
     pub fn close_all(&mut self) {
+        self.text = None;
         self.sort = None;
-        self.radio_launcher = None;
         self.adventure_launcher = None;
         self.artist_radio_picker = None;
         self.artist_bio = None;
         self.input_dialog = None;
+        self.library_dialog = None;
         self.confirm_dialog = None;
         self.library_picker_active = false;
         self.search_active = false;
@@ -1430,7 +1531,7 @@ impl Popups {
 }
 
 /// Artwork state.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ArtworkState {
     pub current_thumb: Option<String>,
     pub current_data: Option<Vec<u8>>,
@@ -1461,34 +1562,16 @@ pub struct ArtworkState {
     pub last_motion_at: Option<std::time::Instant>,
 }
 
-impl Default for ArtworkState {
-    fn default() -> Self {
-        Self {
-            current_thumb: None,
-            current_data: None,
-            loading: false,
-            pending_thumb: None,
-            grid_cache: HashMap::new(),
-            grid_cache_order: std::collections::VecDeque::new(),
-            grid_cache_bytes: 0,
-            grid_generation: 0,
-            grid_pending: std::collections::HashSet::new(),
-            cache_stats: None,
-            default_visible: false,
-            mode: ArtworkMode::default(),
-            suppress_loads: false,
-            last_motion_at: None,
-        }
-    }
-}
-
 impl ArtworkState {
     const MAX_GRID_CACHE_ENTRIES: usize = 256;
     const MAX_GRID_CACHE_BYTES: usize = 128 * 1024 * 1024;
 
     pub fn insert_grid_art(&mut self, key: String, data: Vec<u8>) {
         if data.len() > Self::MAX_GRID_CACHE_BYTES {
-            tracing::debug!("Skipping oversized in-memory artwork item: {} bytes", data.len());
+            tracing::debug!(
+                "Skipping oversized in-memory artwork item: {} bytes",
+                data.len()
+            );
             return;
         }
         if let Some(previous) = self.grid_cache.remove(&key) {
@@ -1527,15 +1610,6 @@ impl ArtworkState {
 /// absorb a held-down arrow key without flapping.
 pub const ART_LOAD_PAUSE_MS: u64 = 1000;
 
-/// Remote player control state.
-#[derive(Debug, Default)]
-pub struct RemoteControl {
-    pub output_target: OutputTarget,
-    pub players: Vec<RemotePlayer>,
-    pub discovering: bool,
-    pub playback: RemotePlaybackState,
-}
-
 /// DJ mode state (Guest DJ modes that modify queue behavior).
 #[derive(Debug, Clone, Default)]
 pub struct DjState {
@@ -1548,7 +1622,7 @@ pub struct DjState {
     pub last_was_inserted: bool,
 }
 
-/// Similar content view state (Plex sonic similarity).
+/// Similar content view state (server sonic similarity).
 #[derive(Debug, Clone, Default)]
 pub struct SimilarViewState {
     pub albums: Vec<Album>,
@@ -1572,9 +1646,9 @@ pub struct SimilarViewState {
 /// Source of a related artist entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RelatedSource {
-    /// From Plex /related API.
-    Plex,
-    /// From Plex "Similar" metadata tags on the artist.
+    Navidrome,
+
+    /// From server "Similar" metadata tags on the artist.
     SimilarTag,
     /// From textamp artist_aliases.
     Alias,
@@ -1597,31 +1671,11 @@ pub struct RelatedViewState {
     pub source_key: String,
 }
 
-/// Compilation detection state.
-#[derive(Debug, Clone, Default)]
-pub struct CompilationState {
-    /// Albums confirmed as true compilations (multi-artist).
-    pub albums: Vec<Album>,
-    /// Artist keys that appear ONLY on compilations (no solo albums) — hidden from artist list.
-    pub artist_keys: std::collections::HashSet<String>,
-    /// All artist keys that appear on any compilation track — used to show "Compilation Tracks" item.
-    pub track_artist_keys: std::collections::HashSet<String>,
-    /// Maps artist_key → Vec<album_rating_key> for compilation appearances.
-    pub artist_map: std::collections::HashMap<String, Vec<String>>,
-    /// Single-artist "compilations" (greatest hits etc.) mapped to their actual artist.
-    /// Maps artist_key → Vec<Album> so they can appear as normal albums under that artist.
-    pub single_artist: std::collections::HashMap<String, Vec<Album>>,
-    /// Whether compilation detection has run for current library.
-    pub detected: bool,
-    /// A blocking worker is currently deriving compilation metadata.
-    pub detecting: bool,
-    /// Monotonic identity used to reject same-library stale workers after a refresh.
-    pub detection_request_id: u64,
-}
+pub type CompilationState = crate::services::compilations::CompilationIndex;
 
 /// Library data — artists, albums, playlists, genres, and derived data.
 ///
-/// Contains all cached data from the Plex library API, plus derived data
+/// Contains all cached data from the server library API, plus derived data
 /// like compilation detection and artist aliases.
 #[derive(Debug, Default)]
 pub struct LibraryData {
@@ -1650,7 +1704,7 @@ pub struct LibraryData {
 
     // Tag-style lists (each is its own top-level section).
     // The legacy `genres` field has been dropped — Album Genres and
-    // Library Genres hit the same Plex endpoint, so we only keep
+    // Library Genres hit the same server endpoint, so we only keep
     // album_genres.
     pub artist_genres: Vec<Genre>,
     pub album_genres: Vec<Genre>,
@@ -1697,8 +1751,7 @@ pub struct LibraryData {
 pub struct SearchState {
     pub query: String,
     pub results: Option<SearchResults>,
-    pub track_loading: bool,
-    pub track_version: u64,
+
     pub focus: SearchFocus,
     pub pending_album_key: Option<String>,
     pub pending_track_key: Option<String>,
@@ -1706,7 +1759,7 @@ pub struct SearchState {
 }
 
 /// Queue and playback mode state.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct QueueState {
     pub tracks: Vec<Track>,
     pub index: Option<usize>,
@@ -1719,42 +1772,22 @@ pub struct QueueState {
     pub shuffle_undo_index: Option<usize>,
 }
 
-impl Default for QueueState {
-    fn default() -> Self {
-        Self {
-            tracks: Vec::new(),
-            index: None,
-            selected: std::collections::BTreeSet::new(),
-            original: Vec::new(),
-            sort_mode: QueueSortMode::default(),
-            history: VecDeque::new(),
-            undo_snapshot: None,
-            shuffle_undo_queue: None,
-            shuffle_undo_index: None,
-        }
-    }
-}
-
 /// Root application state.
 #[derive(Debug)]
 pub struct AppState {
+    pub sources: crate::app::sources::SourceState,
     // Connection
-    pub connection: ConnectionState,
-    pub libraries: Vec<Library>,
     pub active_library: Option<String>,
-    pub available_servers: Vec<PlexServer>,
+
     pub connected_server_url: Option<String>,
 
-    /// Libraries from all available servers: (server_identifier, server_name, libraries).
-    pub all_server_libraries: Vec<(String, String, Vec<Library>)>,
-    pub active_server_id: Option<String>,
+    pub connection_generation: u64,
+
     /// Monotonic identity of the selected server/library pair. Background
     /// results carrying an older generation are discarded centrally.
     pub library_generation: u64,
 
     // Authentication flow state
-    pub auth_state: AuthState,
-    pub is_fresh_login: bool,
 
     // Navigation (musikcube-style)
     pub view: View,
@@ -1773,11 +1806,12 @@ pub struct AppState {
     /// (persisted via UiConfig). Hidden sections still exist in code
     /// but are filtered out of `category_rows()`.
     pub hidden_sections: Vec<BrowseCategory>,
+    pub hidden_collections: Vec<crate::app::sources::navidrome::commands::CollectionKind>,
 
     // Library data (artists, albums, playlists, genres, etc.)
     pub library: LibraryData,
 
-    // Similar content (Plex sonic similarity)
+    // Similar content (server sonic similarity)
     pub similar: SimilarViewState,
 
     // Related artists (Ctrl+R)
@@ -1789,14 +1823,10 @@ pub struct AppState {
     /// Last-wins generation for async "replace queue and play" loads.
     pub queue_play_request_id: u64,
     /// Whether user is currently dragging the seek indicator
-    pub seeking_drag: bool,
+    pub seek_drag: Option<ratatui::layout::Rect>,
     pub volume_drag: bool,
     /// Consecutive playback errors (for auto-skip with limit)
     pub consecutive_playback_errors: u32,
-    /// Plex session identifier for timeline reporting.
-    pub plex_session_id: Option<String>,
-    /// Last time a progress report was sent to Plex (for periodic ~10s updates).
-    pub last_progress_report: Option<std::time::Instant>,
 
     // Search
     pub search: SearchState,
@@ -1804,8 +1834,7 @@ pub struct AppState {
     // UI state
     pub list_state: ListStates,
     pub should_quit: bool,
-    /// Cache data built during quit, saved after terminal is restored.
-    pub pending_cache_save: Option<crate::plex::CacheData>,
+
     pub notifications: Notifications,
 
     // Popups (sort, radio launcher, adventure, artist radio picker, bio, dialogs, library picker, search)
@@ -1833,20 +1862,8 @@ pub struct AppState {
 
     // Folder browsing state (for Folders category with Miller columns)
     pub folder_state: Option<FolderNavigationState>,
-    /// Cached subfolder contents: folder_key -> CachedFolder with timestamp.
-    /// Each entry has its own timestamp for individual staleness tracking.
-    /// At 32+ days, entries are served as warm cache and re-fetched in background on access.
-    /// Subfolders are only cached when navigated to (lazy caching).
-    pub folder_contents_cache: HashMap<String, CachedFolder>,
-    /// Folder key currently being loaded asynchronously (prevents duplicate spawns).
-    pub pending_folder_load: Option<String>,
+
     pub folder_play_request_id: u64,
-    /// Whether a subfolder preload crawl is currently active.
-    pub subfolder_preload_active: bool,
-    /// Cancel flag for the subfolder preload task (set on library switch).
-    pub subfolder_preload_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    /// Whether to keep subfolder cache entries indefinitely (per-library setting).
-    pub keep_subfolder_cache: bool,
 
     // Miller column navigation for browse categories
     pub artist_nav: BrowseNavigationState,
@@ -1863,14 +1880,11 @@ pub struct AppState {
     pub playlist_nav_request_id: u64,
 
     // Playlist tracks cache (playlist_key -> cached tracks with timestamp)
-    pub playlist_tracks_cache: HashMap<String, CachedPlaylistTracks>,
 
     // Artwork state
     pub artwork: ArtworkState,
 
     // Radio mode state (legacy)
-    pub radio_state: RadioState,
-
     /// Transcode bitrate in kbps. 0 = disabled (direct play), e.g. 256 = transcode to 256kbps MP3.
     pub transcode_kbps: u32,
 
@@ -1879,6 +1893,12 @@ pub struct AppState {
 
     // NEW: Playback mode (Queue vs Radio)
     pub playback_mode: PlaybackMode,
+    pub radio_generation: u64,
+    /// The pending station or refill belongs to the current playback context.
+    pub radio_task: Option<crate::app::tasks::TaskLease>,
+    /// Candidate station title; active playback remains unchanged until it loads.
+    pub station_starting: Option<StationStart>,
+    pub station_navigation_generation: u64,
 
     // NEW: Radio playback state (continuous)
     pub radio: RadioPlaybackState,
@@ -1886,7 +1906,7 @@ pub struct AppState {
     // NEW: Station navigation (hierarchical)
     pub station_nav: StationNavigationState,
 
-    // Stations state (Plexamp-style radio stations) - legacy, use station_nav instead
+    // Stations state (continuous radio stations) - legacy, use station_nav instead
     pub stations: Vec<Station>,
     pub stations_loading: bool,
     /// Cached station children (mood/style/decade sub-lists, keyed by station key).
@@ -1951,7 +1971,7 @@ pub struct AppState {
     /// Populated lazily by the tick handler when a track row is
     /// selected and never queried before. Empty `Vec` means the API
     /// returned no similar tracks (distinct from "not yet loaded").
-    pub track_pane_similar: HashMap<String, Vec<Track>>,
+    pub track_pane_similar: HashMap<String, Result<Vec<Track>, String>>,
     /// Track keys whose similar-tracks fetch is currently in flight.
     pub track_pane_similar_loading: std::collections::HashSet<String>,
 
@@ -1984,13 +2004,15 @@ pub struct AppState {
     /// (Lissajous XY trace). Capped at `VECTORSCOPE_BUFFER_LEN`
     /// — once full, oldest samples are overwritten in-place.
     pub vectorscope_buffer: std::collections::VecDeque<(f32, f32)>,
+    /// Sampled PCM levels and bounded history for the optional Studio Meters view.
+    pub studio_meters: crate::app::meters::StudioMeters,
 
     /// Per-tick counter, used to drive simple animated text in
     /// loading placeholders ("Loading", "Loading.", "Loading..",
     /// "Loading…"). Wraps freely; consumers use `% 4` etc.
     pub loading_tick: u32,
 
-    // Visualizer tab (Waveform / Spectrum / Spectrogram)
+    // Visualizer tab (existing plots, spectral landscape, or studio meters)
     pub visualizer_tab: VisualizerTab,
     /// Whether the visualizer tab bar is focused (for arrow key navigation)
     pub visualizer_tab_focused: bool,
@@ -2015,20 +2037,19 @@ pub struct AppState {
     /// gates; the GUI just never sets `open = true`.
     pub palette: PaletteState,
 
-    // Marquee scroll animation state (RefCell for interior mutability during render)
-    pub marquee: std::cell::RefCell<MarqueeState>,
+    // Marquee state is updated by Tick and explicit render feedback.
+    pub marquee: MarqueeState,
     /// Second marquee for subtitle row (2-row track display in playlists)
-    pub marquee_subtitle: std::cell::RefCell<MarqueeState>,
+    pub marquee_subtitle: MarqueeState,
 
-    /// Hit-test region registry (RefCell for interior mutability during render).
+    /// Last successfully rendered hit-test geometry, installed by the event loop.
     /// Populated each frame by render code, consumed by mouse_input handlers.
-    pub hit_regions: std::cell::RefCell<crate::ui::hit_regions::HitRegions>,
+    pub hit_regions: crate::app::presentation::HitRegions,
 
     // Library switch loading state
     pub library_loading: bool,
 
     // Remote player control
-    pub remote: RemoteControl,
 
     // (default_artwork_visible, artwork_mode, album_art_cache, album_art_pending, artwork_cache_stats moved to artwork)
     /// Library cache total bytes on disk. Computed on startup and after clears.
@@ -2080,7 +2101,11 @@ pub struct ExternalSearchSettings {
 
 impl Default for ExternalSearchSettings {
     fn default() -> Self {
-        Self { apple_music: true, spotify: true, youtube: true }
+        Self {
+            apple_music: true,
+            spotify: true,
+            youtube: true,
+        }
     }
 }
 
@@ -2090,7 +2115,6 @@ pub enum ScrollbarView {
     Browse,
     Folder,
     Queue,
-    Station,
     Similar,
     Related,
     Help,
@@ -2127,6 +2151,14 @@ pub enum DjMode {
 }
 
 impl DjMode {
+    pub const ALL: [Self; 6] = [
+        Self::Freeze,
+        Self::Contempo,
+        Self::Groupie,
+        Self::Gemini,
+        Self::Twofer,
+        Self::Stretch,
+    ];
     pub fn name(&self) -> &'static str {
         match self {
             DjMode::Stretch => "DJ Stretch",
@@ -2217,11 +2249,49 @@ impl RadioSeedMode {
     }
 }
 
+impl QueueState {
+    /// Move a row while keeping the playing index attached to its track.
+    /// Returns the final row, or None for an invalid/no-op source.
+    pub fn move_track(&mut self, from: usize, to: usize) -> Option<usize> {
+        if from >= self.tracks.len() || from == to {
+            return None;
+        }
+        let destination = to.min(self.tracks.len() - 1);
+        // Rotate only the affected range. Adjacent keyboard moves stay O(1),
+        // rather than shifting the entire queue twice through remove/insert.
+        if from < destination {
+            self.tracks[from..=destination].rotate_left(1);
+        } else {
+            self.tracks[destination..=from].rotate_right(1);
+        }
+        self.index = self.index.map(|index| {
+            if index == from {
+                destination
+            } else if from < index && destination >= index {
+                index - 1
+            } else if from > index && destination <= index {
+                index + 1
+            } else {
+                index
+            }
+        });
+        Some(destination)
+    }
+}
+
 /// Active station info.
 #[derive(Debug, Clone)]
 pub struct ActiveStation {
-    pub key: String,
+    pub source: crate::library::models::RadioSource,
     pub title: String,
+}
+
+/// One pending station switch. A continuation owns no audio: the current
+/// playback instance finishes normally while discovery prepares its successors.
+#[derive(Debug, Clone)]
+pub struct StationStart {
+    pub title: String,
+    pub continue_playback: Option<u64>,
 }
 
 /// Radio seed for similarity-based radio.
@@ -2230,6 +2300,15 @@ pub struct RadioSeed {
     pub mode: RadioSeedMode,
     pub key: String,
     pub title: String,
+}
+
+/// An in-flight refill either buffers ahead or owes the user one advance.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RadioRefill {
+    #[default]
+    Idle,
+    Prefetching,
+    Waiting,
 }
 
 /// Radio playback state (continuous, auto-queueing).
@@ -2241,10 +2320,8 @@ pub struct RadioPlaybackState {
     pub tracks: Vec<Track>,
     /// Current track index within loaded tracks
     pub track_index: Option<usize>,
-    /// Whether we're currently fetching more tracks
-    pub fetching: bool,
-    /// History of played track keys (to avoid repeats)
-    pub history: Vec<String>,
+    /// Pending refill and whether playback must advance when it finishes.
+    pub refill: RadioRefill,
     /// For similarity-based radio: the seed info
     pub seed: Option<RadioSeed>,
 
@@ -2253,9 +2330,6 @@ pub struct RadioPlaybackState {
     pub time_travel_decades: Vec<String>,
     /// Current position in decades list (next decade to fetch from)
     pub time_travel_index: usize,
-
-    /// Station nav column keys from root to playing station (for ancestor ♪ indicator).
-    pub playing_station_ancestors: Vec<String>,
 }
 
 impl RadioPlaybackState {
@@ -2277,16 +2351,7 @@ impl RadioPlaybackState {
 
     /// Clear all state.
     pub fn clear(&mut self) {
-        self.active_station = None;
-        self.tracks.clear();
-        self.track_index = None;
-        self.fetching = false;
-        self.history.clear();
-        self.seed = None;
-        // Clear Time Travel state
-        self.time_travel_decades.clear();
-        self.time_travel_index = 0;
-        self.playing_station_ancestors.clear();
+        *self = Self::default();
     }
 }
 
@@ -2336,6 +2401,10 @@ impl StationColumn {
         self.selected_index = 0;
     }
 
+    pub fn unshuffled_stations(&self) -> &[Station] {
+        self.original_stations.as_deref().unwrap_or(&self.stations)
+    }
+
     /// Restore original order.
     pub fn unshuffle(&mut self) {
         if let Some(stations) = self.original_stations.take() {
@@ -2369,7 +2438,9 @@ impl MillerState<StationColumn> {
 
     /// Get the current title (focused column's title).
     pub fn current_title(&self) -> &str {
-        self.focused().map(|c| c.title.as_str()).unwrap_or("Stations")
+        self.focused()
+            .map(|c| c.title.as_str())
+            .unwrap_or("Stations")
     }
 
     /// Backward-compatible alias for `truncate_right()`.
@@ -2378,95 +2449,110 @@ impl MillerState<StationColumn> {
     }
 }
 
-// Radio state for Alt+R Plex radio, separate from station-based radio (via Radio section).
-// radio_state is used for radio seeded from user selection via Plex playQueues API.
-// This is distinct from RadioPlaybackState which is for Plexamp stations.
-/// Radio mode for Plex radio (Alt+R).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum RadioMode {
-    #[default]
-    Off,
-    /// Active Plex radio — seeded from a track, album, or artist
-    Active,
-}
-
-/// Sonic radio state for similarity-based playback (Alt+R).
-/// Distinct from RadioPlaybackState which handles Plexamp stations (via Ctrl+G).
-#[derive(Debug, Clone, Default)]
-pub struct RadioState {
-    /// Current radio mode
-    pub mode: RadioMode,
-    /// Seed track for track radio
-    pub seed_track_key: Option<String>,
-    /// Seed track title (for display)
-    pub seed_title: String,
-    /// Whether we're currently fetching more tracks
-    pub fetching: bool,
-    /// History of played track keys (to avoid repeats)
-    pub history: Vec<String>,
-}
-
 impl AppState {
+    fn loaded_stations(&self) -> impl Iterator<Item = &Station> {
+        self.station_nav
+            .columns
+            .iter()
+            .flat_map(|column| &column.stations)
+            .chain(&self.stations)
+    }
+
+    pub fn station_by_key(&self, key: &str) -> Option<&Station> {
+        self.loaded_stations().find(|station| station.key == key)
+    }
+
+    /// Resolve the active library's station instead of constructing a provider URL.
+    /// Parent columns retain the root stations while a category is open.
+    pub fn random_album_station(&self) -> Option<&Station> {
+        self.active_library.as_ref()?;
+        self.loaded_stations()
+            .find(|station| station.kind() == crate::library::models::StationKind::RandomAlbum)
+    }
+
+    /// A new playback context invalidates outstanding station/refill requests.
+    pub fn set_playback_mode(&mut self, mode: PlaybackMode) {
+        self.radio_task = None;
+        self.radio_generation = self.radio_generation.wrapping_add(1);
+        self.station_starting = None;
+        self.playback_mode = mode;
+        // Completions from the previous context are now rejected; their
+        // loading flags cannot remain authoritative (including undo snapshots).
+        self.radio.refill = RadioRefill::Idle;
+        self.dj.inserting = false;
+    }
+
+    /// Invalidate account- and connection-scoped work without conflating it
+    /// with navigation between libraries on the same server.
+    pub fn advance_connection_generation(&mut self) {
+        self.sources.nav_connection_task = None;
+        self.connection_generation = self.connection_generation.wrapping_add(1);
+    }
+
     /// Start a new server/library context and invalidate every asynchronous
     /// request whose result could otherwise be mistaken for current data.
     pub fn advance_library_generation(&mut self) {
+        self.radio_task = None;
         self.library_generation = self.library_generation.wrapping_add(1);
+        self.sources.audiomuse.snapshot = None;
+        self.sources.audiomuse.refresh_failed = false;
+        self.cache_mgmt.next_refresh_check = None;
+        self.sources.sonic_tasks.clear();
+        self.station_starting = None;
+        self.radio.refill = RadioRefill::Idle;
+        self.stations_loading = false;
+        self.station_nav.loading = false;
+        // Results from the old generation will be discarded, so their
+        // progress entries must be discarded at the same boundary.
+        self.cache_mgmt.background_refresh.clear();
+        self.cache_mgmt.failures.clear();
         self.queue_play_request_id = self.queue_play_request_id.wrapping_add(1);
         self.folder_play_request_id = self.folder_play_request_id.wrapping_add(1);
         self.artist_nav_request_id = self.artist_nav_request_id.wrapping_add(1);
         self.tag_nav_request_id = self.tag_nav_request_id.wrapping_add(1);
         self.playlist_nav_request_id = self.playlist_nav_request_id.wrapping_add(1);
         self.adventure_request_id = self.adventure_request_id.wrapping_add(1);
-        self.adventure_launcher_request_id =
-            self.adventure_launcher_request_id.wrapping_add(1);
+        self.adventure_launcher_request_id = self.adventure_launcher_request_id.wrapping_add(1);
         self.artist_bio_request_id = self.artist_bio_request_id.wrapping_add(1);
-        self.search.track_version = self.search.track_version.wrapping_add(1);
-        self.library.compilations.detection_request_id = self
-            .library
-            .compilations
-            .detection_request_id
-            .wrapping_add(1);
-        self.pending_folder_load = None;
-        self.subfolder_preload_cancel
-            .store(true, std::sync::atomic::Ordering::Release);
+        self.popups.artist_bio = None;
     }
 
     /// Create a new application state with defaults.
     pub fn new() -> Self {
         Self {
-            connection: ConnectionState::Disconnected,
-            libraries: Vec::new(),
+            sources: Default::default(),
+
             active_library: None,
-            available_servers: Vec::new(),
+
             connected_server_url: None,
-            all_server_libraries: Vec::new(),
-            active_server_id: None,
+
+            connection_generation: 0,
+
             library_generation: 0,
-            auth_state: AuthState::default(),
-            is_fresh_login: false,
-            view: View::Auth,
+
+            view: View::Browse,
             previous_view: None,
             help_scroll: 0,
             browse_category: BrowseCategory::Library,
             focus: Focus::Left,
             category_column_focused: true,
-            category_column_index: 0,
+            category_column_index: 2, // after Search and the Browse heading
             hidden_sections: BrowseCategory::hidden_by_default().to_vec(),
+            hidden_collections: Vec::new(),
             library: LibraryData::default(),
             similar: SimilarViewState::default(),
             related: RelatedViewState::default(),
             playback: PlaybackState::default(),
             queue: QueueState::default(),
             queue_play_request_id: 0,
-            seeking_drag: false,
+            seek_drag: None,
             volume_drag: false,
             consecutive_playback_errors: 0,
-            plex_session_id: None,
-            last_progress_report: None,
+
             search: SearchState::default(),
             list_state: ListStates::default(),
             should_quit: false,
-            pending_cache_save: None,
+
             notifications: Notifications::default(),
             popups: Popups::default(),
             alt_bar_until: None,
@@ -2477,24 +2563,24 @@ impl AppState {
             image_loaded: HashMap::new(),
             settings_state: SettingsState::default(),
             folder_state: None,
-            folder_contents_cache: HashMap::new(),
-            pending_folder_load: None,
+
             folder_play_request_id: 0,
-            subfolder_preload_active: false,
-            subfolder_preload_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            keep_subfolder_cache: false,
+
             artist_nav: BrowseNavigationState::new(),
             artist_nav_request_id: 0,
             tag_nav: BrowseNavigationState::new(),
             tag_nav_request_id: 0,
             playlist_nav: BrowseNavigationState::new(),
             playlist_nav_request_id: 0,
-            playlist_tracks_cache: HashMap::new(),
+
             artwork: ArtworkState::default(),
-            radio_state: RadioState::default(),
             transcode_kbps: 0,
             audio_available: true,
             playback_mode: PlaybackMode::None,
+            radio_generation: 0,
+            radio_task: None,
+            station_starting: None,
+            station_navigation_generation: 0,
             radio: RadioPlaybackState::default(),
             station_nav: StationNavigationState::default(),
             stations: Vec::new(),
@@ -2521,6 +2607,7 @@ impl AppState {
             track_pane_focused: false,
             track_pane_index: 0,
             vectorscope_tap: None,
+            studio_meters: crate::app::meters::StudioMeters::default(),
             vectorscope_buffer: std::collections::VecDeque::with_capacity(VECTORSCOPE_BUFFER_LEN),
             loading_tick: 0,
             visualizer_tab: VisualizerTab::default(),
@@ -2530,11 +2617,11 @@ impl AppState {
             spectrogram: SpectrogramState::default(),
             list_filter: ListFilterState::default(),
             palette: PaletteState::default(),
-            marquee: std::cell::RefCell::new(MarqueeState::default()),
-            marquee_subtitle: std::cell::RefCell::new(MarqueeState::default()),
-            hit_regions: std::cell::RefCell::new(crate::ui::hit_regions::HitRegions::default()),
+            marquee: MarqueeState::default(),
+            marquee_subtitle: MarqueeState::default(),
+            hit_regions: crate::app::presentation::HitRegions::default(),
             library_loading: false,
-            remote: RemoteControl::default(),
+
             library_cache_stats: None,
             waveform_cache_stats: None,
             scroll: ScrollPins::default(),
@@ -2544,66 +2631,118 @@ impl AppState {
         }
     }
 
-    /// Build the ordered list of rows that appear in the leftmost
-    /// "category" column. Library / Genres / Folders pin to the top;
-    /// each loaded playlist follows as its own row. Both the TUI
-    /// keyboard handler and the GUI's category column iterate this
-    /// to keep their layouts in sync.
-    ///
-    /// `state.category_column_index` indexes into the returned vec.
+    /// Visibility choices for the active provider, including currently hidden views.
+    pub fn sidebar_sections(&self) -> Vec<SidebarSection> {
+        use crate::app::sources::navidrome::commands::CollectionKind;
+        let mut sections: Vec<_> = BrowseCategory::all()
+            .iter()
+            .copied()
+            .filter(|c| {
+                if self.sources.active.folder().is_some() {
+                    *c == BrowseCategory::Folders
+                } else if self.sources.active.navidrome().is_some() {
+                    matches!(
+                        c,
+                        BrowseCategory::Library
+                            | BrowseCategory::Folders
+                            | BrowseCategory::AlbumGenres
+                            | BrowseCategory::Playlists
+                    )
+                } else {
+                    true
+                }
+            })
+            .map(SidebarSection::Category)
+            .collect();
+        if self.sources.active.navidrome().is_some() {
+            sections.extend(CollectionKind::SIDEBAR.map(SidebarSection::Collection));
+            if crate::app::sources::sonic::enabled(self)
+                && crate::app::sources::audiomuse::connection(self).is_some()
+            {
+                sections.extend(
+                    crate::audiomuse::Feature::ALL
+                        .map(|f| SidebarSection::Collection(CollectionKind::AudioMuse(f))),
+                );
+            }
+        }
+        sections
+    }
+
+    /// Visible sidebar rows: Search, Browse (including system lists), AudioMuse, playlists.
+    /// Rendering and input share this ordering; headings are not selectable.
+    /// `category_column_index` indexes into this list, not the settings choices.
     pub fn category_rows(&self) -> Vec<CategoryRow> {
+        if matches!(self.sources.active, crate::app::sources::ActiveSource::None) {
+            return vec![
+                CategoryRow::Search,
+                CategoryRow::Header("Browse"),
+                CategoryRow::Category(BrowseCategory::Library),
+            ];
+        }
+        if self.sources.active.folder().is_some() {
+            return vec![
+                CategoryRow::Search,
+                CategoryRow::Header("Browse"),
+                CategoryRow::Category(BrowseCategory::Folders),
+            ]
+            .into_iter()
+            .filter(
+                |row| !matches!(row, CategoryRow::Category(c) if self.hidden_sections.contains(c)),
+            )
+            .collect();
+        }
         let hidden = &self.hidden_sections;
-        let mut rows = Vec::with_capacity(BrowseCategory::all().len() + self.library.playlists.len() + 2);
+        let mut rows =
+            Vec::with_capacity(BrowseCategory::all().len() + self.library.playlists.len() + 2);
 
-        let mut category_count = 0;
+        rows.push(CategoryRow::Search);
+        rows.push(CategoryRow::Header("Browse"));
         for &c in BrowseCategory::top_rows() {
-            if c == BrowseCategory::Playlists { continue; }
-            if hidden.contains(&c) { continue; }
+            if self.sources.active.navidrome().is_some()
+                && !matches!(
+                    c,
+                    BrowseCategory::Library | BrowseCategory::AlbumGenres | BrowseCategory::Folders
+                )
+            {
+                continue;
+            }
+            if c == BrowseCategory::Playlists {
+                continue;
+            }
+            if hidden.contains(&c) {
+                continue;
+            }
             rows.push(CategoryRow::Category(c));
-            category_count += 1;
         }
-
-        if !hidden.contains(&BrowseCategory::Playlists) {
-            // Filter out the auto-everything "All Music" playlist, then
-            // partition the rest into "pinned" (hearted or named
-            // "Recently Added") and "unpinned". Stable order within
-            // each partition preserves Plex's playlist ordering.
-            let is_visible = |title: &str| !title.trim().eq_ignore_ascii_case("all music");
-            let is_pinned = |title: &str| {
-                let trimmed = title.trim();
-                trimmed.eq_ignore_ascii_case("recently added")
-                    || title.contains('\u{2764}')
-                    || title.contains('\u{2661}')
-                    || title.contains('\u{1f90d}')
-                    || title.contains('\u{2665}')
-            };
-            let has_pinned = self.library.playlists.iter()
-                .any(|playlist| is_visible(&playlist.title) && is_pinned(&playlist.title));
-            let has_rest = self.library.playlists.iter()
-                .any(|playlist| is_visible(&playlist.title) && !is_pinned(&playlist.title));
-
-            // Divider after the categories block (above the playlists)
-            // — only when there's at least one category and at least
-            // one playlist to render.
-            if category_count > 0 && (has_pinned || has_rest) {
-                rows.push(CategoryRow::Divider);
-            }
-            for (index, playlist) in self.library.playlists.iter().enumerate() {
-                if is_visible(&playlist.title) && is_pinned(&playlist.title) {
-                    rows.push(CategoryRow::Playlist(index));
+        if self.sources.active.navidrome().is_some() {
+            use crate::app::sources::navidrome::commands::CollectionKind;
+            rows.extend(
+                CollectionKind::SIDEBAR
+                    .into_iter()
+                    .filter(|kind| !self.hidden_collections.contains(kind))
+                    .map(CategoryRow::NavidromeCollection),
+            );
+            if crate::app::sources::sonic::enabled(self)
+                && crate::app::sources::audiomuse::connection(self).is_some()
+            {
+                let entries: Vec<_> = crate::audiomuse::Feature::ALL
+                    .into_iter()
+                    .map(CollectionKind::AudioMuse)
+                    .filter(|kind| !self.hidden_collections.contains(kind))
+                    .map(CategoryRow::NavidromeCollection)
+                    .collect();
+                if !entries.is_empty() {
+                    rows.push(CategoryRow::Header("AudioMuse"));
+                    rows.extend(entries);
                 }
             }
-            // Second divider between the pinned playlists and the
-            // alphabetical remainder, but only if both sides exist.
-            if has_pinned && has_rest {
-                rows.push(CategoryRow::Divider);
+            if !hidden.contains(&BrowseCategory::Playlists) && !self.library.playlists.is_empty() {
+                rows.push(CategoryRow::Header("Playlists"));
+                rows.extend((0..self.library.playlists.len()).map(CategoryRow::Playlist));
             }
-            for (index, playlist) in self.library.playlists.iter().enumerate() {
-                if is_visible(&playlist.title) && !is_pinned(&playlist.title) {
-                    rows.push(CategoryRow::Playlist(index));
-                }
-            }
+            return rows;
         }
+
         rows
     }
 
@@ -2636,19 +2775,18 @@ impl AppState {
     /// only when it's actually on screen.
     pub fn alphabet_strip_visible(&self) -> bool {
         self.browse_category == BrowseCategory::Library
+            && self.sources.nav_collection.is_none()
             && self
                 .artist_nav
                 .columns
                 .first()
-                .map_or(false, |c| {
-                    !c.items.is_empty() && c.sort_mode != ColumnSortMode::Shuffled
-                })
+                .is_some_and(|c| !c.items.is_empty() && c.sort_mode != ColumnSortMode::Shuffled)
     }
 
     /// The track currently highlighted in the focused Miller column,
     /// if any. Used by the right-side track details pane: the pane
     /// shows iff this returns `Some`.
-    pub fn focused_track(&self) -> Option<&crate::plex::models::Track> {
+    pub fn focused_track(&self) -> Option<&crate::library::models::Track> {
         let nav = self.browse_nav()?;
         let col = nav.columns.get(nav.focused_column)?;
         let item = col.items.get(col.selected_index)?;
@@ -2671,7 +2809,7 @@ impl AppState {
     /// or Artist row); in the latter case the renderer simply skips
     /// the pane for that frame and it reappears when a Track row is
     /// focused again.
-    pub fn pane_track(&self) -> Option<&crate::plex::models::Track> {
+    pub fn pane_track(&self) -> Option<&crate::library::models::Track> {
         if !self.track_pane_open {
             return None;
         }
@@ -2691,29 +2829,36 @@ impl AppState {
         }
     }
 
-    /// Effective context-target track for palette commands (Play
-    /// Track / Open in Library / Artist Bio / external search).
-    ///
-    /// Priority:
-    ///   1. The highlighted Sonically-Similar row inside the focused
-    ///      track-details pane — so the user can Open-in-Library a
-    ///      similar track, Bio its artist, etc., without leaving
-    ///      the pane.
-    ///   2. The track on the focused Miller row.
-    pub fn palette_target_track(&self) -> Option<crate::plex::models::Track> {
-        if self.track_pane_focused && self.track_pane_index > 0 {
-            if let Some(parent) = self.focused_track() {
-                let sim_idx = self.track_pane_index - 1;
-                if let Some(sim) = self
-                    .track_pane_similar
-                    .get(&parent.rating_key)
-                    .and_then(|v| v.get(sim_idx))
-                {
-                    return Some(sim.clone());
+    /// Visible ordered track list and highlighted row for palette commands.
+    /// Never fall back to a retained navigation column from another view.
+    pub fn palette_track_list(&self) -> Option<(&[Track], usize)> {
+        let (tracks, index): (&[Track], usize) = match self.view {
+            View::Queue | View::NowPlaying => (self.playback_tracks(), self.list_state.queue_index),
+            View::Browse if !self.category_column_focused => {
+                if self.palette_target_is_similar() {
+                    let parent = self.focused_track()?;
+                    (
+                        self.track_pane_similar
+                            .get(&parent.rating_key)?
+                            .as_ref()
+                            .ok()?,
+                        self.track_pane_index - 1,
+                    )
+                } else {
+                    self.focused_track()?;
+                    let col = self.browse_nav()?.focused()?;
+                    (&col.tracks, col.selected_index)
                 }
             }
-        }
-        self.focused_track().cloned()
+            _ => return None,
+        };
+        tracks.get(index)?;
+        Some((tracks, index))
+    }
+
+    pub fn palette_target_track(&self) -> Option<Track> {
+        let (tracks, index) = self.palette_track_list()?;
+        tracks.get(index).cloned()
     }
 
     /// Whether the palette's context-aware target is a Sonically-
@@ -2721,116 +2866,39 @@ impl AppState {
     /// Used to gate per-list commands like "Play Track and Following"
     /// that don't make sense on a free-floating similar track.
     pub fn palette_target_is_similar(&self) -> bool {
-        self.track_pane_focused
+        self.view == View::Browse
+            && !self.category_column_focused
+            && self.track_pane_focused
             && self.track_pane_index > 0
             && self
                 .focused_track()
                 .and_then(|p| self.track_pane_similar.get(&p.rating_key))
+                .and_then(|result| result.as_ref().ok())
                 .map(|v| v.get(self.track_pane_index - 1).is_some())
                 .unwrap_or(false)
     }
 
-    /// Build artist root items, using compilation-aware version if compilations are detected.
+    /// Build the album-artist list, separating confirmed compilations.
     pub fn build_artist_root_items(&self) -> Vec<BrowseItem> {
-        if self.library.compilations.detected {
-            BrowseItem::artist_root_items_with_compilations(
-                &self.library.artists,
-                !self.library.compilations.albums.is_empty(),
-                &self.library.compilations.artist_keys,
-            )
-        } else {
-            BrowseItem::artist_root_items(&self.library.artists)
-        }
-    }
-
-    /// Build track-level artist list from `all_tracks`.
-    ///
-    /// Scans all tracks, collects unique artist names from `original_title`
-    /// (falling back to `grandparent_title`), and creates Artist entries.
-    /// For names matching an existing Plex artist, uses that Artist.
-    /// For others, creates a synthetic Artist entry.
-    pub fn build_track_artists(&mut self) {
-        use std::collections::HashMap;
-
-        if self.library.all_tracks.is_empty() {
-            return;
-        }
-
-        // Build name→Artist lookup from Plex artists (case-insensitive)
-        let plex_artist_by_name: HashMap<String, &Artist> = self.library.artists.iter()
-            .map(|a| (a.title.to_lowercase(), a))
-            .collect();
-
-        // Collect unique artist names from tracks
-        let mut seen: HashMap<String, Artist> = HashMap::new();
-        for track in &self.library.all_tracks {
-            let artist_name = track.original_title.as_deref()
-                .unwrap_or_else(|| track.artist_name());
-            if artist_name.is_empty() {
-                continue;
-            }
-            let key_lower = artist_name.to_lowercase();
-            if seen.contains_key(&key_lower) {
-                continue;
-            }
-
-            // Try to find matching Plex artist
-            if let Some(plex_artist) = plex_artist_by_name.get(&key_lower) {
-                seen.insert(key_lower, (*plex_artist).clone());
-            } else {
-                // Create synthetic artist entry
-                // Use grandparent_rating_key if available, otherwise hash the name
-                let rating_key = track.grandparent_rating_key.clone()
-                    .unwrap_or_else(|| format!("track_artist:{}", key_lower));
-                seen.insert(key_lower, Artist {
-                    rating_key,
-                    title: artist_name.to_string(),
-                    thumb: None,
-                    ..Artist::default()
-                });
-            }
-        }
-
-        let mut track_artists: Vec<Artist> = seen.into_values().collect();
-        track_artists.sort_by(|a, b| {
-            crate::app::handlers::helpers::sort_key(&a.title)
-                .cmp(&crate::app::handlers::helpers::sort_key(&b.title))
-        });
-        self.library.track_artists = track_artists;
-        tracing::info!("Built {} track-level artists from {} tracks", self.library.track_artists.len(), self.library.all_tracks.len());
-    }
-
-    /// Compute artist aliases from uniform track artists on non-compilation albums.
-    ///
-    /// When ALL tracks on a non-compilation album share the same `original_title` that
-    /// differs from the album artist, that track artist is an alias of the album artist.
-    /// Example: Robert Pollard (album artist) → "Guided by Voices" (track artist alias).
-    pub fn build_artist_aliases(&mut self) {
-        let (aliases, album_display) = crate::services::artist_alias_service::compute_aliases(
-            &self.library.all_tracks,
-            &self.library.albums,
-        );
-
-        let alias_count: usize = aliases.values().map(|s| s.len()).sum();
-        tracing::info!(
-            "Built {} artist aliases across {} artists, {} album display overrides",
-            alias_count,
-            aliases.len(),
-            album_display.len(),
-        );
-
-        self.library.artist_aliases = aliases;
-        self.library.album_display_artist = album_display;
+        BrowseItem::artist_root_items_with_compilations(
+            &self.library.artists,
+            !self.library.compilations.albums.is_empty(),
+            &self.library.compilations.artist_keys,
+        )
     }
 
     /// Switch to a new view, deactivating the inline filter and clearing queue multi-select.
     pub fn set_view(&mut self, view: View) {
+        if self.view == view {
+            return;
+        }
         if self.list_filter.active {
             self.list_filter.deactivate();
         }
-        if view != View::Queue {
+        if !matches!(view, View::Queue | View::NowPlaying) {
             self.queue.selected.clear();
         }
+        self.select_mode = false;
         self.view = view;
     }
 
@@ -2850,6 +2918,13 @@ impl AppState {
     ///   `Ctrl+L|P|G|O` shortcut, or palette command), unfocus the
     ///   sections column so focus moves onto the rightward content.
     pub fn set_browse_category(&mut self, cat: BrowseCategory, preserve_sections_focus: bool) {
+        if self.sources.nav_collection.take().is_some() {
+            self.sources.nav_tasks.remove("collection");
+            self.sources.nav_tasks.remove("audiomuse");
+            self.artist_nav_request_id = self.artist_nav_request_id.wrapping_add(1);
+            self.artist_nav =
+                BrowseNavigationState::with_root("artists", self.build_artist_root_items());
+        }
         let was_same = self.browse_category == cat;
         self.browse_category = cat;
         self.category_column_index = self.row_index_for_category(cat);
@@ -2877,11 +2952,25 @@ impl AppState {
     /// `hidden_sections`). Using `all()` to set
     /// `category_column_index` was the source of teleporting-cursor
     /// bugs as the user arrowed through the sections column.
-    fn row_index_for_category(&self, cat: BrowseCategory) -> usize {
-        self.category_rows()
+    pub(crate) fn row_index_for_category(&self, cat: BrowseCategory) -> usize {
+        let rows = self.category_rows();
+        let fallback = rows
             .iter()
+            .position(|r| !matches!(r, CategoryRow::Header(_)))
+            .unwrap_or(0);
+        if cat == BrowseCategory::Library {
+            if let Some(kind) = self.sources.nav_collection {
+                return rows
+                    .iter()
+                    .position(
+                        |row| matches!(row, CategoryRow::NavidromeCollection(k) if *k == kind),
+                    )
+                    .unwrap_or(fallback);
+            }
+        }
+        rows.iter()
             .position(|r| matches!(r, CategoryRow::Category(c) if *c == cat))
-            .unwrap_or(0)
+            .unwrap_or(fallback)
     }
 
     /// Focus the category column, syncing category_column_index to match
@@ -2920,21 +3009,17 @@ impl AppState {
     /// Convert radio playback to queue mode, returning a snapshot for undo.
     pub fn convert_radio_to_queue(&mut self, description: &str) -> QueueSnapshot {
         let snapshot = QueueSnapshot {
-            queue: self.radio.tracks.clone(),
-            queue_index: self.radio.track_index,
+            contents: QueueContents::Radio(Box::new(self.radio.clone())),
             description: description.to_string(),
-            radio_snapshot: Some(self.radio.clone()),
-            radio_state_snapshot: Some(self.radio_state.clone()),
         };
         // Take tracks from radio instead of cloning (avoids redundant allocation)
         self.queue.tracks = std::mem::take(&mut self.radio.tracks);
         self.queue.index = self.radio.track_index;
-        self.playback_mode = PlaybackMode::Queue;
+        self.set_playback_mode(PlaybackMode::Queue);
         if let Some(idx) = self.queue.index {
             self.list_state.queue_index = idx;
         }
         self.radio.clear();
-        self.radio_state = RadioState::default();
         snapshot
     }
 
@@ -2953,7 +3038,10 @@ impl AppState {
             Some(c) => c,
             None => return false,
         };
-        let first_is_track = col.items.first().map_or(false, |item| matches!(item, BrowseItem::Track { .. }));
+        let first_is_track = col
+            .items
+            .first()
+            .is_some_and(|item| matches!(item, BrowseItem::Track { .. }));
         if !first_is_track {
             return false;
         }
@@ -2965,17 +3053,23 @@ impl AppState {
 
         // Check parent item for AllTracks or compilation album
         if col_idx > 0 {
-            if let Some(parent_item) = nav.columns.get(col_idx - 1).and_then(|p| p.selected_item()) {
+            if let Some(parent_item) = nav.columns.get(col_idx - 1).and_then(|p| p.selected_item())
+            {
                 match parent_item {
                     // Per-artist All Tracks, All Library Tracks, Compilation All Tracks
                     BrowseItem::AllTracks { .. } => return true,
                     // Compilation Tracks for a specific artist
                     BrowseItem::CompilationTracks { .. } => return true,
                     // Compilation album track column
-                    BrowseItem::Album { key, .. } => {
-                        if self.library.compilations.albums.iter().any(|a| a.rating_key == *key) {
-                            return true;
-                        }
+                    BrowseItem::Album { key, .. }
+                        if self
+                            .library
+                            .compilations
+                            .albums
+                            .iter()
+                            .any(|a| a.rating_key == *key) =>
+                    {
+                        return true;
                     }
                     _ => {}
                 }
@@ -2983,29 +3077,6 @@ impl AppState {
         }
 
         false
-    }
-
-    /// Whether multiple servers have music libraries available.
-    pub fn has_multiple_servers(&self) -> bool {
-        self.all_server_libraries.len() > 1
-    }
-
-    /// Get the server name for the currently active library.
-    pub fn active_server_name(&self) -> Option<&str> {
-        let server_id = self.active_server_id.as_ref()?;
-        self.all_server_libraries.iter()
-            .find(|(id, _, _)| id == server_id)
-            .map(|(_, name, _)| name.as_str())
-    }
-
-    /// Get all music libraries across all servers, with server info.
-    /// Returns: Vec<(server_id, server_name, library)>
-    pub fn all_libraries_with_servers(&self) -> Vec<(&str, &str, &Library)> {
-        self.all_server_libraries.iter()
-            .flat_map(|(id, name, libs)| {
-                libs.iter().map(move |lib| (id.as_str(), name.as_str(), lib))
-            })
-            .collect()
     }
 
     /// Set a toast notification (auto-clears after 5 seconds).
@@ -3028,16 +3099,6 @@ impl AppState {
         }
 
         // Priority 3: Preloads in progress (initial library data loading)
-        if !self.cache_mgmt.preloads_in_progress.is_empty() {
-            let done = self.cache_mgmt.preloads_total.saturating_sub(self.cache_mgmt.preloads_in_progress.len());
-            let total = self.cache_mgmt.preloads_total;
-            let msg = if total > 0 {
-                format!("Loading library data ({}/{})...", done, total)
-            } else {
-                "Loading library data...".to_string()
-            };
-            return Some(Notification::ongoing(msg));
-        }
 
         // Priority 4: Station loading (ongoing)
         if self.station_nav.loading {
@@ -3046,7 +3107,9 @@ impl AppState {
 
         // Priority 5: Background refresh (ongoing)
         if !self.cache_mgmt.background_refresh.is_empty() {
-            let categories: Vec<_> = self.cache_mgmt.background_refresh
+            let categories: Vec<_> = self
+                .cache_mgmt
+                .background_refresh
                 .iter()
                 .map(|c| c.display_name())
                 .collect();
@@ -3064,9 +3127,6 @@ impl AppState {
         }
 
         // Priority 7: Cache saving (ongoing)
-        if self.cache_mgmt.save_in_progress {
-            return Some(Notification::ongoing("Saving cache..."));
-        }
 
         // Priority 8: Toast notifications (transient)
         if let Some(ref msg) = self.notifications.toast_message {
@@ -3081,14 +3141,33 @@ impl AppState {
         None
     }
 
+    /// Tracks in the active playback context, excluding the inactive queue.
+    pub fn playback_tracks(&self) -> &[Track] {
+        match self.playback_mode {
+            PlaybackMode::Radio => &self.radio.tracks,
+            PlaybackMode::Queue | PlaybackMode::None => &self.queue.tracks,
+        }
+    }
+
     /// Get the currently playing track (mode-aware).
     pub fn current_track(&self) -> Option<&Track> {
         match self.playback_mode {
             PlaybackMode::Queue | PlaybackMode::None => {
                 self.queue.index.and_then(|idx| self.queue.tracks.get(idx))
             }
-            PlaybackMode::Radio => {
-                self.radio.current_track()
+            PlaybackMode::Radio => self.radio.current_track(),
+        }
+    }
+
+    /// Update prepared metadata in the active context, never the inactive queue.
+    pub fn current_track_mut(&mut self) -> Option<&mut Track> {
+        match self.playback_mode {
+            PlaybackMode::Radio => self
+                .radio
+                .track_index
+                .and_then(|i| self.radio.tracks.get_mut(i)),
+            PlaybackMode::Queue | PlaybackMode::None => {
+                self.queue.index.and_then(|i| self.queue.tracks.get_mut(i))
             }
         }
     }
@@ -3159,7 +3238,11 @@ impl AppState {
             BrowseCategory::Playlists => self.list_state.playlists_index,
             BrowseCategory::Folders => 0,
             cat if cat.is_tag_section() => self
-                .tag_nav.columns.first().map(|c| c.selected_index).unwrap_or(0),
+                .tag_nav
+                .columns
+                .first()
+                .map(|c| c.selected_index)
+                .unwrap_or(0),
             _ => 0,
         }
     }
@@ -3169,7 +3252,7 @@ impl AppState {
         match self.browse_category {
             BrowseCategory::Library => self.list_state.artists_index = idx,
             BrowseCategory::Playlists => self.list_state.playlists_index = idx,
-            BrowseCategory::Folders => {},
+            BrowseCategory::Folders => {}
             cat if cat.is_tag_section() => {
                 if let Some(c) = self.tag_nav.columns.first_mut() {
                     c.selected_index = idx;
@@ -3182,14 +3265,16 @@ impl AppState {
     /// Get the selected category item's rating key.
     pub fn selected_category_key(&self) -> Option<String> {
         match self.browse_category {
-            BrowseCategory::Library => {
-                self.library.artists.get(self.list_state.artists_index)
-                    .map(|a| a.rating_key.clone())
-            }
-            BrowseCategory::Playlists => {
-                self.library.playlists.get(self.list_state.playlists_index)
-                    .map(|p| p.rating_key.clone())
-            }
+            BrowseCategory::Library => self
+                .library
+                .artists
+                .get(self.list_state.artists_index)
+                .map(|a| a.rating_key.clone()),
+            BrowseCategory::Playlists => self
+                .library
+                .playlists
+                .get(self.list_state.playlists_index)
+                .map(|p| p.rating_key.clone()),
             BrowseCategory::Folders => None,
             cat if cat.is_tag_section() => {
                 let list = self.tag_list_for(cat);
@@ -3203,14 +3288,16 @@ impl AppState {
     /// Get the selected category item's title for display.
     pub fn selected_category_title(&self) -> Option<String> {
         match self.browse_category {
-            BrowseCategory::Library => {
-                self.library.artists.get(self.list_state.artists_index)
-                    .map(|a| a.title.clone())
-            }
-            BrowseCategory::Playlists => {
-                self.library.playlists.get(self.list_state.playlists_index)
-                    .map(|p| p.title.clone())
-            }
+            BrowseCategory::Library => self
+                .library
+                .artists
+                .get(self.list_state.artists_index)
+                .map(|a| a.title.clone()),
+            BrowseCategory::Playlists => self
+                .library
+                .playlists
+                .get(self.list_state.playlists_index)
+                .map(|p| p.title.clone()),
             BrowseCategory::Folders => None,
             cat if cat.is_tag_section() => {
                 let list = self.tag_list_for(cat);
@@ -3240,55 +3327,9 @@ impl Default for AppState {
     }
 }
 
-/// Connection state to Plex server.
-#[derive(Debug, Clone)]
-pub enum ConnectionState {
-    Disconnected,
-    Authenticating,
-    AuthPending { pin_code: String, pin_id: u64 },
-    Connecting,
-    Connected { username: String, has_plex_pass: bool },
-    /// Authentication is still valid and cached state remains usable, but the
-    /// most recent server request failed. A later successful response restores
-    /// `Connected` without forcing the user through login again.
-    Degraded { username: String, has_plex_pass: bool, message: String },
-    Error(String),
-}
-
-impl ConnectionState {
-    pub fn mark_degraded(&mut self, message: String) {
-        match self {
-            ConnectionState::Connected { username, has_plex_pass }
-            | ConnectionState::Degraded { username, has_plex_pass, .. } => {
-                *self = ConnectionState::Degraded {
-                    username: username.clone(),
-                    has_plex_pass: *has_plex_pass,
-                    message,
-                };
-            }
-            _ => {}
-        }
-    }
-
-    pub fn mark_healthy(&mut self) {
-        if let ConnectionState::Degraded { username, has_plex_pass, .. } = self {
-            *self = ConnectionState::Connected {
-                username: username.clone(),
-                has_plex_pass: *has_plex_pass,
-            };
-        }
-    }
-
-    pub fn is_authenticated(&self) -> bool {
-        matches!(self, ConnectionState::Connected { .. } | ConnectionState::Degraded { .. })
-    }
-}
-
 /// Current view (musikcube-style).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
-    /// Authentication screen
-    Auth,
     /// Browse library (main view with left: categories, right: tracks)
     Browse,
     /// Queue view — shows queue/radio tracks with stations panel and artwork
@@ -3307,7 +3348,6 @@ pub enum View {
     Settings,
 }
 
-
 /// Visualizer tab for the Now Playing view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum VisualizerTab {
@@ -3321,17 +3361,80 @@ pub enum VisualizerTab {
     /// (braille glyphs) and the GUI (canvas) render this from
     /// the shared sample-tap pipeline.
     Vectorscope,
+    Landscape,
+    Meters,
 }
 
-cyclic_enum!(VisualizerTab, Waveform, Spectrum, Spectrogram, Vectorscope);
+cyclic_enum!(
+    VisualizerTab,
+    Waveform,
+    Spectrum,
+    Spectrogram,
+    Vectorscope,
+    Landscape,
+    Meters
+);
 
 impl VisualizerTab {
+    pub const ALL: [Self; 6] = [
+        Self::Waveform,
+        Self::Spectrum,
+        Self::Spectrogram,
+        Self::Vectorscope,
+        Self::Landscape,
+        Self::Meters,
+    ];
+
+    /// Shared tab labels/layout for rendering and hit testing. On narrow
+    /// panes, show a window beginning at the selected tab.
+    pub fn visible_tabs(self, width: u16) -> Vec<(Self, &'static str)> {
+        let compact = width < 100;
+        let labels = ["wave", "spec", "gram", "XY", "land", "meters"];
+        let tabs: Vec<_> = Self::ALL
+            .iter()
+            .enumerate()
+            .map(|(i, &tab)| (tab, if compact { labels[i] } else { tab.name() }))
+            .collect();
+        let total: usize = tabs.iter().map(|(_, name)| name.len() + 5).sum();
+        let start = if total.saturating_sub(3) > width as usize {
+            self as usize
+        } else {
+            0
+        };
+        let mut used = 0;
+        tabs.into_iter()
+            .skip(start)
+            .take_while(|(_, label)| {
+                used += label.len() + if used == 0 { 2 } else { 5 };
+                used <= width as usize
+            })
+            .collect()
+    }
+
+    pub fn hit_tab(self, width: u16, column: u16) -> Option<Self> {
+        let mut x = 0;
+        for (tab, label) in self.visible_tabs(width) {
+            let end = x + label.len() as u16 + 2;
+            if (x..end).contains(&column) {
+                return Some(tab);
+            }
+            x = end + 3;
+        }
+        None
+    }
+
+    pub fn allows_canvas_seek(self) -> bool {
+        !matches!(self, Self::Landscape | Self::Meters)
+    }
+
     pub fn name(&self) -> &'static str {
         match self {
             VisualizerTab::Waveform => "waveform",
             VisualizerTab::Spectrum => "spectrum",
             VisualizerTab::Spectrogram => "spectrogram",
             VisualizerTab::Vectorscope => "vectorscope",
+            VisualizerTab::Landscape => "spectral landscape",
+            VisualizerTab::Meters => "studio meters",
         }
     }
 }
@@ -3376,7 +3479,7 @@ impl SearchTab {
 /// Browse category type (what's shown in left panel).
 ///
 /// Each variant other than Library / Playlists / Folders is a "tag"
-/// section: a flat list of values fetched from Plex (album genres,
+/// section: a flat list of values fetched from server (album genres,
 /// moods, decades, etc.) that drills into albums. They all share the
 /// `tag_nav` state, which is reset when the user switches between
 /// them.
@@ -3498,7 +3601,7 @@ impl BrowseCategory {
         )
     }
 
-    /// Sections hidden by default — sparsely populated in most Plex
+    /// Sections hidden by default — sparsely populated in most server
     /// libraries. Users can toggle visibility from the Settings panel.
     pub fn hidden_by_default() -> &'static [BrowseCategory] {
         &[
@@ -3519,11 +3622,34 @@ impl BrowseCategory {
 /// playlist gets its own clickable line below the divider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CategoryRow {
+    Search,
+    NavidromeCollection(crate::app::sources::navidrome::commands::CollectionKind),
     Category(BrowseCategory),
     Playlist(usize),
-    /// A horizontal-rule separator row. Renders as chrome (no
+    /// A labelled separator row. Renders as chrome (no
     /// selection, skipped by Up/Down navigation, ignored by mouse).
-    Divider,
+    Header(&'static str),
+}
+
+/// A configurable sidebar section, independent of its current visible position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidebarSection {
+    Category(BrowseCategory),
+    Collection(crate::app::sources::navidrome::commands::CollectionKind),
+}
+impl SidebarSection {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Category(c) => c.display_label(),
+            Self::Collection(c) => c.label(),
+        }
+    }
+    pub fn hidden(self, state: &AppState) -> bool {
+        match self {
+            Self::Category(c) => state.hidden_sections.contains(&c),
+            Self::Collection(c) => state.hidden_collections.contains(&c),
+        }
+    }
 }
 
 /// TUI command-palette overlay state. `open == false` means we're in
@@ -3565,11 +3691,20 @@ pub struct PaletteEntry {
     pub aliases: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct TextPopup {
+    pub title: String,
+    pub text: String,
+    pub scroll: u16,
+    pub request_id: u64,
+}
+
 /// The dispatchable command attached to a palette entry. Mirror of
-/// `ui::command_palette::PaletteCommand` but lives in shared state so
+/// `app::command_palette::PaletteCommand` but lives in shared state so
 /// the GUI never needs to import the TUI module.
 #[derive(Debug, Clone)]
 pub enum PaletteCommandKind {
+    Navidrome(crate::app::sources::navidrome::commands::Command),
     Quit,
     GotoLibrary,
     GotoGenres,
@@ -3589,6 +3724,7 @@ pub enum PaletteCommandKind {
     ToggleTallMode,
     Refresh,
     PlayPause,
+    StopPlayback,
     NextTrack,
     PrevTrack,
     ToggleDj(DjMode),
@@ -3598,8 +3734,14 @@ pub enum PaletteCommandKind {
     RemixDoppelganger,
     RemixShuffle,
     RemixUndoShuffle,
-    /// Start a Plex Radio station identified by its rating key.
-    PlayStation { key: String, title: String },
+    /// Start a station identified by its station URL, not an artist rating key.
+    PlayStation(String),
+    BrowseStations {
+        key: String,
+        title: String,
+    },
+    StationsBack,
+    ArtistRadio,
     /// Pick one album at random from the active library and play it
     /// once (clear queue + load tracks). Distinct from
     /// "Random Album Radio" which is a continuous station.
@@ -3665,7 +3807,7 @@ pub enum PaletteCommandKind {
     /// the only edit needed.
     FromTrackContext {
         kind: crate::services::track_context::ContextKind,
-        track: Box<crate::plex::models::Track>,
+        track: Box<crate::library::models::Track>,
     },
     /// Open the F3 library-picker popup.
     SwitchLibrary,
@@ -3709,13 +3851,12 @@ impl PaletteState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LibrarySubMode {
     #[default]
-    Normal,        // Standard artist list with drill-down
-    AllByArtist,   // All albums sorted by artist
-    AllShuffled,   // All albums shuffled
+    Normal, // Standard artist list with drill-down
+    AllByArtist, // All albums sorted by artist
+    AllShuffled, // All albums shuffled
 }
 
 cyclic_enum!(LibrarySubMode, Normal, AllByArtist, AllShuffled);
-
 
 /// Sort mode for the play queue in Now Playing view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -3745,15 +3886,13 @@ pub enum Focus {
     Right,
 }
 
-/// Focus within the Now Playing queue view. Stations is legacy
-/// (the inline stations panel was removed); Sidebar covers the
+/// Focus within the Now Playing queue view. Sidebar covers the
 /// left-hand action buttons (Radio / DJ Modes / Remix / Clear) so
 /// the user can keyboard-navigate them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NowPlayingFocus {
     #[default]
     Tracks,
-    Stations,
     Sidebar,
     /// The right-side artwork panel on the queue screen. Up/Down or
     /// Left/Right arrows can land here as the third stop in the
@@ -3801,7 +3940,7 @@ pub struct PlaybackState {
     pub duration_ms: u64,
     pub volume: f32,
     pub muted: bool,
-    /// True once Plex has accepted (or we have queued) the played/scrobble
+    /// True once server has accepted (or we have queued) the played/scrobble
     /// report for this track. Reset only when a new track starts.
     pub scrobble_reported: bool,
     /// When the current track transitioned to Playing (for grace period on TrackEnded detection).
@@ -3852,7 +3991,7 @@ pub struct WaveformState {
 #[derive(Debug, Clone, Default)]
 pub struct SpectrogramState {
     /// Cached spectrogram data for current track.
-    pub data: Option<crate::plex::SpectrogramData>,
+    pub data: Option<crate::media::SpectrogramData>,
     /// Track key this spectrogram is for.
     pub track_key: Option<String>,
     /// Whether spectrogram is being generated.
@@ -3869,40 +4008,6 @@ pub enum SearchFocus {
     Results,
 }
 
-/// Radio launcher tab (artist-only radio).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum RadioLauncherTab {
-    #[default]
-    All,
-    Artists,
-}
-
-cyclic_enum!(RadioLauncherTab, All, Artists);
-
-impl RadioLauncherTab {
-    pub fn all() -> &'static [RadioLauncherTab] {
-        Self::CYCLE_ORDER
-    }
-
-    pub fn name(&self) -> &'static str {
-        match self {
-            RadioLauncherTab::All => "All",
-            RadioLauncherTab::Artists => "Artists",
-        }
-    }
-}
-
-/// Radio launcher popup state.
-#[derive(Debug, Clone)]
-pub struct RadioLauncherState {
-    pub query: String,
-    pub results: Option<SearchResults>,
-    pub focus: SearchFocus,
-    pub tab: RadioLauncherTab,
-    pub item_index: usize,
-    pub loading: bool,
-}
-
 /// Adventure launcher step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdventureStep {
@@ -3915,8 +4020,17 @@ pub enum AdventureStep {
 #[derive(Debug, Clone)]
 pub enum AdventureDrillLevel {
     Search,
-    ArtistAlbums { artist_key: String, artist_name: String, albums: Vec<Album> },
-    AlbumTracks { album_key: String, album_title: String, artist_name: String, tracks: Vec<Track> },
+    ArtistAlbums {
+        artist_key: String,
+        artist_name: String,
+        albums: Vec<Album>,
+    },
+    AlbumTracks {
+        album_key: String,
+        album_title: String,
+        artist_name: String,
+        tracks: Vec<Track>,
+    },
 }
 
 /// Adventure launcher popup state. The original 3-step wizard
@@ -3941,10 +4055,6 @@ pub struct AdventureLauncherState {
     pub track_count_input: String,
     pub scroll_pin: Option<usize>,
     pub search_tab: SearchTab,
-    /// Bumped each time the user changes the query. The async track
-    /// search uses this as a debounce token: stale callbacks (queued
-    /// before the user kept typing) are dropped without applying.
-    pub search_version: u64,
 }
 
 /// List selection states for different views.
@@ -3953,7 +4063,7 @@ pub struct ListStates {
     pub artists_index: usize,
     pub albums_index: usize,
     pub playlists_index: usize,
-    pub right_albums_index: usize,  // Albums in right panel (for artist drill-down)
+    pub right_albums_index: usize, // Albums in right panel (for artist drill-down)
     pub tracks_index: usize,
     pub queue_index: usize,
     pub similar_index: usize,
@@ -3972,51 +4082,41 @@ impl ListStates {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SettingsSection {
     #[default]
-    Account,
+    Libraries,
     Textamp,
-    Sections,
-    Cache,
     About,
 }
 
 impl SettingsSection {
     pub fn all() -> &'static [SettingsSection] {
         &[
-            SettingsSection::Account,
+            SettingsSection::Libraries,
             SettingsSection::Textamp,
-            SettingsSection::Sections,
-            SettingsSection::Cache,
             SettingsSection::About,
         ]
     }
 
     pub fn name(&self) -> &'static str {
         match self {
-            SettingsSection::Account => "account",
+            SettingsSection::Libraries => "libraries",
             SettingsSection::Textamp => "textamp",
-            SettingsSection::Sections => "sections",
-            SettingsSection::Cache => "cache",
             SettingsSection::About => "about",
         }
     }
 
     pub fn next(&self) -> Self {
         match self {
-            SettingsSection::Account => SettingsSection::Textamp,
-            SettingsSection::Textamp => SettingsSection::Sections,
-            SettingsSection::Sections => SettingsSection::Cache,
-            SettingsSection::Cache => SettingsSection::About,
-            SettingsSection::About => SettingsSection::Account,
+            SettingsSection::Libraries => SettingsSection::Textamp,
+            SettingsSection::Textamp => SettingsSection::About,
+            SettingsSection::About => SettingsSection::Libraries,
         }
     }
 
     pub fn prev(&self) -> Self {
         match self {
-            SettingsSection::Account => SettingsSection::About,
-            SettingsSection::Textamp => SettingsSection::Account,
-            SettingsSection::Sections => SettingsSection::Textamp,
-            SettingsSection::Cache => SettingsSection::Sections,
-            SettingsSection::About => SettingsSection::Cache,
+            SettingsSection::Textamp => SettingsSection::Libraries,
+            SettingsSection::Libraries => SettingsSection::About,
+            SettingsSection::About => SettingsSection::Textamp,
         }
     }
 }
@@ -4031,9 +4131,59 @@ pub enum SettingsFocus {
     Content,
 }
 
+/// Ordered settings rows shared by rendering and keyboard activation. Provider
+/// capabilities determine the rows, so hidden controls cannot shift action indices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextampSetting {
+    Theme(crate::app::theme::ThemeName),
+    Artwork(ArtworkMode),
+
+    Transcode,
+    ExternalSearch(crate::services::external_search::SearchTarget),
+    Sidebar(SidebarSection),
+}
+
+impl AppState {
+    pub fn textamp_settings(&self) -> Vec<TextampSetting> {
+        use crate::services::external_search::SearchTarget;
+        use TextampSetting::*;
+        let mut items: Vec<_> = crate::app::theme::ThemeName::all()
+            .iter()
+            .copied()
+            .map(Theme)
+            .chain(ArtworkMode::all().iter().copied().map(Artwork))
+            .collect();
+
+        if self
+            .sources
+            .active
+            .capabilities()
+            .supports(crate::library::capabilities::Feature::Transcoding)
+        {
+            items.push(Transcode);
+        }
+        items.extend(
+            [
+                SearchTarget::AppleMusic,
+                SearchTarget::Spotify,
+                SearchTarget::YouTube,
+            ]
+            .map(ExternalSearch),
+        );
+        items.extend(self.sidebar_sections().into_iter().map(Sidebar));
+        items
+    }
+}
+
 /// Settings screen state.
 #[derive(Debug, Clone, Default)]
 pub struct SettingsState {
+    pub cache_scans: std::collections::HashMap<String, crate::app::sources::cache::ScanState>,
+    pub scan_request: u64,
+    pub cache_request: u64,
+    pub cache_entries: Vec<(crate::app::sources::LibraryChoice, Result<u64, String>)>,
+    pub cache_task: Option<crate::app::tasks::TaskLease>,
+
     /// Which panel has focus
     pub focus: SettingsFocus,
     /// Which settings section is focused
@@ -4044,23 +4194,10 @@ pub struct SettingsState {
     pub editing: bool,
     /// Pending server discovery
     pub discovering_servers: bool,
-    /// Username being edited (Account section sign-in)
+    /// Active server account name, also used by the library manager.
     pub username_input: String,
-    /// Password being edited (Account section sign-in)
-    pub password_input: SecretString,
-    /// Which credential field is being edited (None = not editing credentials)
-    pub editing_credential: Option<CredentialField>,
-    /// Whether the Account section is in sign-in mode (showing login form)
-    pub signing_in: bool,
     /// Scroll offset for the About section (display-only, no selectable items)
     pub scroll: u16,
-}
-
-/// Which credential field is being edited in settings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CredentialField {
-    Username,
-    Password,
 }
 
 /// Input dialog for text entry (playlist names, etc.).
@@ -4069,7 +4206,7 @@ pub struct InputDialog {
     /// Dialog title
     pub title: String,
     /// Current input text
-    pub input: String,
+    pub input: SecretString,
     /// Action to dispatch on confirm
     pub action_type: InputDialogAction,
 }
@@ -4077,8 +4214,23 @@ pub struct InputDialog {
 /// What action to take when input dialog is confirmed.
 #[derive(Debug, Clone)]
 pub enum InputDialogAction {
+    AudioMuseSearch(crate::audiomuse::Feature),
+    NavidromePlaylistName { id: String },
+    NavidromeName(String),
+    FolderLocation,
+    FolderName(String),
     SavePlaylist,
     AdventureLength,
+}
+impl InputDialogAction {
+    pub fn submit_label(&self) -> &'static str {
+        match self {
+            Self::AudioMuseSearch(_) => "Search",
+            Self::FolderLocation => "Continue",
+            Self::AdventureLength => "Generate",
+            _ => "Save",
+        }
+    }
 }
 
 /// Sonic Adventure creation state.
@@ -4120,6 +4272,22 @@ pub enum RefreshCategory {
 }
 
 impl RefreshCategory {
+    /// Album-artist browsing shares the same underlying artist request.
+    pub fn canonical(self) -> Self {
+        if self == Self::AlbumArtists {
+            Self::Artists
+        } else {
+            self
+        }
+    }
+    pub fn progress_label(&self) -> &'static str {
+        if *self == Self::AllTracks {
+            "Tracks"
+        } else {
+            self.cache_key()
+        }
+    }
+
     /// Get all categories in priority order.
     pub fn all() -> &'static [RefreshCategory] {
         &[
@@ -4156,7 +4324,10 @@ impl RefreshCategory {
 
     /// Look up a RefreshCategory from its cache key string.
     pub fn from_cache_key(key: &str) -> Option<Self> {
-        RefreshCategory::all().iter().find(|c| c.cache_key() == key).copied()
+        RefreshCategory::all()
+            .iter()
+            .find(|c| c.cache_key() == key)
+            .copied()
     }
 
     /// Get display name for status messages and toasts.
@@ -4215,69 +4386,17 @@ pub struct ConfirmDialog {
 /// Action to take when confirmation dialog is confirmed.
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
+    NavidromeDeletePlaylist(String),
+    NavidromeReplacePlaylist(String),
+    RemoveNavidrome(String),
+    RemoveFolder(String),
+
     RefreshCache,
     ClearLibraryCache,
+    ClearSourceCache(crate::app::sources::LibraryChoice),
     ClearArtworkCache,
-    ClearSubfolderCache,
+
     Quit,
-}
-
-/// Output target for playback — Local (default) or Remote (Plex player device).
-#[derive(Debug, Clone, Default)]
-pub enum OutputTarget {
-    #[default]
-    Local,
-    Remote {
-        player_id: String,
-        player_name: String,
-        /// Direct URI for players that advertise on the local network (e.g. "http://192.168.1.5:32500").
-        player_uri: Option<String>,
-    },
-}
-
-/// State for tracking remote player playback (polling, position interpolation).
-#[derive(Debug, Clone)]
-pub struct RemotePlaybackState {
-    /// Last time we polled the remote player for status.
-    pub last_poll: Option<std::time::Instant>,
-    /// Ensures slow status requests never pile up behind the serialized
-    /// remote-command queue.
-    pub poll_in_flight: bool,
-    /// Track key reported by the remote player (for detecting track changes).
-    pub current_track_key: Option<String>,
-    /// Position baseline from the last successful poll (ms).
-    pub baseline_position: u64,
-    /// When the baseline was set — used to interpolate smoothly between polls.
-    pub baseline_time: Option<std::time::Instant>,
-}
-
-impl Default for RemotePlaybackState {
-    fn default() -> Self {
-        Self {
-            last_poll: None,
-            poll_in_flight: false,
-            current_track_key: None,
-            baseline_position: 0,
-            baseline_time: None,
-        }
-    }
-}
-
-impl RemotePlaybackState {
-    /// Anchor remote position at a server-confirmed or user-requested point.
-    pub fn anchor(&mut self, position_ms: u64, running: bool) {
-        self.baseline_position = position_ms;
-        self.baseline_time = running.then(std::time::Instant::now);
-    }
-
-    /// Interpolate from the last anchor without mutating the baseline.
-    pub fn estimated_position(&self) -> u64 {
-        self.baseline_position.saturating_add(
-            self.baseline_time
-                .map(|instant| instant.elapsed().as_millis() as u64)
-                .unwrap_or(0),
-        )
-    }
 }
 
 /// Inline list filter state (/ key in browse view).

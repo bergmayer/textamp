@@ -12,20 +12,26 @@
 //! ├──────────────────────────────────────────────────────────────┤
 //! │ playing Track Name by Artist from Album       vol ─■── 80%   │
 //! ├──────────────────────────────────────────────────────────────┤
-//! │ ^A artists │ ^P playlists │ ^N queue │ ^S similar │ ? │
+//! │ Library / Now Playing │ :  /  ⇥  ,  \  |                   │
 //! └──────────────────────────────────────────────────────────────┘
+//! The existing `:` command control and right-click track menu share entries,
+//! including capability-gated Sonic Radio; no additional shortcut is needed.
+//! Sidebar collections (favorites, album history, AudioMuse categories) are not
+//! duplicated as commands. The existing `:` control still opens the action list.
+//! The untitled sidebar starts with Search, followed by lowercase group headings.
+//! Highlighting Search shows a themed logo and Enter prompt.
 
 use std::cell::RefCell;
 
-use crate::app::state::{View, BrowseCategory, InputDialog, ConfirmDialog};
-use crate::app::AppState;
-use crate::services::NavigationService;
 use super::artwork::ArtworkRenderer;
-use super::layout::{AppLayout, FullScreenLayout, centered_rect};
+use super::layout::{centered_rect, AppLayout, FullScreenLayout};
 use super::screens;
 use super::theme::theme;
 use super::widgets;
 use super::widgets::scrollbar::render_scrollbar;
+use crate::app::state::{BrowseCategory, ConfirmDialog, InputDialog, View};
+use crate::services::NavigationService;
+use crate::ui::RenderState as AppState;
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
@@ -64,13 +70,15 @@ pub fn render(frame: &mut Frame, state: &AppState) {
 
     // Fill entire background with theme color
     let t = theme();
-    frame.render_widget(Block::default().style(Style::default().bg(t.colors.bg_primary)), frame.area());
+    frame.render_widget(
+        Block::default().style(Style::default().bg(t.colors.bg_primary)),
+        frame.area(),
+    );
 
     // Tall mode: split the frame vertically — Library on top half,
-    // Now Playing on bottom half. Only applies when the user is on a
-    // view that would normally be one of those two; popups / Help /
-    // Settings / Auth still render full-screen because their layouts
-    // assume the whole frame.
+    // Now Playing below. View selects keyboard focus; retained selections
+    // in the other pane are not focused. Settings / Help replace the upper
+    // pane; Auth / Search and modal overlays use the full frame.
     let tall_eligible = matches!(
         state.view,
         View::Browse | View::Queue | View::NowPlaying | View::Settings | View::Help
@@ -87,18 +95,18 @@ pub fn render(frame: &mut Frame, state: &AppState) {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Percentage(40),
-                Constraint::Length(1),       // separator row
-                Constraint::Min(5),          // bottom half (60% minus 1 row)
+                Constraint::Length(1), // separator row
+                Constraint::Min(5),    // bottom half (60% minus 1 row)
             ])
             .split(frame.area());
 
-        // Register the split for mouse hit-testing — clicks crossing
-        // the separator switch the active view (top = Browse, bottom
-        // = NowPlaying).
-        state.hit_regions.borrow_mut().tall_mode_split = Some(crate::ui::hit_regions::TallModeSplit {
-            top: split[0],
-            bottom: split[2],
-        });
+        // Register pane geometry for pointer routing: top = Browse/Settings/Help;
+        // bottom queue/artwork = Queue, bottom visualizer = NowPlaying.
+        state.hit_regions.borrow_mut().tall_mode_split =
+            Some(crate::app::presentation::TallModeSplit {
+                top: split[0],
+                bottom: split[2],
+            });
 
         // Top half: whichever view the user is on. Settings / Help
         // get the top half so the Now Playing visualizer stays visible
@@ -118,7 +126,6 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         render_queue_and_visualizer_in(frame, state, split[2], false);
     } else {
         match state.view {
-            View::Auth => render_auth(frame, state),
             View::Browse => render_browse(frame, state),
             View::Queue => render_queue_and_visualizer(frame, state),
             View::NowPlaying => render_queue_and_visualizer(frame, state),
@@ -135,11 +142,8 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         screens::filter::render(frame, state, frame.area());
     }
 
-    // Render radio launcher popup if active
-    if state.popups.radio_launcher.is_some() {
-        screens::radio_launcher::render(frame, state, frame.area());
-    }
-
+    // Radio/DJ controls use the shared capability-filtered command palette.
+    // Shortcut labels and activation use the same presentation rows.
     // Render adventure launcher popup if active
     if state.popups.adventure_launcher.is_some() {
         screens::adventure_launcher::render(frame, state, frame.area());
@@ -172,7 +176,25 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         BIO_ARTWORK_RENDERER.with(|r| r.borrow_mut().clear());
     }
 
+    if let Some(popup) = &state.popups.text {
+        let area = centered_rect(70, 70, frame.area());
+        frame.render_widget(Clear, area);
+        frame.render_widget(
+            Paragraph::new(popup.text.as_str())
+                .wrap(Wrap { trim: false })
+                .scroll((popup.scroll, 0))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(popup.title.as_str())
+                        .title_bottom(" ↑↓ scroll · Esc close "),
+                ),
+            area,
+        );
+    }
+
     // Render error popup if present
+    screens::library_dialog::render(frame, state);
     if let Some(ref error) = state.notifications.last_error {
         render_error_popup(frame, error);
     }
@@ -197,10 +219,6 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     if state.palette.open {
         crate::ui::command_palette::render(frame, state, frame.area());
     }
-}
-
-fn render_auth(frame: &mut Frame, state: &AppState) {
-    screens::auth::render(frame, state, frame.area());
 }
 
 fn render_browse(frame: &mut Frame, state: &AppState) {
@@ -241,7 +259,10 @@ fn render_browse_in(frame: &mut Frame, state: &AppState, area: Rect, skip_transp
         0
     } else {
         match state.browse_category {
-            BrowseCategory::Folders => state.folder_state.as_ref().map_or(0, |fs| fs.focused_column),
+            BrowseCategory::Folders => state
+                .folder_state
+                .as_ref()
+                .map_or(0, |fs| fs.focused_column),
             _ => state.browse_nav().map_or(0, |nav| nav.focused_column),
         }
     };
@@ -269,13 +290,26 @@ fn render_browse_in(frame: &mut Frame, state: &AppState, area: Rect, skip_transp
     let t = theme();
     let category_rows = state.category_rows();
 
-    let n_meaningful_miller = count_meaningful_miller_cols(state);
+    let search_selected = state.category_column_focused
+        && matches!(
+            category_rows.get(state.category_column_index),
+            Some(crate::app::state::CategoryRow::Search)
+        );
+    let n_meaningful_miller = if search_selected {
+        1
+    } else {
+        count_meaningful_miller_cols(state)
+    };
 
     // Track-details pane: counted as a "column slot" so it gets
     // the same width as everything else. Visible whenever the
     // focused Miller row is a Track AND the pane hasn't been
     // hidden via Ctrl+W for that specific track.
-    let pane_track = state.pane_track();
+    let pane_track = if search_selected {
+        None
+    } else {
+        state.pane_track()
+    };
     let n_pane: usize = if pane_track.is_some() { 1 } else { 0 };
 
     let total_cols_wanted = 1 + n_meaningful_miller + n_pane;
@@ -286,7 +320,7 @@ fn render_browse_in(frame: &mut Frame, state: &AppState, area: Rect, skip_transp
     // (focus-anchored) while the cat stays put. Total wanted slots
     // is at least 2 so even an empty / loading content area still
     // reserves a meaningful col next to cat.
-    let strip_wants_to_show = state.alphabet_strip_visible();
+    let strip_wants_to_show = !search_selected && state.alphabet_strip_visible();
     let cat_col_visible = true;
     let resolve_layout = |strip_w: u16| -> usize {
         let usable = full_area.width.saturating_sub(strip_w);
@@ -305,13 +339,12 @@ fn render_browse_in(frame: &mut Frame, state: &AppState, area: Rect, skip_transp
     // with it. Folders are excluded — they use a different render
     // path (`render_folder_view`) so the ribbon model doesn't
     // apply directly there yet.
-    let scrolling_browse = state.miller_layout
-        == crate::app::state::MillerLayoutMode::Scrolling
-        && matches!(
+    let scrolling_browse = !search_selected
+        && state.miller_layout == crate::app::state::MillerLayoutMode::Scrolling
+        && (matches!(
             state.browse_category,
             BrowseCategory::Library | BrowseCategory::Playlists
-        ) || (state.miller_layout == crate::app::state::MillerLayoutMode::Scrolling
-            && state.browse_category.is_tag_section());
+        ) || state.browse_category.is_tag_section());
 
     // Number of leading nav cols the inner Miller renderer always
     // skips for this category (Playlists hides its root col 0
@@ -326,16 +359,23 @@ fn render_browse_in(frame: &mut Frame, state: &AppState, area: Rect, skip_transp
     const RIBBON_VISIBLE: usize = 2;
     let ribbon_total = if scrolling_browse {
         1 + visible_nav_cols + n_pane
-    } else { 0 };
+    } else {
+        0
+    };
     let ribbon_focused = if scrolling_browse {
-        if state.category_column_focused { 0 }
-        else if state.track_pane_focused { ribbon_total.saturating_sub(1) }
-        else if state.alphabet_strip_focused { 1 }
-        else {
+        if state.category_column_focused {
+            0
+        } else if state.track_pane_focused {
+            ribbon_total.saturating_sub(1)
+        } else if state.alphabet_strip_focused {
+            1
+        } else {
             let nav_focused = state.browse_nav().map(|n| n.focused_column).unwrap_or(0);
             1 + nav_focused.saturating_sub(category_base_offset)
         }
-    } else { 0 };
+    } else {
+        0
+    };
     let ribbon_start = if scrolling_browse {
         let focus_anchored = (ribbon_focused + 1).saturating_sub(RIBBON_VISIBLE);
         if state.miller_scroll_manual && ribbon_total > RIBBON_VISIBLE {
@@ -347,10 +387,14 @@ fn render_browse_in(frame: &mut Frame, state: &AppState, area: Rect, skip_transp
         } else {
             focus_anchored
         }
-    } else { 0 };
+    } else {
+        0
+    };
     let ribbon_end = if scrolling_browse {
         (ribbon_start + RIBBON_VISIBLE).min(ribbon_total)
-    } else { 0 };
+    } else {
+        0
+    };
     let scroll_sections_visible = scrolling_browse && ribbon_start == 0;
     let scroll_artists_visible = scrolling_browse && ribbon_start <= 1 && ribbon_end >= 2;
 
@@ -361,12 +405,12 @@ fn render_browse_in(frame: &mut Frame, state: &AppState, area: Rect, skip_transp
     };
     let (visible_count, col_width) = if scrolling_browse {
         // Two slots visible, each half the screen.
-        let cw = (full_area.width / RIBBON_VISIBLE as u16).max(MIN_COL_WIDTH);
+        let cw = full_area.width / RIBBON_VISIBLE as u16;
         (RIBBON_VISIBLE, cw)
     } else {
         let vc = resolve_layout(strip_width);
         let usable_width = full_area.width.saturating_sub(strip_width);
-        let cw = (usable_width / vc as u16).max(MIN_COL_WIDTH);
+        let cw = usable_width / vc as u16;
         (vc, cw)
     };
     let _virtual_start: usize = 0;
@@ -389,11 +433,13 @@ fn render_browse_in(frame: &mut Frame, state: &AppState, area: Rect, skip_transp
             height: full_area.height,
         };
 
-        let is_focused = state.category_column_focused;
-        let border_color = if is_focused { t.colors.title_focused } else { t.colors.border };
+        let is_focused = state.view == View::Browse && state.category_column_focused;
+        let border_color = if is_focused {
+            t.colors.title_focused
+        } else {
+            t.colors.border
+        };
         let block = Block::default()
-            .title(" browse ")
-            .title_style(Style::default().fg(if is_focused { t.colors.title_focused } else { t.colors.fg_accent }))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(border_color))
             .style(Style::default().bg(t.colors.bg_primary));
@@ -401,25 +447,48 @@ fn render_browse_in(frame: &mut Frame, state: &AppState, area: Rect, skip_transp
         frame.render_widget(block, col_area);
 
         // Register category column hit region
+        let category_scroll = state
+            .scroll
+            .category
+            .unwrap_or_else(|| {
+                NavigationService::calc_scroll_offset(
+                    state.category_column_index,
+                    inner.height as usize,
+                    category_rows.len(),
+                )
+            })
+            .min(category_rows.len().saturating_sub(inner.height as usize));
         {
             let mut hr = state.hit_regions.borrow_mut();
-            hr.category_column = Some(crate::ui::hit_regions::CategoryColumnRegion {
+            hr.category_column = Some(crate::app::presentation::CategoryColumnRegion {
+                scroll_offset: category_scroll,
                 area: col_area,
                 inner,
                 item_count: category_rows.len(),
             });
         }
 
-        // Categories, dividers, and playlists render as one continuous
-        // list — the visual y-offset is just the row index.
-        for (i, row) in category_rows.iter().enumerate() {
-            let y_offset = i as u16;
-            if y_offset >= inner.height { break; }
+        // Search → Browse/native system lists → AudioMuse discovery → playlists.
+        // Labelled headings scroll with their rows; clicks use the published offset.
+        for (i, row) in category_rows.iter().enumerate().skip(category_scroll) {
+            let y_offset = (i - category_scroll) as u16;
+            if y_offset >= inner.height {
+                break;
+            }
 
-            // Divider rows render a horizontal rule and skip the rest.
-            if matches!(row, crate::app::state::CategoryRow::Divider) {
-                let sep = "\u{2500}".repeat(inner.width as usize);
-                let line_area = Rect { x: inner.x, y: inner.y + y_offset, width: inner.width, height: 1 };
+            // Nonselectable headings label groups and span the sidebar width.
+            if let crate::app::state::CategoryRow::Header(label) = row {
+                let label = label.to_lowercase();
+                let sep = format!(
+                    "─ {label} {}",
+                    "─".repeat((inner.width as usize).saturating_sub(label.len() + 3))
+                );
+                let line_area = Rect {
+                    x: inner.x,
+                    y: inner.y + y_offset,
+                    width: inner.width,
+                    height: 1,
+                };
                 frame.render_widget(
                     Paragraph::new(sep).style(Style::default().fg(t.colors.border)),
                     line_area,
@@ -428,9 +497,11 @@ fn render_browse_in(frame: &mut Frame, state: &AppState, area: Rect, skip_transp
             }
 
             let (label, is_active) = match row {
+                crate::app::state::CategoryRow::Search => ("Search…".to_owned(), false),
                 crate::app::state::CategoryRow::Category(cat) => {
                     let label = cat.display_label();
-                    let active = state.browse_category == *cat;
+                    let active =
+                        state.browse_category == *cat && state.sources.nav_collection.is_none();
                     (label.to_string(), active)
                 }
                 crate::app::state::CategoryRow::Playlist(idx) => {
@@ -439,7 +510,10 @@ fn render_browse_in(frame: &mut Frame, state: &AppState, area: Rect, skip_transp
                         None => continue,
                     };
                     let active = state.browse_category == BrowseCategory::Playlists
-                        && state.playlist_nav.columns.first()
+                        && state
+                            .playlist_nav
+                            .columns
+                            .first()
                             .and_then(|c| c.items.get(c.selected_index))
                             .map(|it| it.key() == p.rating_key.as_str())
                             .unwrap_or(false);
@@ -448,7 +522,12 @@ fn render_browse_in(frame: &mut Frame, state: &AppState, area: Rect, skip_transp
                     // color instead of the colorful emoji glyph.
                     (crate::util::force_text_presentation(&p.title), active)
                 }
-                crate::app::state::CategoryRow::Divider => unreachable!(),
+                crate::app::state::CategoryRow::NavidromeCollection(kind) => (
+                    kind.label().to_owned(),
+                    state.browse_category == BrowseCategory::Library
+                        && state.sources.nav_collection == Some(*kind),
+                ),
+                crate::app::state::CategoryRow::Header(_) => unreachable!(),
             };
 
             let is_selected = i == state.category_column_index;
@@ -460,9 +539,13 @@ fn render_browse_in(frame: &mut Frame, state: &AppState, area: Rect, skip_transp
             // as `bg_selection`/`bg_highlight`, which makes the row
             // text invisible.
             let style = if show_cursor {
-                Style::default().fg(t.colors.selection_text).bg(t.colors.bg_selection)
+                Style::default()
+                    .fg(t.colors.selection_text)
+                    .bg(t.colors.bg_selection)
             } else if show_active {
-                Style::default().fg(t.colors.selection_text).bg(t.colors.bg_highlight)
+                Style::default()
+                    .fg(t.colors.selection_text)
+                    .bg(t.colors.bg_highlight)
             } else {
                 Style::default().fg(t.colors.fg_primary)
             };
@@ -488,9 +571,42 @@ fn render_browse_in(frame: &mut Frame, state: &AppState, area: Rect, skip_transp
             let display_w = unicode_width::UnicodeWidthStr::width(text.as_str());
             let pad = (inner.width as usize).saturating_sub(display_w);
             let padded = format!("{}{}", text, " ".repeat(pad));
-            let line_area = Rect { x: inner.x, y: inner.y + y_offset, width: inner.width, height: 1 };
+            let line_area = Rect {
+                x: inner.x,
+                y: inner.y + y_offset,
+                width: inner.width,
+                height: 1,
+            };
             frame.render_widget(Paragraph::new(padded).style(style), line_area);
         }
+        if category_rows.len() > inner.height as usize {
+            render_scrollbar(
+                frame,
+                col_area,
+                category_rows.len(),
+                inner.height as usize,
+                category_scroll,
+                Some(border_color),
+            );
+        }
+    }
+
+    // Search is a transient landing panel, not a new navigation stack:
+    // [ Search / Browse sidebar ][ themed ANSI logo + Enter prompt ]
+    // Retain the previous stack, but do not render/register its hit targets.
+    if search_selected {
+        let panel = Rect::new(
+            full_area.x + col_width,
+            full_area.y,
+            full_area.width.saturating_sub(col_width),
+            full_area.height,
+        );
+        state.hit_regions.borrow_mut().search_landing = Some(panel);
+        widgets::logo::render_search(frame, panel, &t.colors);
+        if !skip_transport {
+            render_transport(frame, state, layout.transport);
+        }
+        return;
     }
 
     // Strip rendering in shrinking layout only (between sections and
@@ -548,83 +664,46 @@ fn render_browse_in(frame: &mut Frame, state: &AppState, area: Rect, skip_transp
         None
     };
 
-
     // Pass content area to existing category renderers.
     // They compute their own internal column layout from the given area.
     // When category column is visible, they get 2/3 of the width (2 content column slots).
     // When it's scrolled off, they get full width (3 content column slots).
-    let current_track_key = state.current_track().map(|t| t.rating_key.as_str());
 
     // When category column is focused, anchor the inner content viewport to
     // column 0 so the root column (e.g. Artists) is always visible next to the
     // category column.
-    let content_focus_override = if state.category_column_focused { Some(0) } else { None };
 
+    // Playlists already appear in the sections column, so hide their
+    // duplicate root. Other categories share the same Miller presentation.
+    let column_offset = usize::from(state.browse_category == BrowseCategory::Playlists)
+        + if scrolling_browse {
+            ribbon_start.saturating_sub(1)
+        } else {
+            0
+        };
     match state.browse_category {
-        BrowseCategory::Library => {
-            let (filter_results, filter_column) = if state.list_filter.active
-                && state.list_filter.category == BrowseCategory::Library {
-                (state.list_filter.results.as_ref(), Some(state.list_filter.column))
-            } else { (None, None) };
-            // In Niri scroll mode, when the sections col (ribbon
-            // idx 0) and possibly the artists col (ribbon idx 1)
-            // have scrolled off the left, the inner Miller renderer
-            // skips that many leading nav cols by way of
-            // `column_offset`. Otherwise (shrinking layout) we pass
-            // 0 — render every nav col.
-            let column_offset = if scrolling_browse { ribbon_start.saturating_sub(1) } else { 0 };
-            render_browse_miller_columns(
-                frame, state, &state.artist_nav, "artists", current_track_key,
-                filter_results, filter_column, false,
-                content_area, Rect { x: 0, y: 0, width: 0, height: 0 },
-                Some(col_width), content_focus_override, column_offset,
-            );
+        BrowseCategory::Folders => render_folder_view(frame, state, content_area, Some(col_width)),
+        category => {
+            if let Some(nav) = state.browse_nav() {
+                let title = if category == BrowseCategory::Library {
+                    state
+                        .sources
+                        .nav_collection
+                        .map_or("artists", |kind| kind.label())
+                } else {
+                    category.name()
+                };
+                render_browse_miller_columns(
+                    frame,
+                    state,
+                    nav,
+                    title,
+                    content_area,
+                    Some(col_width),
+                    column_offset,
+                );
+            }
         }
-        BrowseCategory::Playlists => {
-            // Skip column 0 of playlist_nav — the playlists are
-            // already enumerated in the leftmost browse column, so a
-            // second "playlists" list right next to it is redundant.
-            // Same fix the GUI got in `content_columns`.
-            let (filter_results, filter_column) = if state.list_filter.active
-                && state.list_filter.category == BrowseCategory::Playlists {
-                (state.list_filter.results.as_ref(), Some(state.list_filter.column))
-            } else { (None, None) };
-            // category_base_offset = 1 for Playlists (root col always
-            // skipped); scroll mode adds further offset as the user
-            // drills past the leftmost slot.
-            let column_offset = if scrolling_browse {
-                1 + ribbon_start.saturating_sub(1)
-            } else { 1 };
-            render_browse_miller_columns(
-                frame, state, &state.playlist_nav, "playlists", current_track_key,
-                filter_results, filter_column, true,
-                content_area, Rect { x: 0, y: 0, width: 0, height: 0 },
-                Some(col_width), content_focus_override, column_offset,
-            );
-        }
-        BrowseCategory::Folders => {
-            let (filter_results, filter_column) = if state.list_filter.active
-                && state.list_filter.category == BrowseCategory::Folders {
-                (state.list_filter.results.as_ref(), Some(state.list_filter.column))
-            } else { (None, None) };
-            render_folder_view(frame, state, filter_results, filter_column,
-                content_area, Rect { x: 0, y: 0, width: 0, height: 0 },
-                Some(col_width), content_focus_override);
-        }
-        cat if cat.is_tag_section() => {
-            let (filter_results, filter_column) = if state.list_filter.active
-                && state.list_filter.category == cat {
-                (state.list_filter.results.as_ref(), Some(state.list_filter.column))
-            } else { (None, None) };
-            let column_offset = if scrolling_browse { ribbon_start.saturating_sub(1) } else { 0 };
-            render_browse_miller_columns(
-                frame, state, &state.tag_nav, cat.name(), current_track_key,
-                filter_results, filter_column, false,
-                content_area, Rect { x: 0, y: 0, width: 0, height: 0 },
-                Some(col_width), content_focus_override, column_offset,
-            );
-        }
-        _ => {}
     }
 
     // Track details pane (when focused row is a Track).
@@ -672,7 +751,12 @@ fn render_browse_in(frame: &mut Frame, state: &AppState, area: Rect, skip_transp
         // U+2581 LOWER ONE EIGHTH BLOCK: thin line hugging the bottom
         // of the row, leaving the rest of the row empty.
         let rail_text = "\u{2581}".repeat(total_cells);
-        let rail_area = Rect { x: full_area.x, y: bar_y, width: full_area.width, height: 1 };
+        let rail_area = Rect {
+            x: full_area.x,
+            y: bar_y,
+            width: full_area.width,
+            height: 1,
+        };
         frame.render_widget(Paragraph::new(rail_text).style(rail_style), rail_area);
 
         // U+2584 LOWER HALF BLOCK: thumb stands proud above the rail
@@ -689,13 +773,14 @@ fn render_browse_in(frame: &mut Frame, state: &AppState, area: Rect, skip_transp
         // Register the rail for click + drag hit-testing. The mouse
         // handler maps clicks anywhere on the rail to a ribbon-slot
         // scroll position; dragging the thumb pans continuously.
-        state.hit_regions.borrow_mut().miller_h_scrollbar = Some(crate::ui::hit_regions::MillerHScrollbar {
-            rail: rail_area,
-            thumb_x: full_area.x + filled_x as u16,
-            thumb_w: filled_w as u16,
-            total: ribbon_total,
-            visible: RIBBON_VISIBLE,
-        });
+        state.hit_regions.borrow_mut().miller_h_scrollbar =
+            Some(crate::app::presentation::MillerHScrollbar {
+                rail: rail_area,
+                thumb_x: full_area.x + filled_x as u16,
+                thumb_w: filled_w as u16,
+                total: ribbon_total,
+                visible: RIBBON_VISIBLE,
+            });
     }
 
     // Chrome: tab bar, transport, command bar
@@ -707,15 +792,20 @@ fn render_browse_in(frame: &mut Frame, state: &AppState, area: Rect, skip_transp
 /// Combined Queue / Now Playing — matches the GUI's layout where the
 /// queue list and the visualizer share one screen. Top half is the
 /// existing queue-mode renderer (artwork + stations + track list);
-/// bottom half is the visualizer panel (waveform / spectrum /
-/// spectrogram). View::Queue and View::NowPlaying both render this
+/// bottom half holds waveform, spectrum, spectrogram, vectorscope,
+/// landscape, or studio meters. View::Queue and View::NowPlaying both render this
 /// same screen so users don't have to flip between two screens to
 /// see what's playing AND what's coming up.
 fn render_queue_and_visualizer(frame: &mut Frame, state: &AppState) {
     render_queue_and_visualizer_in(frame, state, frame.area(), false);
 }
 
-fn render_queue_and_visualizer_in(frame: &mut Frame, state: &AppState, area_param: Rect, skip_transport: bool) {
+fn render_queue_and_visualizer_in(
+    frame: &mut Frame,
+    state: &AppState,
+    area_param: Rect,
+    skip_transport: bool,
+) {
     use ratatui::layout::{Constraint, Direction, Layout};
 
     let layout = if skip_transport {
@@ -812,24 +902,17 @@ fn truncate_path_left(path: &str, max_width: usize) -> String {
 fn render_folder_view(
     frame: &mut Frame,
     state: &AppState,
-    filter_results: Option<&crate::app::state::ListFilterResults>,
-    filter_column: Option<usize>,
-    left_area: Rect,
-    right_area: Rect,
+    area: Rect,
     fixed_col_width: Option<u16>,
-    focus_override: Option<usize>,
 ) {
+    let focus_override = state.category_column_focused.then_some(0);
+    let filter_results = state.list_filter.results.as_ref().filter(|_| {
+        state.list_filter.active && state.list_filter.category == state.browse_category
+    });
+    let filter_column = filter_results.map(|_| state.list_filter.column);
     use crate::services::FolderItemType;
 
     let t = theme();
-
-    // Combine left and right panels for folder view
-    let area = Rect {
-        x: left_area.x,
-        y: left_area.y,
-        width: left_area.width + right_area.width,
-        height: left_area.height,
-    };
 
     if let Some(ref folder_state) = state.folder_state {
         if folder_state.loading {
@@ -841,8 +924,8 @@ fn render_folder_view(
                 .style(Style::default().bg(t.colors.bg_primary));
             let inner = block.inner(area);
             frame.render_widget(block, area);
-            let loading = Paragraph::new("Loading...")
-                .style(Style::default().fg(t.colors.fg_muted));
+            let loading =
+                Paragraph::new("Loading...").style(Style::default().fg(t.colors.fg_muted));
             frame.render_widget(loading, inner);
             return;
         }
@@ -856,7 +939,9 @@ fn render_folder_view(
         // Find the last non-empty column (or focused column, whichever is greater)
         let last_meaningful = (0..num_columns)
             .rev()
-            .find(|&i| !folder_state.columns[i].items.is_empty() || i <= folder_state.focused_column)
+            .find(|&i| {
+                !folder_state.columns[i].items.is_empty() || i <= folder_state.focused_column
+            })
             .unwrap_or(0);
         let effective_columns = (last_meaningful + 1).max(num_columns.min(2));
 
@@ -888,7 +973,9 @@ fn render_folder_view(
         // Register folder Miller column regions for hit-testing
         {
             let mut column_regions = Vec::new();
-            for (vis_idx, col_idx) in (start_col..effective_columns.min(start_col + max_visible)).enumerate() {
+            for (vis_idx, col_idx) in
+                (start_col..effective_columns.min(start_col + max_visible)).enumerate()
+            {
                 let col_area = Rect {
                     x: area.x + (vis_idx as u16 * col_width),
                     y: area.y,
@@ -911,7 +998,7 @@ fn render_folder_view(
                 } else {
                     None
                 };
-                column_regions.push(crate::ui::hit_regions::MillerColumnRegion {
+                column_regions.push(crate::app::presentation::MillerColumnRegion {
                     col_idx,
                     area: col_area,
                     inner: inner_tmp,
@@ -922,15 +1009,19 @@ fn render_folder_view(
                 });
             }
             let mut hr = state.hit_regions.borrow_mut();
-            hr.miller_columns = Some(crate::ui::hit_regions::MillerRegions {
+            hr.miller_columns = Some(crate::app::presentation::MillerRegions {
                 area,
                 columns: column_regions,
             });
         }
 
-        for (vis_idx, col_idx) in (start_col..effective_columns.min(start_col + max_visible)).enumerate() {
+        for (vis_idx, col_idx) in
+            (start_col..effective_columns.min(start_col + max_visible)).enumerate()
+        {
             let col = &folder_state.columns[col_idx];
-            let is_focused = focus_override.is_none() && col_idx == folder_state.focused_column;
+            let is_focused = state.view == View::Browse
+                && focus_override.is_none()
+                && col_idx == folder_state.focused_column;
 
             let col_area = Rect {
                 x: area.x + (vis_idx as u16 * col_width),
@@ -945,7 +1036,11 @@ fn render_folder_view(
 
             use crate::util::truncate_middle;
 
-            let border_color = if is_focused { t.colors.title_focused } else { t.colors.border };
+            let border_color = if is_focused {
+                t.colors.title_focused
+            } else {
+                t.colors.border
+            };
             let is_root = col_idx == 0;
 
             // Show title for all columns; folder paths truncate from the left
@@ -970,7 +1065,11 @@ fn render_folder_view(
                 .style(Style::default().bg(t.colors.bg_primary));
 
             if !title.is_empty() {
-                let title_color = if is_focused { t.colors.title_focused } else { t.colors.fg_accent };
+                let title_color = if is_focused {
+                    t.colors.title_focused
+                } else {
+                    t.colors.fg_accent
+                };
                 block = block
                     .title(title)
                     .title_style(Style::default().fg(title_color));
@@ -989,16 +1088,19 @@ fn render_folder_view(
                     height: 1,
                 };
                 let style = if is_focused {
-                    Style::default().fg(t.colors.fg_accent).bg(t.colors.bg_primary)
+                    Style::default()
+                        .fg(t.colors.fg_accent)
+                        .bg(t.colors.bg_primary)
                 } else {
-                    Style::default().fg(t.colors.fg_muted).bg(t.colors.bg_primary)
+                    Style::default()
+                        .fg(t.colors.fg_muted)
+                        .bg(t.colors.bg_primary)
                 };
                 frame.render_widget(Paragraph::new("\u{2715}").style(style), close_x);
             }
 
             if col.items.is_empty() {
-                let empty = Paragraph::new("(empty)")
-                    .style(Style::default().fg(t.colors.fg_muted));
+                let empty = Paragraph::new("(empty)").style(Style::default().fg(t.colors.fg_muted));
                 frame.render_widget(empty, inner);
             } else {
                 // LAZY LOADING: Only render visible items
@@ -1020,36 +1122,45 @@ fn render_folder_view(
                 } else {
                     None
                 };
-                let display_indices = column_filter
-                    .map(|results| results.matched_indices.as_slice());
+                let display_indices =
+                    column_filter.map(|results| results.matched_indices.as_slice());
                 let filter_active_on_col = column_filter.is_some();
                 let total_items = display_indices.map_or(col.items.len(), <[usize]>::len);
 
                 // Calculate scroll offset (needed for both rendering and scrollbar)
-                let display_selected_idx = if let Some(results) = column_filter.filter(|_| filter_active_on_col) {
-                    results.matched_indices.iter()
-                        .position(|&idx| idx == selected_idx)
-                        .unwrap_or(0)
-                } else {
-                    selected_idx
-                };
+                let display_selected_idx =
+                    if let Some(results) = column_filter.filter(|_| filter_active_on_col) {
+                        results
+                            .matched_indices
+                            .iter()
+                            .position(|&idx| idx == selected_idx)
+                            .unwrap_or(0)
+                    } else {
+                        selected_idx
+                    };
                 let scroll_offset = match state.scroll.browse {
                     Some((pin_col, pinned)) if pin_col == col_idx => pinned,
-                    _ => NavigationService::calc_scroll_offset(display_selected_idx, visible_height, total_items),
+                    _ => NavigationService::calc_scroll_offset(
+                        display_selected_idx,
+                        visible_height,
+                        total_items,
+                    ),
                 };
 
                 if total_items == 0 && filter_active_on_col {
-                    let empty = Paragraph::new("no matches")
-                        .style(Style::default().fg(t.colors.fg_muted));
+                    let empty =
+                        Paragraph::new("no matches").style(Style::default().fg(t.colors.fg_muted));
                     frame.render_widget(empty, inner);
                 } else {
                     // Only create ListItems for visible range
                     let display_items: Box<
-                        dyn Iterator<Item = (usize, &crate::services::FolderItem)> + '_
+                        dyn Iterator<Item = (usize, &crate::services::FolderItem)> + '_,
                     > = if let Some(indices) = display_indices {
-                        Box::new(indices.iter().filter_map(|&idx| {
-                            col.items.get(idx).map(|item| (idx, item))
-                        }))
+                        Box::new(
+                            indices
+                                .iter()
+                                .filter_map(|&idx| col.items.get(idx).map(|item| (idx, item))),
+                        )
                     } else {
                         Box::new(col.items.iter().enumerate())
                     };
@@ -1073,13 +1184,19 @@ fn render_folder_view(
                             let display_title = truncate_middle(&item.title, max_text_width);
 
                             let style = if is_now_playing {
-                                Style::default().fg(t.colors.fg_accent).add_modifier(ratatui::style::Modifier::BOLD)
+                                Style::default()
+                                    .fg(t.colors.fg_accent)
+                                    .add_modifier(ratatui::style::Modifier::BOLD)
                             } else if is_selected && is_focused {
-                                Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
+                                Style::default()
+                                    .fg(t.colors.selection_text)
+                                    .bg(t.colors.selection_bar_bg)
                             } else if is_selected {
                                 // Selected row in a non-focused folder
                                 // col: dim highlight, not the cursor.
-                                Style::default().fg(t.colors.selection_text).bg(t.colors.bg_highlight)
+                                Style::default()
+                                    .fg(t.colors.selection_text)
+                                    .bg(t.colors.bg_highlight)
                             } else {
                                 Style::default().fg(t.colors.fg_primary)
                             };
@@ -1093,7 +1210,14 @@ fn render_folder_view(
 
                 // Scrollbar + position indicator for long lists
                 if total_items > visible_height {
-                    render_scrollbar(frame, col_area, total_items, visible_height, scroll_offset, Some(border_color));
+                    render_scrollbar(
+                        frame,
+                        col_area,
+                        total_items,
+                        visible_height,
+                        scroll_offset,
+                        Some(border_color),
+                    );
 
                     let footer = format!("{}/{}", selected_idx + 1, total_items);
                     let footer_area = Rect::new(
@@ -1118,8 +1242,8 @@ fn render_folder_view(
             .style(Style::default().bg(t.colors.bg_primary));
         let inner = block.inner(area);
         frame.render_widget(block, area);
-        let msg = Paragraph::new("Loading folders...")
-            .style(Style::default().fg(t.colors.fg_muted));
+        let msg =
+            Paragraph::new("Loading folders...").style(Style::default().fg(t.colors.fg_muted));
         frame.render_widget(msg, inner);
     }
 }
@@ -1140,8 +1264,14 @@ fn is_two_row_column(
 ) -> bool {
     use crate::app::state::BrowseItem;
 
-    let first_is_track = col.items.first().map_or(false, |item| matches!(item, BrowseItem::Track { .. }));
-    let first_is_album = col.items.first().map_or(false, |item| matches!(item, BrowseItem::Album { .. }));
+    let first_is_track = col
+        .items
+        .first()
+        .is_some_and(|item| matches!(item, BrowseItem::Track { .. }));
+    let first_is_album = col
+        .items
+        .first()
+        .is_some_and(|item| matches!(item, BrowseItem::Album { .. }));
 
     // Special track columns always get two-row display
     if first_is_track && state.is_special_track_column(nav, col_idx) {
@@ -1149,12 +1279,15 @@ fn is_two_row_column(
     }
 
     // Album columns in "All Artists" mode (shows artist on 2nd row)
-    if first_is_album && (nav.columns.first()
-        .and_then(|c| c.selected_item())
-        .map_or(false, |item| matches!(item, BrowseItem::AllArtists))
-        || (state.browse_category == crate::app::state::BrowseCategory::Library
-            && state.library.library_sub_mode != crate::app::state::LibrarySubMode::Normal
-            && col_idx == 0))
+    if first_is_album
+        && (nav
+            .columns
+            .first()
+            .and_then(|c| c.selected_item())
+            .is_some_and(|item| matches!(item, BrowseItem::AllArtists))
+            || (state.browse_category == crate::app::state::BrowseCategory::Library
+                && state.library.library_sub_mode != crate::app::state::LibrarySubMode::Normal
+                && col_idx == 0))
     {
         return true;
     }
@@ -1199,10 +1332,7 @@ pub(crate) fn compute_art_grid_row(inner_width: u16, inner_height: u16) -> (u16,
     let max_art = ((inner_width as u32 * 3 / 5) as u16).max(20);
     let art_width = max_art.min(inner_width.saturating_sub(8)).max(8);
     let height_bound = (inner_height / TARGET_ROWS).max(1);
-    let art_row_height = height_bound
-        .min(art_width / 2)
-        .min(MAX_ROW_H)
-        .max(6);
+    let art_row_height = height_bound.min(art_width / 2).clamp(6, MAX_ROW_H);
     (art_row_height, art_width)
 }
 
@@ -1256,7 +1386,11 @@ fn count_meaningful_miller_cols(state: &AppState) -> usize {
         .unwrap_or(column_offset);
     let effective_columns = last_meaningful + 1;
     let n = effective_columns.saturating_sub(column_offset);
-    if n == 0 && nav.loading { 1 } else { n }
+    if n == 0 && nav.loading {
+        1
+    } else {
+        n
+    }
 }
 
 /// Render the vertical alphabet jump strip.
@@ -1295,7 +1429,7 @@ fn render_alphabet_strip(frame: &mut Frame, state: &AppState, area: Rect) {
         .artist_nav
         .columns
         .first()
-        .map_or(false, |c| !c.sort_ascending);
+        .is_some_and(|c| !c.sort_ascending);
 
     let n = ALPHABET_STRIP_LETTERS.len();
     let h = inner.height as usize;
@@ -1319,7 +1453,9 @@ fn render_alphabet_strip(frame: &mut Frame, state: &AppState, area: Rect) {
         }
     };
     let style_for = |letter_idx: usize| -> Style {
-        let is_selected = state.alphabet_strip_focused && state.alphabet_strip_index == letter_idx;
+        let is_selected = state.view == View::Browse
+            && state.alphabet_strip_focused
+            && state.alphabet_strip_index == letter_idx;
         if is_selected {
             Style::default()
                 .fg(t.colors.selection_text)
@@ -1378,9 +1514,12 @@ fn render_alphabet_strip(frame: &mut Frame, state: &AppState, area: Rect) {
 
     if let Some(rows) = letter_rows {
         // Render each letter at its target row.
-        for visual_idx in 0..n {
-            let letter_idx = if descending { n - 1 - visual_idx } else { visual_idx };
-            let row = rows[visual_idx];
+        for (visual_idx, &row) in rows.iter().enumerate().take(n) {
+            let letter_idx = if descending {
+                n - 1 - visual_idx
+            } else {
+                visual_idx
+            };
             if row < h {
                 let cell = Rect {
                     x: inner.x,
@@ -1403,8 +1542,8 @@ fn render_alphabet_strip(frame: &mut Frame, state: &AppState, area: Rect) {
             while next_idx + 1 < n {
                 let cur = rows[next_idx];
                 let nxt = rows[next_idx + 1];
-                let cur_dist = if row >= cur { row - cur } else { cur - row };
-                let nxt_dist = if row >= nxt { row - nxt } else { nxt - row };
+                let cur_dist = row.abs_diff(cur);
+                let nxt_dist = row.abs_diff(nxt);
                 if nxt_dist < cur_dist {
                     next_idx += 1;
                 } else {
@@ -1412,7 +1551,11 @@ fn render_alphabet_strip(frame: &mut Frame, state: &AppState, area: Rect) {
                 }
             }
             let visual_idx = next_idx;
-            let letter_idx = if descending { n - 1 - visual_idx } else { visual_idx };
+            let letter_idx = if descending {
+                n - 1 - visual_idx
+            } else {
+                visual_idx
+            };
             letters_hit.push((
                 Rect {
                     x: inner.x,
@@ -1429,7 +1572,11 @@ fn render_alphabet_strip(frame: &mut Frame, state: &AppState, area: Rect) {
         // own hit region.
         for row in 0..h {
             let visual_idx = (row * n) / h;
-            let letter_idx = if descending { n - 1 - visual_idx } else { visual_idx };
+            let letter_idx = if descending {
+                n - 1 - visual_idx
+            } else {
+                visual_idx
+            };
             let cell = Rect {
                 x: inner.x,
                 y: inner.y + row as u16,
@@ -1443,7 +1590,7 @@ fn render_alphabet_strip(frame: &mut Frame, state: &AppState, area: Rect) {
     }
 
     let mut hr = state.hit_regions.borrow_mut();
-    hr.alphabet_strip = Some(crate::ui::hit_regions::AlphabetStripRegions {
+    hr.alphabet_strip = Some(crate::app::presentation::AlphabetStripRegions {
         area,
         letters: letters_hit,
     });
@@ -1460,12 +1607,12 @@ fn render_track_details_pane(
     frame: &mut Frame,
     state: &AppState,
     area: Rect,
-    track: &crate::plex::models::Track,
+    track: &crate::library::models::Track,
 ) {
     use crate::util::{format_duration, truncate_middle};
     let t = theme();
 
-    let pane_focused = state.track_pane_focused;
+    let pane_focused = state.view == View::Browse && state.track_pane_focused;
     let pane_idx = state.track_pane_index;
 
     let block = Block::default()
@@ -1500,9 +1647,13 @@ fn render_track_details_pane(
             height: 1,
         };
         let style = if pane_focused {
-            Style::default().fg(t.colors.fg_accent).bg(t.colors.bg_primary)
+            Style::default()
+                .fg(t.colors.fg_accent)
+                .bg(t.colors.bg_primary)
         } else {
-            Style::default().fg(t.colors.fg_muted).bg(t.colors.bg_primary)
+            Style::default()
+                .fg(t.colors.fg_muted)
+                .bg(t.colors.bg_primary)
         };
         frame.render_widget(Paragraph::new("\u{2715}").style(style), r);
         Some(r)
@@ -1539,10 +1690,7 @@ fn render_track_details_pane(
             .fg(t.colors.fg_accent)
             .add_modifier(ratatui::style::Modifier::BOLD)
     };
-    frame.render_widget(
-        Paragraph::new(play_label).style(play_style),
-        play_area,
-    );
+    frame.render_widget(Paragraph::new(play_label).style(play_style), play_area);
 
     // Scrollable body region below the pinned Play row. Reserve the
     // rightmost column for the scrollbar so content doesn't bleed
@@ -1552,7 +1700,7 @@ fn render_track_details_pane(
     if body_h == 0 {
         // No room for a body; register hit regions and return.
         let mut hr = state.hit_regions.borrow_mut();
-        hr.track_pane = Some(crate::ui::hit_regions::TrackPaneRegions {
+        hr.track_pane = Some(crate::app::presentation::TrackPaneRegions {
             outer: area,
             play_button: play_area,
             similar_rows: Vec::new(),
@@ -1587,8 +1735,8 @@ fn render_track_details_pane(
     //   1+art_h     : (blank)
     //   2+art_h..   : metadata lines
     //   ...         : (blank)
-    //   ...         : "Sonically Similar" header
-    //   ...         : similar rows
+    //   ...         : optional "Sonically Similar" header (library setting)
+    //   ...         : optional similar rows
 
     let max_w = body_w as usize;
     let mut lines: Vec<(Style, String)> = Vec::new();
@@ -1610,9 +1758,9 @@ fn render_track_details_pane(
     // Album + (year).
     let album_year = match (track.parent_title.as_deref(), track.year) {
         (Some(a), Some(y)) => format!("{}  ({})", a, y),
-        (Some(a), None)    => a.to_string(),
-        (None, Some(y))    => y.to_string(),
-        (None, None)       => String::new(),
+        (Some(a), None) => a.to_string(),
+        (None, Some(y)) => y.to_string(),
+        (None, None) => String::new(),
     };
     if !album_year.is_empty() {
         lines.push((
@@ -1654,17 +1802,22 @@ fn render_track_details_pane(
     // first row of the body region, just below the pinned Play row).
     // Layout: blank, artwork, blank, metadata lines, blank, "Sonically
     // Similar" header, similar rows (or placeholder).
-    let art_top: u16 = 1;                      // 1-row gap after Play
-    let art_bot: u16 = art_top + art_h;        // exclusive
-    let info_top: u16 = art_bot + 1;           // 1-row gap after art
+    let art_top: u16 = 1; // 1-row gap after Play
+    let art_bot: u16 = art_top + art_h; // exclusive
+    let info_top: u16 = art_bot + 1; // 1-row gap after art
     let info_bot: u16 = info_top + lines.len() as u16;
-    let header_y: u16 = info_bot + 1;          // 1-row gap after info
+    let header_y: u16 = info_bot + 1; // 1-row gap after info
     let list_y: u16 = header_y + 1;
-    let similar_data = state.track_pane_similar.get(&track.rating_key);
+    let similar_result = state.track_pane_similar.get(&track.rating_key);
+    let similar_data = similar_result.and_then(|result| result.as_ref().ok());
     let similar_count: u16 = similar_data
         .map(|v| if v.is_empty() { 1 } else { v.len() as u16 })
         .unwrap_or(1); // "Loading…" placeholder occupies 1 row
-    let content_h: u16 = list_y + similar_count;
+    let content_h: u16 = if crate::app::sources::sonic::enabled(state) {
+        list_y + similar_count
+    } else {
+        info_bot
+    };
 
     // Auto-scroll: when the pane has focus and the user has highlighted
     // a similar row that lives outside the visible window, slide the
@@ -1689,9 +1842,13 @@ fn render_track_details_pane(
     // Helper: convert content_y → screen_y, returning None if the row
     // is clipped (above or below the body window).
     let to_screen = |cy: u16| -> Option<u16> {
-        if cy < scroll { return None; }
+        if cy < scroll {
+            return None;
+        }
         let off = cy - scroll;
-        if off >= body_h { return None; }
+        if off >= body_h {
+            return None;
+        }
         Some(body_y + off)
     };
 
@@ -1716,7 +1873,8 @@ fn render_track_details_pane(
             };
             if let Some(album_key) = track.parent_rating_key.as_deref() {
                 if let Some(data) = state.artwork.grid_cache.get(album_key) {
-                    rendered_art = super::artwork::render_grid_image(frame, art_area, album_key, data);
+                    rendered_art =
+                        super::artwork::render_grid_image(frame, art_area, album_key, data);
                 }
             }
             if !rendered_art {
@@ -1726,7 +1884,12 @@ fn render_track_details_pane(
                 let cy = art_area.y + art_area.height / 2;
                 frame.render_widget(
                     Paragraph::new(label).style(Style::default().fg(t.colors.fg_muted)),
-                    Rect { x: cx, y: cy, width: lw, height: 1 },
+                    Rect {
+                        x: cx,
+                        y: cy,
+                        width: lw,
+                        height: 1,
+                    },
                 );
             }
         } else {
@@ -1736,7 +1899,12 @@ fn render_track_details_pane(
                 let sy = body_y + (r - scroll);
                 frame.render_widget(
                     Paragraph::new("").style(Style::default().bg(t.colors.bg_primary)),
-                    Rect { x: inner.x, y: sy, width: body_w, height: 1 },
+                    Rect {
+                        x: inner.x,
+                        y: sy,
+                        width: body_w,
+                        height: 1,
+                    },
                 );
             }
         }
@@ -1748,77 +1916,111 @@ fn render_track_details_pane(
         if let Some(sy) = to_screen(cy) {
             frame.render_widget(
                 Paragraph::new(text.as_str()).style(*style),
-                Rect { x: inner.x, y: sy, width: body_w, height: 1 },
-            );
-        }
-    }
-
-    // "Sonically Similar" header.
-    if let Some(sy) = to_screen(header_y) {
-        frame.render_widget(
-            Paragraph::new("Sonically Similar").style(
-                Style::default()
-                    .fg(t.colors.fg_accent)
-                    .add_modifier(ratatui::style::Modifier::BOLD),
-            ),
-            Rect { x: inner.x, y: sy, width: body_w, height: 1 },
-        );
-    }
-
-    // Similar rows (or placeholder).
-    let mut similar_rows: Vec<(Rect, usize)> = Vec::new();
-    match similar_data {
-        Some(list) if list.is_empty() => {
-            if let Some(sy) = to_screen(list_y) {
-                frame.render_widget(
-                    Paragraph::new("(no similar tracks found)")
-                        .style(Style::default().fg(t.colors.fg_muted)),
-                    Rect { x: inner.x, y: sy, width: body_w, height: 1 },
-                );
-            }
-        }
-        Some(list) => {
-            for (i, sim) in list.iter().enumerate() {
-                let cy = list_y + i as u16;
-                let sy = match to_screen(cy) { Some(v) => v, None => continue };
-                let label = format!(
-                    "\u{2022} {} \u{2014} {}",
-                    sim.title,
-                    sim.track_artist(),
-                );
-                let truncated = truncate_middle(&label, max_w);
-                let row_focused = pane_focused && pane_idx == i + 1;
-                let style = if row_focused {
-                    Style::default()
-                        .fg(t.colors.selection_text)
-                        .bg(t.colors.bg_selection)
-                } else {
-                    Style::default().fg(t.colors.fg_primary)
-                };
-                let row_area = Rect {
+                Rect {
                     x: inner.x,
                     y: sy,
                     width: body_w,
                     height: 1,
-                };
-                frame.render_widget(
-                    Paragraph::new(truncated).style(style),
-                    row_area,
-                );
-                similar_rows.push((row_area, i));
-            }
-        }
-        None => {
-            if let Some(sy) = to_screen(list_y) {
-                frame.render_widget(
-                    Paragraph::new("Loading\u{2026}")
-                        .style(Style::default().fg(t.colors.fg_muted)),
-                    Rect { x: inner.x, y: sy, width: body_w, height: 1 },
-                );
-            }
+                },
+            );
         }
     }
 
+    // Sonic-only section disappears when disabled; metadata/play controls remain.
+    let mut similar_rows: Vec<(Rect, usize)> = Vec::new();
+    if crate::app::sources::sonic::enabled(state) {
+        // "Sonically Similar" header.
+        if let Some(sy) = to_screen(header_y) {
+            frame.render_widget(
+                Paragraph::new(
+                    if state
+                        .sources
+                        .active
+                        .navidrome()
+                        .is_some_and(|s| !s.extensions.contains("sonicSimilarity"))
+                    {
+                        "Similar Tracks"
+                    } else {
+                        "Sonically Similar"
+                    },
+                )
+                .style(
+                    Style::default()
+                        .fg(t.colors.fg_accent)
+                        .add_modifier(ratatui::style::Modifier::BOLD),
+                ),
+                Rect {
+                    x: inner.x,
+                    y: sy,
+                    width: body_w,
+                    height: 1,
+                },
+            );
+        }
+
+        // Similar rows (or placeholder).
+        match similar_data {
+            Some(list) if list.is_empty() => {
+                if let Some(sy) = to_screen(list_y) {
+                    frame.render_widget(
+                        Paragraph::new("(no similar tracks found)")
+                            .style(Style::default().fg(t.colors.fg_muted)),
+                        Rect {
+                            x: inner.x,
+                            y: sy,
+                            width: body_w,
+                            height: 1,
+                        },
+                    );
+                }
+            }
+            Some(list) => {
+                for (i, sim) in list.iter().enumerate() {
+                    let cy = list_y + i as u16;
+                    let sy = match to_screen(cy) {
+                        Some(v) => v,
+                        None => continue,
+                    };
+                    let label = format!("\u{2022} {} \u{2014} {}", sim.title, sim.track_artist(),);
+                    let truncated = truncate_middle(&label, max_w);
+                    let row_focused = pane_focused && pane_idx == i + 1;
+                    let style = if row_focused {
+                        Style::default()
+                            .fg(t.colors.selection_text)
+                            .bg(t.colors.bg_selection)
+                    } else {
+                        Style::default().fg(t.colors.fg_primary)
+                    };
+                    let row_area = Rect {
+                        x: inner.x,
+                        y: sy,
+                        width: body_w,
+                        height: 1,
+                    };
+                    frame.render_widget(Paragraph::new(truncated).style(style), row_area);
+                    similar_rows.push((row_area, i));
+                }
+            }
+            None => {
+                if let Some(sy) = to_screen(list_y) {
+                    frame.render_widget(
+                        Paragraph::new(if similar_result.is_some_and(Result::is_err) {
+                            "Unavailable · F5 retries"
+                        } else {
+                            "Loading…"
+                        })
+                        .style(Style::default().fg(t.colors.fg_muted)),
+                        Rect {
+                            x: inner.x,
+                            y: sy,
+                            width: body_w,
+                            height: 1,
+                        },
+                    );
+                }
+            }
+        }
+    }
     // Vertical scrollbar on the right edge of the body when content
     // overflows the visible region. Mirrors the column scrollbar
     // style used elsewhere in the TUI.
@@ -1833,8 +2035,7 @@ fn render_track_details_pane(
         let bar_x = inner.x + body_w;
         for r in 0..body_h {
             let sy = body_y + r;
-            let in_thumb = (r as usize) >= thumb_pos
-                && (r as usize) < thumb_pos + thumb_size;
+            let in_thumb = (r as usize) >= thumb_pos && (r as usize) < thumb_pos + thumb_size;
             let glyph = if in_thumb { "\u{2588}" } else { "\u{2502}" };
             let style = if in_thumb {
                 Style::default().fg(t.colors.fg_accent)
@@ -1843,7 +2044,12 @@ fn render_track_details_pane(
             };
             frame.render_widget(
                 Paragraph::new(glyph).style(style),
-                Rect { x: bar_x, y: sy, width: 1, height: 1 },
+                Rect {
+                    x: bar_x,
+                    y: sy,
+                    width: 1,
+                    height: 1,
+                },
             );
         }
     }
@@ -1851,7 +2057,7 @@ fn render_track_details_pane(
     // Register click regions so the mouse handler can dispatch
     // Play / drill-into-similar / close-pane.
     let mut hr = state.hit_regions.borrow_mut();
-    hr.track_pane = Some(crate::ui::hit_regions::TrackPaneRegions {
+    hr.track_pane = Some(crate::app::presentation::TrackPaneRegions {
         outer: area,
         play_button: play_area,
         similar_rows,
@@ -1864,14 +2070,8 @@ fn render_browse_miller_columns(
     state: &AppState,
     nav: &crate::app::state::BrowseNavigationState,
     root_title: &str,
-    current_track_key: Option<&str>,
-    filter_results: Option<&crate::app::state::ListFilterResults>,
-    filter_column: Option<usize>,
-    two_row_tracks: bool,
-    left_area: Rect,
-    right_area: Rect,
+    area: Rect,
     fixed_col_width: Option<u16>,
-    focus_override: Option<usize>,
     // Number of leading columns to hide. Used by the Playlists
     // category to suppress the redundant root "playlists" column —
     // the playlists are already enumerated in the leftmost browse
@@ -1880,16 +2080,14 @@ fn render_browse_miller_columns(
 ) {
     use crate::app::state::BrowseItem;
     use crate::util::truncate_middle;
-
+    let current_track_key = state.current_track().map(|track| track.rating_key.as_str());
+    let two_row_tracks = state.browse_category == BrowseCategory::Playlists;
+    let focus_override = state.category_column_focused.then_some(0);
+    let filter_results = state.list_filter.results.as_ref().filter(|_| {
+        state.list_filter.active && state.list_filter.category == state.browse_category
+    });
+    let filter_column = filter_results.map(|_| state.list_filter.column);
     let t = theme();
-
-    // Combine left and right panels for full-width Miller columns
-    let area = Rect {
-        x: left_area.x,
-        y: left_area.y,
-        width: left_area.width + right_area.width,
-        height: left_area.height,
-    };
 
     // Loading with no columns yet: show full loading state
     if nav.loading && nav.columns.is_empty() {
@@ -1901,8 +2099,7 @@ fn render_browse_miller_columns(
             .style(Style::default().bg(t.colors.bg_primary));
         let inner = block.inner(area);
         frame.render_widget(block, area);
-        let loading = Paragraph::new("Loading...")
-            .style(Style::default().fg(t.colors.fg_muted));
+        let loading = Paragraph::new("Loading...").style(Style::default().fg(t.colors.fg_muted));
         frame.render_widget(loading, inner);
         return;
     }
@@ -1941,7 +2138,11 @@ fn render_browse_miller_columns(
         .unwrap_or(column_offset);
     let effective_columns = last_meaningful + 1;
     // When loading with existing columns, reserve space for a loading indicator column
-    let layout_columns = if nav.loading { effective_columns + 1 } else { effective_columns };
+    let layout_columns = if nav.loading {
+        effective_columns + 1
+    } else {
+        effective_columns
+    };
 
     // Pick the column width.
     //
@@ -1968,13 +2169,19 @@ fn render_browse_miller_columns(
     // Drilling deeper slides one column right; backing out left
     // slides one column left so parents return to view. Columns
     // deeper than focus stay loaded but scroll off the right edge.
-    let viewport_focus = focus_override.unwrap_or(nav.focused_column).max(column_offset);
-    let start_col = (viewport_focus + 1).saturating_sub(max_visible).max(column_offset);
+    let viewport_focus = focus_override
+        .unwrap_or(nav.focused_column)
+        .max(column_offset);
+    let start_col = (viewport_focus + 1)
+        .saturating_sub(max_visible)
+        .max(column_offset);
 
     // Register Miller column regions for hit-testing
     {
         let mut column_regions = Vec::new();
-        for (vis_idx, col_idx) in (start_col..effective_columns.min(start_col + max_visible)).enumerate() {
+        for (vis_idx, col_idx) in
+            (start_col..effective_columns.min(start_col + max_visible)).enumerate()
+        {
             let col = &nav.columns[col_idx];
             // In scrolling mode every column is locked at exactly
             // `col_width` — never extend the last visible column to
@@ -2015,7 +2222,7 @@ fn render_browse_miller_columns(
             } else {
                 0
             };
-            column_regions.push(crate::ui::hit_regions::MillerColumnRegion {
+            column_regions.push(crate::app::presentation::MillerColumnRegion {
                 col_idx,
                 area: col_area,
                 inner: inner_tmp,
@@ -2026,20 +2233,23 @@ fn render_browse_miller_columns(
             });
         }
         let mut hr = state.hit_regions.borrow_mut();
-        hr.miller_columns = Some(crate::ui::hit_regions::MillerRegions {
+        hr.miller_columns = Some(crate::app::presentation::MillerRegions {
             area,
             columns: column_regions,
         });
     }
 
-    for (vis_idx, col_idx) in (start_col..effective_columns.min(start_col + max_visible)).enumerate() {
+    for (vis_idx, col_idx) in
+        (start_col..effective_columns.min(start_col + max_visible)).enumerate()
+    {
         let col = &nav.columns[col_idx];
         // Track-details pane is treated as the rightmost column for
         // focus purposes: when it's focused, no miller column should
         // also paint as focused, otherwise the user sees two
         // simultaneously highlighted "selected" rows (the pane on the
         // right and the track row in the tracks column behind it).
-        let is_focused = focus_override.is_none()
+        let is_focused = state.view == View::Browse
+            && focus_override.is_none()
             && col_idx == nav.focused_column
             && !state.track_pane_focused;
         let is_root = col_idx == 0;
@@ -2058,12 +2268,20 @@ fn render_browse_miller_columns(
             height: area.height,
         };
 
-        let border_color = if is_focused { t.colors.title_focused } else { t.colors.border };
+        let border_color = if is_focused {
+            t.colors.title_focused
+        } else {
+            t.colors.border
+        };
 
         // Show title for all columns with sort suffix
         let sort_suffix = {
             let suffix = col.sort_mode.header_suffix(!col.sort_ascending);
-            if suffix.is_empty() { String::new() } else { format!(" ({})", suffix) }
+            if suffix.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", suffix)
+            }
         };
 
         let title = if is_root {
@@ -2124,7 +2342,11 @@ fn render_browse_miller_columns(
             .style(Style::default().bg(t.colors.bg_primary));
 
         if !title.is_empty() {
-            let title_color = if is_focused { t.colors.title_focused } else { t.colors.fg_accent };
+            let title_color = if is_focused {
+                t.colors.title_focused
+            } else {
+                t.colors.fg_accent
+            };
             block = block
                 .title(title)
                 .title_style(Style::default().fg(title_color));
@@ -2145,9 +2367,13 @@ fn render_browse_miller_columns(
                 height: 1,
             };
             let style = if is_focused {
-                Style::default().fg(t.colors.fg_accent).bg(t.colors.bg_primary)
+                Style::default()
+                    .fg(t.colors.fg_accent)
+                    .bg(t.colors.bg_primary)
             } else {
-                Style::default().fg(t.colors.fg_muted).bg(t.colors.bg_primary)
+                Style::default()
+                    .fg(t.colors.fg_muted)
+                    .bg(t.colors.bg_primary)
             };
             frame.render_widget(Paragraph::new("\u{2715}").style(style), close_x);
         }
@@ -2165,7 +2391,11 @@ fn render_browse_miller_columns(
                 width: full_inner.width,
                 height: 1,
             };
-            let label = col.play_all_row.as_ref().map(|p| p.label()).unwrap_or("Play");
+            let label = col
+                .play_all_row
+                .as_ref()
+                .map(|p| p.label())
+                .unwrap_or("Play");
             // Highlight when the column is focused AND the cursor is
             // on the play row. Otherwise paint as a regular header
             // affordance — still legible, just not selected.
@@ -2200,8 +2430,8 @@ fn render_browse_miller_columns(
         };
 
         if col.items.is_empty() {
-            let empty = Paragraph::new("(empty)")
-                .style(Style::default().fg(t.colors.fg_muted));
+            let text = if nav.loading { "Loading…" } else { "(empty)" };
+            let empty = Paragraph::new(text).style(Style::default().fg(t.colors.fg_muted));
             frame.render_widget(empty, inner);
             continue;
         }
@@ -2223,11 +2453,20 @@ fn render_browse_miller_columns(
         let is_filter_column = filter_column == Some(col_idx);
 
         if col.artwork_visible {
-            let col_filter = per_col_result.or_else(|| {
-                if is_filter_column { filter_results } else { None }
+            let col_filter = per_col_result.or({
+                if is_filter_column {
+                    filter_results
+                } else {
+                    None
+                }
             });
             render_album_art_grid(
-                frame, state, col, is_focused, inner, col_area, col_idx,
+                frame,
+                state,
+                col,
+                is_focused,
+                (col_area, inner),
+                col_idx,
                 col_filter,
             );
             continue;
@@ -2248,18 +2487,15 @@ fn render_browse_miller_columns(
             // Keep the unfiltered path allocation-free: retaining a slice of
             // matched indices avoids constructing a 70k-element Vec<&Item>
             // merely to render the twenty rows visible in the terminal.
-            let active_filter = per_col_result.or_else(|| {
-                filter_results.filter(|_| is_filter_column)
-            });
-            let display_indices = active_filter
-                .map(|results| results.matched_indices.as_slice());
+            let active_filter =
+                per_col_result.or_else(|| filter_results.filter(|_| is_filter_column));
+            let display_indices = active_filter.map(|results| results.matched_indices.as_slice());
             let filter_active_on_col = active_filter.is_some();
-            let total_display_items = display_indices
-                .map_or(col.items.len(), <[usize]>::len);
+            let total_display_items = display_indices.map_or(col.items.len(), <[usize]>::len);
 
             if total_display_items == 0 && filter_active_on_col {
-                let empty = Paragraph::new("no matches")
-                    .style(Style::default().fg(t.colors.fg_muted));
+                let empty =
+                    Paragraph::new("no matches").style(Style::default().fg(t.colors.fg_muted));
                 frame.render_widget(empty, inner);
             } else {
                 // Calculate scroll offset based on display items.
@@ -2268,7 +2504,9 @@ fn render_browse_miller_columns(
                 // index; otherwise fall back to the historic single-
                 // column results / unfiltered position.
                 let display_selected_idx = if let Some(results) = active_filter {
-                    results.matched_indices.iter()
+                    results
+                        .matched_indices
+                        .iter()
                         .position(|&idx| idx == selected_idx)
                         .unwrap_or(0)
                 } else {
@@ -2276,14 +2514,20 @@ fn render_browse_miller_columns(
                 };
                 let scroll_offset = match state.scroll.browse {
                     Some((pin_col, pinned)) if pin_col == col_idx => pinned,
-                    _ => NavigationService::calc_scroll_offset(display_selected_idx, visible_item_count, total_display_items),
+                    _ => NavigationService::calc_scroll_offset(
+                        display_selected_idx,
+                        visible_item_count,
+                        total_display_items,
+                    ),
                 };
 
                 let display_items: Box<dyn Iterator<Item = (usize, &BrowseItem)> + '_> =
                     if let Some(indices) = display_indices {
-                        Box::new(indices.iter().filter_map(|&idx| {
-                            col.items.get(idx).map(|item| (idx, item))
-                        }))
+                        Box::new(
+                            indices
+                                .iter()
+                                .filter_map(|&idx| col.items.get(idx).map(|item| (idx, item))),
+                        )
                     } else {
                         Box::new(col.items.iter().enumerate())
                     };
@@ -2574,7 +2818,9 @@ fn render_browse_miller_columns(
     // sits on the next-empty slot when nav is loading — animated
     // dot pattern in the background + "Loading..." text whose
     // trailing dots animate via `state.loading_tick`.
-    let real_rendered = effective_columns.min(start_col + max_visible).saturating_sub(start_col);
+    let real_rendered = effective_columns
+        .min(start_col + max_visible)
+        .saturating_sub(start_col);
     if nav.loading && real_rendered < max_visible {
         let vis_idx = real_rendered;
         let placeholder_area = Rect {
@@ -2601,7 +2847,9 @@ fn render_loading_column(frame: &mut Frame, area: Rect, loading_tick: u32) {
         return;
     }
     let muted_border = Style::default().fg(t.colors.fg_muted);
-    let muted_bg = Style::default().bg(t.colors.bg_primary).fg(t.colors.fg_muted);
+    let muted_bg = Style::default()
+        .bg(t.colors.bg_primary)
+        .fg(t.colors.fg_muted);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(muted_border)
@@ -2620,7 +2868,9 @@ fn render_loading_column(frame: &mut Frame, area: Rect, loading_tick: u32) {
         .map(|x| if x % 2 == 0 { '\u{00b7}' } else { ' ' })
         .collect();
     for dy in 0..inner.height {
-        if dy % 2 != 0 { continue; }
+        if dy % 2 != 0 {
+            continue;
+        }
         let row_rect = Rect {
             x: inner.x,
             y: inner.y + dy,
@@ -2628,8 +2878,7 @@ fn render_loading_column(frame: &mut Frame, area: Rect, loading_tick: u32) {
             height: 1,
         };
         frame.render_widget(
-            Paragraph::new(dot_row.clone())
-                .style(Style::default().fg(t.colors.fg_muted)),
+            Paragraph::new(dot_row.clone()).style(Style::default().fg(t.colors.fg_muted)),
             row_rect,
         );
     }
@@ -2650,9 +2899,13 @@ fn render_loading_column(frame: &mut Frame, area: Rect, loading_tick: u32) {
         let ly = inner.y + inner.height / 2;
         if ly < inner.y + inner.height {
             frame.render_widget(
-                Paragraph::new(label)
-                    .style(Style::default().fg(t.colors.fg_accent)),
-                Rect { x: lx, y: ly, width: label_w, height: 1 },
+                Paragraph::new(label).style(Style::default().fg(t.colors.fg_accent)),
+                Rect {
+                    x: lx,
+                    y: ly,
+                    width: label_w,
+                    height: 1,
+                },
             );
         }
     }
@@ -2665,8 +2918,7 @@ fn render_album_art_grid(
     state: &AppState,
     col: &crate::app::state::BrowseColumn,
     is_focused: bool,
-    inner: Rect,
-    col_area: Rect,
+    (col_area, inner): (Rect, Rect),
     col_idx: usize,
     filter_results: Option<&crate::app::state::ListFilterResults>,
 ) {
@@ -2678,8 +2930,7 @@ fn render_album_art_grid(
     // allocate a Vec entry for every album on every terminal frame.
     let display_indices = if let Some(results) = filter_results {
         if results.matched_indices.is_empty() {
-            let empty = Paragraph::new("no matches")
-                .style(Style::default().fg(t.colors.fg_muted));
+            let empty = Paragraph::new("no matches").style(Style::default().fg(t.colors.fg_muted));
             frame.render_widget(empty, inner);
             return;
         }
@@ -2703,11 +2954,12 @@ fn render_album_art_grid(
 
     // Classify items: "one-row" pinned items vs normal art-height items
     fn is_one_row(item: &BrowseItem) -> bool {
-        matches!(item,
-            BrowseItem::ArtistRadio { .. } |
-            BrowseItem::AllTracks { .. } |
-            BrowseItem::CompilationTracks { .. } |
-            BrowseItem::Compilations
+        matches!(
+            item,
+            BrowseItem::ArtistRadio { .. }
+                | BrowseItem::AllTracks { .. }
+                | BrowseItem::CompilationTracks { .. }
+                | BrowseItem::Compilations
         )
     }
 
@@ -2742,11 +2994,15 @@ fn render_album_art_grid(
         let mut y = 0u16;
         let mut count = 0;
         for i in offset..total_items {
-            let Some((_, item)) = item_at(i) else { continue };
+            let Some((_, item)) = item_at(i) else {
+                continue;
+            };
             let h = if is_one_row(item) { 1 } else { art_row_height };
             // Account for spacer row after last one-row item
             let spacer = if has_spacer_after(i) { 1u16 } else { 0 };
-            if y + h + spacer > inner.height { break; }
+            if y + h + spacer > inner.height {
+                break;
+            }
             y += h + spacer;
             count += 1;
         }
@@ -2757,7 +3013,10 @@ fn render_album_art_grid(
 
     // Convert selected_idx to display position within the (possibly filtered) list
     let display_selected = if let Some(indices) = display_indices {
-        indices.iter().position(|&idx| idx == selected_idx).unwrap_or(0)
+        indices
+            .iter()
+            .position(|&idx| idx == selected_idx)
+            .unwrap_or(0)
     } else {
         selected_idx
     };
@@ -2770,7 +3029,9 @@ fn render_album_art_grid(
             let mut offset = 0;
             loop {
                 let visible = count_visible_from(offset);
-                if visible == 0 { break; }
+                if visible == 0 {
+                    break;
+                }
                 if display_selected >= offset && display_selected < offset + visible {
                     break;
                 }
@@ -2793,7 +3054,9 @@ fn render_album_art_grid(
             break;
         }
 
-        let Some((orig_idx, item)) = item_at(display_idx) else { continue };
+        let Some((orig_idx, item)) = item_at(display_idx) else {
+            continue;
+        };
         let is_selected = orig_idx == selected_idx;
         let one_row = is_one_row(item);
         let row_height = if one_row { 1 } else { art_row_height };
@@ -2826,7 +3089,12 @@ fn render_album_art_grid(
             };
             frame.render_widget(
                 Paragraph::new(format!(" {}", title_text)).style(title_style),
-                Rect { x: inner.x, y: row_y, width: inner.width, height: 1 },
+                Rect {
+                    x: inner.x,
+                    y: row_y,
+                    width: inner.width,
+                    height: 1,
+                },
             );
         } else {
             // Art-height item: artwork on left, text on right
@@ -2850,13 +3118,15 @@ fn render_album_art_grid(
             };
             if let Some(key) = art_key {
                 if let Some(data) = state.artwork.grid_cache.get(key) {
-                    rendered_image = super::artwork::render_grid_image(frame, image_area, key, data);
+                    rendered_image =
+                        super::artwork::render_grid_image(frame, image_area, key, data);
                 }
             }
 
             if !rendered_image {
                 // Placeholder: centered initials in art area
-                let initials: String = item.title()
+                let initials: String = item
+                    .title()
                     .split_whitespace()
                     .filter_map(|w| w.chars().next())
                     .take(3)
@@ -2870,11 +3140,21 @@ fn render_album_art_grid(
                 };
 
                 let text_y_p = image_area.y + image_area.height / 2;
-                let text_x_p = image_area.x + (image_area.width.saturating_sub(placeholder_text.len() as u16)) / 2;
+                let text_x_p = image_area.x
+                    + (image_area
+                        .width
+                        .saturating_sub(placeholder_text.len() as u16))
+                        / 2;
                 if text_y_p < image_area.y + image_area.height {
                     frame.render_widget(
-                        Paragraph::new(placeholder_text).style(Style::default().fg(t.colors.fg_muted)),
-                        Rect { x: text_x_p, y: text_y_p, width: image_area.width, height: 1 },
+                        Paragraph::new(placeholder_text)
+                            .style(Style::default().fg(t.colors.fg_muted)),
+                        Rect {
+                            x: text_x_p,
+                            y: text_y_p,
+                            width: image_area.width,
+                            height: 1,
+                        },
                     );
                 }
             }
@@ -2894,7 +3174,12 @@ fn render_album_art_grid(
                 };
                 frame.render_widget(
                     Paragraph::new(title_text).style(title_style),
-                    Rect { x: text_x, y: title_y, width: text_width, height: 1 },
+                    Rect {
+                        x: text_x,
+                        y: title_y,
+                        width: text_width,
+                        height: 1,
+                    },
                 );
 
                 // Artist and year (line 2)
@@ -2907,7 +3192,12 @@ fn render_album_art_grid(
                     let sub_style = Style::default().fg(t.colors.fg_muted);
                     frame.render_widget(
                         Paragraph::new(subtitle).style(sub_style),
-                        Rect { x: text_x, y: title_y + 1, width: text_width, height: 1 },
+                        Rect {
+                            x: text_x,
+                            y: title_y + 1,
+                            width: text_width,
+                            height: 1,
+                        },
                     );
                 }
             }
@@ -2923,8 +3213,19 @@ fn render_album_art_grid(
 
     // Scrollbar + position indicator
     if total_items > visible_count {
-        let sb_border = if is_focused { Some(t.colors.title_focused) } else { None };
-        render_scrollbar(frame, col_area, total_items, visible_count, scroll_offset, sb_border);
+        let sb_border = if is_focused {
+            Some(t.colors.title_focused)
+        } else {
+            None
+        };
+        render_scrollbar(
+            frame,
+            col_area,
+            total_items,
+            visible_count,
+            scroll_offset,
+            sb_border,
+        );
 
         let footer = format!("{}/{}", display_selected + 1, total_items);
         let footer_area = Rect::new(
@@ -2944,83 +3245,203 @@ fn render_transport(frame: &mut Frame, state: &AppState, area: Rect) {
     widgets::transport::render(frame, state, area);
 }
 
-/// Render the command bar (3 rows: top info/tabs + spacer + contextual commands).
-///
-/// Top row layout: [library name] [^Q/^C quit] ... [F-keys] [^L library] [^U queue] [^N now playing]
+/// A compact switch-only popup; management lives in Settings → Libraries.
 fn render_library_picker(frame: &mut Frame, state: &AppState) {
+    // Underlying Settings may have registered tabs; none belong to this modal.
+    state.hit_regions.borrow_mut().library_manager_rows = None;
+    // A quick switcher overlays, but never replaces, the normal app.
+    // ┌ Switch library ─────────────────────────────┐
+    // │ > Music · server       Beatles · WebDAV       │
+    // │ Enter switch · F2 manage · Esc cancel       │
+    // └────────────────────────────────────────────┘
     let t = theme();
-    let area = centered_rect(50, 30, frame.area());
-
+    let count = crate::app::sources::choices(state).len();
+    let screen = frame.area();
+    let width = 84.min(screen.width.saturating_sub(4));
+    let height = ((count.max(1) + 4).min(20) as u16).min(screen.height.saturating_sub(2));
+    let area = Rect::new(
+        screen.x + (screen.width - width) / 2,
+        screen.y + (screen.height - height) / 2,
+        width,
+        height,
+    );
     frame.render_widget(Clear, area);
-
     let block = Block::default()
-        .title(" switch library ")
-        .title_style(Style::default().fg(t.colors.fg_accent))
+        .title(" Switch library ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(t.colors.border_focused))
         .style(Style::default().bg(t.colors.bg_primary));
-
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    let rows = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
+    render_library_choices(frame, state, area, rows[0]);
+    frame.render_widget(
+        Paragraph::new("Enter switch · F2 manage · Esc cancel")
+            .style(Style::default().fg(t.colors.fg_muted)),
+        rows[1],
+    );
+}
 
-    // Build flat list of all libraries across servers
-    let multi_server = state.has_multiple_servers();
-    let all_libs = if multi_server {
-        state.all_libraries_with_servers()
-    } else {
-        // Single server — use current libraries
-        let server_id = state.active_server_id.as_deref().unwrap_or("");
-        let server_name = state.active_server_name().unwrap_or("");
-        state.libraries.iter()
-            .map(|lib| (server_id, server_name, lib))
-            .collect()
-    };
+/// Settings content, not a startup screen or full-window modal.
+pub(super) fn render_library_manager(frame: &mut Frame, state: &AppState, inner: Rect) {
+    // Sidebar | account-grouped library list → selected library options popover.
+    // Add library opens a type chooser, followed by a single connection form.
+    let t = theme();
+    let rows = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(1),
+        Constraint::Length(2),
+    ])
+    .split(inner);
+    let active = crate::app::sources::library_choices(state)
+        .into_iter()
+        .find(|entry| entry.active(state))
+        .map(|entry| entry.label())
+        .unwrap_or_else(|| "None".into());
+    frame.render_widget(
+        Paragraph::new(format!("Active: {active}")).style(Style::default().fg(t.colors.fg_accent)),
+        Rect::new(
+            rows[0].x,
+            rows[0].y.saturating_add(1),
+            rows[0].width,
+            rows[0].height.saturating_sub(1),
+        ),
+    );
+    render_managed_libraries(frame, state, rows[1]);
+    let shortcuts = "← sidebar · ↑↓ library · Enter options · A add";
+    frame.render_widget(
+        Paragraph::new(vec![Line::from(shortcuts)]).style(Style::default().fg(t.colors.fg_muted)),
+        rows[2],
+    );
+}
 
-    if all_libs.is_empty() {
-        let msg = Paragraph::new("No libraries available")
-            .style(Style::default().fg(t.colors.fg_muted));
-        frame.render_widget(msg, inner);
-        return;
-    }
-
-    // Register hit regions for mouse handler
-    {
-        let mut hr = state.hit_regions.borrow_mut();
-        hr.library_picker = Some(crate::ui::hit_regions::PopupListRegions {
-            outer: area,
-            items_area: inner,
-            item_count: all_libs.len(),
-        });
-    }
-
-    // Build library list items
-    let items: Vec<ListItem> = all_libs.iter().enumerate().map(|(i, (server_id, server_name, lib))| {
-        let is_selected = i == state.popups.library_picker_index;
-        let is_active = state.active_library.as_deref() == Some(lib.key.as_str())
-            && state.active_server_id.as_deref() == Some(*server_id);
-
-        let prefix = if is_selected { "\u{266a} " } else { "  " };
-        let suffix = if is_active { " *" } else { "" };
-        let text = if multi_server {
-            format!("{}{} ({}){}", prefix, lib.title, server_name, suffix)
-        } else {
-            format!("{}{}{}", prefix, lib.title, suffix)
-        };
-
-        let style = if is_selected {
-            Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
+fn render_managed_libraries(frame: &mut Frame, state: &AppState, area: Rect) {
+    let t = theme();
+    let entries = crate::app::sources::choices(state);
+    let mut lines = Vec::new();
+    let mut rows = Vec::new();
+    let mut previous = String::new();
+    let mut selected_line = 0;
+    for (index, entry) in entries.iter().enumerate() {
+        let group = entry.group();
+        if group != previous {
+            if !lines.is_empty() {
+                lines.push(Line::from(""));
+            }
+            if !group.is_empty() {
+                lines.push(Line::styled(
+                    group.clone(),
+                    Style::default().fg(t.colors.fg_muted),
+                ));
+            }
+            previous = group;
+        }
+        if index == state.popups.library_picker_index {
+            selected_line = lines.len();
+        }
+        let selected = index == state.popups.library_picker_index
+            && state.settings_state.focus == crate::app::state::SettingsFocus::Content;
+        let style = if selected {
+            Style::default()
+                .fg(t.colors.selection_text)
+                .bg(t.colors.selection_bar_bg)
         } else {
             Style::default().fg(t.colors.fg_primary)
         };
-
-        ListItem::new(text).style(style)
-    }).collect();
-
-    let list = List::new(items);
-    frame.render_widget(list, inner);
+        let name = match entry {
+            crate::app::sources::LibraryChoice::Navidrome { name, .. } => name.clone(),
+            _ => entry.label(),
+        };
+        rows.push((lines.len(), index));
+        lines.push(Line::styled(
+            format!(
+                "{}{}{}",
+                if selected { "> " } else { "  " },
+                if entry.active(state) { "[Active] " } else { "" },
+                name
+            ),
+            style,
+        ));
+    }
+    let total = lines.len();
+    let offset = state
+        .sources
+        .picker_scroll_pin
+        .unwrap_or_else(|| selected_line.saturating_sub(area.height.saturating_sub(1) as usize))
+        .min(total.saturating_sub(area.height as usize));
+    let rows = rows
+        .into_iter()
+        .filter_map(|(line, index)| {
+            let y = line.checked_sub(offset)?;
+            (y < area.height as usize)
+                .then_some((Rect::new(area.x, area.y + y as u16, area.width, 1), index))
+        })
+        .collect();
+    state.hit_regions.borrow_mut().library_manager_rows =
+        Some(crate::app::presentation::SettingsContentRegion {
+            inner: area,
+            rows,
+            scroll_offset: offset,
+            total_lines: total,
+        });
+    frame.render_widget(Paragraph::new(lines).scroll((offset as u16, 0)), area);
 }
 
-/// Render the artist bio popup (F4).
+fn render_library_choices(frame: &mut Frame, state: &AppState, outer: Rect, list_area: Rect) {
+    let t = theme();
+    let entries = crate::app::sources::choices(state);
+    let offset = crate::app::sources::picker_offset(state, list_area.height as usize);
+    state.hit_regions.borrow_mut().library_picker =
+        Some(crate::app::presentation::PopupListRegions {
+            outer,
+            items_area: list_area,
+            item_count: entries.len(),
+        });
+    let items: Vec<ListItem> = entries
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(list_area.height as usize)
+        .map(|(i, entry)| {
+            let selected = i == state.popups.library_picker_index
+                && (state.popups.library_picker_active
+                    || state.settings_state.focus == crate::app::state::SettingsFocus::Content);
+            let style = if selected {
+                Style::default()
+                    .fg(t.colors.selection_text)
+                    .bg(t.colors.selection_bar_bg)
+            } else {
+                Style::default().fg(t.colors.fg_primary)
+            };
+            ListItem::new(format!(
+                "{}{}{} · {}",
+                if selected { "> " } else { "  " },
+                if entry.active(state) { "[Active] " } else { "" },
+                entry.label(),
+                entry.provider(),
+            ))
+            .style(style)
+        })
+        .collect();
+    frame.render_widget(List::new(items), list_area);
+    if entries.is_empty() {
+        let message = if state.popups.library_picker_active {
+            "No saved libraries. F2 to add or reconnect."
+        } else {
+            "No libraries found.\nUse Add library to connect a source."
+        };
+        frame.render_widget(
+            Paragraph::new(message)
+                .wrap(Wrap { trim: false })
+                .style(Style::default().fg(t.colors.fg_muted)),
+            list_area,
+        );
+    }
+}
+
+/// Render the artist bio popup (F4): prose beside the selected photo,
+/// full-width prose below it; left/right selects another article photo.
+/// Down past the prose focuses the Google button; Up returns, Tab switches directly.
 fn render_artist_bio_popup(frame: &mut Frame, state: &AppState) {
     let popup = match &state.popups.artist_bio {
         Some(p) => p,
@@ -3033,8 +3454,16 @@ fn render_artist_bio_popup(frame: &mut Frame, state: &AppState) {
     frame.render_widget(Clear, area);
 
     let title = format!(" {} ", popup.artist_name);
+    let hint = if popup.google_focused {
+        " ↑ back · Enter search · G Google · Esc close "
+    } else if popup.document.source_url.is_some() {
+        " ↑↓ navigate · Tab button · ←→ photos · B source · G Google · Esc close "
+    } else {
+        " ↑↓ navigate · Tab button · G Google · Esc close "
+    };
     let block = Block::default()
         .title(title)
+        .title_bottom(hint)
         .title_style(Style::default().fg(t.colors.fg_accent))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(t.colors.border_focused))
@@ -3043,25 +3472,61 @@ fn render_artist_bio_popup(frame: &mut Frame, state: &AppState) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    // Biography / photos above a fixed, keyboard- and mouse-accessible browser button.
+    let mut bio_area = inner;
+    if !inner.is_empty() {
+        bio_area.height = bio_area.height.saturating_sub(1);
+        let label = "[ Search Google ]";
+        let width = (label.len() as u16).min(inner.width);
+        let button = Rect::new(
+            inner.x + (inner.width - width) / 2,
+            inner.bottom() - 1,
+            width,
+            1,
+        );
+        frame.render_widget(
+            Paragraph::new(label).style(if popup.google_focused {
+                Style::default()
+                    .fg(t.colors.selection_text)
+                    .bg(t.colors.selection_bar_bg)
+            } else {
+                Style::default().fg(t.colors.fg_primary)
+            }),
+            button,
+        );
+        state.hit_regions.borrow_mut().biography_google = Some(button);
+    }
+    state.hit_regions.borrow_mut().biography_text =
+        Some(crate::app::presentation::ScrollableTextRegion {
+            area: bio_area,
+            lines: 0,
+            visible: bio_area.height as usize,
+        });
+
     if popup.loading {
         let loading = Paragraph::new("Loading biography...")
             .style(Style::default().fg(t.colors.fg_muted))
             .alignment(Alignment::Center);
-        frame.render_widget(loading, inner);
+        frame.render_widget(loading, bio_area);
         return;
     }
 
-    let bio_area = inner;
-
     // Determine artwork size and whether to show it
-    let has_artwork = popup.artwork_data.is_some() && popup.artwork_thumb.is_some();
+    let photo = popup.document.images.get(popup.image_index);
+    let has_artwork = photo.is_some();
     // Drive layout from height: fill ~60% of bio area vertically, then derive width
     // from height so a square image fills the rect exactly (terminal cells ≈ 2:1 aspect).
     let art_h = if has_artwork {
         let target = (bio_area.height * 3) / 5; // ~60% of bio area
         target.max(6).min(bio_area.height.saturating_sub(2))
-    } else { 0 };
-    let art_w = if has_artwork { (art_h * 2).min(bio_area.width / 2) } else { 0 };
+    } else {
+        0
+    };
+    let art_w = if has_artwork {
+        (art_h * 2).min(bio_area.width / 2)
+    } else {
+        0
+    };
     // 1 col gap between text and artwork
     let gap = if has_artwork && art_w > 0 { 1u16 } else { 0 };
 
@@ -3069,10 +3534,26 @@ fn render_artist_bio_popup(frame: &mut Frame, state: &AppState) {
     let full_width = bio_area.width as usize;
     let narrow_width = bio_area.width.saturating_sub(art_w + gap) as usize;
     let art_rows = art_h as usize;
-    let wrapped = wrap_bio_text(&popup.bio, narrow_width, full_width, art_rows);
+    let text = match photo.filter(|p| !p.caption.is_empty()) {
+        Some(photo) => format!(
+            "Photo {}/{}: {}\n\n{}",
+            popup.image_index + 1,
+            popup.document.images.len(),
+            photo.caption,
+            popup.document.text
+        ),
+        None => popup.document.text.clone(),
+    };
+    let wrapped = wrap_bio_text(&text, narrow_width, full_width, art_rows);
     let total_lines = wrapped.len() as u16;
     let visible = bio_area.height;
     let scroll = popup.scroll.min(total_lines.saturating_sub(visible));
+    state.hit_regions.borrow_mut().biography_text =
+        Some(crate::app::presentation::ScrollableTextRegion {
+            area: bio_area,
+            lines: wrapped.len(),
+            visible: visible as usize,
+        });
 
     // Render artwork scrolling with text: crop top rows as user scrolls down.
     let art_visible_h = art_h.saturating_sub(scroll);
@@ -3083,11 +3564,15 @@ fn render_artist_bio_popup(frame: &mut Frame, state: &AppState) {
             width: art_w,
             height: art_visible_h,
         };
-        if let (Some(ref data), Some(ref thumb)) = (&popup.artwork_data, &popup.artwork_thumb) {
+        if let Some(photo) = photo {
             BIO_ARTWORK_RENDERER.with(|renderer| {
                 let mut renderer = renderer.borrow_mut();
-                let crop_fraction = if scroll > 0 { scroll as f32 / art_h as f32 } else { 0.0 };
-                if renderer.load_image_cropped(data, thumb, crop_fraction) {
+                let crop_fraction = if scroll > 0 {
+                    scroll as f32 / art_h as f32
+                } else {
+                    0.0
+                };
+                if renderer.load_image_cropped(&photo.data, &photo.key, crop_fraction) {
                     renderer.render(frame, art_rect);
                 }
             });
@@ -3096,11 +3581,20 @@ fn render_artist_bio_popup(frame: &mut Frame, state: &AppState) {
 
     // Render visible text lines
     let style = Style::default().fg(t.colors.fg_primary);
-    for (screen_row, line_text) in wrapped.iter().skip(scroll as usize).take(visible as usize).enumerate() {
+    for (screen_row, line_text) in wrapped
+        .iter()
+        .skip(scroll as usize)
+        .take(visible as usize)
+        .enumerate()
+    {
         let y = bio_area.y + screen_row as u16;
         // Narrow width only when artwork is visible on this screen row
         let in_art_zone = has_artwork && (screen_row as u16) < art_visible_h;
-        let line_width = if in_art_zone { narrow_width as u16 } else { bio_area.width };
+        let line_width = if in_art_zone {
+            narrow_width as u16
+        } else {
+            bio_area.width
+        };
         let line_rect = Rect {
             x: bio_area.x,
             y,
@@ -3113,21 +3607,37 @@ fn render_artist_bio_popup(frame: &mut Frame, state: &AppState) {
 
     // Scrollbar
     if total_lines > visible {
-        render_scrollbar(frame, area, total_lines as usize, visible as usize, scroll as usize, None);
+        render_scrollbar(
+            frame,
+            area,
+            total_lines as usize,
+            visible as usize,
+            scroll as usize,
+            None,
+        );
     }
 }
 
 /// Word-wrap bio text with a narrow region (next to artwork) and full-width below.
 /// The first `narrow_rows` output lines are wrapped at `narrow_width`;
 /// subsequent lines are wrapped at `full_width`.
-fn wrap_bio_text(text: &str, narrow_width: usize, full_width: usize, narrow_rows: usize) -> Vec<String> {
+fn wrap_bio_text(
+    text: &str,
+    narrow_width: usize,
+    full_width: usize,
+    narrow_rows: usize,
+) -> Vec<String> {
     use unicode_width::UnicodeWidthStr;
 
     if full_width == 0 {
         return vec![];
     }
     // If no artwork, everything is full width
-    let narrow_width = if narrow_width == 0 || narrow_width >= full_width { full_width } else { narrow_width };
+    let narrow_width = if narrow_width == 0 || narrow_width >= full_width {
+        full_width
+    } else {
+        narrow_width
+    };
 
     let mut lines = Vec::new();
 
@@ -3145,7 +3655,11 @@ fn wrap_bio_text(text: &str, narrow_width: usize, full_width: usize, narrow_rows
             // Widths are terminal cells, not bytes — bios with accented or
             // CJK text would otherwise wrap at the wrong column.
             let word_width = UnicodeWidthStr::width(*word);
-            let max_w = if lines.len() < narrow_rows { narrow_width } else { full_width };
+            let max_w = if lines.len() < narrow_rows {
+                narrow_width
+            } else {
+                full_width
+            };
             if line.is_empty() {
                 line.push_str(word);
                 line_width = word_width;
@@ -3169,7 +3683,7 @@ fn wrap_bio_text(text: &str, narrow_width: usize, full_width: usize, narrow_rows
 
 fn render_error_popup(frame: &mut Frame, error: &str) {
     let t = theme();
-    let area = centered_rect(60, 20, frame.area());
+    let area = centered_rect(70, 35, frame.area());
 
     frame.render_widget(Clear, area);
 
@@ -3209,22 +3723,24 @@ fn render_input_dialog(frame: &mut Frame, dialog: &InputDialog) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),  // input label
-            Constraint::Length(1),  // input field
-            Constraint::Length(1),  // hint
+            Constraint::Length(1), // input label
+            Constraint::Length(1), // input field
+            Constraint::Length(1), // hint
         ])
         .split(inner);
 
     // Input field with cursor
-    let input_text = format!("{}▋", dialog.input);
-    let input = Paragraph::new(input_text)
-        .style(Style::default().fg(t.colors.fg_primary));
+    let input_text = format!("{}▋", dialog.input.as_str());
+    let input = Paragraph::new(input_text).style(Style::default().fg(t.colors.fg_primary));
     frame.render_widget(input, chunks[1]);
 
     // Hint text
-    let hint = Paragraph::new("Enter: Save  |  Esc: Cancel")
-        .style(Style::default().fg(t.colors.fg_muted))
-        .alignment(Alignment::Center);
+    let hint = Paragraph::new(format!(
+        "Enter: {}  |  Esc: Cancel",
+        dialog.action_type.submit_label()
+    ))
+    .style(Style::default().fg(t.colors.fg_muted))
+    .alignment(Alignment::Center);
     frame.render_widget(hint, chunks[2]);
 }
 
@@ -3248,7 +3764,10 @@ fn render_confirm_dialog(frame: &mut Frame, state: &AppState, dialog: &ConfirmDi
     let msg = Paragraph::new(dialog.message.as_str())
         .style(Style::default().fg(t.colors.fg_primary))
         .wrap(Wrap { trim: true });
-    let msg_area = Rect { height: inner.height.saturating_sub(2), ..inner };
+    let msg_area = Rect {
+        height: inner.height.saturating_sub(2),
+        ..inner
+    };
     frame.render_widget(msg, msg_area);
 
     // Button row at bottom of inner area
@@ -3258,13 +3777,23 @@ fn render_confirm_dialog(frame: &mut Frame, state: &AppState, dialog: &ConfirmDi
     let yes_x = inner.x + 1;
     let no_x = yes_x + yes_text.len() as u16 + 2;
 
-    let yes_area = Rect { x: yes_x, y: btn_y, width: yes_text.len() as u16, height: 1 };
-    let no_area = Rect { x: no_x, y: btn_y, width: no_text.len() as u16, height: 1 };
+    let yes_area = Rect {
+        x: yes_x,
+        y: btn_y,
+        width: yes_text.len() as u16,
+        height: 1,
+    };
+    let no_area = Rect {
+        x: no_x,
+        y: btn_y,
+        width: no_text.len() as u16,
+        height: 1,
+    };
 
     // Register hit regions
     {
         let mut hr = state.hit_regions.borrow_mut();
-        hr.confirm_dialog = Some(crate::ui::hit_regions::DialogRegions {
+        hr.confirm_dialog = Some(crate::app::presentation::DialogRegions {
             outer: area,
             yes_button: yes_area,
             no_button: no_area,
@@ -3274,13 +3803,21 @@ fn render_confirm_dialog(frame: &mut Frame, state: &AppState, dialog: &ConfirmDi
     // Highlight the selected button with accent, dim the other
     let (yes_style, no_style) = if dialog.selected_yes {
         (
-            Style::default().fg(t.colors.bg_primary).bg(t.colors.fg_accent),
-            Style::default().fg(t.colors.fg_muted).bg(t.colors.bg_secondary),
+            Style::default()
+                .fg(t.colors.bg_primary)
+                .bg(t.colors.fg_accent),
+            Style::default()
+                .fg(t.colors.fg_muted)
+                .bg(t.colors.bg_secondary),
         )
     } else {
         (
-            Style::default().fg(t.colors.fg_muted).bg(t.colors.bg_secondary),
-            Style::default().fg(t.colors.bg_primary).bg(t.colors.fg_accent),
+            Style::default()
+                .fg(t.colors.fg_muted)
+                .bg(t.colors.bg_secondary),
+            Style::default()
+                .fg(t.colors.bg_primary)
+                .bg(t.colors.fg_accent),
         )
     };
 
@@ -3293,19 +3830,31 @@ fn render_confirm_dialog(frame: &mut Frame, state: &AppState, dialog: &ConfirmDi
         let hint = Paragraph::new("Y/N or Enter to confirm")
             .style(Style::default().fg(t.colors.fg_muted))
             .alignment(Alignment::Center);
-        let hint_area = Rect { x: inner.x, y: hint_y, width: inner.width, height: 1 };
+        let hint_area = Rect {
+            x: inner.x,
+            y: hint_y,
+            width: inner.width,
+            height: 1,
+        };
         frame.render_widget(hint, hint_area);
     }
 }
 
 /// Check if a mouse click hit a confirm dialog button. Returns Some(true) for Yes, Some(false) for No, None for miss.
-pub fn confirm_dialog_hit_test(dialog: &ConfirmDialog, frame_area: Rect, col: u16, row: u16) -> Option<bool> {
+pub fn confirm_dialog_hit_test(
+    dialog: &ConfirmDialog,
+    frame_area: Rect,
+    col: u16,
+    row: u16,
+) -> Option<bool> {
     let area = centered_rect(50, 25, frame_area);
     let block = Block::default().borders(Borders::ALL);
     let inner = block.inner(area);
 
     let btn_y = inner.y + inner.height.saturating_sub(1);
-    if row != btn_y { return None; }
+    if row != btn_y {
+        return None;
+    }
 
     let yes_text = "  Yes  ";
     let no_text = "  No  ";
@@ -3335,9 +3884,10 @@ fn render_toast(frame: &mut Frame, message: &str, area: Rect) {
     };
 
     frame.render_widget(Clear, toast_area);
-    let text = Paragraph::new(padded_message)
-        .style(Style::default()
+    let text = Paragraph::new(padded_message).style(
+        Style::default()
             .fg(t.colors.fg_primary)
-            .bg(t.colors.fg_accent));
+            .bg(t.colors.fg_accent),
+    );
     frame.render_widget(text, toast_area);
 }

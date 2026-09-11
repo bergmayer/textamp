@@ -228,17 +228,32 @@ mod tests {
     #[test]
     fn test_jump_to_letter() {
         let items = vec!["Alice", "Bob", "Charlie", "David"];
-        assert_eq!(NavigationService::jump_to_letter(&items, 'a', |s| s.to_string()), Some(0));
-        assert_eq!(NavigationService::jump_to_letter(&items, 'b', |s| s.to_string()), Some(1));
-        assert_eq!(NavigationService::jump_to_letter(&items, 'c', |s| s.to_string()), Some(2));
-        assert_eq!(NavigationService::jump_to_letter(&items, 'z', |s| s.to_string()), None);
+        assert_eq!(
+            NavigationService::jump_to_letter(&items, 'a', |s| s.to_string()),
+            Some(0)
+        );
+        assert_eq!(
+            NavigationService::jump_to_letter(&items, 'b', |s| s.to_string()),
+            Some(1)
+        );
+        assert_eq!(
+            NavigationService::jump_to_letter(&items, 'c', |s| s.to_string()),
+            Some(2)
+        );
+        assert_eq!(
+            NavigationService::jump_to_letter(&items, 'z', |s| s.to_string()),
+            None
+        );
     }
 
     #[test]
     fn test_jump_to_letter_the_prefix() {
         let items = vec!["Alice", "The Beatles", "Charlie"];
         // "The Beatles" should match 'B' because "The " is stripped
-        assert_eq!(NavigationService::jump_to_letter(&items, 'b', |s| s.to_string()), Some(1));
+        assert_eq!(
+            NavigationService::jump_to_letter(&items, 'b', |s| s.to_string()),
+            Some(1)
+        );
     }
 
     #[test]

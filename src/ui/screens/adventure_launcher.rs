@@ -5,11 +5,13 @@
 //! 2. Enter track count (5-100)
 //! 3. Find end track (same search + drill)
 
-use crate::app::state::{AdventureDrillLevel, AdventureLauncherState, AdventureStep, SearchFocus, SearchTab};
-use crate::app::AppState;
+use crate::app::state::{
+    AdventureDrillLevel, AdventureLauncherState, AdventureStep, SearchFocus, SearchTab,
+};
 use crate::services::NavigationService;
 use crate::ui::layout::centered_rect;
 use crate::ui::theme::theme;
+use crate::ui::RenderState as AppState;
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs};
@@ -32,23 +34,22 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
             _ => match &launcher.drill {
                 AdventureDrillLevel::Search => 2 + 3, // tabs (2) + search input (3)
                 AdventureDrillLevel::ArtistAlbums { .. } => 1, // breadcrumb (1)
-                AdventureDrillLevel::AlbumTracks { .. } => 1,  // breadcrumb (1)
+                AdventureDrillLevel::AlbumTracks { .. } => 1, // breadcrumb (1)
             },
         };
         let item_count = match launcher.step {
             AdventureStep::EnterTrackCount => 0,
             _ => match &launcher.drill {
-                AdventureDrillLevel::Search => {
-                    launcher.results.as_ref().map_or(0, |r| {
-                        r.artists.len() + r.albums.len() + r.tracks.len()
-                    })
-                }
+                AdventureDrillLevel::Search => launcher
+                    .results
+                    .as_ref()
+                    .map_or(0, |r| r.artists.len() + r.albums.len() + r.tracks.len()),
                 AdventureDrillLevel::ArtistAlbums { albums, .. } => albums.len(),
                 AdventureDrillLevel::AlbumTracks { tracks, .. } => tracks.len(),
             },
         };
         let mut hr = state.hit_regions.borrow_mut();
-        hr.adventure_launcher = Some(crate::ui::hit_regions::AdventureLauncherRegions {
+        hr.adventure_launcher = Some(crate::app::presentation::AdventureLauncherRegions {
             outer: popup_area,
             inner: inner_tmp,
             item_count,
@@ -92,10 +93,19 @@ fn render_track_finder(frame: &mut Frame, launcher: &AdventureLauncherState, are
         AdventureDrillLevel::Search => {
             render_search_level(frame, launcher, inner);
         }
-        AdventureDrillLevel::ArtistAlbums { artist_name, albums, .. } => {
+        AdventureDrillLevel::ArtistAlbums {
+            artist_name,
+            albums,
+            ..
+        } => {
             render_artist_albums_level(frame, launcher, artist_name, albums, inner);
         }
-        AdventureDrillLevel::AlbumTracks { album_title, artist_name, tracks, .. } => {
+        AdventureDrillLevel::AlbumTracks {
+            album_title,
+            artist_name,
+            tracks,
+            ..
+        } => {
             render_album_tracks_level(frame, launcher, artist_name, album_title, tracks, inner);
         }
     }
@@ -130,11 +140,19 @@ fn render_search_level(frame: &mut Frame, launcher: &AdventureLauncherState, are
         AdventureStep::FindEndTrack => "Step 3/3: Search for a track to END the adventure.",
         _ => "",
     };
-    let hint = Paragraph::new(Span::styled(step_hint, Style::default().fg(t.colors.fg_muted)));
+    let hint = Paragraph::new(Span::styled(
+        step_hint,
+        Style::default().fg(t.colors.fg_muted),
+    ));
     frame.render_widget(hint, tab_hint_chunks[1]);
 
     // Search input
-    render_search_input(frame, &launcher.query, launcher.focus == SearchFocus::Input, chunks[1]);
+    render_search_input(
+        frame,
+        &launcher.query,
+        launcher.focus == SearchFocus::Input,
+        chunks[1],
+    );
 
     // Results
     render_search_results(frame, launcher, chunks[2]);
@@ -154,26 +172,34 @@ fn render_adventure_tabs(frame: &mut Frame, launcher: &AdventureLauncherState, a
         SearchTab::Genres => 5,
     };
 
-    let titles: Vec<Line> = labels.iter().enumerate().map(|(i, tab)| {
-        if i == selected_idx {
-            Line::from(Span::styled(
-                format!(" {} ", tab.name()),
-                Style::default()
-                    .fg(t.colors.fg_accent)
-                    .add_modifier(Modifier::BOLD),
-            ))
-        } else {
-            Line::from(Span::styled(
-                format!(" {} ", tab.name()),
-                Style::default().fg(t.colors.fg_muted),
-            ))
-        }
-    }).collect();
+    let titles: Vec<Line> = labels
+        .iter()
+        .enumerate()
+        .map(|(i, tab)| {
+            if i == selected_idx {
+                Line::from(Span::styled(
+                    format!(" {} ", tab.name()),
+                    Style::default()
+                        .fg(t.colors.fg_accent)
+                        .add_modifier(Modifier::BOLD),
+                ))
+            } else {
+                Line::from(Span::styled(
+                    format!(" {} ", tab.name()),
+                    Style::default().fg(t.colors.fg_muted),
+                ))
+            }
+        })
+        .collect();
 
     let tabs = Tabs::new(titles)
         .select(selected_idx)
         .highlight_style(Style::default())
-        .style(Style::default().bg(t.colors.bg_primary).fg(t.colors.fg_muted))
+        .style(
+            Style::default()
+                .bg(t.colors.bg_primary)
+                .fg(t.colors.fg_muted),
+        )
         .divider(Span::styled(" │ ", Style::default().fg(t.colors.fg_muted)))
         .padding("", "");
 
@@ -185,7 +211,7 @@ fn render_artist_albums_level(
     frame: &mut Frame,
     launcher: &AdventureLauncherState,
     artist_name: &str,
-    albums: &[crate::plex::models::Album],
+    albums: &[crate::library::models::Album],
     area: Rect,
 ) {
     let t = theme();
@@ -207,7 +233,11 @@ fn render_artist_albums_level(
 
     // Album list
     if albums.is_empty() {
-        let msg = if launcher.loading { "Loading..." } else { "No albums found" };
+        let msg = if launcher.loading {
+            "Loading..."
+        } else {
+            "No albums found"
+        };
         let empty = Paragraph::new(msg)
             .style(Style::default().fg(t.colors.fg_muted))
             .alignment(Alignment::Center);
@@ -219,10 +249,13 @@ fn render_artist_albums_level(
     let visible_height = chunks[1].height as usize;
     let scroll_offset = match launcher.scroll_pin {
         Some(pinned) => pinned,
-        None => NavigationService::calc_scroll_offset(launcher.item_index, visible_height, albums.len()),
+        None => {
+            NavigationService::calc_scroll_offset(launcher.item_index, visible_height, albums.len())
+        }
     };
 
-    let items: Vec<ListItem> = albums.iter()
+    let items: Vec<ListItem> = albums
+        .iter()
         .enumerate()
         .skip(scroll_offset)
         .take(visible_height)
@@ -234,7 +267,9 @@ fn render_artist_albums_level(
                 format!("  {}", album.title)
             };
             let style = if is_selected {
-                Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
+                Style::default()
+                    .fg(t.colors.selection_text)
+                    .bg(t.colors.selection_bar_bg)
             } else {
                 Style::default().fg(t.colors.fg_primary)
             };
@@ -246,7 +281,13 @@ fn render_artist_albums_level(
 
     // Scrollbar for long album lists
     if albums.len() > visible_height {
-        crate::ui::widgets::render_scrollbar_borderless(frame, chunks[1], albums.len(), visible_height, scroll_offset);
+        crate::ui::widgets::render_scrollbar_borderless(
+            frame,
+            chunks[1],
+            albums.len(),
+            visible_height,
+            scroll_offset,
+        );
     }
 }
 
@@ -256,7 +297,7 @@ fn render_album_tracks_level(
     launcher: &AdventureLauncherState,
     artist_name: &str,
     album_title: &str,
-    tracks: &[crate::plex::models::Track],
+    tracks: &[crate::library::models::Track],
     area: Rect,
 ) {
     let t = theme();
@@ -286,7 +327,11 @@ fn render_album_tracks_level(
 
     // Track list
     if tracks.is_empty() {
-        let msg = if launcher.loading { "Loading..." } else { "No tracks found" };
+        let msg = if launcher.loading {
+            "Loading..."
+        } else {
+            "No tracks found"
+        };
         let empty = Paragraph::new(msg)
             .style(Style::default().fg(t.colors.fg_muted))
             .alignment(Alignment::Center);
@@ -298,10 +343,13 @@ fn render_album_tracks_level(
     let visible_height = chunks[1].height as usize;
     let scroll_offset = match launcher.scroll_pin {
         Some(pinned) => pinned,
-        None => NavigationService::calc_scroll_offset(launcher.item_index, visible_height, tracks.len()),
+        None => {
+            NavigationService::calc_scroll_offset(launcher.item_index, visible_height, tracks.len())
+        }
     };
 
-    let items: Vec<ListItem> = tracks.iter()
+    let items: Vec<ListItem> = tracks
+        .iter()
         .enumerate()
         .skip(scroll_offset)
         .take(visible_height)
@@ -311,7 +359,9 @@ fn render_album_tracks_level(
             let duration = format_duration(track.duration_ms());
             let text = format!("  {}{} [{}]", track_num, track.title, duration);
             let style = if is_selected {
-                Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
+                Style::default()
+                    .fg(t.colors.selection_text)
+                    .bg(t.colors.selection_bar_bg)
             } else {
                 Style::default().fg(t.colors.fg_primary)
             };
@@ -323,7 +373,13 @@ fn render_album_tracks_level(
 
     // Scrollbar for long track lists
     if tracks.len() > visible_height {
-        crate::ui::widgets::render_scrollbar_borderless(frame, chunks[1], tracks.len(), visible_height, scroll_offset);
+        crate::ui::widgets::render_scrollbar_borderless(
+            frame,
+            chunks[1],
+            tracks.len(),
+            visible_height,
+            scroll_offset,
+        );
     }
 }
 
@@ -349,7 +405,11 @@ fn render_search_input(frame: &mut Frame, query: &str, is_focused: bool, area: R
     } else {
         query.to_string()
     };
-    let fg = if is_focused { t.colors.fg_primary } else { t.colors.fg_muted };
+    let fg = if is_focused {
+        t.colors.fg_primary
+    } else {
+        t.colors.fg_muted
+    };
     let input = Paragraph::new(query_text).style(Style::default().fg(fg));
     frame.render_widget(input, input_inner);
 }
@@ -383,9 +443,15 @@ fn render_search_results(frame: &mut Frame, launcher: &AdventureLauncherState, a
     match launcher.search_tab {
         SearchTab::Global => {
             // Global tab: show all results with section headers
-            let has_any = !results.artists.is_empty() || !results.albums.is_empty() || !results.tracks.is_empty();
+            let has_any = !results.artists.is_empty()
+                || !results.albums.is_empty()
+                || !results.tracks.is_empty();
             if !has_any {
-                let msg = if launcher.loading { "Searching..." } else { "No matches found" };
+                let msg = if launcher.loading {
+                    "Searching..."
+                } else {
+                    "No matches found"
+                };
                 let empty = Paragraph::new(msg)
                     .style(Style::default().fg(t.colors.fg_muted))
                     .alignment(Alignment::Center);
@@ -397,14 +463,22 @@ fn render_search_results(frame: &mut Frame, launcher: &AdventureLauncherState, a
             let mut global_idx: usize = 0;
 
             if !results.artists.is_empty() {
-                entries.push((format!("── Artists ({}) ──", results.artists.len()), true, None));
+                entries.push((
+                    format!("── Artists ({}) ──", results.artists.len()),
+                    true,
+                    None,
+                ));
                 for a in &results.artists {
                     entries.push((format!("  {}", a.title), false, Some(global_idx)));
                     global_idx += 1;
                 }
             }
             if !results.albums.is_empty() {
-                entries.push((format!("── Albums ({}) ──", results.albums.len()), true, None));
+                entries.push((
+                    format!("── Albums ({}) ──", results.albums.len()),
+                    true,
+                    None,
+                ));
                 for a in &results.albums {
                     let artist = a.artist_name();
                     let text = if let Some(year) = a.year {
@@ -417,32 +491,47 @@ fn render_search_results(frame: &mut Frame, launcher: &AdventureLauncherState, a
                 }
             }
             if !results.tracks.is_empty() {
-                entries.push((format!("── Tracks ({}) ──", results.tracks.len()), true, None));
+                entries.push((
+                    format!("── Tracks ({}) ──", results.tracks.len()),
+                    true,
+                    None,
+                ));
                 for tr in &results.tracks {
-                    entries.push((format!("  {} - {}", tr.title, tr.track_artist()), false, Some(global_idx)));
+                    entries.push((
+                        format!("  {} - {}", tr.title, tr.track_artist()),
+                        false,
+                        Some(global_idx),
+                    ));
                     global_idx += 1;
                 }
             }
 
-            let display_selected = entries.iter()
+            let display_selected = entries
+                .iter()
                 .position(|(_, _, idx)| *idx == Some(selected_idx))
                 .unwrap_or(0);
             let scroll_offset = match launcher.scroll_pin {
                 Some(pinned) => pinned,
-                None => NavigationService::calc_scroll_offset(display_selected, visible_height, entries.len()),
+                None => NavigationService::calc_scroll_offset(
+                    display_selected,
+                    visible_height,
+                    entries.len(),
+                ),
             };
 
-            let items: Vec<ListItem> = entries.iter()
+            let items: Vec<ListItem> = entries
+                .iter()
                 .skip(scroll_offset)
                 .take(visible_height)
                 .map(|(text, is_header, sel_idx)| {
                     if *is_header {
-                        ListItem::new(text.as_str())
-                            .style(Style::default().fg(t.colors.fg_accent))
+                        ListItem::new(text.as_str()).style(Style::default().fg(t.colors.fg_accent))
                     } else {
                         let is_selected = is_focused && *sel_idx == Some(selected_idx);
                         let style = if is_selected {
-                            Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
+                            Style::default()
+                                .fg(t.colors.selection_text)
+                                .bg(t.colors.selection_bar_bg)
                         } else {
                             Style::default().fg(t.colors.fg_primary)
                         };
@@ -455,32 +544,76 @@ fn render_search_results(frame: &mut Frame, launcher: &AdventureLauncherState, a
 
             // Scrollbar for long lists
             if entries.len() > visible_height {
-                crate::ui::widgets::render_scrollbar_borderless(frame, area, entries.len(), visible_height, scroll_offset);
+                crate::ui::widgets::render_scrollbar_borderless(
+                    frame,
+                    area,
+                    entries.len(),
+                    visible_height,
+                    scroll_offset,
+                );
             }
         }
         SearchTab::Artists => {
-            render_simple_list(frame, &results.artists, |a| a.title.clone(), selected_idx, is_focused, visible_height, launcher.scroll_pin, area);
+            render_simple_list(
+                frame,
+                &results.artists,
+                |a| a.title.clone(),
+                selected_idx,
+                is_focused,
+                launcher.scroll_pin,
+                area,
+            );
         }
         SearchTab::Albums => {
-            render_simple_list(frame, &results.albums, |a| {
-                let artist = a.artist_name();
-                if let Some(year) = a.year {
-                    format!("{} ({}) - {}", a.title, year, artist)
-                } else {
-                    format!("{} - {}", a.title, artist)
-                }
-            }, selected_idx, is_focused, visible_height, launcher.scroll_pin, area);
+            render_simple_list(
+                frame,
+                &results.albums,
+                |a| {
+                    let artist = a.artist_name();
+                    if let Some(year) = a.year {
+                        format!("{} ({}) - {}", a.title, year, artist)
+                    } else {
+                        format!("{} - {}", a.title, artist)
+                    }
+                },
+                selected_idx,
+                is_focused,
+                launcher.scroll_pin,
+                area,
+            );
         }
         SearchTab::Tracks => {
-            render_simple_list(frame, &results.tracks, |tr| {
-                format!("{} - {}", tr.title, tr.track_artist())
-            }, selected_idx, is_focused, visible_height, launcher.scroll_pin, area);
+            render_simple_list(
+                frame,
+                &results.tracks,
+                |tr| format!("{} - {}", tr.title, tr.track_artist()),
+                selected_idx,
+                is_focused,
+                launcher.scroll_pin,
+                area,
+            );
         }
         SearchTab::Playlists => {
-            render_simple_list(frame, &results.playlists, |p| p.title.clone(), selected_idx, is_focused, visible_height, launcher.scroll_pin, area);
+            render_simple_list(
+                frame,
+                &results.playlists,
+                |p| p.title.clone(),
+                selected_idx,
+                is_focused,
+                launcher.scroll_pin,
+                area,
+            );
         }
         SearchTab::Genres => {
-            render_simple_list(frame, &results.genres, |g| g.title.clone(), selected_idx, is_focused, visible_height, launcher.scroll_pin, area);
+            render_simple_list(
+                frame,
+                &results.genres,
+                |g| g.title.clone(),
+                selected_idx,
+                is_focused,
+                launcher.scroll_pin,
+                area,
+            );
         }
     }
 }
@@ -492,14 +625,13 @@ fn render_simple_list<T, F>(
     format_fn: F,
     selected_idx: usize,
     is_focused: bool,
-    visible_height: usize,
     scroll_pin: Option<usize>,
     area: Rect,
-)
-where
+) where
     F: Fn(&T) -> String,
 {
     let t = theme();
+    let visible_height = area.height as usize;
 
     if items.is_empty() {
         let empty = Paragraph::new("No matches")
@@ -514,7 +646,8 @@ where
         None => NavigationService::calc_scroll_offset(selected_idx, visible_height, items.len()),
     };
 
-    let list_items: Vec<ListItem> = items.iter()
+    let list_items: Vec<ListItem> = items
+        .iter()
         .enumerate()
         .skip(scroll_offset)
         .take(visible_height)
@@ -522,7 +655,9 @@ where
             let is_selected = is_focused && i == selected_idx;
             let text = format!("  {}", format_fn(item));
             let style = if is_selected {
-                Style::default().fg(t.colors.selection_text).bg(t.colors.selection_bar_bg)
+                Style::default()
+                    .fg(t.colors.selection_text)
+                    .bg(t.colors.selection_bar_bg)
             } else {
                 Style::default().fg(t.colors.fg_primary)
             };
@@ -534,7 +669,13 @@ where
 
     // Scrollbar for long lists
     if items.len() > visible_height {
-        crate::ui::widgets::render_scrollbar_borderless(frame, area, items.len(), visible_height, scroll_offset);
+        crate::ui::widgets::render_scrollbar_borderless(
+            frame,
+            area,
+            items.len(),
+            visible_height,
+            scroll_offset,
+        );
     }
 }
 
@@ -570,8 +711,14 @@ fn render_track_count(frame: &mut Frame, launcher: &AdventureLauncherState, area
         "Start: (none)".to_string()
     };
     let info = Paragraph::new(vec![
-        Line::from(Span::styled("Step 2/3", Style::default().fg(t.colors.fg_muted))),
-        Line::from(Span::styled(start_info, Style::default().fg(t.colors.fg_primary))),
+        Line::from(Span::styled(
+            "Step 2/3",
+            Style::default().fg(t.colors.fg_muted),
+        )),
+        Line::from(Span::styled(
+            start_info,
+            Style::default().fg(t.colors.fg_primary),
+        )),
     ]);
     frame.render_widget(info, chunks[0]);
 
@@ -603,4 +750,3 @@ fn format_duration(ms: u64) -> String {
     let s = secs % 60;
     format!("{}:{:02}", m, s)
 }
-

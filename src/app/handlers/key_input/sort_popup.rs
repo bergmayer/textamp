@@ -3,8 +3,8 @@
 use crate::app::action::*;
 use crossterm::event::{KeyCode, KeyEvent};
 
-use crate::app::Action;
 use crate::app::state::{ColumnSortMode, SortPopupOption};
+use crate::app::Action;
 use crate::app::AppState;
 
 /// Handle keys when sort popup is active.
@@ -18,15 +18,11 @@ pub(super) fn handle_sort_popup_keys(key: KeyEvent, state: &mut AppState) -> Vec
         KeyCode::Esc => {
             return vec![SearchAction::CloseSortPopup.into()];
         }
-        KeyCode::Up => {
-            if popup.selected_index > 0 {
-                popup.selected_index -= 1;
-            }
+        KeyCode::Up if popup.selected_index > 0 => {
+            popup.selected_index -= 1;
         }
-        KeyCode::Down => {
-            if popup.selected_index + 1 < popup.options.len() {
-                popup.selected_index += 1;
-            }
+        KeyCode::Down if popup.selected_index + 1 < popup.options.len() => {
+            popup.selected_index += 1;
         }
         KeyCode::Enter | KeyCode::Char(' ') => {
             return apply_selected_option(state);
@@ -148,39 +144,41 @@ pub fn toggle_group_by_album(state: &mut AppState, col_idx: usize) -> Vec<Action
         None => return vec![],
     };
 
-    let (now_grouped, sort_mode, pending_page, persist_state) = if let Some(col) = nav.columns.get_mut(col_idx) {
-        if col.grouped_by_album {
-            col.ungroup_by_album();
+    let (now_grouped, sort_mode, pending_page, persist_state) =
+        if let Some(col) = nav.columns.get_mut(col_idx) {
+            if col.grouped_by_album {
+                col.ungroup_by_album();
+            } else {
+                col.group_by_album();
+            }
+            let now_grouped = col.grouped_by_album;
+            let sort_mode = col.sort_mode;
+            // Snapshot pagination info BEFORE truncating columns (which
+            // re-borrows `nav.columns`).
+            let pending = if now_grouped {
+                col.lazy.as_ref().and_then(|lazy| {
+                    let total = lazy.total? as usize;
+                    if !lazy.loading && col.tracks.len() < total {
+                        Some((lazy.key.clone(), col.tracks.len() as u32))
+                    } else {
+                        None
+                    }
+                })
+            } else {
+                None
+            };
+            // For a playlist's track column, the toggle is per-(library,
+            // playlist) and gets persisted. The playlist key lives on
+            // the column's `lazy` marker (every playlist tracks col gets
+            // one — see `PlaylistFirstPageLoaded` event handler).
+            let persist = col
+                .lazy
+                .as_ref()
+                .map(|lazy| (lazy.key.clone(), now_grouped, col.artwork_visible));
+            (now_grouped, sort_mode, pending, persist)
         } else {
-            col.group_by_album();
-        }
-        let now_grouped = col.grouped_by_album;
-        let sort_mode = col.sort_mode;
-        // Snapshot pagination info BEFORE truncating columns (which
-        // re-borrows `nav.columns`).
-        let pending = if now_grouped {
-            col.lazy.as_ref().and_then(|lazy| {
-                let total = lazy.total? as usize;
-                if !lazy.loading && col.tracks.len() < total {
-                    Some((lazy.key.clone(), col.tracks.len() as u32))
-                } else {
-                    None
-                }
-            })
-        } else {
-            None
+            return vec![];
         };
-        // For a playlist's track column, the toggle is per-(library,
-        // playlist) and gets persisted. The playlist key lives on
-        // the column's `lazy` marker (every playlist tracks col gets
-        // one — see `PlaylistFirstPageLoaded` event handler).
-        let persist = col.lazy.as_ref().map(|lazy| {
-            (lazy.key.clone(), now_grouped, col.artwork_visible)
-        });
-        (now_grouped, sort_mode, pending, persist)
-    } else {
-        return vec![];
-    };
     // Now safe to mutate nav.columns again.
     nav.columns.truncate(col_idx + 1);
     if nav.focused_column > col_idx {
@@ -189,23 +187,37 @@ pub fn toggle_group_by_album(state: &mut AppState, col_idx: usize) -> Vec<Action
 
     // Rebuild popup options: column is now album-type or all-tracks-type
     if let Some(popup) = &mut state.popups.sort {
-        popup.column_type = if now_grouped { SortColumnType::Album } else { SortColumnType::AllTracks };
+        popup.column_type = if now_grouped {
+            SortColumnType::Album
+        } else {
+            SortColumnType::AllTracks
+        };
         popup.rebuild_options(sort_mode);
     }
 
     let mut actions = auto_drill_after_sort(state);
     if let Some((playlist_key, offset)) = pending_page {
-        actions.push(crate::app::action::MillerAction::LoadMorePlaylistTracks {
-            playlist_key, offset,
-        }.into());
+        actions.push(
+            crate::app::action::MillerAction::LoadMorePlaylistTracks {
+                playlist_key,
+                offset,
+            }
+            .into(),
+        );
     }
     if let Some((playlist_key, group, art)) = persist_state {
         if let Some(library_key) = state.active_library.clone() {
-            actions.push(crate::app::action::SettingsAction::SavePlaylistView {
-                library_key,
-                playlist_key,
-                view: crate::config::settings::PlaylistView { group_by_album: group, show_artwork: art },
-            }.into());
+            actions.push(
+                crate::app::action::SettingsAction::SavePlaylistView {
+                    library_key,
+                    playlist_key,
+                    view: crate::config::settings::PlaylistView {
+                        group_by_album: group,
+                        show_artwork: art,
+                    },
+                }
+                .into(),
+            );
         }
     }
     actions
@@ -232,9 +244,10 @@ pub fn toggle_artwork(state: &mut AppState, col_idx: usize) -> Vec<Action> {
             // Playlist tracks columns: snapshot the playlist key
             // (lives on `lazy`) along with the new toggle states so
             // the caller can dispatch a persist action.
-            let persist = col.lazy.as_ref().map(|lazy| {
-                (lazy.key.clone(), col.grouped_by_album, col.artwork_visible)
-            });
+            let persist = col
+                .lazy
+                .as_ref()
+                .map(|lazy| (lazy.key.clone(), col.grouped_by_album, col.artwork_visible));
             (col.artwork_visible, persist)
         } else {
             return vec![];
@@ -267,11 +280,17 @@ pub fn toggle_artwork(state: &mut AppState, col_idx: usize) -> Vec<Action> {
     // playlist tracks column (identified by `col.lazy.key`).
     if let Some((playlist_key, group, art)) = persist_state {
         if let Some(library_key) = state.active_library.clone() {
-            actions.push(crate::app::action::SettingsAction::SavePlaylistView {
-                library_key,
-                playlist_key,
-                view: crate::config::settings::PlaylistView { group_by_album: group, show_artwork: art },
-            }.into());
+            actions.push(
+                crate::app::action::SettingsAction::SavePlaylistView {
+                    library_key,
+                    playlist_key,
+                    view: crate::config::settings::PlaylistView {
+                        group_by_album: group,
+                        show_artwork: art,
+                    },
+                }
+                .into(),
+            );
         }
     }
 

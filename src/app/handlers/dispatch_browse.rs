@@ -1,12 +1,9 @@
 //! Browse dispatch handlers: LoadStations, LoadTagList, LoadTagAlbums,
 //! RefreshTagView, OpenTrackDetails, OpenInLibrary.
 
+use crate::app::action::{BrowseAction, MillerAction, SystemAction};
+use crate::app::state::{BrowseCategory, BrowseColumn, BrowseItem, RefreshCategory, StationColumn};
 use crate::app::{Action, AppState, Event};
-use crate::app::action::{AsyncError, BrowseAction, MillerAction, SystemAction};
-use crate::app::state::{
-    BrowseCategory, BrowseColumn, BrowseItem, RefreshCategory, StationColumn,
-};
-use crate::plex::PlexClient;
 
 use anyhow::Result;
 
@@ -15,38 +12,13 @@ use tokio::sync::mpsc;
 
 /// Dispatch browse-related actions. Returns follow-up actions.
 pub async fn dispatch(
-    event_tx: &mpsc::Sender<Event>,
+    _event_tx: &mpsc::Sender<Event>,
     action: BrowseAction,
     state: &mut AppState,
-    client: &mut PlexClient,
 ) -> Result<Vec<Action>> {
     let mut follow_ups = vec![];
 
     match action {
-        BrowseAction::LoadStations => {
-            let Some(lib_key) = state.active_library.clone() else {
-                return Ok(follow_ups);
-            };
-            state.stations_loading = true;
-            state.station_nav.loading = true;
-            let tx = event_tx.clone();
-            let request_client = client.clone();
-            tokio::spawn(async move {
-                let result = request_client
-                    .get_stations(&lib_key)
-                    .await
-                    .map_err(|error| AsyncError::from_api("Failed to load stations", &error));
-                let _ = tx
-                    .send(Event::Effect(
-                        BrowseAction::StationsLoaded {
-                            library_key: lib_key,
-                            result,
-                        }
-                        .into(),
-                    ))
-                    .await;
-            });
-        }
         BrowseAction::StationsLoaded {
             library_key,
             result,
@@ -58,7 +30,6 @@ pub async fn dispatch(
             state.station_nav.loading = false;
             match result {
                 Ok(mut stations) => {
-                    state.connection.mark_healthy();
                     helpers::append_station_action_items(
                         &mut stations,
                         state.queue.shuffle_undo_queue.is_some(),
@@ -73,59 +44,11 @@ pub async fn dispatch(
                     state.stations = stations;
                 }
                 Err(error) => {
-                    if error.connection_error {
-                        state.connection.mark_degraded(error.message.clone());
-                    }
                     state.set_error(error.message);
                 }
             }
         }
-        BrowseAction::LoadTagList(section) => {
-            if !section.is_tag_section() {
-                return Ok(follow_ups);
-            }
-            let lib_key = match state.active_library.clone() {
-                Some(k) => k,
-                None => return Ok(follow_ups),
-            };
-            set_tag_loading(state, section, true);
-            state.tag_nav.loading = true;
 
-            let tx = event_tx.clone();
-            let request_client = client.clone();
-            tokio::spawn(async move {
-                let result = match section {
-                    BrowseCategory::AlbumGenres => request_client.get_album_genres(&lib_key).await,
-                    BrowseCategory::ArtistGenres => request_client.get_artist_genres(&lib_key).await,
-                    BrowseCategory::Moods => request_client.get_moods(&lib_key).await,
-                    BrowseCategory::Styles => request_client.get_styles(&lib_key).await,
-                    BrowseCategory::Decades => request_client.get_decades(&lib_key).await,
-                    BrowseCategory::Years => request_client.get_years(&lib_key).await,
-                    BrowseCategory::Collections => request_client.get_collections(&lib_key).await,
-                    BrowseCategory::Countries => request_client.get_countries(&lib_key).await,
-                    BrowseCategory::Labels => request_client.get_labels(&lib_key).await,
-                    BrowseCategory::Formats => request_client.get_formats(&lib_key).await,
-                    BrowseCategory::Studios => request_client.get_studios(&lib_key).await,
-                    _ => return,
-                }
-                .map_err(|error| {
-                    AsyncError::from_api(
-                        &format!("Failed to load {}", section.display_label()),
-                        &error,
-                    )
-                });
-                let _ = tx
-                    .send(Event::Effect(
-                        BrowseAction::TagListLoaded {
-                            library_key: lib_key,
-                            section,
-                            result,
-                        }
-                        .into(),
-                    ))
-                    .await;
-            });
-        }
         BrowseAction::TagListLoaded {
             library_key,
             section,
@@ -137,7 +60,6 @@ pub async fn dispatch(
             set_tag_loading(state, section, false);
             match result {
                 Ok(items) => {
-                    state.connection.mark_healthy();
                     store_tag_list(state, section, items);
                     if state.browse_category == section {
                         follow_ups.push(BrowseAction::RefreshTagView.into());
@@ -146,76 +68,12 @@ pub async fn dispatch(
                     }
                 }
                 Err(error) => {
-                    if error.connection_error {
-                        state.connection.mark_degraded(error.message.clone());
-                    }
                     state.set_error(error.message);
                     state.tag_nav.loading = false;
                 }
             }
         }
-        BrowseAction::LoadTagAlbums { replace_child } => {
-            // Drill from column 0 (tag list) into column 1 (albums for that tag).
-            let section = state.browse_category;
-            if !section.is_tag_section() {
-                return Ok(follow_ups);
-            }
-            let auto_drill = replace_child;
-            let lib_key = match state.active_library.clone() {
-                Some(k) => k,
-                None => return Ok(follow_ups),
-            };
-            let tag = match state.tag_nav.columns.first()
-                .and_then(|c| c.items.get(c.selected_index))
-                .and_then(|item| match item {
-                    BrowseItem::Genre { key, title } => Some((key.clone(), title.clone())),
-                    _ => None,
-                })
-            {
-                Some(t) => t,
-                None => return Ok(follow_ups),
-            };
 
-            state.tag_nav.columns.truncate(1);
-            state.tag_nav.focused_column = 0;
-            state.library.right_panel_loading = true;
-
-            let tag_key = tag.0;
-            let tag_title = tag.1;
-            let tx = event_tx.clone();
-            let request_client = client.clone();
-            tokio::spawn(async move {
-                let result = match section {
-                    BrowseCategory::AlbumGenres | BrowseCategory::ArtistGenres => {
-                        request_client.get_genre_albums(&lib_key, &tag_key).await
-                    }
-                    BrowseCategory::Moods => request_client.get_mood_albums(&lib_key, &tag_key).await,
-                    BrowseCategory::Styles => request_client.get_style_albums(&lib_key, &tag_key).await,
-                    BrowseCategory::Decades => request_client.get_decade_albums(&lib_key, &tag_key).await,
-                    BrowseCategory::Years => request_client.get_year_albums(&lib_key, &tag_key).await,
-                    BrowseCategory::Collections => request_client.get_collection_albums(&lib_key, &tag_key).await,
-                    BrowseCategory::Countries => request_client.get_country_albums(&lib_key, &tag_key).await,
-                    BrowseCategory::Labels => request_client.get_label_albums(&lib_key, &tag_key).await,
-                    BrowseCategory::Formats => request_client.get_format_albums(&lib_key, &tag_key).await,
-                    BrowseCategory::Studios => request_client.get_studio_albums(&lib_key, &tag_key).await,
-                    _ => return,
-                }
-                .map_err(|error| AsyncError::from_api("Failed to load albums", &error));
-                let _ = tx
-                    .send(Event::Effect(
-                        BrowseAction::TagAlbumsLoaded {
-                            library_key: lib_key,
-                            section,
-                            tag_key,
-                            tag_title,
-                            replace_child: auto_drill,
-                            result,
-                        }
-                        .into(),
-                    ))
-                    .await;
-            });
-        }
         BrowseAction::TagAlbumsLoaded {
             library_key,
             section,
@@ -229,9 +87,9 @@ pub async fn dispatch(
                 .columns
                 .first()
                 .and_then(|column| column.items.get(column.selected_index))
-                .is_some_and(|item| {
-                    matches!(item, BrowseItem::Genre { key, .. } if key == &tag_key)
-                });
+                .is_some_and(
+                    |item| matches!(item, BrowseItem::Genre { key, .. } if key == &tag_key),
+                );
             if state.active_library.as_ref() != Some(&library_key)
                 || state.browse_category != section
                 || !selected_tag_matches
@@ -241,19 +99,16 @@ pub async fn dispatch(
             state.library.right_panel_loading = false;
             match result {
                 Ok(mut albums) => {
-                    state.connection.mark_healthy();
                     albums.sort_by_cached_key(|album| {
                         album.parent_title.as_deref().unwrap_or("").to_lowercase()
                     });
                     state.library.tag_albums = albums.clone();
-                    let items = BrowseItem::from_albums(&albums, &state.library.album_display_artist);
+                    let items =
+                        BrowseItem::from_albums(&albums, &state.library.album_display_artist);
                     let col = BrowseColumn::new(tag_title, items);
                     state.tag_nav.drill_column(col, replace_child);
                 }
                 Err(error) => {
-                    if error.connection_error {
-                        state.connection.mark_degraded(error.message.clone());
-                    }
                     state.set_error(error.message);
                 }
             }
@@ -292,9 +147,8 @@ pub async fn dispatch(
                         && !state.artwork.grid_pending.contains(&album_key)
                     {
                         if let Some(thumb) = track.parent_thumb.clone() {
-                            follow_ups.push(
-                                SystemAction::LoadAlbumArt(vec![(album_key, thumb)]).into(),
-                            );
+                            follow_ups
+                                .push(SystemAction::LoadAlbumArt(vec![(album_key, thumb)]).into());
                         }
                     }
                 }
@@ -304,7 +158,12 @@ pub async fn dispatch(
         BrowseAction::CloseTrackDetails => {
             state.track_pane_open = false;
         }
-        BrowseAction::OpenInLibrary { artist_key, artist_name, album_key, album_title } => {
+        BrowseAction::OpenInLibrary {
+            artist_key,
+            artist_name,
+            album_key,
+            album_title,
+        } => {
             state.track_pane_open = false;
             if let Some(ak) = album_key {
                 state.search.pending_album_key = Some(ak);
@@ -319,26 +178,41 @@ pub async fn dispatch(
             if state.artist_nav.columns.is_empty() {
                 let items = state.build_artist_root_items();
                 let title = format!("artists ({})", state.library.artists.len());
-                state.artist_nav.columns.push(BrowseColumn::new(title, items));
+                state
+                    .artist_nav
+                    .columns
+                    .push(BrowseColumn::new(title, items));
             } else {
                 state.artist_nav.columns.truncate(1);
             }
             state.artist_nav.focused_column = 0;
 
             if let Some(col) = state.artist_nav.columns.first_mut() {
-                if let Some(idx) = col.items.iter().position(|item| {
-                    matches!(item, BrowseItem::Artist { key, .. } if key == &artist_key)
-                }) {
+                if let Some(idx) = col.items.iter().position(
+                    |item| matches!(item, BrowseItem::Artist { key, .. } if key == &artist_key),
+                ) {
                     col.selected_index = idx;
                 }
             }
 
-            if let Some(idx) = state.library.artists.iter().position(|a| a.rating_key == artist_key) {
+            if let Some(idx) = state
+                .library
+                .artists
+                .iter()
+                .position(|a| a.rating_key == artist_key)
+            {
                 state.list_state.artists_index = idx;
             }
 
-            follow_ups.push(MillerAction::LoadArtistAlbumsForMiller { artist_key, replace_child: false }.into());
+            follow_ups.push(
+                MillerAction::LoadArtistAlbumsForMiller {
+                    artist_key,
+                    replace_child: false,
+                }
+                .into(),
+            );
         }
+        _ => anyhow::bail!("Unsupported library operation reached shared handler"),
     }
     Ok(follow_ups)
 }
@@ -377,7 +251,11 @@ fn is_tag_loading(state: &AppState, section: BrowseCategory) -> bool {
     }
 }
 
-fn store_tag_list(state: &mut AppState, section: BrowseCategory, items: Vec<crate::plex::models::Genre>) {
+fn store_tag_list(
+    state: &mut AppState,
+    section: BrowseCategory,
+    items: Vec<crate::library::models::Genre>,
+) {
     match section {
         BrowseCategory::AlbumGenres => state.library.album_genres = items,
         BrowseCategory::ArtistGenres => state.library.artist_genres = items,

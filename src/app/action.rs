@@ -3,23 +3,34 @@
 //! Actions are commands that modify state or trigger side effects.
 //! Organized into sub-enums matching dispatch handler modules.
 
-use crate::plex::models::Track;
 use super::state::{BrowseCategory, View};
+use crate::library::models::Track;
 
-/// Cloneable, UI-safe representation of a failed background effect. Keeping
-/// the transport classification lets reducers enter degraded/offline mode
-/// without moving `reqwest::Error` values through the event bus.
+/// Cloneable, UI-safe representation of a failed background effect.
 #[derive(Debug, Clone)]
 pub struct AsyncError {
     pub message: String,
-    pub connection_error: bool,
 }
 
-impl AsyncError {
-    pub fn from_api(context: &str, error: &crate::plex::ApiError) -> Self {
+/// Result of a best-effort batch of asynchronous operations.
+///
+/// `items` may contain useful partial results. Failure metadata is kept
+/// separately so callers can report partial completion honestly.
+#[derive(Debug, Clone)]
+pub struct AsyncBatchOutcome<T> {
+    pub items: T,
+    pub attempted: usize,
+    pub failed: usize,
+    pub first_error: Option<AsyncError>,
+}
+
+impl<T> AsyncBatchOutcome<T> {
+    pub fn new(items: T, attempted: usize) -> Self {
         Self {
-            message: format!("{context}: {error}"),
-            connection_error: error.is_connection_error(),
+            items,
+            attempted,
+            failed: 0,
+            first_error: None,
         }
     }
 }
@@ -27,6 +38,7 @@ impl AsyncError {
 /// Top-level action routing — each variant maps to a dispatch handler module.
 #[derive(Debug, Clone)]
 pub enum Action {
+    Source(crate::app::sources::SourceAction),
     System(SystemAction),
     Navigation(NavigationAction),
     Data(DataAction),
@@ -47,6 +59,7 @@ pub enum Action {
 #[derive(Debug, Clone)]
 pub enum SystemAction {
     Quit,
+
     ShowError(String),
     ClearError,
     SetStatus(String),
@@ -84,7 +97,10 @@ pub enum NavigationAction {
     /// content area for the new category but leaves keyboard focus
     /// on the sections column. Click / Enter / palette / shortcut
     /// drills set it to false so focus follows the action.
-    SetCategory { category: BrowseCategory, preserve_sections_focus: bool },
+    SetCategory {
+        category: BrowseCategory,
+        preserve_sections_focus: bool,
+    },
     ToggleFocus,
 }
 
@@ -92,7 +108,10 @@ impl NavigationAction {
     /// Convenience for the common "click / palette / shortcut" path
     /// that should transfer focus to the new category's content.
     pub fn set_category(category: BrowseCategory) -> Self {
-        Self::SetCategory { category, preserve_sections_focus: false }
+        Self::SetCategory {
+            category,
+            preserve_sections_focus: false,
+        }
     }
 }
 
@@ -104,18 +123,34 @@ pub enum DataAction {
     LoadArtistAlbums,
     LoadArtistAllTracks,
     LoadSelectedAlbumTracks,
-    LoadAlbumTracks { rating_key: String },
+    LoadAlbumTracks {
+        rating_key: String,
+    },
     LoadCategoryTracks,
     GoBackInRightPanel,
-    LoadSimilarAlbums { rating_key: String, title: String },
-    LoadSimilarTracks { rating_key: String, title: String },
+    LoadSimilarAlbums {
+        rating_key: String,
+        title: String,
+    },
+    LoadSimilarTracks {
+        rating_key: String,
+        title: String,
+    },
     /// Lazy-load sonically similar tracks for the right-side
     /// track-details pane. Stores results in
     /// `state.track_pane_similar` keyed by `rating_key` without
     /// switching the view.
-    LoadTrackPaneSimilar { rating_key: String },
-    LoadSimilarArtists { artist_key: String, title: String },
-    LoadRelated { artist_key: String, title: String },
+    LoadTrackPaneSimilar {
+        rating_key: String,
+    },
+    LoadSimilarArtists {
+        artist_key: String,
+        title: String,
+    },
+    LoadRelated {
+        artist_key: String,
+        title: String,
+    },
     ListUp,
     ListDown,
     ListPageUp,
@@ -133,15 +168,21 @@ pub enum DataAction {
 /// `false`.
 #[derive(Debug, Clone)]
 pub enum MillerAction {
-    LoadArtistAlbumsForMiller { artist_key: String, replace_child: bool },
+    LoadArtistAlbumsForMiller {
+        artist_key: String,
+        replace_child: bool,
+    },
     ArtistAlbumsForMillerLoaded {
         request_id: u64,
         artist_key: String,
         replace_child: bool,
-        is_plex_artist: bool,
-        result: Result<Vec<crate::plex::models::Album>, AsyncError>,
+        is_catalog_artist: bool,
+        result: Result<Vec<crate::library::models::Album>, AsyncError>,
     },
-    LoadAlbumTracksForMiller { album_key: String, replace_child: bool },
+    LoadAlbumTracksForMiller {
+        album_key: String,
+        replace_child: bool,
+    },
     AlbumTracksForMillerLoaded {
         request_id: u64,
         album_key: String,
@@ -149,22 +190,37 @@ pub enum MillerAction {
         replace_child: bool,
         result: Result<Vec<Track>, AsyncError>,
     },
-    LoadArtistAllTracksForMiller { artist_key: String, replace_child: bool },
+    LoadArtistAllTracksForMiller {
+        artist_key: String,
+        replace_child: bool,
+    },
     ArtistAllTracksForMillerLoaded {
         request_id: u64,
         replace_child: bool,
         result: Result<Vec<Track>, AsyncError>,
     },
-    LoadAllAlbumsForMiller { replace_child: bool },
-    PlayTrackFromMiller { column_index: usize, track_index: usize, single_track: bool },
-    LoadGenreAlbumsForMiller { genre_key: String, replace_child: bool },
+    LoadAllAlbumsForMiller {
+        replace_child: bool,
+    },
+    PlayTrackFromMiller {
+        column_index: usize,
+        track_index: usize,
+        single_track: bool,
+    },
+    LoadGenreAlbumsForMiller {
+        genre_key: String,
+        replace_child: bool,
+    },
     GenreAlbumsForMillerLoaded {
         request_id: u64,
         genre_name: String,
         replace_child: bool,
-        result: Result<Vec<crate::plex::models::Album>, AsyncError>,
+        result: Result<Vec<crate::library::models::Album>, AsyncError>,
     },
-    LoadGenreTracksForMiller { album_key: String, replace_child: bool },
+    LoadGenreTracksForMiller {
+        album_key: String,
+        replace_child: bool,
+    },
     GenreTracksForMillerLoaded {
         request_id: u64,
         album_key: String,
@@ -172,33 +228,63 @@ pub enum MillerAction {
         replace_child: bool,
         result: Result<Vec<Track>, AsyncError>,
     },
-    PlayGenreTrackFromMiller { column_index: usize, track_index: usize, single_track: bool },
-    LoadPlaylistTracksForMiller { playlist_key: String, replace_child: bool },
+    PlayGenreTrackFromMiller {
+        column_index: usize,
+        track_index: usize,
+        single_track: bool,
+    },
+    LoadPlaylistTracksForMiller {
+        playlist_key: String,
+        replace_child: bool,
+    },
     /// Fetch the next page of a lazy-loaded playlist tracks column.
     /// `offset` is how many tracks the column already has; the server
     /// returns the next chunk after that. Not a drill — extends the
     /// existing column in place.
-    LoadMorePlaylistTracks { playlist_key: String, offset: u32 },
-    PlayPlaylistTrackFromMiller { column_index: usize, track_index: usize, single_track: bool },
-    RefreshAlbumTracks { album_key: String },
+    LoadMorePlaylistTracks {
+        playlist_key: String,
+        offset: u32,
+    },
+    PlayPlaylistTrackFromMiller {
+        column_index: usize,
+        track_index: usize,
+        single_track: bool,
+    },
+    RefreshAlbumTracks {
+        album_key: String,
+    },
     AlbumTracksRefreshed {
         request_id: u64,
         tag_section: bool,
         column_index: usize,
         result: Result<Vec<Track>, AsyncError>,
     },
-    LoadCompilationsForMiller { replace_child: bool },
-    LoadCompilationAlbumsForMiller { artist_key: String, artist_name: String, replace_child: bool },
-    LoadCompilationAllTracksForMiller { artist_key: String, artist_name: String, replace_child: bool },
-    LoadAllCompilationTracksForMiller { replace_child: bool },
-    LoadAllLibraryTracksForMiller { replace_child: bool },
+    LoadCompilationsForMiller {
+        replace_child: bool,
+    },
+    LoadCompilationAlbumsForMiller {
+        artist_key: String,
+        artist_name: String,
+        replace_child: bool,
+    },
+    LoadCompilationAllTracksForMiller {
+        artist_key: String,
+        artist_name: String,
+        replace_child: bool,
+    },
+    LoadAllCompilationTracksForMiller {
+        replace_child: bool,
+    },
+    LoadAllLibraryTracksForMiller {
+        replace_child: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
 pub enum PlaybackAction {
     TogglePlayPause,
     Stop,
-    /// Stop local audio and discard playback state without reporting to Plex.
+    /// Stop local audio and discard playback state without reporting to server.
     /// Used while credentials/server identity are being replaced, when any
     /// report would necessarily be sent in the wrong account context.
     ResetForAccountChange,
@@ -210,14 +296,7 @@ pub enum PlaybackAction {
     VolumeUp,
     VolumeDown,
     ToggleMute,
-    StartResolvedStream {
-        preparation_id: u64,
-        track_key: String,
-        url: String,
-    },
-    /// Start low-priority next-track downloads after the current stream has
-    /// built its initial PCM runway.
-    PrefetchUpcoming,
+
     RetryCurrentTrack,
 }
 
@@ -227,29 +306,55 @@ pub enum QueueLoadIntent {
         request_id: u64,
         label: Option<String>,
     },
-    Append { label: String },
-    InsertNext { label: String },
+    Append {
+        label: String,
+    },
+    InsertNext {
+        label: String,
+    },
 }
 
 #[derive(Debug, Clone)]
 pub enum QueueAction {
-    PlayTrack(Track),
+    PlayTrack(Box<Track>),
     PlayTrackFromCategory(usize),
-    PlayAlbum { rating_key: String },
-    PlayArtistTracks { artist_key: String },
+    PlayAlbum {
+        rating_key: String,
+    },
+    PlayArtistTracks {
+        artist_key: String,
+    },
     PlayTracksNow(Vec<Track>),
     PlaySearchResult,
     EnqueueSelection,
     EnqueueSelectionNext,
-    EnqueueAlbum { rating_key: String, title: String },
-    EnqueueArtistTracks { artist_key: String, artist_name: String },
-    PlayAlbumNow { rating_key: String, title: String },
-    PlayPlaylistNow { playlist_key: String, title: String },
-    EnqueueTrack(Track),
+    EnqueueAlbum {
+        rating_key: String,
+        title: String,
+    },
+    EnqueueArtistTracks {
+        artist_key: String,
+        artist_name: String,
+    },
+    PlayAlbumNow {
+        rating_key: String,
+        title: String,
+    },
+    PlayPlaylistNow {
+        playlist_key: String,
+        title: String,
+    },
+    EnqueueTrack(Box<Track>),
     EnqueueSearchResult,
     EnqueueSearchResultNext,
-    EnqueueAlbumNext { rating_key: String, title: String },
-    EnqueueArtistTracksNext { artist_key: String, artist_name: String },
+    EnqueueAlbumNext {
+        rating_key: String,
+        title: String,
+    },
+    EnqueueArtistTracksNext {
+        artist_key: String,
+        artist_name: String,
+    },
     EnqueueTracksNext(Vec<Track>),
     TracksLoaded {
         intent: QueueLoadIntent,
@@ -277,12 +382,15 @@ pub enum QueueAction {
     MoveQueueTrackDown,
     /// Drag-and-drop reorder: pull the track at `from` and insert it at
     /// `to` (with `to` interpreted in the post-removal index space).
-    MoveQueueTrack { from: usize, to: usize },
+    MoveQueueTrack {
+        from: usize,
+        to: usize,
+    },
     MoveSelectedTracksUp,
     MoveSelectedTracksDown,
     RemoveSelectedFromQueue,
-    RemixBatchReady(Vec<(usize, Vec<Track>)>),
-    RemixDoppelgangerReady(Vec<(usize, Track)>),
+    RemixBatchReady(AsyncBatchOutcome<Vec<(usize, Vec<Track>)>>),
+    RemixDoppelgangerReady(AsyncBatchOutcome<Vec<(usize, Track)>>),
 }
 
 #[derive(Debug, Clone)]
@@ -304,7 +412,9 @@ pub enum SearchAction {
     SetListFilterQuery(String),
     /// Debounce completion for list filtering. The timer carries only a
     /// generation; the winning generation snapshots and filters the column.
-    RunListFilter { version: u64 },
+    RunListFilter {
+        version: u64,
+    },
     OpenSearchPopup,
     CloseSearchPopup,
     /// Replace the global-search query (text input handler) and
@@ -314,20 +424,26 @@ pub enum SearchAction {
     /// Switch the active result-category tab in the global search
     /// popup (Global / Artists / Albums / Tracks / Playlists / Genres).
     SetSearchTab(crate::app::state::SearchTab),
-    CloseRadioLauncher,
-    RadioLauncherSearch,
-    RadioLauncherSelectResult,
     OpenAdventureLauncher,
     /// Open the Sonic Adventure launcher with a pre-selected start
     /// track — skips the start-track search step and goes straight to
     /// "enter track count". Used by the track context menu and the
     /// Now Playing "Adventure" action when the source already
     /// identifies a specific track.
-    OpenAdventureLauncherWithStart { start_track: Box<crate::plex::models::Track> },
+    OpenAdventureLauncherWithStart {
+        start_track: Box<crate::library::models::Track>,
+    },
     CloseAdventureLauncher,
     AdventureLauncherSearch,
-    AdventureLauncherDrillArtist { key: String, name: String },
-    AdventureLauncherDrillAlbum { key: String, title: String, artist_name: String },
+    AdventureLauncherDrillArtist {
+        key: String,
+        name: String,
+    },
+    AdventureLauncherDrillAlbum {
+        key: String,
+        title: String,
+        artist_name: String,
+    },
     AdventureLauncherSelectTrack,
     AdventureLauncherBack,
     /// Switch which adventure-launcher field is being edited
@@ -351,6 +467,7 @@ pub enum SearchAction {
     /// Replace the search query (TextInput handler) and re-run search.
     AdventureLauncherSetQuery(String),
     OpenLibraryPicker,
+    ManageLibraries,
     CloseLibraryPicker,
     OpenSortPopup,
     CloseSortPopup,
@@ -367,7 +484,12 @@ pub enum SearchAction {
     ArtistRadioPickerSetCount,
     ArtistRadioPickerToggleArtist,
     ArtistRadioPickerLaunch,
-    ShowArtistBio { artist_key: String, artist_name: String },
+    ShowArtistBio {
+        artist_key: String,
+        artist_name: String,
+    },
+    OpenBiographySource,
+    SearchBiographyOnGoogle,
 }
 
 #[derive(Debug, Clone)]
@@ -375,30 +497,32 @@ pub enum BrowseAction {
     LoadStations,
     StationsLoaded {
         library_key: String,
-        result: Result<Vec<crate::plex::models::Station>, AsyncError>,
+        result: Result<Vec<crate::library::models::Station>, AsyncError>,
     },
     /// Load tag-list data for a tag-style section (album genres, artist
     /// genres, moods, styles, decades, years, collections, countries,
     /// labels, formats, studios). The handler maps the section to the
-    /// matching Plex client method.
+    /// matching server client method.
     LoadTagList(crate::app::state::BrowseCategory),
     TagListLoaded {
         library_key: String,
         section: crate::app::state::BrowseCategory,
-        result: Result<Vec<crate::plex::models::Genre>, AsyncError>,
+        result: Result<Vec<crate::library::models::Genre>, AsyncError>,
     },
     /// Load albums for the currently-selected tag in the active tag
     /// section (column 0 → column 1 drill). `replace_child` mirrors
     /// the MillerAction convention: `true` for keyboard auto-drill,
     /// `false` for click / Enter / palette.
-    LoadTagAlbums { replace_child: bool },
+    LoadTagAlbums {
+        replace_child: bool,
+    },
     TagAlbumsLoaded {
         library_key: String,
         section: crate::app::state::BrowseCategory,
         tag_key: String,
         tag_title: String,
         replace_child: bool,
-        result: Result<Vec<crate::plex::models::Album>, AsyncError>,
+        result: Result<Vec<crate::library::models::Album>, AsyncError>,
     },
     /// Populate the root column of `tag_nav` with the current section's
     /// tag list. Re-run on section switch.
@@ -429,7 +553,10 @@ pub enum FolderAction {
     /// Drill into a folder. `replace_child` mirrors the MillerAction
     /// convention: `true` for keyboard auto-drill, `false` for click /
     /// Enter / palette.
-    NavigateIntoFolder { folder_key: String, replace_child: bool },
+    NavigateIntoFolder {
+        folder_key: String,
+        replace_child: bool,
+    },
     PlayFolderTracks,
     FolderTracksLoaded {
         request_id: u64,
@@ -438,7 +565,9 @@ pub enum FolderAction {
         ordered_keys: Vec<String>,
         result: Result<Vec<Track>, AsyncError>,
     },
-    PlayFolderTrack { track_index: usize },
+    PlayFolderTrack {
+        track_index: usize,
+    },
     FolderTrackLoaded {
         request_id: u64,
         selected_key: Option<String>,
@@ -450,34 +579,53 @@ pub enum FolderAction {
 
 #[derive(Debug, Clone)]
 pub enum RadioAction {
+    StartSonicRadio(Box<Track>),
     JumpToRadioTrack(usize),
     PlayCurrentRadioTrack,
-    StartPlexRadio { key: String, title: String },
+    StartArtistRadio {
+        key: String,
+        title: String,
+    },
+    /// Resolved station intent, including custom multi-artist selections.
+    StartStation(crate::app::state::ActiveStation),
     PlayStation(String),
     DrillIntoStation(String, String),
     NavigateStationsBack,
     ToggleDjMode(crate::app::state::DjMode),
     DjModeProcess,
-    DjModeTracksReady(Vec<Track>, bool, Option<String>),
+    DjModeTracksReady(Result<Vec<Track>, AsyncError>, bool),
     DjModeBatchReady(Vec<(usize, Vec<Track>)>),
 }
 
 #[derive(Debug, Clone)]
 pub enum SettingsAction {
-    Logout,
-    LogoutStorageFinished(Result<(), String>),
-    PersistenceFailed { operation: String, error: String },
-    AuthSignIn,
-    AuthSelectServer,
+    PersistenceFailed {
+        operation: String,
+        error: String,
+    },
+
     OpenSettings,
-    SaveCredentials,
     SettingsSelect,
-    SettingsSignIn,
-    SelectServer(String),
-    SelectLibrary(String),
-    SelectLibraryOnServer(String, String),
+
     SaveSettings,
     ClearLibraryCache,
+    ClearSourceCache(crate::app::sources::LibraryChoice),
+    RescanSourceCache(crate::app::sources::LibraryChoice),
+    SourceCacheScanned {
+        choice: crate::app::sources::LibraryChoice,
+        request: u64,
+        manual: bool,
+        result: Result<crate::app::sources::cache::ScanResult, String>,
+    },
+    SourceCacheCleared {
+        choice: crate::app::sources::LibraryChoice,
+        request: u64,
+        result: Result<usize, String>,
+    },
+    CacheSizes {
+        request: u64,
+        entries: Vec<(crate::app::sources::LibraryChoice, Result<u64, String>)>,
+    },
     LibraryCacheCleared(Result<usize, String>),
     ClearArtworkCache,
     ArtworkCacheCleared(usize),
@@ -485,20 +633,16 @@ pub enum SettingsAction {
         library: Result<usize, String>,
         artwork: usize,
     },
-    ClearSubfolderCache,
+
     /// Recompute on-disk cache stats (library breakdown + artwork +
     /// waveform sizes) and post the results back via CacheEvent /
     /// ArtworkEvent. Used by the Settings popup to make sure the
-    /// Cache tab shows fresh sizes the moment it opens.
+    /// library-options popover shows current sizes when it opens.
     RefreshCacheStats,
     /// Wipe library + artwork caches, then trigger a fresh load from
-    /// the server. The "Refresh all cache" button in Settings → Cache.
+    /// the server. Used by the explicit global cache-refresh action.
     RefreshAllCache,
-    StartSubfolderCrawl,
-    StopSubfolderCrawl,
-    ToggleKeepSubfolderCache,
-    DiscoverPlayers,
-    SetOutputTarget(crate::app::state::OutputTarget),
+
     SetAdventureLength(usize),
     CancelAdventure,
     AdventureComplete(Vec<Track>),
@@ -507,16 +651,15 @@ pub enum SettingsAction {
         request_id: u64,
         result: Result<Vec<Track>, AsyncError>,
     },
-    ArtistRadioComplete(Vec<Track>),
+    ArtistRadioComplete(AsyncBatchOutcome<Vec<Track>>),
     /// Toggle whether the named external-search service is offered in
     /// the palette / context menu / menu bar. Mirrors `UiConfig`'s
     /// per-service flag onto `AppState::external_search` and persists
     /// the change to the config file. Sent by Settings checkboxes.
     ToggleExternalSearchService(crate::services::external_search::SearchTarget),
     /// Toggle whether a top-level browse section is shown in the
-    /// leftmost browse column. Updates both `AppState::hidden_sections`
-    /// and `UiConfig::hidden_sections` (persisted).
-    ToggleSectionVisibility(crate::app::state::BrowseCategory),
+    /// leftmost browse column. Persists category and collection preferences.
+    ToggleSectionVisibility(crate::app::state::SidebarSection),
     /// TUI-only: flip the Library Miller-column layout between
     /// shrinking (every column compressed to fit) and scrolling
     /// (each column at half-screen width, viewport scrolls as the
@@ -551,35 +694,57 @@ pub enum SettingsAction {
 // ============================================================================
 
 impl From<SystemAction> for Action {
-    fn from(a: SystemAction) -> Self { Action::System(a) }
+    fn from(a: SystemAction) -> Self {
+        Action::System(a)
+    }
 }
 impl From<NavigationAction> for Action {
-    fn from(a: NavigationAction) -> Self { Action::Navigation(a) }
+    fn from(a: NavigationAction) -> Self {
+        Action::Navigation(a)
+    }
 }
 impl From<DataAction> for Action {
-    fn from(a: DataAction) -> Self { Action::Data(a) }
+    fn from(a: DataAction) -> Self {
+        Action::Data(a)
+    }
 }
 impl From<MillerAction> for Action {
-    fn from(a: MillerAction) -> Self { Action::Miller(a) }
+    fn from(a: MillerAction) -> Self {
+        Action::Miller(a)
+    }
 }
 impl From<PlaybackAction> for Action {
-    fn from(a: PlaybackAction) -> Self { Action::Playback(a) }
+    fn from(a: PlaybackAction) -> Self {
+        Action::Playback(a)
+    }
 }
 impl From<QueueAction> for Action {
-    fn from(a: QueueAction) -> Self { Action::Queue(a) }
+    fn from(a: QueueAction) -> Self {
+        Action::Queue(a)
+    }
 }
 impl From<SearchAction> for Action {
-    fn from(a: SearchAction) -> Self { Action::Search(a) }
+    fn from(a: SearchAction) -> Self {
+        Action::Search(a)
+    }
 }
 impl From<BrowseAction> for Action {
-    fn from(a: BrowseAction) -> Self { Action::Browse(a) }
+    fn from(a: BrowseAction) -> Self {
+        Action::Browse(a)
+    }
 }
 impl From<FolderAction> for Action {
-    fn from(a: FolderAction) -> Self { Action::Folders(a) }
+    fn from(a: FolderAction) -> Self {
+        Action::Folders(a)
+    }
 }
 impl From<RadioAction> for Action {
-    fn from(a: RadioAction) -> Self { Action::Radio(a) }
+    fn from(a: RadioAction) -> Self {
+        Action::Radio(a)
+    }
 }
 impl From<SettingsAction> for Action {
-    fn from(a: SettingsAction) -> Self { Action::Settings(a) }
+    fn from(a: SettingsAction) -> Self {
+        Action::Settings(a)
+    }
 }

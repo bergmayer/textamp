@@ -1,42 +1,18 @@
 //! Shared utility functions used across multiple handler modules.
 //!
-//! Split into focused submodules:
-//! - `cache` — periodic cache saving
-//! - `connection` — server connection discovery
-//! - `navigation` — list scrolling, pagination, filter selection
-//! - `playback` — track playing, Plex reporting, radio
-//! - `preload` — background data preloading
-//! - `refresh` — view refresh, stale data detection
+//! Navigation, playback and cache-refresh coordination.
 
-mod cache;
-mod compilations;
-mod connection;
 pub(in crate::app::handlers) mod navigation;
 mod playback;
-mod preload;
 mod refresh;
 
-// Re-export all public items for backward compatibility.
-// Call sites continue to use `helpers::function_name()`.
-pub use cache::maybe_save_cache_async;
-pub use connection::{find_working_connection, find_working_connection_from_servers};
-pub use navigation::{
-    adjust_list_index, calc_scroll_offset, load_artists,
-    load_playlists, maybe_load_more, set_list_index, sorted_merge,
-};
+pub use navigation::{adjust_list_index, calc_scroll_offset, set_list_index, sorted_merge};
+pub(crate) use playback::audio_event_adapter;
 pub use playback::{
-    fetch_more_radio_tracks, generate_plex_session_id,
-    get_upcoming_tracks, insert_tracks_next, play_current_track, play_track, queue_and_play,
-    start_resolved_stream,
-    report_playback_progress_to_plex, report_playback_stop_to_plex, report_playback_to_plex,
-    report_scrobble_to_plex,
+    advance_radio, get_upcoming_tracks, insert_tracks_next, play_current_track, play_track,
+    queue_and_play,
 };
-pub use preload::{maybe_start_subfolder_preload, preload_all_library_data, preload_data, PreloadType, SubfolderPreloadResult};
-pub use compilations::maybe_detect as maybe_detect_compilations;
-pub use refresh::{
-    is_viewing_category, check_staleness_on_view_load, current_view_category,
-    refresh_current_view, spawn_category_refresh,
-};
+pub use refresh::{current_view_category, refresh_current_view, refresh_due_caches};
 
 /// Page size for paginated API requests.
 pub const PAGE_SIZE: u32 = 100;
@@ -46,7 +22,7 @@ pub const PAGE_SIZE: u32 = 100;
 ///
 /// Layout:
 /// ```text
-/// [Plex radio stations...]
+/// [server radio stations...]
 /// ─────────────── (sep:dj)
 /// DJ Freeze, Contempo, Groupie, Gemini, Twofer, Stretch (all continuous)
 /// DJ Friendgänger (grayed)
@@ -55,9 +31,12 @@ pub const PAGE_SIZE: u32 = 100;
 /// ─────────────── (sep:remix)
 /// Remix: Gemini, Twofer, Stretch, Shuffle
 /// ```
-pub fn append_station_action_items(stations: &mut Vec<crate::plex::models::Station>, shuffle_active: bool) {
-    use crate::plex::models::Station;
+pub fn append_station_action_items(
+    stations: &mut Vec<crate::library::models::Station>,
+    shuffle_active: bool,
+) {
     use crate::app::state::DjMode;
+    use crate::library::models::Station;
 
     // Strip any previously appended synthetic items so we always rebuild fresh.
     stations.retain(|s| {
@@ -72,16 +51,21 @@ pub fn append_station_action_items(stations: &mut Vec<crate::plex::models::Stati
         key: "sep:dj".to_string(),
         title: "\u{2500}".to_string(), // ─
         station_type: "separator".to_string(),
-        identifier: None, thumb: None, art: None, description: None,
+        identifier: None,
+        thumb: None,
+        art: None,
+        description: None,
     });
 
     // All 6 DJ modes are now continuous (insert on every track transition)
-    for mode in &[DjMode::Freeze, DjMode::Contempo, DjMode::Groupie, DjMode::Gemini, DjMode::Twofer, DjMode::Stretch] {
+    for mode in &DjMode::ALL {
         stations.push(Station {
             key: mode.key().to_string(),
             title: mode.name().to_string(),
             station_type: "dj_mode".to_string(),
-            identifier: None, thumb: None, art: None,
+            identifier: None,
+            thumb: None,
+            art: None,
             description: Some(mode.description().to_string()),
         });
     }
@@ -91,7 +75,9 @@ pub fn append_station_action_items(stations: &mut Vec<crate::plex::models::Stati
         key: "dj:friendganger".to_string(),
         title: "DJ Friendg\u{00e4}nger".to_string(),
         station_type: "dj_mode".to_string(),
-        identifier: None, thumb: None, art: None,
+        identifier: None,
+        thumb: None,
+        art: None,
         description: Some("Requires Sonic Analysis on shared libraries".to_string()),
     });
 
@@ -100,21 +86,28 @@ pub fn append_station_action_items(stations: &mut Vec<crate::plex::models::Stati
         key: "sep:actions".to_string(),
         title: "\u{2500}".to_string(), // ─
         station_type: "separator".to_string(),
-        identifier: None, thumb: None, art: None, description: None,
+        identifier: None,
+        thumb: None,
+        art: None,
+        description: None,
     });
 
     stations.push(Station {
         key: "action:adventure".to_string(),
         title: "Sonic Adventure".to_string(),
         station_type: "action".to_string(),
-        identifier: None, thumb: None, art: None,
+        identifier: None,
+        thumb: None,
+        art: None,
         description: Some("Create a sonic bridge between two tracks".to_string()),
     });
     stations.push(Station {
         key: "action:artist_radio".to_string(),
         title: "Artist Radio".to_string(),
         station_type: "action".to_string(),
-        identifier: None, thumb: None, art: None,
+        identifier: None,
+        thumb: None,
+        art: None,
         description: Some("Blend radio from multiple artists".to_string()),
     });
 
@@ -123,43 +116,68 @@ pub fn append_station_action_items(stations: &mut Vec<crate::plex::models::Stati
         key: "sep:remix".to_string(),
         title: "\u{2500}".to_string(), // ─
         station_type: "separator".to_string(),
-        identifier: None, thumb: None, art: None, description: None,
+        identifier: None,
+        thumb: None,
+        art: None,
+        description: None,
     });
 
     stations.push(Station {
         key: "remix:gemini".to_string(),
         title: "Remix: Gemini".to_string(),
         station_type: "remix".to_string(),
-        identifier: None, thumb: None, art: None,
+        identifier: None,
+        thumb: None,
+        art: None,
         description: Some("Insert similar tracks between queue items".to_string()),
     });
     stations.push(Station {
         key: "remix:twofer".to_string(),
         title: "Remix: Twofer".to_string(),
         station_type: "remix".to_string(),
-        identifier: None, thumb: None, art: None,
+        identifier: None,
+        thumb: None,
+        art: None,
         description: Some("Insert same-artist tracks between queue items".to_string()),
     });
     stations.push(Station {
         key: "remix:stretch".to_string(),
         title: "Remix: Stretch".to_string(),
         station_type: "remix".to_string(),
-        identifier: None, thumb: None, art: None,
+        identifier: None,
+        thumb: None,
+        art: None,
         description: Some("Insert sonic bridge tracks between queue items".to_string()),
     });
     stations.push(Station {
         key: "remix:doppelganger".to_string(),
         title: "Remix: Doppelganger".to_string(),
         station_type: "remix".to_string(),
-        identifier: None, thumb: None, art: None,
+        identifier: None,
+        thumb: None,
+        art: None,
         description: Some("Replace each track with similar track by different artist".to_string()),
     });
     stations.push(Station {
         key: "remix:shuffle".to_string(),
-        title: if shuffle_active { "Undo Shuffle" } else { "Remix: Shuffle" }.to_string(),
+        title: if shuffle_active {
+            "Undo Shuffle"
+        } else {
+            "Remix: Shuffle"
+        }
+        .to_string(),
         station_type: "remix".to_string(),
-        identifier: None, thumb: None, art: None,
-        description: Some(if shuffle_active { "Restore original queue order" } else { "Shuffle the current queue" }.to_string()),
+        identifier: None,
+        thumb: None,
+        art: None,
+        description: Some(
+            if shuffle_active {
+                "Restore original queue order"
+            } else {
+                "Shuffle the current queue"
+            }
+            .to_string(),
+        ),
     });
 }
 
@@ -167,11 +185,15 @@ pub fn append_station_action_items(stations: &mut Vec<crate::plex::models::Stati
 ///
 /// Used by keyboard (Enter/Right, Up/Down auto-drill) and mouse click handlers
 /// to avoid duplicating the grouped-album expansion logic.
-pub fn drill_grouped_album(col: &crate::app::state::BrowseColumn, album_idx: usize) -> Option<crate::app::state::BrowseColumn> {
+pub fn drill_grouped_album(
+    col: &crate::app::state::BrowseColumn,
+    album_idx: usize,
+) -> Option<crate::app::state::BrowseColumn> {
     use crate::app::state::{BrowseColumn, BrowseItem};
     let groups = col.album_groups.as_ref()?;
     let indices = groups.get(album_idx)?;
-    let tracks: Vec<_> = indices.iter()
+    let tracks: Vec<_> = indices
+        .iter()
         .filter_map(|&i| col.tracks.get(i).cloned())
         .collect();
     let items = BrowseItem::from_tracks(&tracks);
@@ -207,10 +229,8 @@ pub fn sort_key(title: &str) -> String {
 /// Index space is shared between rendering, click hit-testing, and
 /// keyboard nav of the strip itself.
 pub const ALPHABET_STRIP_LETTERS: [char; 29] = [
-    '%', '0',
-    'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm',
-    'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
-    '文',
+    '%', '0', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q',
+    'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', '文',
 ];
 
 /// Find the row index in the artist root column whose `sort_key`
@@ -225,14 +245,26 @@ pub fn alphabet_target_index(state: &crate::app::state::AppState, ch: char) -> O
         return None;
     }
     let pred: Box<dyn Fn(&str) -> bool> = match ch {
-        '0' => Box::new(|t: &str| sort_key(t).chars().next().map_or(false, |c| c.is_ascii_digit())),
-        '%' => Box::new(|t: &str| sort_key(t).chars().next().map_or(false,
-            |c| c.is_ascii() && !c.is_ascii_alphanumeric())),
-        '文' => Box::new(|t: &str| sort_key(t).chars().next().map_or(false, |c| !c.is_ascii())),
+        '0' => Box::new(|t: &str| {
+            sort_key(t)
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_digit())
+        }),
+        '%' => Box::new(|t: &str| {
+            sort_key(t)
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii() && !c.is_ascii_alphanumeric())
+        }),
+        '文' => Box::new(|t: &str| sort_key(t).chars().next().is_some_and(|c| !c.is_ascii())),
         c if c.is_ascii_alphabetic() => {
             let lc = c.to_ascii_lowercase();
             Box::new(move |t: &str| {
-                sort_key(t).chars().next().map_or(false, |first| first.to_ascii_lowercase() == lc)
+                sort_key(t)
+                    .chars()
+                    .next()
+                    .is_some_and(|first| first.to_ascii_lowercase() == lc)
             })
         }
         _ => return None,
@@ -258,17 +290,40 @@ pub fn alphabet_jump(state: &mut crate::app::state::AppState, ch: char) -> Optio
 /// → selected track → selected album → selected artist → now-playing track.
 /// For compilation tracks, uses the track artist (original_title) instead of album artist.
 pub fn get_artist_for_bio(state: &crate::app::state::AppState) -> Option<(String, String)> {
-    use crate::app::state::{View, BrowseItem, PlaybackMode};
+    use crate::app::state::{BrowseItem, PlaybackMode, View};
+
+    if state.sources.active.folder().is_some() {
+        // Only actual embedded artist tags, never a guessed directory/file name.
+        let track = if state.view == View::Queue {
+            state.queue.tracks.get(state.list_state.queue_index)
+        } else {
+            state.current_track()
+        }?;
+        let name = track
+            .original_title
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .or(track
+                .grandparent_title
+                .as_deref()
+                .filter(|s| !s.trim().is_empty()))?;
+        return Some((String::new(), name.to_owned()));
+    }
 
     // Helper: extract artist info from a track, preferring track artist for compilations
-    let artist_from_track = |track: &crate::plex::models::Track| -> Option<(String, String)> {
+    let artist_from_track = |track: &crate::library::models::Track| -> Option<(String, String)> {
         // Check if this is a compilation track (has original_title different from album artist)
         if let Some(ref track_artist) = track.original_title {
             let album_artist = track.grandparent_title.as_deref().unwrap_or("");
             // If track artist differs from album artist, try to find the track artist
             if !track_artist.is_empty() && track_artist != album_artist {
                 // Search for artist by name in cached artists
-                if let Some(found) = state.library.artists.iter().find(|a| a.title == *track_artist) {
+                if let Some(found) = state
+                    .library
+                    .artists
+                    .iter()
+                    .find(|a| a.title == *track_artist)
+                {
                     return Some((found.rating_key.clone(), found.title.clone()));
                 }
                 // Fall back to album artist if track artist not found in library
@@ -285,12 +340,13 @@ pub fn get_artist_for_bio(state: &crate::app::state::AppState) -> Option<(String
     //    wins ahead of everything else — when the user has navigated
     //    into the pane and picked a similar song, "Artist Bio"
     //    should target THAT artist, not the parent track's.
-    if state.track_pane_focused && state.track_pane_index > 0 {
+    if state.palette_target_is_similar() {
         if let Some(parent) = state.focused_track() {
             let sim_idx = state.track_pane_index - 1;
             if let Some(sim) = state
                 .track_pane_similar
                 .get(&parent.rating_key)
+                .and_then(|result| result.as_ref().ok())
                 .and_then(|v| v.get(sim_idx))
             {
                 if let Some(result) = artist_from_track(sim) {
@@ -323,16 +379,25 @@ pub fn get_artist_for_bio(state: &crate::app::state::AppState) -> Option<(String
                         match item {
                             BrowseItem::Album { key, artist, .. } => {
                                 // Look up album in state.library.albums to get artist key
-                                if let Some(album) = state.library.albums.iter().find(|a| a.rating_key == *key) {
-                                    if let (Some(artist_key), Some(artist_name)) = (&album.parent_rating_key, &album.parent_title) {
+                                if let Some(album) =
+                                    state.library.albums.iter().find(|a| a.rating_key == *key)
+                                {
+                                    if let (Some(artist_key), Some(artist_name)) =
+                                        (&album.parent_rating_key, &album.parent_title)
+                                    {
                                         return Some((artist_key.clone(), artist_name.clone()));
                                     }
                                 }
                                 // Fall back to artist name from BrowseItem
                                 if !artist.is_empty() {
                                     // Try to find artist by name in state.library.artists
-                                    if let Some(found) = state.library.artists.iter().find(|a| a.title == *artist) {
-                                        return Some((found.rating_key.clone(), found.title.clone()));
+                                    if let Some(found) =
+                                        state.library.artists.iter().find(|a| a.title == *artist)
+                                    {
+                                        return Some((
+                                            found.rating_key.clone(),
+                                            found.title.clone(),
+                                        ));
                                     }
                                 }
                             }
@@ -346,7 +411,11 @@ pub fn get_artist_for_bio(state: &crate::app::state::AppState) -> Option<(String
                                     return Some((artist_key.to_string(), artist_name.to_string()));
                                 }
                             }
-                            BrowseItem::ArtistRadio { artist_key, artist_name, .. } => {
+                            BrowseItem::ArtistRadio {
+                                artist_key,
+                                artist_name,
+                                ..
+                            } => {
                                 return Some((artist_key.clone(), artist_name.clone()));
                             }
                             _ => {}
@@ -383,7 +452,9 @@ pub fn get_artist_for_bio(state: &crate::app::state::AppState) -> Option<(String
                     }
                     SearchTab::Albums => {
                         if let Some(album) = results.albums.get(idx) {
-                            if let (Some(key), Some(name)) = (&album.parent_rating_key, &album.parent_title) {
+                            if let (Some(key), Some(name)) =
+                                (&album.parent_rating_key, &album.parent_title)
+                            {
                                 return Some((key.clone(), name.clone()));
                             }
                         }
@@ -395,7 +466,10 @@ pub fn get_artist_for_bio(state: &crate::app::state::AppState) -> Option<(String
                     }
                     SearchTab::Global => {
                         // All tab: figure out which section the index is in
-                        let (section, local_idx) = crate::app::handlers::dispatch_search::resolve_global_index(results, idx);
+                        let (section, local_idx) =
+                            crate::app::handlers::dispatch_search::resolve_global_index(
+                                results, idx,
+                            );
                         match section {
                             SearchTab::Artists => {
                                 if let Some(artist) = results.artists.get(local_idx) {
@@ -404,7 +478,9 @@ pub fn get_artist_for_bio(state: &crate::app::state::AppState) -> Option<(String
                             }
                             SearchTab::Albums => {
                                 if let Some(album) = results.albums.get(local_idx) {
-                                    if let (Some(key), Some(name)) = (&album.parent_rating_key, &album.parent_title) {
+                                    if let (Some(key), Some(name)) =
+                                        (&album.parent_rating_key, &album.parent_title)
+                                    {
                                         return Some((key.clone(), name.clone()));
                                     }
                                 }
@@ -428,7 +504,9 @@ pub fn get_artist_for_bio(state: &crate::app::state::AppState) -> Option<(String
             match state.similar.mode {
                 crate::app::state::SimilarMode::Albums => {
                     if let Some(album) = state.similar.albums.get(state.list_state.similar_index) {
-                        if let (Some(key), Some(name)) = (&album.parent_rating_key, &album.parent_title) {
+                        if let (Some(key), Some(name)) =
+                            (&album.parent_rating_key, &album.parent_title)
+                        {
                             return Some((key.clone(), name.clone()));
                         }
                     }
@@ -441,7 +519,8 @@ pub fn get_artist_for_bio(state: &crate::app::state::AppState) -> Option<(String
                     }
                 }
                 crate::app::state::SimilarMode::Artists => {
-                    if let Some(artist) = state.similar.artists.get(state.list_state.similar_index) {
+                    if let Some(artist) = state.similar.artists.get(state.list_state.similar_index)
+                    {
                         return Some((artist.rating_key.clone(), artist.title.clone()));
                     }
                 }
@@ -458,48 +537,6 @@ pub fn get_artist_for_bio(state: &crate::app::state::AppState) -> Option<(String
     }
 
     None
-}
-
-/// Spawn an API call whose success and failure both retain the identity of
-/// the selection that initiated it.
-pub fn spawn_scoped_api_call<T, F, Fut>(
-    event_tx: &tokio::sync::mpsc::Sender<crate::app::Event>,
-    library_generation: u64,
-    client: &crate::plex::PlexClient,
-    request_key: String,
-    call: F,
-    on_success: impl Fn(String, T) -> crate::app::Event + Send + 'static,
-    error_msg: &str,
-) where
-    F: FnOnce(crate::plex::PlexClient) -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = Result<T, crate::plex::ApiError>> + Send,
-    T: Send + 'static,
-{
-    let tx = crate::app::event::LibraryEventSender::new(
-        event_tx.clone(),
-        library_generation,
-    );
-    let client = client.clone();
-    let message = error_msg.to_string();
-    tokio::spawn(async move {
-        match call(client).await {
-            Ok(data) => {
-                let _ = tx.send(on_success(request_key, data)).await;
-            }
-            Err(error) => {
-                let _ = tx
-                    .send(
-                        crate::app::event::DataEvent::ScopedLoadError {
-                            request_key,
-                            message: format!("{message}: {error}"),
-                            connection_error: error.is_connection_error(),
-                        }
-                        .into(),
-                    )
-                    .await;
-            }
-        }
-    });
 }
 
 #[cfg(test)]
@@ -534,3 +571,4 @@ mod tests {
         assert_eq!(calc_scroll_offset(0, 10, 0), 0);
     }
 }
+pub mod biography;

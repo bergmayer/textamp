@@ -1,154 +1,92 @@
 # Textamp Project Instructions
 
-## Build Requirements
+## Build and verification
 
-Build with `cargo build --release --bin textamp`. Do not say "done" until the build succeeds with zero warnings.
+Build with `cargo build --release --bin textamp`. Do not say "done" until it
+succeeds with zero warnings. Run `cargo test`, `cargo fmt --all -- --check`, and
+`cargo clippy --all-targets -- -D warnings` for functionality changes.
 
-## UI Consistency
+Use isolated XDG configuration/data/cache/state directories for automated app
+tests. Live tests that change playlists, favorites, ratings or play history must
+use the dedicated loopback fixture, never a personal music server. Audio tests
+use `DummyBackend` or explicitly opt into native hardware.
 
-When making any functionality changes to the app, always update all relevant:
-- Shortcut bars in `src/ui/app.rs` (`render_shortcuts()`)
-- Help screen in `src/ui/screens/help.rs`
-- Layout diagrams in code comments
-- README.md if applicable
+## UI consistency
 
-Clicking an item to highlight it should never recenter/scroll the view. Use the `scroll_pin` pattern to preserve viewport position on click — set pin on click, clear on keyboard navigation.
+Update relevant shortcut bars in `src/ui/app.rs`, the shared help text in
+`src/util/help_text.rs` (rendered by `src/ui/screens/help.rs`), layout comments,
+and README when functionality changes.
+
+Clicking to highlight must not recenter the viewport. Set the `scroll_pin` on
+click and clear it on keyboard navigation. Settings/library management must
+support both mouse and arrows; opening it must not switch libraries or play.
 
 ## Architecture
 
-### Layer Separation
+Textamp is a pure terminal app. Supported sources are Subsonic/Navidrome,
+local folders and WebDAV, with optional AudioMuse analysis. Plex is retired;
+its source archive is not a runtime dependency. Do not restore Plex fallbacks.
 
-The UI is separate from the application logic. Each layer has clear boundaries:
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                         UI Layer                             │
-│  src/ui/ - ratatui renderer (pure render-from-state)        │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    App Core (orchestration)                  │
-│  src/app/ - State, Events, Actions, Event Loop              │
-└─────────────────────────────────────────────────────────────┘
-                              │
-        ┌─────────────────────┼─────────────────────┐
-        ▼                     ▼                     ▼
-┌───────────────┐   ┌─────────────────┐   ┌───────────────────┐
-│ Plex Module   │   │ Services        │   │ Audio             │
-│ src/plex/     │   │ src/services/   │   │ src/audio/        │
-│               │   │                 │   │                   │
-│ • PlexClient  │   │ • PlaybackSvc   │   │ • AudioBackend    │
-│ • PlexAuth    │   │ • FolderSvc     │   │   (trait)         │
-│ • Models      │   │ • LibrarySvc    │   │ • RodioBackend    │
-│ • LibraryCache│   │ • Adventure     │   │ • DummyBackend    │
-│ • WaveformCch │   │                 │   │                   │
-└───────────────┘   └─────────────────┘   └───────────────────┘
+```text
+UI: src/ui (pure render-from-state)
+  ↓ input actions / render feedback
+App: src/app (state, reducers, task ownership, event loop adapters)
+  ├─ src/app/sources (provider routing and orchestration)
+  │    ├─ src/navidrome (OpenSubsonic HTTP and normalized catalog)
+  │    ├─ src/audiomuse (analysis/discovery HTTP)
+  │    └─ src/library (shared models, local/WebDAV, persistent caches)
+  ├─ src/services (UI-independent business logic)
+  ├─ src/media (artwork, waveform and spectrogram caches/analysis)
+  └─ src/audio (local decoding/output; no UI or library API imports)
 ```
 
-The UI layer only consumes state; it never owns or mutates it. App-core
-modules never import from `src/ui/`. Keeping this boundary clean is the
-point of the separation.
+`AppState` is the source of truth; events carry user input or asynchronous
+completions, actions change state, and UI rendering consumes state. UI does not
+own state or effects. App-core modules must not import `src/ui`.
 
-### Plex Module (`src/plex/`)
-The unified Plex integration layer. **No UI or audio imports.**
+Provider capabilities determine available operations. Shared queue, radio and
+playback reducers must not issue provider-specific HTTP requests. Use the source
+boundary, retaining library and operation identity on successes and failures.
+Task leases cancel superseded work. Never convert an error into a successful
+empty catalog or overwrite a newer selection with an older response.
 
-Structure:
-- `mod.rs` - PlexService facade combining client + cache + preloading
-- `client.rs` - HTTP API client
-- `auth.rs` - Authentication (password, PIN/OAuth)
-- `cache.rs` - LibraryCache for fast startup
-- `waveform.rs` - Waveform generation and caching
-- `models/` - All Plex data models
-- `constants.rs` - API endpoints, headers, type IDs
-- `error.rs` - Error types
+Avoid adding wrappers or traits without a concrete benefit. Reuse shared models
+and preserve their serialized compatibility with existing non-Plex caches.
 
-### Audio (`src/audio/`)
-- `AudioBackend` trait defines the interface
-- `RodioBackend` implements it via rodio/symphonia
-- `DummyBackend` for testing without audio hardware
-- **No API or UI imports**
+## Libraries, views and caches
 
-### Services (`src/services/`)
-- Reusable business logic, **UI-agnostic**
-- `PlaybackService` - queue management, track navigation
-- `FolderService` - folder/file browsing
-- `LibraryService` - library browse modes
-- `generate_adventure` - sonic adventure algorithm
-- Pure functions where possible, easily testable
+F3 switches libraries; F2 → Libraries manages sources/accounts. Startup opens the
+saved selection, then another saved source if needed; no source opens normal
+browsing with an add-library prompt. Startup must not start playback.
 
-### UI (`src/ui/`)
-- Pure rendering from state — no mutation
-- Imports data models from Plex (not the client)
+Settings has Libraries, Textamp and About. Libraries is a single list
+grouped by provider/account, with Add library and inline connection forms. Enter
+opens per-library options (Make active, connection/AI and cache size/clear/re-scan).
+F3 remains switch-only. Cache jobs must not switch the active source or playback.
+Sidebar visibility belongs in Textamp settings. Theme artwork uses the active
+theme unless a different theme row has content focus. Cache sizes are measured
+on disk per library (including AudioMuse), not estimated from in-memory structs.
 
-### App Core (`src/app/`)
-- `AppState` - single source of truth
-- `EventLoop` - orchestrates all layers
-- Elm Architecture (TEA) pattern
+Browse uses Miller columns. Ctrl+L opens Library, Ctrl+G genres, Ctrl+O folders,
+Ctrl+F search, Ctrl+U queue, Ctrl+N Now Playing, F1 help. Tab switches Library /
+Now Playing focus, including split mode. `:` is the command palette; `:q` quits.
+Keep the help text authoritative for all other bindings.
 
-## Elm Architecture (TEA) Pattern
+All sources have persistent metadata caches: server catalogs, directory trees and
+visited album listings. Cached startup comes first, weekly refresh plus manual F5.
+AudioMuse shares that policy. Local/WebDAV tree scans are bounded and keep only
+directory structure; leaf track listings remain lazy. Never download audio as
+part of a cache scan or replace a complete tree with a partial failed scan. Failed refreshes preserve the last usable cache. These are metadata
+caches, not offline music downloads.
 
-- **State**: Single `AppState` struct in `src/app/state.rs`
-- **Events**: User input and async completions in `src/app/event.rs`
-- **Actions**: Commands that modify state in `src/app/action.rs`
-- **Render**: Pure function `ui::render(&Frame, &AppState)` in `src/ui/`
+Honor XDG overrides before platform defaults. macOS configuration, credentials and
+logs default to `~/Library/Application Support/textamp`; caches to
+`~/Library/Caches/textamp`. Credentials are separate private files. Do not print
+secrets, alter personal credentials during tests, or delete music when removing
+an account/library.
 
-## Categories
+## Installation
 
-Four browse categories accessible globally via Ctrl+key:
-- Artists (Ctrl+A)
-- Playlists (Ctrl+P) - tabbed: Playlists / Stations
-- Genres (Ctrl+G) - tabbed: All / Library / Artist / Album / Mood / Style
-- Folders (Ctrl+O) - Miller columns navigation
-
-Albums are accessed by drilling into an Artist, Genre, or Mood.
-
-## Views
-
-- **Browse**: Main view showing categories and content
-- **Search** (Ctrl+F): Tabbed search/filter view
-- **Queue** (Ctrl+U): Track list with stations panel and artwork
-- **Now Playing** (Ctrl+N): Visualizer with artwork, track info, and waveform/spectrum/spectrogram tabs
-- **Similar**: Shows similar albums/tracks
-- **Help** (F1): Keyboard shortcuts (scrollable)
-- **Settings** (F2): Configuration
-
-## Testing
-
-Run tests with: `cargo test`
-
-The `PlaybackService` has unit tests demonstrating testable service design.
-Use `DummyBackend` for testing without audio hardware.
-
-## File Locations
-
-The app checks XDG environment variables first, then falls back to platform defaults.
-
-### Config & Data Files
-
-| File | XDG Override | Linux Default | macOS Default |
-|------|--------------|---------------|---------------|
-| Config | `$XDG_CONFIG_HOME/textamp/config.toml` | `~/.config/textamp/config.toml` | `~/Library/Application Support/textamp/config.toml` |
-| Auth | `$XDG_DATA_HOME/textamp/auth.toml` | `~/.local/share/textamp/auth.toml` | `~/Library/Application Support/textamp/auth.toml` |
-| Log | `$XDG_STATE_HOME/textamp/textamp.log` | `~/.local/state/textamp/textamp.log` | `~/Library/Application Support/textamp/textamp.log` |
-
-### Cache Files
-
-| File | XDG Override | Linux Default | macOS Default |
-|------|--------------|---------------|---------------|
-| Library cache | `$XDG_CACHE_HOME/textamp/library_*.json` | `~/.cache/textamp/library_*.json` | `~/Library/Caches/textamp/library_*.json` |
-| Waveforms | `$XDG_CACHE_HOME/textamp/waveforms/*.json` | `~/.cache/textamp/waveforms/*.json` | `~/Library/Caches/textamp/waveforms/*.json` |
-
-### Cache Settings
-
-- **Library cache**: ~19MB per library
-  - Per-category timestamps: each of the 11 RefreshCategory variants tracks its own age
-  - Tier 1 (72h): Active category refreshed on view navigation if >72h old
-  - Tier 2 (32d): Other categories refreshed on view navigation if >32 days old
-  - Manual refresh: F5 refreshes current view
-  - Stores: artists, albums, playlists, genres, stations, folders
-
-- **Waveform cache**:
-  - TTL: 7 days
-  - Max size: 100 MB
-  - ~8-15 KB per track
+When asked to update the installed build, replace `~/Applications/textamp` only
+after verification. Keep the launcher separate. Do not retain old binary backups
+or commit/publish without instruction.

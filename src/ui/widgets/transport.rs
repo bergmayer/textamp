@@ -7,8 +7,8 @@
 //! Notifications temporarily cover the volume widget when active.
 
 use crate::app::state::{NotificationType, PlayStatus};
-use crate::app::AppState;
 use crate::ui::theme::theme;
+use crate::ui::RenderState as AppState;
 use crate::util::truncate_str;
 
 use ratatui::prelude::*;
@@ -17,6 +17,9 @@ use unicode_width::UnicodeWidthStr;
 
 /// Render the transport bar.
 pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
+    if area.is_empty() {
+        return;
+    }
     let t = theme();
     let bg_style = Style::default().bg(t.colors.transport_bg);
 
@@ -25,8 +28,18 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
 
     // Top row: playback controls + track info + volume.
     // Bottom row: Library / Now Playing tab strip + ":" hint.
-    let top = Rect { x: area.x, y: area.y, width: area.width, height: 1 };
-    let bottom = Rect { x: area.x, y: area.y + 1, width: area.width, height: area.height.saturating_sub(1) };
+    let top = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: 1,
+    };
+    let bottom = Rect {
+        x: area.x,
+        y: area.y + 1,
+        width: area.width,
+        height: area.height.saturating_sub(1),
+    };
 
     // Special case: Inline list filter mode shows filter box across the
     // top row; the tab strip still renders on the bottom row.
@@ -39,8 +52,11 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     // Special case: Adventure mode messages take over the entire bar
     if state.adventure.active && !state.adventure.generating {
         let adventure_text = build_adventure_text(state);
-        let paragraph = Paragraph::new(adventure_text)
-            .style(Style::default().fg(t.colors.fg_accent).bg(t.colors.transport_bg));
+        let paragraph = Paragraph::new(adventure_text).style(
+            Style::default()
+                .fg(t.colors.fg_accent)
+                .bg(t.colors.transport_bg),
+        );
         frame.render_widget(paragraph, area);
         return;
     }
@@ -67,7 +83,13 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     // Create the full line with proper spacing
     let left_width = UnicodeWidthStr::width(left_display.as_str());
     let padding = available_width.saturating_sub(left_width as u16 + right_width);
-    let full_line = format!("{}{:>pad$}{}", left_display, "", right_text, pad = padding as usize);
+    let full_line = format!(
+        "{}{:>pad$}{}",
+        left_display,
+        "",
+        right_text,
+        pad = padding as usize
+    );
 
     // Register transport hit regions
     // Left content layout: " ⏸ 00:00 ━━●──────────── 04:32 ⏮  ⏭  │  Track info..."
@@ -81,10 +103,10 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         let search_w = right_width;
 
         // Compute left-side positions from known structure widths
-        let status_w: u16 = 3;    // " ⏸ "
-        let pos_str_w: u16 = 5;   // "00:00"
-        let bar_w: u16 = 20;      // progress bar
-        let dur_str_w: u16 = 5;   // "04:32"
+        let status_w: u16 = 3; // " ⏸ "
+        let pos_str_w = format_time(state.playback.position_ms).len() as u16;
+        let bar_w: u16 = 20; // progress bar
+        let dur_str_w = format_time(state.playback.duration_ms).len() as u16;
         let seekbar_x = area.x + status_w + pos_str_w + 1; // +1 for space
         let prev_x = seekbar_x + bar_w + 1 + dur_str_w + 1; // bar + space + dur + space
         let next_x = prev_x + 1 + 2; // ⏮ + two spaces
@@ -92,20 +114,53 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         let track_info_x = next_x + 1 + separator_w; // ⏭ + separator
 
         let mut hr = state.hit_regions.borrow_mut();
-        hr.transport = Some(crate::ui::hit_regions::TransportRegions {
-            play_pause: Rect { x: area.x, y: area.y, width: status_w + 2, height: 1 },
-            seekbar: Rect { x: seekbar_x, y: area.y, width: bar_w, height: 1 },
-            prev_track: Rect { x: prev_x.saturating_sub(1), y: area.y, width: 3, height: 1 },
-            next_track: Rect { x: next_x.saturating_sub(1), y: area.y, width: 3, height: 1 },
-            track_info: Some(Rect { x: track_info_x, y: area.y, width: search_x.saturating_sub(track_info_x), height: 1 }),
-            search_icon: Some(Rect { x: search_x, y: area.y, width: search_w, height: 1 }),
+        hr.transport = Some(crate::app::presentation::TransportRegions {
+            play_pause: Rect {
+                x: area.x,
+                y: area.y,
+                width: status_w + 2,
+                height: 1,
+            },
+            seekbar: Rect {
+                x: seekbar_x,
+                y: area.y,
+                width: bar_w,
+                height: 1,
+            },
+            prev_track: Rect {
+                x: prev_x.saturating_sub(1),
+                y: area.y,
+                width: 3,
+                height: 1,
+            },
+            next_track: Rect {
+                x: next_x.saturating_sub(1),
+                y: area.y,
+                width: 3,
+                height: 1,
+            },
+            track_info: Some(Rect {
+                x: track_info_x,
+                y: area.y,
+                width: search_x.saturating_sub(track_info_x),
+                height: 1,
+            }),
+            search_icon: Some(Rect {
+                x: search_x,
+                y: area.y,
+                width: search_w,
+                height: 1,
+            }),
             speaker_icon: None,
             volume_slider: None,
         });
     }
 
-    let paragraph = Paragraph::new(full_line)
-        .style(Style::default().fg(t.colors.fg_primary).bg(t.colors.transport_bg));
+    let paragraph = Paragraph::new(full_line).style(
+        Style::default()
+            .fg(t.colors.fg_primary)
+            .bg(t.colors.transport_bg),
+    );
 
     frame.render_widget(paragraph, area);
 
@@ -137,12 +192,18 @@ fn render_tab_strip(frame: &mut Frame, state: &AppState, area: Rect) {
     let divider = "│";
     let np_label = " now playing ";
     // Symbol cheat sheet: `:` = command palette, `/` = inline filter
-    // overlay, `?` = search popup, `⇥` = Tab toggles Library ↔ Now
+    // overlay, `⇥` = Tab toggles Library ↔ Now
     // Playing, `,` = open Settings (mirrors macOS Cmd+,), `\` =
     // toggle scrolling Miller layout, `|` = toggle tall split.
     // Mirrors classic vim chrome — same row as the Library / Now
     // Playing tabs, on the right edge.
-    let palette_hint = " :  /  ?  \u{21e5}  ,  \\  | ";
+    let palette_hint = if state.view == View::Settings {
+        " ← sidebar · ↑↓ items · Enter select · Tab pane · Esc close "
+    } else if state.tall_mode {
+        " :  /  Tab focus  ,  \\  | "
+    } else {
+        " :  /  \u{21e5}  ,  \\  | "
+    };
 
     // Active tab uses an inverted (selection-style) background so the
     // selected/unselected distinction is obvious in every theme — in
@@ -163,7 +224,8 @@ fn render_tab_strip(frame: &mut Frame, state: &AppState, area: Rect) {
     let lib_w = UnicodeWidthStr::width(lib_label) as u16;
     let div_w = UnicodeWidthStr::width(divider) as u16;
     let np_w = UnicodeWidthStr::width(np_label) as u16;
-    let hint_w = UnicodeWidthStr::width(palette_hint) as u16;
+    let hint_w = (UnicodeWidthStr::width(palette_hint) as u16)
+        .min(area.width.saturating_sub(lib_w + div_w + np_w));
 
     let lib_x = area.x;
     let div_x = lib_x + lib_w;
@@ -171,28 +233,70 @@ fn render_tab_strip(frame: &mut Frame, state: &AppState, area: Rect) {
     let hint_x = area.x + area.width.saturating_sub(hint_w);
 
     frame.render_widget(
-        Paragraph::new(lib_label).style(if library_active { active_style } else { inactive_style }),
-        Rect { x: lib_x, y: area.y, width: lib_w, height: 1 },
+        Paragraph::new(lib_label).style(if library_active {
+            active_style
+        } else {
+            inactive_style
+        }),
+        Rect {
+            x: lib_x,
+            y: area.y,
+            width: lib_w,
+            height: 1,
+        },
     );
     frame.render_widget(
         Paragraph::new(divider).style(divider_style),
-        Rect { x: div_x, y: area.y, width: div_w, height: 1 },
+        Rect {
+            x: div_x,
+            y: area.y,
+            width: div_w,
+            height: 1,
+        },
     );
     frame.render_widget(
-        Paragraph::new(np_label).style(if now_active { active_style } else { inactive_style }),
-        Rect { x: np_x, y: area.y, width: np_w, height: 1 },
+        Paragraph::new(np_label).style(if now_active {
+            active_style
+        } else {
+            inactive_style
+        }),
+        Rect {
+            x: np_x,
+            y: area.y,
+            width: np_w,
+            height: 1,
+        },
     );
     frame.render_widget(
-        Paragraph::new(palette_hint).style(Style::default().fg(t.colors.fg_muted).bg(t.colors.transport_bg)),
-        Rect { x: hint_x, y: area.y, width: hint_w, height: 1 },
+        Paragraph::new(palette_hint).style(
+            Style::default()
+                .fg(t.colors.fg_muted)
+                .bg(t.colors.transport_bg),
+        ),
+        Rect {
+            x: hint_x,
+            y: area.y,
+            width: hint_w,
+            height: 1,
+        },
     );
 
     // Register click hit regions. The shared tab_bar_action handler
     // expects index 0 = Library (Browse) and index 2 = Now Playing.
-    let lib_rect = Rect { x: lib_x, y: area.y, width: lib_w, height: 1 };
-    let np_rect = Rect { x: np_x, y: area.y, width: np_w, height: 1 };
+    let lib_rect = Rect {
+        x: lib_x,
+        y: area.y,
+        width: lib_w,
+        height: 1,
+    };
+    let np_rect = Rect {
+        x: np_x,
+        y: area.y,
+        width: np_w,
+        height: 1,
+    };
     let mut hr = state.hit_regions.borrow_mut();
-    hr.tab_bar = Some(crate::ui::hit_regions::TabBarRegions {
+    hr.tab_bar = Some(crate::app::presentation::TabBarRegions {
         library_label: None,
         quit_button: None,
         tabs: vec![(lib_rect, 0), (np_rect, 2)],
@@ -203,15 +307,24 @@ fn render_tab_strip(frame: &mut Frame, state: &AppState, area: Rect) {
 fn build_adventure_text(state: &AppState) -> String {
     if state.adventure.start_track.is_some() && state.adventure.end_track.is_some() {
         // Both tracks selected - waiting for length input
-        let start = state.adventure.start_track.as_ref()
+        let start = state
+            .adventure
+            .start_track
+            .as_ref()
             .map(|t| truncate_str(&t.title, 15))
             .unwrap_or_default();
-        let end = state.adventure.end_track.as_ref()
+        let end = state
+            .adventure
+            .end_track
+            .as_ref()
             .map(|t| truncate_str(&t.title, 15))
             .unwrap_or_default();
         format!("🌟 ADVENTURE: {} → {} (enter length)", start, end)
     } else if state.adventure.start_track.is_some() {
-        let start_title = state.adventure.start_track.as_ref()
+        let start_title = state
+            .adventure
+            .start_track
+            .as_ref()
             .map(|t| truncate_str(&t.title, 20))
             .unwrap_or_default();
         format!("🌟 ADVENTURE: {} → select END (Alt+A)", start_title)
@@ -275,10 +388,6 @@ struct RightContent {
 fn build_right_content(state: &AppState) -> RightContent {
     let mut right = String::new();
 
-    if let crate::app::state::OutputTarget::Remote { ref player_name, .. } = state.remote.output_target {
-        right.push_str(&format!("-> {} ", truncate_str(player_name, 15)));
-    }
-
     if let Some(notification) = state.current_notification() {
         let icon = match notification.notification_type {
             NotificationType::Ongoing => "⟳",
@@ -292,7 +401,7 @@ fn build_right_content(state: &AppState) -> RightContent {
 
 /// Build a progress bar with filled/empty segments and position indicator.
 fn build_progress_bar(progress: f32, width: usize) -> String {
-    let filled = (progress * width as f32).round() as usize;
+    let filled = (progress.clamp(0.0, 1.0) * width.saturating_sub(1) as f32).round() as usize;
     let mut bar = String::with_capacity(width);
 
     for i in 0..width {
@@ -361,7 +470,11 @@ fn render_with_filter(frame: &mut Frame, state: &AppState, area: Rect) {
     // Show match count if we have results
     let match_suffix = if let Some(ref results) = state.list_filter.results {
         if results.has_more {
-            format!(" ({}/{}+)", results.matched_indices.len(), results.total_matches)
+            format!(
+                " ({}/{}+)",
+                results.matched_indices.len(),
+                results.total_matches
+            )
         } else if results.matched_indices.is_empty() {
             " (no matches)".to_string()
         } else {
@@ -393,24 +506,50 @@ fn render_with_filter(frame: &mut Frame, state: &AppState, area: Rect) {
     // Create the full line with proper spacing
     let left_width = UnicodeWidthStr::width(left_display.as_str()) as u16;
     let padding = available_width.saturating_sub(left_width + filter_width);
-    let full_line = format!("{}{:>pad$}{}", left_display, "", filter_text, pad = padding as usize);
+    let full_line = format!(
+        "{}{:>pad$}{}",
+        left_display,
+        "",
+        filter_text,
+        pad = padding as usize
+    );
 
     // Register transport hit regions for playback controls (still visible in filter mode)
     {
         let status_w: u16 = 3;
-        let pos_str_w: u16 = 5;
+        let pos_str_w = format_time(state.playback.position_ms).len() as u16;
         let bar_w: u16 = 20;
-        let dur_str_w: u16 = 5;
+        let dur_str_w = format_time(state.playback.duration_ms).len() as u16;
         let seekbar_x = area.x + status_w + pos_str_w + 1;
         let prev_x = seekbar_x + bar_w + 1 + dur_str_w + 1;
         let next_x = prev_x + 1 + 2;
 
         let mut hr = state.hit_regions.borrow_mut();
-        hr.transport = Some(crate::ui::hit_regions::TransportRegions {
-            play_pause: Rect { x: area.x, y: area.y, width: status_w + 2, height: 1 },
-            seekbar: Rect { x: seekbar_x, y: area.y, width: bar_w, height: 1 },
-            prev_track: Rect { x: prev_x.saturating_sub(1), y: area.y, width: 3, height: 1 },
-            next_track: Rect { x: next_x.saturating_sub(1), y: area.y, width: 3, height: 1 },
+        hr.transport = Some(crate::app::presentation::TransportRegions {
+            play_pause: Rect {
+                x: area.x,
+                y: area.y,
+                width: status_w + 2,
+                height: 1,
+            },
+            seekbar: Rect {
+                x: seekbar_x,
+                y: area.y,
+                width: bar_w,
+                height: 1,
+            },
+            prev_track: Rect {
+                x: prev_x.saturating_sub(1),
+                y: area.y,
+                width: 3,
+                height: 1,
+            },
+            next_track: Rect {
+                x: next_x.saturating_sub(1),
+                y: area.y,
+                width: 3,
+                height: 1,
+            },
             track_info: None,
             search_icon: None,
             speaker_icon: None,
@@ -418,8 +557,11 @@ fn render_with_filter(frame: &mut Frame, state: &AppState, area: Rect) {
         });
     }
 
-    let paragraph = Paragraph::new(full_line)
-        .style(Style::default().fg(t.colors.fg_primary).bg(t.colors.transport_bg));
+    let paragraph = Paragraph::new(full_line).style(
+        Style::default()
+            .fg(t.colors.fg_primary)
+            .bg(t.colors.transport_bg),
+    );
 
     frame.render_widget(paragraph, area);
 }

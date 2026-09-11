@@ -2,18 +2,19 @@
 name = "textamp"
 version = "1.0.0"
 edition = "2021"
-description = "A keyboard-driven Plex Music client for the terminal"
+description = "A terminal music player for Subsonic, Navidrome, WebDAV and local files"
 license = "Unlicense"
 authors = ["John Bergmayer"]
-keywords = ["plex", "music", "tui", "plexamp"]
+keywords = ["subsonic", "navidrome", "music", "tui", "webdav"]
 categories = ["command-line-utilities", "multimedia::audio"]
+exclude = ["archive/**", "**/.DS_Store"]
 
 [dependencies]
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 
-# HTTP client - use native-tls (OpenSSL) for better compatibility with Plex servers
+# HTTP client
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "gzip", "deflate", "charset", "native-tls"] }
 bytes = "1"
 
@@ -53,16 +54,20 @@ tracing-appender = "0.2"
 thiserror = "1"
 anyhow = "1"
 zeroize = "1"
+md5 = "0.8" # Subsonic's required salted-password authentication algorithm
+flate2 = "1" # Stream large metadata snapshots into compressed local caches.
+time = { version = "0.3", features = ["local-offset"] } # Calendar-based radio.
 
 # Directory paths
 dirs = "5"
 
 # Async stream utilities
 futures = "0.3"
-tokio-stream = "0.1"
 
-# Hostname detection
-hostname = "0.4"
+# Plain folder libraries: bounded WebDAV XML and temporary media.
+roxmltree = "0.21"
+scraper = "0.24"
+tempfile = "3"
 
 # Random number generation
 rand = "0.9"
@@ -80,7 +85,7 @@ crossterm = "0.28"
 fs4 = "0.9"
 
 # Terminal UI
-ratatui = "0.29"
+ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
 ratatui-image = { version = "9", default-features = false, features = ["crossterm", "image-defaults"] }
 
 # Command-palette: typed text input + fuzzy-match against the command registry.
@@ -90,14 +95,6 @@ fuzzy-matcher = "0.3"
 [[bin]]
 name = "textamp"
 path = "src/bin/textamp_tui.rs"
-
-[[bin]]
-name = "textamp-debug"
-path = "src/bin/debug.rs"
-
-[[bin]]
-name = "textamp-test-tui"
-path = "src/bin/test_tui.rs"
 
 [profile.release]
 lto = true

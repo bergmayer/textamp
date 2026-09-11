@@ -1,8 +1,6 @@
 //! Handler modules for the event loop.
 //!
-//! Each module contains free functions that receive a `HandlerContext` (or relevant
-//! subset of parameters) instead of `&self`. This allows splitting the monolithic
-//! event loop into focused, maintainable modules.
+//! Dispatch functions receive state and the resources needed for their actions.
 //!
 //! `key_input` holds the crossterm-fed dispatcher plus pure action-builder
 //! helpers (e.g. `navigate_to_album`, `get_similar_action`,
@@ -10,8 +8,9 @@
 //!
 //! `mouse_input` handles ratatui-layout hit regions stored on `AppState`.
 
-pub mod context;
 pub mod events;
+mod events_playlist;
+mod events_radio;
 pub mod helpers;
 pub mod key_input;
 pub mod lazy_art;
@@ -19,7 +18,6 @@ pub mod mouse_input;
 
 pub mod dispatch_browse;
 pub mod dispatch_data;
-pub mod dispatch_folders;
 pub mod dispatch_miller;
 pub mod dispatch_navigation;
 pub mod dispatch_playback;

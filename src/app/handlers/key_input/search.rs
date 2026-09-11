@@ -3,28 +3,33 @@
 use crate::app::action::*;
 use crossterm::event::{self, KeyCode, KeyModifiers};
 
-use crate::app::Action;
 use crate::app::state::{SearchFocus, SearchTab};
+use crate::app::Action;
 use crate::app::AppState;
 
 /// Handle search popup keys (Ctrl+F floating dialog).
 pub(super) fn handle_search_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
     // Clear mouse scroll pin on any keyboard navigation
     state.scroll.search = None;
+    if state.sources.active.folder().is_some()
+        && matches!(
+            key.code,
+            KeyCode::Tab | KeyCode::BackTab | KeyCode::Left | KeyCode::Right
+        )
+    {
+        return vec![];
+    }
 
     // Handle Ctrl+E / Ctrl+Shift+E before other keys
     if key.modifiers.contains(KeyModifiers::CONTROL) {
-        match key.code {
-            KeyCode::Char('e') => {
-                if key.modifiers.contains(KeyModifiers::SHIFT) {
-                    // Ctrl+Shift+E: insert NEXT in queue after current track
-                    return vec![QueueAction::EnqueueSearchResultNext.into()];
-                } else {
-                    // Ctrl+E: add to END of queue
-                    return vec![QueueAction::EnqueueSearchResult.into()];
-                }
+        if let KeyCode::Char('e') = key.code {
+            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                // Ctrl+Shift+E: insert NEXT in queue after current track
+                return vec![QueueAction::EnqueueSearchResultNext.into()];
+            } else {
+                // Ctrl+E: add to END of queue
+                return vec![QueueAction::EnqueueSearchResult.into()];
             }
-            _ => {}
         }
     }
 
@@ -129,14 +134,13 @@ pub(super) fn handle_search_keys(key: event::KeyEvent, state: &mut AppState) -> 
             state.search.query.pop();
             state.search.focus = SearchFocus::Input;
             state.list_state.search_item_index = 0;
-            if !state.search.query.is_empty() {
-                vec![SearchAction::ExecuteLocalSearch.into()]
-            } else {
-                state.search.results = None;
-                vec![]
-            }
+            vec![SearchAction::ExecuteLocalSearch.into()]
         }
-        KeyCode::Char(c) => {
+        KeyCode::Char(c)
+            if !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER) =>
+        {
             state.search.query.push(c);
             state.search.focus = SearchFocus::Input;
             state.list_state.search_item_index = 0;
@@ -156,8 +160,11 @@ fn search_result_count(state: &AppState) -> usize {
     match state.search.tab {
         SearchTab::Global => {
             // All tab: sum of all sections (section headers not counted)
-            results.artists.len() + results.albums.len() + results.playlists.len()
-                + results.genres.len() + results.tracks.len()
+            results.artists.len()
+                + results.albums.len()
+                + results.playlists.len()
+                + results.genres.len()
+                + results.tracks.len()
         }
         SearchTab::Artists => results.artists.len(),
         SearchTab::Albums => results.albums.len(),

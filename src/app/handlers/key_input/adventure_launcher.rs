@@ -3,12 +3,15 @@
 use crate::app::action::*;
 use crossterm::event::{self, KeyCode};
 
-use crate::app::Action;
 use crate::app::state::{AdventureDrillLevel, AdventureStep, SearchFocus, SearchTab};
+use crate::app::Action;
 use crate::app::AppState;
 
 /// Handle adventure launcher popup keys.
-pub(super) fn handle_adventure_launcher_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
+pub(super) fn handle_adventure_launcher_keys(
+    key: event::KeyEvent,
+    state: &mut AppState,
+) -> Vec<Action> {
     let launcher = match state.popups.adventure_launcher.as_mut() {
         Some(l) => l,
         None => return vec![],
@@ -18,9 +21,7 @@ pub(super) fn handle_adventure_launcher_keys(key: event::KeyEvent, state: &mut A
         AdventureStep::FindStartTrack | AdventureStep::FindEndTrack => {
             handle_track_finder_keys(key, state)
         }
-        AdventureStep::EnterTrackCount => {
-            handle_track_count_keys(key, state)
-        }
+        AdventureStep::EnterTrackCount => handle_track_count_keys(key, state),
     }
 }
 
@@ -38,7 +39,8 @@ fn handle_track_finder_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<A
         KeyCode::Left => {
             // Left arrow: same as Esc in drill levels, ignored in Search
             match &launcher.drill {
-                AdventureDrillLevel::ArtistAlbums { .. } | AdventureDrillLevel::AlbumTracks { .. } => {
+                AdventureDrillLevel::ArtistAlbums { .. }
+                | AdventureDrillLevel::AlbumTracks { .. } => {
                     vec![SearchAction::AdventureLauncherBack.into()]
                 }
                 AdventureDrillLevel::Search => vec![],
@@ -55,9 +57,7 @@ fn handle_track_finder_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<A
                     }
                     vec![]
                 }
-                SearchFocus::Results => {
-                    handle_enter_on_result(launcher)
-                }
+                SearchFocus::Results => handle_enter_on_result(launcher),
             }
         }
         KeyCode::Down => {
@@ -161,7 +161,8 @@ fn handle_enter_on_result(launcher: &mut crate::app::state::AdventureLauncherSta
                             return vec![SearchAction::AdventureLauncherDrillArtist {
                                 key: artist.rating_key.clone(),
                                 name: artist.title.clone(),
-                            }.into()];
+                            }
+                            .into()];
                         }
                     }
                     SearchTab::Albums => {
@@ -170,7 +171,8 @@ fn handle_enter_on_result(launcher: &mut crate::app::state::AdventureLauncherSta
                                 key: album.rating_key.clone(),
                                 title: album.title.clone(),
                                 artist_name: album.artist_name().to_string(),
-                            }.into()];
+                            }
+                            .into()];
                         }
                     }
                     SearchTab::Tracks => {
@@ -190,14 +192,16 @@ fn handle_enter_on_result(launcher: &mut crate::app::state::AdventureLauncherSta
                             return vec![SearchAction::AdventureLauncherDrillArtist {
                                 key: artist.rating_key.clone(),
                                 name: artist.title.clone(),
-                            }.into()];
+                            }
+                            .into()];
                         } else if idx < artist_count + album_count {
                             let album = &results.albums[idx - artist_count];
                             return vec![SearchAction::AdventureLauncherDrillAlbum {
                                 key: album.rating_key.clone(),
                                 title: album.title.clone(),
                                 artist_name: album.artist_name().to_string(),
-                            }.into()];
+                            }
+                            .into()];
                         } else {
                             return vec![SearchAction::AdventureLauncherSelectTrack.into()];
                         }
@@ -206,13 +210,18 @@ fn handle_enter_on_result(launcher: &mut crate::app::state::AdventureLauncherSta
             }
             vec![]
         }
-        AdventureDrillLevel::ArtistAlbums { albums, artist_name, .. } => {
+        AdventureDrillLevel::ArtistAlbums {
+            albums,
+            artist_name,
+            ..
+        } => {
             if let Some(album) = albums.get(launcher.item_index) {
                 vec![SearchAction::AdventureLauncherDrillAlbum {
                     key: album.rating_key.clone(),
                     title: album.title.clone(),
                     artist_name: artist_name.clone(),
-                }.into()]
+                }
+                .into()]
             } else {
                 vec![]
             }
@@ -237,7 +246,11 @@ fn handle_track_count_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Ac
         }
         KeyCode::Enter => {
             // Parse count and advance to FindEndTrack
-            let count = launcher.track_count_input.parse::<usize>().unwrap_or(20).clamp(5, 100);
+            let count = launcher
+                .track_count_input
+                .parse::<usize>()
+                .unwrap_or(20)
+                .clamp(5, 100);
             launcher.track_count_input = count.to_string();
             launcher.step = AdventureStep::FindEndTrack;
             launcher.query.clear();
@@ -268,7 +281,9 @@ fn result_count(launcher: &crate::app::state::AdventureLauncherState) -> usize {
         AdventureDrillLevel::Search => {
             if let Some(ref results) = launcher.results {
                 match launcher.search_tab {
-                    SearchTab::Global => results.artists.len() + results.albums.len() + results.tracks.len(),
+                    SearchTab::Global => {
+                        results.artists.len() + results.albums.len() + results.tracks.len()
+                    }
                     SearchTab::Artists => results.artists.len(),
                     SearchTab::Albums => results.albums.len(),
                     SearchTab::Tracks => results.tracks.len(),

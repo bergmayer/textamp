@@ -3,20 +3,13 @@
 use crate::app::action::*;
 use crossterm::event::{self, KeyCode, KeyModifiers};
 
-use crate::app::Action;
 use crate::app::state::{NowPlayingFocus, PlaybackMode, View};
+use crate::app::Action;
 use crate::app::AppState;
-use crate::plex::models::Track;
+use crate::library::models::Track;
 
 /// Handle Queue view keys (track list + sidebar buttons).
 pub(super) fn handle_queue_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
-    // Tab toggles back to the Library (Browse) view — the inverse
-    // of what Tab does inside Browse. The full cycle through every
-    // intermediate view is gone; Library and Now Playing are the
-    // only two stops Tab visits.
-    if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
-        return vec![NavigationAction::SetView(View::Browse).into()];
-    }
     // Horizontal navigation between the three top panes:
     //   Sidebar  ←→  Tracks  ←→  Artwork
     // Left from Tracks → Sidebar; Right from Tracks → Artwork.
@@ -40,14 +33,6 @@ pub(super) fn handle_queue_keys(key: event::KeyEvent, state: &mut AppState) -> V
     // the Artist Bio popup as a little easter egg.
     if state.now_playing_focus == NowPlayingFocus::Artwork {
         return handle_artwork_keys(key, state);
-    }
-
-    // (Stations panel was removed; keep the legacy handler for
-    // backward compat — set_focus to Stations is no longer reachable
-    // via standard navigation but the variant still exists in the
-    // enum for older serialized state).
-    if state.now_playing_focus == NowPlayingFocus::Stations {
-        return handle_station_keys(key, state);
     }
 
     handle_queue_track_keys(key, state)
@@ -83,8 +68,11 @@ fn handle_artwork_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action
             // Artist Bio popup for whichever artist resolves from
             // the now-playing track (or focused row).
             match crate::app::handlers::helpers::get_artist_for_bio(state) {
-                Some((artist_key, artist_name)) =>
-                    vec![SearchAction::ShowArtistBio { artist_key, artist_name }.into()],
+                Some((artist_key, artist_name)) => vec![SearchAction::ShowArtistBio {
+                    artist_key,
+                    artist_name,
+                }
+                .into()],
                 None => vec![],
             }
         }
@@ -93,9 +81,11 @@ fn handle_artwork_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action
 }
 
 /// Handle keyboard nav over the now-playing left sidebar buttons:
-/// Radio / DJ Modes / Remix Tools / Clear Queue.
+/// Capability-filtered Radio / DJ Modes / Remix Tools / Clear Queue.
 fn handle_sidebar_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
-    const N: usize = 4;
+    let buttons = state.now_playing_sidebar_buttons();
+    let n = buttons.len();
+    state.now_playing_sidebar_index = state.now_playing_sidebar_index.min(n - 1);
     match key.code {
         KeyCode::Up => {
             state.now_playing_sidebar_index = state.now_playing_sidebar_index.saturating_sub(1);
@@ -105,30 +95,19 @@ fn handle_sidebar_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action
             // At the bottom of the sidebar (Clear Queue), Down hops
             // straight to the visualizer below. Otherwise just
             // advance to the next button.
-            if state.now_playing_sidebar_index >= N - 1 {
+            if state.now_playing_sidebar_index >= n - 1 {
                 state.now_playing_focus = NowPlayingFocus::Tracks;
                 state.visualizer_tab_focused = true;
                 return vec![NavigationAction::SetView(View::NowPlaying).into()];
             }
-            state.now_playing_sidebar_index = (state.now_playing_sidebar_index + 1).min(N - 1);
+            state.now_playing_sidebar_index = (state.now_playing_sidebar_index + 1).min(n - 1);
             vec![]
         }
         KeyCode::Right | KeyCode::Esc => {
             state.now_playing_focus = NowPlayingFocus::Tracks;
             vec![]
         }
-        KeyCode::Enter => {
-            // Mirror the mouse-click flow: open the palette
-            // pre-filtered to surface the matching cluster, or fire
-            // the action directly for ClearQueue.
-            match state.now_playing_sidebar_index {
-                0 => { crate::ui::command_palette::open_with_query(state, "Radio"); vec![] }
-                1 => { crate::ui::command_palette::open_with_query(state, "DJ"); vec![] }
-                2 => { crate::ui::command_palette::open_with_query(state, "Remix"); vec![] }
-                3 => vec![QueueAction::ClearQueue.into()],
-                _ => vec![],
-            }
-        }
+        KeyCode::Enter => activate_sidebar(state, buttons[state.now_playing_sidebar_index]),
         _ => vec![],
     }
 }
@@ -136,11 +115,14 @@ fn handle_sidebar_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action
 /// Handle Now Playing visualizer view keys (artwork + track info + waveform seekbar).
 ///
 /// Standard arrow-key navigation: arrows always traverse the
-/// on-screen UI elements. Seeking now lives on `,` / `.` so the
+/// on-screen UI elements. Seeking uses the global Shift+arrow shortcuts so the
 /// arrows are free to walk between the visualizer, the visualizer
 /// tab bar, and the queue / sidebar / tracks at the top of the
 /// combined Now-Playing screen.
-pub(super) fn handle_now_playing_visualizer_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
+pub(super) fn handle_now_playing_visualizer_keys(
+    key: event::KeyEvent,
+    state: &mut AppState,
+) -> Vec<Action> {
     // When visualizer tab bar is focused, arrow keys navigate tabs.
     if state.visualizer_tab_focused {
         match key.code {
@@ -170,15 +152,9 @@ pub(super) fn handle_now_playing_visualizer_keys(key: event::KeyEvent, state: &m
         }
     }
 
-    // Tab toggles back to Library — the inverse of what Tab does in
-    // Browse. Same keypress, opposite direction.
-    if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
-        return vec![NavigationAction::SetView(View::Browse).into()];
-    }
-
     match key.code {
         KeyCode::Esc => vec![],
-        KeyCode::F(1) | KeyCode::Char('?') => vec![NavigationAction::SetView(View::Help).into()],
+        KeyCode::F(1) => vec![NavigationAction::SetView(View::Help).into()],
 
         // Up: focus the visualizer tab bar (waveform / spectrum /
         // spectrogram). A second Up walks onto the queue tracks at
@@ -206,257 +182,10 @@ pub(super) fn handle_now_playing_visualizer_keys(key: event::KeyEvent, state: &m
             vec![NavigationAction::SetView(View::Queue).into()]
         }
 
-        // Seeking: vim-style `,` / `.` (1-second steps). Shift+arrow
-        // also seeks, preserving the previous muscle memory.
-        KeyCode::Char(',') => vec![PlaybackAction::SeekRelative(-1000).into()],
+        // Preserve the one-second forward shortcut; comma opens Settings globally.
         KeyCode::Char('.') => vec![PlaybackAction::SeekRelative(1000).into()],
 
         _ => vec![],
-    }
-}
-
-/// Handle station panel navigation keys (queue view, stations focused).
-fn handle_station_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
-    // When "◂ back" row is highlighted, handle it before normal dispatch
-    if state.scroll.station_back_highlighted {
-        match key.code {
-            KeyCode::Enter => {
-                state.scroll.station_back_highlighted = false;
-                return vec![RadioAction::NavigateStationsBack.into()];
-            }
-            KeyCode::Down => {
-                state.scroll.station_back_highlighted = false;
-                return vec![];
-            }
-            KeyCode::Up => {
-                // Already at back row, no-op
-                return vec![];
-            }
-            _ => {
-                state.scroll.station_back_highlighted = false;
-            }
-        }
-    }
-
-    match key.code {
-        KeyCode::Esc => {
-            // If drilled into a sub-column, go back a level first
-            if state.station_nav.can_go_left() {
-                state.station_nav.focus_left();
-                if let Some(col) = state.station_nav.focused() {
-                    state.stations = col.stations.clone();
-                }
-            } else {
-                state.now_playing_focus = NowPlayingFocus::Tracks;
-            }
-            vec![]
-        }
-        KeyCode::F(1) | KeyCode::Char('?') => vec![NavigationAction::SetView(View::Help).into()],
-
-        KeyCode::Up => {
-            state.scroll.station = None;
-            // At top of non-root column, highlight the "◂ back" row
-            let at_top = state.station_nav.focused().map_or(false, |c| c.selected_index == 0);
-            let is_drilled = state.station_nav.focused().map_or(false, |c| c.key.is_some());
-            if at_top && is_drilled {
-                state.scroll.station_back_highlighted = true;
-                return vec![];
-            }
-            state.station_nav.move_up();
-            // Skip separators
-            skip_station_separators(state, true);
-            state.station_nav.truncate_right_columns();
-            vec![]
-        }
-        KeyCode::Down => {
-            state.scroll.station = None;
-            state.station_nav.move_down();
-            // Skip separators
-            skip_station_separators(state, false);
-            state.station_nav.truncate_right_columns();
-            vec![]
-        }
-        KeyCode::PageUp => {
-            state.scroll.station = None;
-            if let Some(col) = state.station_nav.focused_mut() {
-                col.selected_index = col.selected_index.saturating_sub(10);
-            }
-            state.station_nav.truncate_right_columns();
-            vec![]
-        }
-        KeyCode::PageDown => {
-            state.scroll.station = None;
-            if let Some(col) = state.station_nav.focused_mut() {
-                let max = col.stations.len().saturating_sub(1);
-                col.selected_index = (col.selected_index + 10).min(max);
-            }
-            state.station_nav.truncate_right_columns();
-            vec![]
-        }
-        KeyCode::Home => {
-            state.scroll.station = None;
-            if let Some(col) = state.station_nav.focused_mut() {
-                col.selected_index = 0;
-            }
-            state.station_nav.truncate_right_columns();
-            vec![]
-        }
-        KeyCode::End => {
-            state.scroll.station = None;
-            if let Some(col) = state.station_nav.focused_mut() {
-                col.selected_index = col.stations.len().saturating_sub(1);
-            }
-            state.station_nav.truncate_right_columns();
-            vec![]
-        }
-
-        KeyCode::Right => {
-            // Right arrow: drill into categories, otherwise move focus to tracks
-            // First check if there's already a column to the right we can move to
-            if state.station_nav.focus_right() {
-                if let Some(col) = state.station_nav.focused() {
-                    state.stations = col.stations.clone();
-                }
-                return vec![];
-            }
-            // Drill into categories only; non-categories → focus tracks
-            if let Some(station) = state.station_nav.selected_station().cloned() {
-                if station.is_category() && !station.key.starts_with("action:") {
-                    return vec![RadioAction::DrillIntoStation(station.key.clone(), station.title.clone()).into()];
-                }
-            }
-            state.now_playing_focus = NowPlayingFocus::Tracks;
-            vec![]
-        }
-
-        KeyCode::Enter => {
-            // Enter: drill into categories, play stations, toggle DJ modes, or trigger action popups
-            if let Some(station) = state.station_nav.selected_station().cloned() {
-                // Skip separators
-                if station.is_separator() {
-                    return vec![];
-                }
-                if station.key.starts_with("action:") {
-                    return match station.key.as_str() {
-                        "action:adventure" => vec![SearchAction::OpenAdventureLauncher.into()],
-                        "action:artist_radio" => vec![SearchAction::OpenArtistRadioPicker.into()],
-                        _ => vec![],
-                    };
-                }
-                // Remix items
-                if station.key.starts_with("remix:") {
-                    return match station.key.as_str() {
-                        "remix:gemini" => vec![QueueAction::RemixGemini.into()],
-                        "remix:twofer" => vec![QueueAction::RemixTwofer.into()],
-                        "remix:stretch" => vec![QueueAction::RemixStretch.into()],
-                        "remix:doppelganger" => vec![QueueAction::RemixDoppelganger.into()],
-                        "remix:shuffle" => {
-                            if state.queue.shuffle_undo_queue.is_some() {
-                                vec![QueueAction::RemixUndoShuffle.into()]
-                            } else {
-                                vec![QueueAction::RemixShuffle.into()]
-                            }
-                        }
-                        _ => vec![],
-                    };
-                }
-                // DJ mode toggle
-                if station.is_dj_mode() {
-                    if let Some(mode) = crate::app::state::DjMode::from_key(&station.key) {
-                        return vec![RadioAction::ToggleDjMode(mode).into()];
-                    }
-                    // Friendganger is unavailable
-                    return vec![];
-                }
-                if station.is_category() {
-                    return vec![RadioAction::DrillIntoStation(station.key.clone(), station.title.clone()).into()];
-                }
-                return vec![RadioAction::PlayStation(station.key.clone()).into()];
-            }
-            vec![]
-        }
-
-        KeyCode::Left | KeyCode::Backspace => {
-            if state.station_nav.can_go_left() {
-                state.station_nav.focus_left();
-                if let Some(col) = state.station_nav.focused() {
-                    state.stations = col.stations.clone();
-                }
-            } else {
-                // At root of station nav, move focus to tracks
-                state.now_playing_focus = NowPlayingFocus::Tracks;
-            }
-            vec![]
-        }
-
-        // Alphabet jumping in station column
-        KeyCode::Char(c) if c.is_ascii_alphabetic() && !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            let letter_lower = c.to_ascii_lowercase();
-            let use_second_char = key.modifiers.contains(KeyModifiers::SHIFT);
-            if let Some(col) = state.station_nav.focused_mut() {
-                if use_second_char {
-                    let first_letter = col.stations.get(col.selected_index)
-                        .and_then(|s| s.title.chars().next())
-                        .map(|ch| ch.to_ascii_lowercase());
-                    if let Some(first_letter) = first_letter {
-                        if let Some(idx) = col.stations.iter().position(|s| {
-                            let mut chars = s.title.chars();
-                            let first = chars.next().map(|ch| ch.to_ascii_lowercase());
-                            let second = chars.next().map(|ch| ch.to_ascii_lowercase());
-                            first == Some(first_letter) && second == Some(letter_lower)
-                        }) {
-                            col.selected_index = idx;
-                        }
-                    }
-                } else {
-                    if let Some(idx) = col.stations.iter().position(|s| {
-                        s.title.chars().next()
-                            .map(|ch| ch.to_ascii_lowercase() == letter_lower)
-                            .unwrap_or(false)
-                    }) {
-                        col.selected_index = idx;
-                    }
-                }
-            }
-            state.station_nav.truncate_right_columns();
-            vec![]
-        }
-
-        _ => vec![],
-    }
-}
-
-/// Skip over separator items when navigating stations.
-/// `going_up` indicates whether the user pressed Up (true) or Down (false).
-fn skip_station_separators(state: &mut AppState, going_up: bool) {
-    if let Some(col) = state.station_nav.focused_mut() {
-        let max = col.stations.len();
-        if max == 0 { return; }
-        let mut attempts = 0;
-        while attempts < max {
-            if let Some(station) = col.stations.get(col.selected_index) {
-                if !station.is_separator() {
-                    break;
-                }
-            } else {
-                break;
-            }
-            if going_up {
-                if col.selected_index == 0 {
-                    // Wrapped to top and still on separator, move down
-                    col.selected_index = 1.min(max.saturating_sub(1));
-                } else {
-                    col.selected_index -= 1;
-                }
-            } else {
-                if col.selected_index >= max.saturating_sub(1) {
-                    col.selected_index = max.saturating_sub(2);
-                } else {
-                    col.selected_index += 1;
-                }
-            }
-            attempts += 1;
-        }
     }
 }
 
@@ -480,7 +209,7 @@ fn handle_queue_track_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Ac
             }
             vec![]
         }
-        KeyCode::F(1) | KeyCode::Char('?') => vec![NavigationAction::SetView(View::Help).into()],
+        KeyCode::F(1) => vec![NavigationAction::SetView(View::Help).into()],
 
         // Shift+Up/Down: move queue track(s) up/down (batch if multi-selected)
         KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
@@ -554,10 +283,15 @@ fn handle_queue_track_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Ac
                 PlaybackMode::Queue | PlaybackMode::None => {
                     state.queue.index == Some(state.list_state.queue_index)
                 }
-                PlaybackMode::Radio => state.radio.track_index == Some(state.list_state.queue_index),
+                PlaybackMode::Radio => {
+                    state.radio.track_index == Some(state.list_state.queue_index)
+                }
             };
             if is_current {
-                return vec![NavigationAction::SetView(View::NowPlaying).into(), SystemAction::LoadWaveform.into()];
+                return vec![
+                    NavigationAction::SetView(View::NowPlaying).into(),
+                    SystemAction::LoadWaveform.into(),
+                ];
             }
 
             // Play selected item from queue or radio (without modifying queue order)
@@ -598,12 +332,6 @@ fn handle_queue_track_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Ac
             }
         }
 
-        // Left: switch focus to stations panel
-        KeyCode::Left => {
-            state.now_playing_focus = NowPlayingFocus::Stations;
-            vec![]
-        }
-
         // Alphabet jumping
         KeyCode::Char(c) if c.is_ascii_alphabetic() && key.modifiers.is_empty() => {
             let letter_lower = c.to_ascii_lowercase();
@@ -612,7 +340,9 @@ fn handle_queue_track_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Ac
                 PlaybackMode::Radio => &state.radio.tracks,
             };
             if let Some(idx) = tracks.iter().position(|t| {
-                t.title.chars().next()
+                t.title
+                    .chars()
+                    .next()
                     .map(|ch| ch.to_ascii_lowercase() == letter_lower)
                     .unwrap_or(false)
             }) {
@@ -622,5 +352,24 @@ fn handle_queue_track_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Ac
         }
 
         _ => vec![],
+    }
+}
+
+pub(crate) fn activate_sidebar(
+    state: &mut AppState,
+    button: crate::app::presentation::NpSidebarButton,
+) -> Vec<Action> {
+    use crate::app::presentation::NpSidebarButton::*;
+    match button {
+        ClearQueue => vec![QueueAction::ClearQueue.into()],
+        Radio | DjModes | Remix => {
+            let query = match button {
+                Radio => "Radio",
+                DjModes => "DJ",
+                _ => "Remix",
+            };
+            crate::app::command_palette::open_with_query(state, query);
+            vec![]
+        }
     }
 }

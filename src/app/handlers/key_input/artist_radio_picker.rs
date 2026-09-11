@@ -3,12 +3,15 @@
 use crate::app::action::*;
 use crossterm::event::{self, KeyCode};
 
-use crate::app::Action;
 use crate::app::state::{ArtistRadioPickerStep, SearchFocus};
+use crate::app::Action;
 use crate::app::AppState;
 
 /// Handle artist radio picker popup keys.
-pub(super) fn handle_artist_radio_picker_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
+pub(super) fn handle_artist_radio_picker_keys(
+    key: event::KeyEvent,
+    state: &mut AppState,
+) -> Vec<Action> {
     let picker = match state.popups.artist_radio_picker.as_mut() {
         Some(p) => p,
         None => return vec![],
@@ -21,14 +24,17 @@ pub(super) fn handle_artist_radio_picker_keys(key: event::KeyEvent, state: &mut 
 }
 
 /// Handle keys in the EnterCount step: type a number (2-12), Enter to proceed.
-fn handle_count_step(key: event::KeyEvent, picker: &mut crate::app::state::ArtistRadioPickerState) -> Vec<Action> {
+fn handle_count_step(
+    key: event::KeyEvent,
+    picker: &mut crate::app::state::ArtistRadioPickerState,
+) -> Vec<Action> {
     match key.code {
         KeyCode::Esc => {
             vec![SearchAction::CloseArtistRadioPicker.into()]
         }
         KeyCode::Enter => {
             let count = picker.count_input.parse::<usize>().unwrap_or(0);
-            if count >= 1 && count <= 12 {
+            if (1..=12).contains(&count) {
                 vec![SearchAction::ArtistRadioPickerSetCount.into()]
             } else {
                 vec![]
@@ -49,7 +55,10 @@ fn handle_count_step(key: event::KeyEvent, picker: &mut crate::app::state::Artis
 }
 
 /// Handle keys in the SelectArtists step: search, navigate, toggle selection.
-fn handle_select_step(key: event::KeyEvent, picker: &mut crate::app::state::ArtistRadioPickerState) -> Vec<Action> {
+fn handle_select_step(
+    key: event::KeyEvent,
+    picker: &mut crate::app::state::ArtistRadioPickerState,
+) -> Vec<Action> {
     match key.code {
         KeyCode::Esc => {
             if !picker.query.is_empty() {

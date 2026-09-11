@@ -4,30 +4,32 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Root configuration structure.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
+    /// Optional analysis connection keyed by the exact Navidrome library identity.
     #[serde(default)]
-    pub plex: PlexConfig,
+    pub audiomuse_connections: HashMap<String, crate::audiomuse::Connection>,
+    /// Source/account/server/library-scoped opt-outs. Absent preserves existing behavior.
+    #[serde(default)]
+    pub sonic_disabled_libraries: std::collections::HashSet<String>,
+    #[serde(default)]
+    pub navidrome_sources: Vec<crate::navidrome::Source>,
+    /// Account and optional music-folder selection, independent of server defaults.
+    #[serde(default)]
+    pub default_navidrome: Option<crate::navidrome::Selection>,
+    /// Named filesystem libraries, independent of server sign-in.
+    #[serde(default)]
+    pub folder_sources: Vec<crate::library::FolderSource>,
+    /// Last selected folder, opened at startup when configured.
+    #[serde(default)]
+    pub default_folder_source: Option<String>,
+
     #[serde(default)]
     pub general: GeneralConfig,
     #[serde(default)]
     pub playback: PlaybackConfig,
     #[serde(default)]
     pub ui: UiConfig,
-    #[serde(default)]
-    pub libraries: LibrariesConfig,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            plex: PlexConfig::default(),
-            general: GeneralConfig::default(),
-            playback: PlaybackConfig::default(),
-            ui: UiConfig::default(),
-            libraries: LibrariesConfig::default(),
-        }
-    }
 }
 
 impl Config {
@@ -36,7 +38,8 @@ impl Config {
     /// playlist has any saved entry — the caller should fall back to
     /// defaults (no grouping, no artwork) in that case.
     pub fn playlist_view(&self, lib_key: &str, playlist_key: &str) -> Option<PlaylistView> {
-        self.ui.library_view_settings
+        self.ui
+            .library_view_settings
             .get(lib_key)?
             .playlists
             .get(playlist_key)
@@ -47,7 +50,9 @@ impl Config {
     /// view (no grouping, no artwork) deletes the entry rather than
     /// storing a redundant row — keeps the on-disk config minimal.
     pub fn set_playlist_view(&mut self, lib_key: &str, playlist_key: &str, view: PlaylistView) {
-        let lib = self.ui.library_view_settings
+        let lib = self
+            .ui
+            .library_view_settings
             .entry(lib_key.to_string())
             .or_default();
         if view.is_default() {
@@ -77,69 +82,11 @@ impl Config {
     }
 }
 
-/// Per-library settings (indexed by library key).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct LibrarySettings {
-    /// Keep subfolder cache entries indefinitely (don't purge at 32 days).
-    #[serde(default, alias = "keep_folder_cache")]
-    pub keep_subfolder_cache: bool,
-}
-
-/// Libraries configuration.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct LibrariesConfig {
-    /// Default library to open on startup (by key)
-    #[serde(default)]
-    pub default_library: Option<String>,
-
-    /// Selected server identifier (for multi-server setups)
-    #[serde(default)]
-    pub selected_server: Option<String>,
-
-    /// Per-library settings keyed by library key
-    #[serde(default)]
-    pub per_library: HashMap<String, LibrarySettings>,
-}
-
-/// Plex server configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlexConfig {
-    /// Plex server URL (e.g., "http://localhost:32400")
-    #[serde(default = "default_server_url")]
-    pub server_url: String,
-
-    /// Plex username (display only, authentication uses tokens)
-    #[serde(default)]
-    pub username: Option<String>,
-
-}
-
-impl Default for PlexConfig {
-    fn default() -> Self {
-        Self {
-            server_url: default_server_url(),
-            username: None,
-        }
-    }
-}
-
-fn default_server_url() -> String {
-    "http://localhost:32400".to_string()
-}
-
 /// General application settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct GeneralConfig {
     #[serde(default)]
     pub default_library: Option<String>,
-}
-
-impl Default for GeneralConfig {
-    fn default() -> Self {
-        Self {
-            default_library: None,
-        }
-    }
 }
 
 /// Playback settings.
@@ -242,6 +189,10 @@ pub struct UiConfig {
     /// default to keep the column readable.
     #[serde(default = "default_hidden_sections")]
     pub hidden_sections: Vec<crate::app::state::BrowseCategory>,
+    /// Optional Navidrome / AudioMuse sidebar views. Existing category preferences
+    /// retain their original configuration format.
+    #[serde(default)]
+    pub hidden_collections: Vec<crate::app::sources::navidrome::commands::CollectionKind>,
 
     /// How the Library screen's Miller columns share the horizontal
     /// space when more than two are open.
@@ -266,10 +217,10 @@ fn default_hidden_sections() -> Vec<crate::app::state::BrowseCategory> {
     crate::app::state::BrowseCategory::hidden_by_default().to_vec()
 }
 
-/// View toggles scoped to a single Plex library.
+/// View toggles scoped to a single server library.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LibraryViewSettings {
-    /// Per-playlist toggles, keyed by the playlist's Plex rating_key.
+    /// Per-playlist toggles, keyed by the playlist's server rating_key.
     #[serde(default)]
     pub playlists: std::collections::HashMap<String, PlaylistView>,
 }
@@ -315,6 +266,7 @@ impl Default for UiConfig {
             enable_youtube_search: default_enable_search_service(),
             library_view_settings: std::collections::HashMap::new(),
             hidden_sections: default_hidden_sections(),
+            hidden_collections: Vec::new(),
             miller_layout: crate::app::state::MillerLayoutMode::default(),
             tall_mode: false,
         }
@@ -333,9 +285,13 @@ fn default_ui_scale() -> f32 {
     // are honoured (serde reads them back); only fresh installs /
     // reset-to-default pick this up.
     #[cfg(target_os = "macos")]
-    { 1.0 }
+    {
+        1.0
+    }
     #[cfg(not(target_os = "macos"))]
-    { 1.25 }
+    {
+        1.25
+    }
 }
 
 /// Clamp bounds for the user-settable UI scale. Keep the UI within

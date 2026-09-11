@@ -8,7 +8,7 @@
 //! This service is UI-agnostic and can be used with any frontend.
 //! All functions are pure and have no side effects.
 
-use crate::plex::models::{Album, Artist, Genre, Playlist, SearchResults, Track};
+use crate::library::models::{Album, Artist, Genre, Playlist, SearchResults, Track};
 
 /// A filtered item with display title and key for selection.
 #[derive(Debug, Clone)]
@@ -91,7 +91,7 @@ impl SearchFilterService {
             .collect();
 
         // Deduplicate by artist name (case-insensitive), keeping first occurrence
-        artists.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+        artists.sort_by_key(|a| a.title.to_lowercase());
         artists.dedup_by(|a, b| a.title.to_lowercase() == b.title.to_lowercase());
 
         artists
@@ -115,9 +115,12 @@ impl SearchFilterService {
                 .map(|a| FilteredItem::new(Self::format_album(a), &a.rating_key))
                 .collect();
 
-            // Supplement with local albums matching by year (Plex API doesn't search by year)
-            let existing_keys: std::collections::HashSet<&str> =
-                results.albums.iter().map(|a| a.rating_key.as_str()).collect();
+            // Supplement with local albums matching by year (server API doesn't search by year)
+            let existing_keys: std::collections::HashSet<&str> = results
+                .albums
+                .iter()
+                .map(|a| a.rating_key.as_str())
+                .collect();
             for a in local_albums {
                 if !existing_keys.contains(a.rating_key.as_str())
                     && Self::album_year_matches(a, &query_lower)
@@ -168,10 +171,7 @@ impl SearchFilterService {
                 .tracks
                 .iter()
                 .map(|t| {
-                    FilteredItem::new(
-                        format!("{} - {}", t.title, t.track_artist()),
-                        &t.rating_key,
-                    )
+                    FilteredItem::new(format!("{} - {}", t.title, t.track_artist()), &t.rating_key)
                 })
                 .collect()
         } else {
@@ -179,10 +179,7 @@ impl SearchFilterService {
                 .iter()
                 .filter(|t| query.is_empty() || t.title.to_lowercase().contains(&query_lower))
                 .map(|t| {
-                    FilteredItem::new(
-                        format!("{} - {}", t.title, t.track_artist()),
-                        &t.rating_key,
-                    )
+                    FilteredItem::new(format!("{} - {}", t.title, t.track_artist()), &t.rating_key)
                 })
                 .collect()
         }
@@ -237,11 +234,17 @@ impl SearchFilterService {
 
         if let Some(results) = api_results {
             // Count API results + local year matches (deduplicated)
-            let existing_keys: std::collections::HashSet<&str> =
-                results.albums.iter().map(|a| a.rating_key.as_str()).collect();
-            let year_matches = local_albums.iter()
-                .filter(|a| !existing_keys.contains(a.rating_key.as_str())
-                    && Self::album_year_matches(a, &query_lower))
+            let existing_keys: std::collections::HashSet<&str> = results
+                .albums
+                .iter()
+                .map(|a| a.rating_key.as_str())
+                .collect();
+            let year_matches = local_albums
+                .iter()
+                .filter(|a| {
+                    !existing_keys.contains(a.rating_key.as_str())
+                        && Self::album_year_matches(a, &query_lower)
+                })
                 .count();
             results.albums.len() + year_matches
         } else {
@@ -339,12 +342,8 @@ mod tests {
         Genre {
             title: title.to_string(),
             key: key.to_string(),
-            tag: None,
-            fast_key: None,
-            filter: None,
+
             count: None,
-            id: None,
-            rating_key: None,
         }
     }
 

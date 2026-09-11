@@ -1,0 +1,25 @@
+#!/bin/sh
+set -eu
+
+# Keep the launcher beside the binary, so release updates need no launcher edits.
+textamp_dir=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+textamp_binary="$textamp_dir/textamp"
+
+if [ ! -x "$textamp_binary" ]; then
+    /usr/bin/osascript -e 'display alert "Textamp could not start" message "Place Textamp.app beside the executable named textamp." as critical'
+    exit 1
+fi
+
+if [ ! -d /Applications/Ghostty.app ]; then
+    /usr/bin/osascript -e 'display alert "Ghostty is required" message "Install Ghostty in Applications, then open Textamp again." as critical'
+    exit 1
+fi
+
+# A separate instance guarantees a new window even when Ghostty is already open.
+# Do not restore existing terminal sessions into the dedicated Textamp instance.
+exec /usr/bin/open -n -a /Applications/Ghostty.app --args \
+    --window-save-state=never \
+    --title=Textamp \
+    --working-directory="$textamp_dir" \
+    --wait-after-command=false \
+    -e "$textamp_binary"

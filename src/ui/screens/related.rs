@@ -3,11 +3,11 @@
 //! Shows artists related to the selected artist, with their albums
 //! grouped by artist, rendered as a centered popup over the previous view.
 
-use crate::app::AppState;
-use crate::app::state::{RelatedSource, RelatedArtistGroup};
+use crate::app::state::{RelatedArtistGroup, RelatedSource};
 use crate::services::NavigationService;
 use crate::ui::layout::centered_rect;
 use crate::ui::theme::theme;
+use crate::ui::RenderState as AppState;
 use crate::util::truncate_middle;
 
 use ratatui::prelude::*;
@@ -34,7 +34,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     // Register hit regions for mouse handler
     {
         let mut hr = state.hit_regions.borrow_mut();
-        hr.related_content = Some(crate::ui::hit_regions::RelatedRegions {
+        hr.related_content = Some(crate::app::presentation::RelatedRegions {
             outer: popup_area,
             inner,
         });
@@ -91,17 +91,25 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
             let alias_suffix = match group.source {
                 RelatedSource::Alias => " (alias)",
                 RelatedSource::SimilarTag => " (similar)",
-                RelatedSource::Plex => "",
+                RelatedSource::Navidrome => "",
             };
             let header_text = format!("  {}{}", group.artist.title, alias_suffix);
             let header_display = truncate_middle(&header_text, max_text_width);
 
             let (fg, bg) = if is_selected {
-                (Style::default().fg(t.colors.selection_text).add_modifier(Modifier::BOLD),
-                 Style::default().bg(t.colors.selection_bar_bg))
+                (
+                    Style::default()
+                        .fg(t.colors.selection_text)
+                        .add_modifier(Modifier::BOLD),
+                    Style::default().bg(t.colors.selection_bar_bg),
+                )
             } else {
-                (Style::default().fg(t.colors.fg_accent).add_modifier(Modifier::BOLD),
-                 Style::default())
+                (
+                    Style::default()
+                        .fg(t.colors.fg_accent)
+                        .add_modifier(Modifier::BOLD),
+                    Style::default(),
+                )
             };
 
             items.push(ListItem::new(Line::from(Span::styled(header_display, fg))).style(bg));
@@ -121,11 +129,12 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
                 let title_display = truncate_middle(&album.title, title_width);
 
                 let (fg, bg) = if is_selected {
-                    (Style::default().fg(t.colors.selection_text),
-                     Style::default().bg(t.colors.selection_bar_bg))
+                    (
+                        Style::default().fg(t.colors.selection_text),
+                        Style::default().bg(t.colors.selection_bar_bg),
+                    )
                 } else {
-                    (Style::default().fg(t.colors.fg_primary),
-                     Style::default())
+                    (Style::default().fg(t.colors.fg_primary), Style::default())
                 };
 
                 let line = if !year_str.is_empty() {
@@ -151,7 +160,14 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
 
     // Scrollbar + position indicator
     if total > visible_item_count {
-        crate::ui::widgets::render_scrollbar(frame, popup_area, total, visible_item_count, scroll_offset, None);
+        crate::ui::widgets::render_scrollbar(
+            frame,
+            popup_area,
+            total,
+            visible_item_count,
+            scroll_offset,
+            None,
+        );
 
         let footer_pos = format!("{}/{}", selected_idx + 1, total);
         let footer_pos_area = Rect::new(

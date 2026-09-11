@@ -1,7 +1,7 @@
 //! UI theming system with multiple theme support.
 //!
 //! Provides semantic color naming and three built-in themes:
-//! - Default (Plexamp-inspired dark)
+//! - Default (warm dark)
 //! - Solarized Dark
 //! - Solarized Light
 //! - Retro (Norton Commander DOS style)
@@ -47,7 +47,7 @@ pub struct ThemeColors {
 }
 
 impl ThemeColors {
-    /// Default dark theme (Plexamp-inspired).
+    /// Default dark theme (warm).
     pub fn dark() -> Self {
         Self {
             bg_primary: Color::Rgb(24, 24, 24),
@@ -58,7 +58,7 @@ impl ThemeColors {
             fg_primary: Color::Rgb(220, 220, 220),
             fg_secondary: Color::Rgb(180, 180, 180),
             fg_muted: Color::Rgb(128, 128, 128),
-            fg_accent: Color::Rgb(229, 160, 60),      // Plexamp orange
+            fg_accent: Color::Rgb(229, 160, 60), // Warm orange
             fg_accent_dim: Color::Rgb(180, 120, 40),
 
             border: Color::Rgb(60, 60, 60),
@@ -82,24 +82,24 @@ impl ThemeColors {
     /// Uses the canonical 16-color Solarized palette.
     pub fn solarized_dark() -> Self {
         // Solarized base colors
-        let base03 = Color::Rgb(0, 43, 54);      // #002b36 - background
-        let base02 = Color::Rgb(7, 54, 66);      // #073642 - background highlight
-        let base01 = Color::Rgb(88, 110, 117);   // #586e75 - optional emphasis
-        let base00 = Color::Rgb(101, 123, 131);  // #657b83 - body text
-        let base0 = Color::Rgb(131, 148, 150);   // #839496 - primary content
-        let base1 = Color::Rgb(147, 161, 161);   // #93a1a1 - comments
-        let _base2 = Color::Rgb(238, 232, 213);  // #eee8d5
-        let _base3 = Color::Rgb(253, 246, 227);  // #fdf6e3
+        let base03 = Color::Rgb(0, 43, 54); // #002b36 - background
+        let base02 = Color::Rgb(7, 54, 66); // #073642 - background highlight
+        let base01 = Color::Rgb(88, 110, 117); // #586e75 - optional emphasis
+        let base00 = Color::Rgb(101, 123, 131); // #657b83 - body text
+        let base0 = Color::Rgb(131, 148, 150); // #839496 - primary content
+        let base1 = Color::Rgb(147, 161, 161); // #93a1a1 - comments
+        let _base2 = Color::Rgb(238, 232, 213); // #eee8d5
+        let _base3 = Color::Rgb(253, 246, 227); // #fdf6e3
 
         // Solarized accent colors
-        let yellow = Color::Rgb(181, 137, 0);    // #b58900
-        let orange = Color::Rgb(203, 75, 22);    // #cb4b16
-        let red = Color::Rgb(220, 50, 47);       // #dc322f
+        let yellow = Color::Rgb(181, 137, 0); // #b58900
+        let orange = Color::Rgb(203, 75, 22); // #cb4b16
+        let red = Color::Rgb(220, 50, 47); // #dc322f
         let _magenta = Color::Rgb(211, 54, 130); // #d33682
         let _violet = Color::Rgb(108, 113, 196); // #6c71c4
-        let blue = Color::Rgb(38, 139, 210);     // #268bd2
-        let cyan = Color::Rgb(42, 161, 152);     // #2aa198
-        let green = Color::Rgb(133, 153, 0);     // #859900
+        let blue = Color::Rgb(38, 139, 210); // #268bd2
+        let cyan = Color::Rgb(42, 161, 152); // #2aa198
+        let green = Color::Rgb(133, 153, 0); // #859900
 
         Self {
             bg_primary: base03,
@@ -133,24 +133,24 @@ impl ThemeColors {
     /// Solarized Light theme.
     pub fn solarized_light() -> Self {
         // Solarized base colors (inverted for light)
-        let _base03 = Color::Rgb(0, 43, 54);     // #002b36
-        let _base02 = Color::Rgb(7, 54, 66);     // #073642
-        let base01 = Color::Rgb(88, 110, 117);   // #586e75
-        let base00 = Color::Rgb(101, 123, 131);  // #657b83 - primary content (light mode)
-        let _base0 = Color::Rgb(131, 148, 150);  // #839496
-        let _base1 = Color::Rgb(147, 161, 161);  // #93a1a1
-        let base2 = Color::Rgb(238, 232, 213);   // #eee8d5 - background highlight
-        let base3 = Color::Rgb(253, 246, 227);   // #fdf6e3 - background
+        let _base03 = Color::Rgb(0, 43, 54); // #002b36
+        let _base02 = Color::Rgb(7, 54, 66); // #073642
+        let base01 = Color::Rgb(88, 110, 117); // #586e75
+        let base00 = Color::Rgb(101, 123, 131); // #657b83 - primary content (light mode)
+        let _base0 = Color::Rgb(131, 148, 150); // #839496
+        let _base1 = Color::Rgb(147, 161, 161); // #93a1a1
+        let base2 = Color::Rgb(238, 232, 213); // #eee8d5 - background highlight
+        let base3 = Color::Rgb(253, 246, 227); // #fdf6e3 - background
 
         // Solarized accent colors
-        let _yellow = Color::Rgb(181, 137, 0);   // #b58900
-        let orange = Color::Rgb(203, 75, 22);    // #cb4b16
-        let red = Color::Rgb(220, 50, 47);       // #dc322f
-        let magenta = Color::Rgb(211, 54, 130);  // #d33682
+        let _yellow = Color::Rgb(181, 137, 0); // #b58900
+        let orange = Color::Rgb(203, 75, 22); // #cb4b16
+        let red = Color::Rgb(220, 50, 47); // #dc322f
+        let magenta = Color::Rgb(211, 54, 130); // #d33682
         let _violet = Color::Rgb(108, 113, 196); // #6c71c4
-        let blue = Color::Rgb(38, 139, 210);     // #268bd2
-        let cyan = Color::Rgb(42, 161, 152);     // #2aa198
-        let green = Color::Rgb(133, 153, 0);     // #859900
+        let blue = Color::Rgb(38, 139, 210); // #268bd2
+        let cyan = Color::Rgb(42, 161, 152); // #2aa198
+        let green = Color::Rgb(133, 153, 0); // #859900
 
         Self {
             bg_primary: base3,
@@ -184,15 +184,15 @@ impl ThemeColors {
     /// Platinum theme — inspired by classic Mac OS 9 "Platinum" UI:
     /// light gray window chrome, black text, blue highlight.
     pub fn platinum() -> Self {
-        let bg          = Color::Rgb(221, 221, 221); // platinum gray #DDDDDD
-        let bg_light    = Color::Rgb(238, 238, 238); // #EEEEEE (lighter field)
-        let bg_shadow   = Color::Rgb(170, 170, 170); // #AAAAAA (groove shadow)
-        let text        = Color::Rgb(0, 0, 0);
-        let muted       = Color::Rgb(102, 102, 102); // #666666
-        let blue        = Color::Rgb(59, 120, 255);  // #3B78FF classic highlight
-        let dark_blue   = Color::Rgb(0, 58, 168);    // deeper blue
-        let red         = Color::Rgb(204, 0, 0);
-        let green       = Color::Rgb(0, 128, 0);
+        let bg = Color::Rgb(221, 221, 221); // platinum gray #DDDDDD
+        let bg_light = Color::Rgb(238, 238, 238); // #EEEEEE (lighter field)
+        let bg_shadow = Color::Rgb(170, 170, 170); // #AAAAAA (groove shadow)
+        let text = Color::Rgb(0, 0, 0);
+        let muted = Color::Rgb(102, 102, 102); // #666666
+        let blue = Color::Rgb(59, 120, 255); // #3B78FF classic highlight
+        let dark_blue = Color::Rgb(0, 58, 168); // deeper blue
+        let red = Color::Rgb(204, 0, 0);
+        let green = Color::Rgb(0, 128, 0);
 
         Self {
             bg_primary: bg,
@@ -336,9 +336,9 @@ impl ThemeColors {
     /// surviving member of the DOS-blue family (the older Borland
     /// theme has been removed).
     pub fn norton() -> Self {
-        let bg_blue = Color::Rgb(0, 0, 170);     // DOS bright blue
-        let cyan = Color::Rgb(85, 255, 255);     // DOS bright cyan (titles)
-        let yellow = Color::Rgb(255, 255, 85);   // DOS bright yellow (highlight)
+        let bg_blue = Color::Rgb(0, 0, 170); // DOS bright blue
+        let cyan = Color::Rgb(85, 255, 255); // DOS bright cyan (titles)
+        let yellow = Color::Rgb(255, 255, 85); // DOS bright yellow (highlight)
         let white = Color::Rgb(255, 255, 255);
         let lightgray = Color::Rgb(200, 200, 200);
         let darkblue = Color::Rgb(0, 0, 110);
@@ -375,16 +375,16 @@ impl ThemeColors {
     /// purple, pink, cyan, and green accents.
     /// Reference palette: https://draculatheme.com/contribute
     pub fn dracula() -> Self {
-        let bg = Color::Rgb(40, 42, 54);          // #282a36
+        let bg = Color::Rgb(40, 42, 54); // #282a36
         let current_line = Color::Rgb(68, 71, 90); // #44475a
         let foreground = Color::Rgb(248, 248, 242); // #f8f8f2
-        let comment = Color::Rgb(98, 114, 164);   // #6272a4
-        let cyan = Color::Rgb(139, 233, 253);     // #8be9fd
-        let green = Color::Rgb(80, 250, 123);     // #50fa7b
-        let pink = Color::Rgb(255, 121, 198);     // #ff79c6
-        let purple = Color::Rgb(189, 147, 249);   // #bd93f9
-        let red = Color::Rgb(255, 85, 85);        // #ff5555
-        let yellow = Color::Rgb(241, 250, 140);   // #f1fa8c
+        let comment = Color::Rgb(98, 114, 164); // #6272a4
+        let cyan = Color::Rgb(139, 233, 253); // #8be9fd
+        let green = Color::Rgb(80, 250, 123); // #50fa7b
+        let pink = Color::Rgb(255, 121, 198); // #ff79c6
+        let purple = Color::Rgb(189, 147, 249); // #bd93f9
+        let red = Color::Rgb(255, 85, 85); // #ff5555
+        let yellow = Color::Rgb(241, 250, 140); // #f1fa8c
         Self {
             bg_primary: bg,
             bg_secondary: Color::Rgb(33, 34, 44),
@@ -418,23 +418,23 @@ impl ThemeColors {
     /// Reference palette: https://www.nordtheme.com/docs/colors-and-palettes
     pub fn nord() -> Self {
         // Polar Night
-        let nord0 = Color::Rgb(46, 52, 64);        // #2e3440
-        let nord1 = Color::Rgb(59, 66, 82);        // #3b4252
-        let nord2 = Color::Rgb(67, 76, 94);        // #434c5e
-        let nord3 = Color::Rgb(76, 86, 106);       // #4c566a
-        // Snow Storm
-        let nord4 = Color::Rgb(216, 222, 233);     // #d8dee9
-        let nord5 = Color::Rgb(229, 233, 240);     // #e5e9f0
-        let _nord6 = Color::Rgb(236, 239, 244);    // #eceff4
-        // Frost
-        let nord7 = Color::Rgb(143, 188, 187);     // #8fbcbb
-        let nord8 = Color::Rgb(136, 192, 208);     // #88c0d0
-        let nord9 = Color::Rgb(129, 161, 193);     // #81a1c1
-        let nord10 = Color::Rgb(94, 129, 172);     // #5e81ac
-        // Aurora
-        let nord11 = Color::Rgb(191, 97, 106);     // #bf616a — red
-        let nord13 = Color::Rgb(235, 203, 139);    // #ebcb8b — yellow
-        let nord14 = Color::Rgb(163, 190, 140);    // #a3be8c — green
+        let nord0 = Color::Rgb(46, 52, 64); // #2e3440
+        let nord1 = Color::Rgb(59, 66, 82); // #3b4252
+        let nord2 = Color::Rgb(67, 76, 94); // #434c5e
+        let nord3 = Color::Rgb(76, 86, 106); // #4c566a
+                                             // Snow Storm
+        let nord4 = Color::Rgb(216, 222, 233); // #d8dee9
+        let nord5 = Color::Rgb(229, 233, 240); // #e5e9f0
+        let _nord6 = Color::Rgb(236, 239, 244); // #eceff4
+                                                // Frost
+        let nord7 = Color::Rgb(143, 188, 187); // #8fbcbb
+        let nord8 = Color::Rgb(136, 192, 208); // #88c0d0
+        let nord9 = Color::Rgb(129, 161, 193); // #81a1c1
+        let nord10 = Color::Rgb(94, 129, 172); // #5e81ac
+                                               // Aurora
+        let nord11 = Color::Rgb(191, 97, 106); // #bf616a — red
+        let nord13 = Color::Rgb(235, 203, 139); // #ebcb8b — yellow
+        let nord14 = Color::Rgb(163, 190, 140); // #a3be8c — green
         Self {
             bg_primary: nord0,
             bg_secondary: nord1,

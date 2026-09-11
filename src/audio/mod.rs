@@ -14,8 +14,7 @@
 //! - Web: Implement `AudioBackend` using Web Audio API
 //! - The rest of the app interacts only with the trait, not concrete implementations
 
-pub mod cache;
-mod player;
+pub mod player;
 mod rodio_backend;
 mod traits;
 
@@ -28,7 +27,20 @@ pub(crate) fn lock_or_recover<T>(mutex: &std::sync::Mutex<T>) -> std::sync::Mute
     mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-pub use cache::TrackAudioCache;
 pub use player::{AudioEvent, AudioPlayer};
 pub use rodio_backend::{RodioBackend, SampleTap};
 pub use traits::{AudioBackend, AudioError};
+
+/// Cancellation is requested by the caller before joining. A wedged native
+/// decoder/device must not hang stop or process shutdown indefinitely.
+fn finish_thread(handle: std::thread::JoinHandle<()>, name: &str, timeout: std::time::Duration) {
+    let deadline = std::time::Instant::now() + timeout;
+    while !handle.is_finished() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    if !handle.is_finished() {
+        tracing::error!("{name} did not stop within {timeout:?}; detaching cancelled worker");
+    } else if handle.join().is_err() {
+        tracing::error!("{name} panicked while stopping");
+    }
+}

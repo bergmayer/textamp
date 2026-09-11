@@ -1,16 +1,7 @@
 //! List navigation, scrolling, pagination, and filter selection.
 
-use crate::app::event::*;
-use crate::app::event::LibraryEventSender;
-use crate::app::{AppState, Event};
-use crate::app::action::AsyncError;
-use crate::app::state::{
-    BrowseCategory, Focus,
-    RightPanelMode, View,
-};
-use crate::plex::PlexClient;
-use super::PAGE_SIZE;
-use tokio::sync::mpsc;
+use crate::app::state::{Focus, RightPanelMode, View};
+use crate::app::AppState;
 
 /// Calculate the scroll offset to keep the selected item centered.
 pub fn calc_scroll_offset(selected: usize, viewport_height: usize, total_items: usize) -> usize {
@@ -24,127 +15,6 @@ pub fn calc_scroll_offset(selected: usize, viewport_height: usize, total_items: 
         total_items.saturating_sub(viewport_height)
     } else {
         selected.saturating_sub(half_height)
-    }
-}
-
-/// Load artists in background.
-pub fn load_artists(event_tx: &mpsc::Sender<Event>, state: &mut AppState, client: &PlexClient) {
-    if let Some(lib_key) = &state.active_library {
-        tracing::info!("Loading all artists from library: {}", lib_key);
-        state.library.artists_loading = true;
-
-        let event_tx =
-            LibraryEventSender::new(event_tx.clone(), state.library_generation);
-        let client = client.clone();
-        let lib_key = lib_key.clone();
-        tokio::spawn(async move {
-            let result = client.get_artists(&lib_key).await.map_err(|error| {
-                tracing::error!("Failed to load artists: {}", error);
-                AsyncError::from_api("Failed to load artists", &error)
-            });
-            let _ = event_tx
-                .send(
-                    DataEvent::ArtistsLoaded {
-                        library_key: lib_key,
-                        result,
-                    }
-                    .into(),
-                )
-                .await;
-        });
-    } else {
-        tracing::warn!("load_artists called but no active_library set");
-    }
-}
-
-/// Load all audio playlists from the server.
-///
-/// Previously this filtered by `state.active_library` (sectionID). Plex
-/// only returns a playlist on a `sectionID=X` query when *every* track
-/// in the playlist belongs to that section — so user-created lists that
-/// span libraries (or were authored against a different one) silently
-/// vanished. Plexamp itself doesn't apply that filter; we mirror its
-/// behaviour and show every audio playlist the server exposes. Smart
-/// playlists with duplicate per-library titles are still de-duped
-/// inside `client.get_playlists`.
-pub fn load_playlists(event_tx: &mpsc::Sender<Event>, state: &mut AppState, client: &PlexClient) {
-    tracing::info!("Loading playlists (server-wide, no section filter)");
-    state.library.playlists_loading = true;
-
-    let event_tx = LibraryEventSender::new(event_tx.clone(), state.library_generation);
-    let client = client.clone();
-    let server_url = client.server_url().map(str::to_string);
-    tokio::spawn(async move {
-        let result = client.get_playlists(None).await.map_err(|error| {
-            tracing::error!("Failed to load playlists: {}", error);
-            AsyncError::from_api("Failed to load playlists", &error)
-        });
-        let _ = event_tx
-            .send(
-                DataEvent::PlaylistsLoaded {
-                    server_url,
-                    result,
-                }
-                .into(),
-            )
-            .await;
-    });
-}
-
-/// Load more data when nearing the end of a paginated list.
-pub fn maybe_load_more(
-    event_tx: &mpsc::Sender<Event>,
-    state: &mut AppState,
-    client: &PlexClient,
-) {
-    if state.view != View::Browse || state.focus != Focus::Left {
-        return;
-    }
-
-    if let Some(lib_key) = &state.active_library.clone() {
-        if state.browse_category == BrowseCategory::Library {
-            let idx = state.list_state.artists_index;
-            let loaded = state.library.artists.len();
-            let total = state.library.artists_total as usize;
-
-            if idx + 20 >= loaded && loaded < total && !state.library.artists_loading {
-                state.library.artists_loading = true;
-                let offset = loaded as u32;
-                // Remember selected artist before re-sort
-                let selected_key = state.library.artists.get(idx)
-                    .map(|a| a.rating_key.clone());
-                let request_client = client.clone();
-                let tx =
-                    LibraryEventSender::new(event_tx.clone(), state.library_generation);
-                let library_key = lib_key.clone();
-                tokio::spawn(async move {
-                    match request_client
-                        .get_artists_page(&library_key, offset, PAGE_SIZE)
-                        .await
-                    {
-                        Ok((artists, total)) => {
-                            let _ = tx
-                                .send(
-                                    DataEvent::ArtistsPageLoaded {
-                                        library_key,
-                                        selected_key,
-                                        artists,
-                                        total,
-                                    }
-                                    .into(),
-                                )
-                                .await;
-                        }
-                        Err(error) => {
-                            tracing::warn!("Failed to load another artist page: {}", error);
-                            let _ = tx
-                                .send(DataEvent::ArtistsPageFailed { library_key }.into())
-                                .await;
-                        }
-                    }
-                });
-            }
-        }
     }
 }
 
@@ -164,7 +34,8 @@ pub fn adjust_list_index(state: &mut AppState, delta: isize) {
                         let len = state.library.selected_artist_albums.len() + 1;
                         if len > 0 {
                             let idx = state.list_state.right_albums_index as isize + delta;
-                            state.list_state.right_albums_index = idx.clamp(0, len as isize - 1) as usize;
+                            state.list_state.right_albums_index =
+                                idx.clamp(0, len as isize - 1) as usize;
                         }
                     }
                     RightPanelMode::AlbumTracks | RightPanelMode::CategoryTracks => {
@@ -178,7 +49,8 @@ pub fn adjust_list_index(state: &mut AppState, delta: isize) {
                         let len = state.library.tag_albums.len();
                         if len > 0 {
                             let idx = state.library.tag_albums_index as isize + delta;
-                            state.library.tag_albums_index = idx.clamp(0, len as isize - 1) as usize;
+                            state.library.tag_albums_index =
+                                idx.clamp(0, len as isize - 1) as usize;
                         }
                     }
                     RightPanelMode::Empty => {}
@@ -297,7 +169,10 @@ pub fn related_flat_count(groups: &[crate::app::state::RelatedArtistGroup]) -> u
 }
 
 /// Resolve flat index into (group_idx, is_header, album_idx_within_group).
-pub fn related_flat_resolve(groups: &[crate::app::state::RelatedArtistGroup], flat_idx: usize) -> Option<(usize, bool, usize)> {
+pub fn related_flat_resolve(
+    groups: &[crate::app::state::RelatedArtistGroup],
+    flat_idx: usize,
+) -> Option<(usize, bool, usize)> {
     let mut offset = 0;
     for (gi, group) in groups.iter().enumerate() {
         let group_size = 1 + group.albums.len();
@@ -319,18 +194,22 @@ pub fn related_flat_resolve(groups: &[crate::app::state::RelatedArtistGroup], fl
 /// More efficient than extend + re-sort for appending small pages to large lists:
 /// O(m log m + n + m) vs O((n+m) log(n+m)), where n = existing, m = new items.
 /// Each sort key is computed exactly once.
-pub fn sorted_merge<T>(existing: &mut Vec<T>, mut new_items: Vec<T>, key_fn: impl Fn(&T) -> String) {
+pub fn sorted_merge<T>(
+    existing: &mut Vec<T>,
+    mut new_items: Vec<T>,
+    key_fn: impl Fn(&T) -> String,
+) {
     if new_items.is_empty() {
         return;
     }
 
     // Sort the new page
-    new_items.sort_by(|a, b| key_fn(a).cmp(&key_fn(b)));
+    new_items.sort_by_key(|a| key_fn(a));
 
     // Pre-compute all sort keys (each computed once)
     let old = std::mem::take(existing);
-    let old_keys: Vec<String> = old.iter().map(|item| key_fn(item)).collect();
-    let new_keys: Vec<String> = new_items.iter().map(|item| key_fn(item)).collect();
+    let old_keys: Vec<String> = old.iter().map(&key_fn).collect();
+    let new_keys: Vec<String> = new_items.iter().map(key_fn).collect();
 
     // Merge both sorted sequences
     *existing = Vec::with_capacity(old.len() + new_items.len());
@@ -368,8 +247,9 @@ pub fn sorted_merge<T>(existing: &mut Vec<T>, mut new_items: Vec<T>, key_fn: imp
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::state::{SimilarMode, RelatedArtistGroup, RelatedSource};
-    use crate::plex::models::{Artist, Album, Track};
+    use crate::app::state::BrowseCategory;
+    use crate::app::state::{RelatedArtistGroup, RelatedSource, SimilarMode};
+    use crate::library::models::{Album, Artist, Track};
 
     fn make_track(key: &str, title: &str) -> Track {
         Track {
@@ -401,7 +281,11 @@ mod tests {
     fn adjust_queue_index_down() {
         let mut state = AppState::new();
         state.view = View::NowPlaying;
-        state.queue.tracks = vec![make_track("1", "A"), make_track("2", "B"), make_track("3", "C")];
+        state.queue.tracks = vec![
+            make_track("1", "A"),
+            make_track("2", "B"),
+            make_track("3", "C"),
+        ];
         state.list_state.queue_index = 0;
 
         adjust_list_index(&mut state, 1);
@@ -415,7 +299,11 @@ mod tests {
     fn adjust_queue_index_up() {
         let mut state = AppState::new();
         state.view = View::NowPlaying;
-        state.queue.tracks = vec![make_track("1", "A"), make_track("2", "B"), make_track("3", "C")];
+        state.queue.tracks = vec![
+            make_track("1", "A"),
+            make_track("2", "B"),
+            make_track("3", "C"),
+        ];
         state.list_state.queue_index = 2;
 
         adjust_list_index(&mut state, -1);
@@ -453,7 +341,11 @@ mod tests {
         let mut state = AppState::new();
         state.view = View::Similar;
         state.similar.mode = SimilarMode::Albums;
-        state.similar.albums = vec![make_album("1", "A"), make_album("2", "B"), make_album("3", "C")];
+        state.similar.albums = vec![
+            make_album("1", "A"),
+            make_album("2", "B"),
+            make_album("3", "C"),
+        ];
         state.list_state.similar_index = 0;
 
         adjust_list_index(&mut state, 2);
@@ -482,7 +374,11 @@ mod tests {
         state.view = View::Browse;
         state.focus = Focus::Left;
         state.set_browse_category(BrowseCategory::Library, false);
-        state.library.artists = vec![make_artist("1", "A"), make_artist("2", "B"), make_artist("3", "C")];
+        state.library.artists = vec![
+            make_artist("1", "A"),
+            make_artist("2", "B"),
+            make_artist("3", "C"),
+        ];
         state.list_state.artists_index = 0;
 
         adjust_list_index(&mut state, 1);
@@ -495,7 +391,11 @@ mod tests {
     fn set_queue_index_absolute() {
         let mut state = AppState::new();
         state.view = View::NowPlaying;
-        state.queue.tracks = vec![make_track("1", "A"), make_track("2", "B"), make_track("3", "C")];
+        state.queue.tracks = vec![
+            make_track("1", "A"),
+            make_track("2", "B"),
+            make_track("3", "C"),
+        ];
         state.list_state.queue_index = 0;
 
         set_list_index(&mut state, 2);
@@ -506,7 +406,11 @@ mod tests {
     fn set_queue_index_max_jumps_to_end() {
         let mut state = AppState::new();
         state.view = View::NowPlaying;
-        state.queue.tracks = vec![make_track("1", "A"), make_track("2", "B"), make_track("3", "C")];
+        state.queue.tracks = vec![
+            make_track("1", "A"),
+            make_track("2", "B"),
+            make_track("3", "C"),
+        ];
         state.list_state.queue_index = 0;
 
         set_list_index(&mut state, isize::MAX);
@@ -517,7 +421,11 @@ mod tests {
     fn set_queue_index_zero_jumps_to_start() {
         let mut state = AppState::new();
         state.view = View::NowPlaying;
-        state.queue.tracks = vec![make_track("1", "A"), make_track("2", "B"), make_track("3", "C")];
+        state.queue.tracks = vec![
+            make_track("1", "A"),
+            make_track("2", "B"),
+            make_track("3", "C"),
+        ];
         state.list_state.queue_index = 2;
 
         set_list_index(&mut state, 0);
@@ -531,12 +439,12 @@ mod tests {
             RelatedArtistGroup {
                 artist: make_artist("a1", "Artist 1"),
                 albums: vec![make_album("al1", "Album 1"), make_album("al2", "Album 2")],
-                source: RelatedSource::Plex,
+                source: RelatedSource::Navidrome,
             },
             RelatedArtistGroup {
                 artist: make_artist("a2", "Artist 2"),
                 albums: vec![make_album("al3", "Album 3")],
-                source: RelatedSource::Plex,
+                source: RelatedSource::Navidrome,
             },
         ]
     }
@@ -608,7 +516,10 @@ mod tests {
         let mut existing = vec!["apple", "cherry", "elephant"];
         let new_items = vec!["banana", "dog"];
         sorted_merge(&mut existing, new_items, |s| s.to_string());
-        assert_eq!(existing, vec!["apple", "banana", "cherry", "dog", "elephant"]);
+        assert_eq!(
+            existing,
+            vec!["apple", "banana", "cherry", "dog", "elephant"]
+        );
     }
 
     #[test]

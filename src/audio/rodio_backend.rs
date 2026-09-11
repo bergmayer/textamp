@@ -10,8 +10,8 @@ use bytes::Bytes;
 use ringbuf::{traits::*, HeapCons, HeapProd, HeapRb};
 use rodio::source::Source;
 use rodio::{
-    cpal::traits::{DeviceTrait, HostTrait}, ChannelCount, Decoder, OutputStream,
-    OutputStreamBuilder, Sample, SampleRate, Sink,
+    cpal::traits::{DeviceTrait, HostTrait},
+    ChannelCount, Decoder, OutputStream, OutputStreamBuilder, Sample, SampleRate, Sink,
 };
 use std::io::{self, Cursor, Read, Seek, SeekFrom};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -19,6 +19,22 @@ use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
+
+/// Reopenable compressed input. File-backed playback uses the same decoder,
+/// bounded PCM pipeline, and seek path as cached bytes, without loading the
+/// whole file into RAM. Temporary remote files live as long as this input.
+#[derive(Clone)]
+pub(crate) enum BufferedInput {
+    Bytes(Arc<Vec<u8>>),
+    File(crate::library::MediaFile),
+}
+impl From<Arc<Vec<u8>>> for BufferedInput {
+    fn from(bytes: Arc<Vec<u8>>) -> Self {
+        Self::Bytes(bytes)
+    }
+}
+trait AudioReader: Read + Seek + Send + Sync {}
+impl<T: Read + Seek + Send + Sync> AudioReader for T {}
 use tokio::sync::mpsc as tokio_mpsc;
 
 const SAMPLE_TAP_CAP: usize = 4_096;
@@ -47,6 +63,7 @@ pub(crate) struct StreamingInput {
     receiver: tokio_mpsc::Receiver<Bytes>,
     failure: StreamFailure,
     mime_type: Option<String>,
+    pub(crate) start_position: Duration,
 }
 
 impl StreamingInput {
@@ -54,11 +71,13 @@ impl StreamingInput {
         receiver: tokio_mpsc::Receiver<Bytes>,
         failure: StreamFailure,
         mime_type: Option<String>,
+        start_position: Duration,
     ) -> Self {
         Self {
             receiver,
             failure,
             mime_type,
+            start_position,
         }
     }
 }
@@ -93,7 +112,7 @@ impl StreamingReader {
 
 impl Read for StreamingReader {
     fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
-        if output.is_empty() {
+        if output.is_empty() || self.cancelled.load(Ordering::Acquire) {
             return Ok(0);
         }
 
@@ -138,6 +157,31 @@ impl Seek for StreamingReader {
     }
 }
 
+/// Non-seekable HTTP bodies must be decoded up to the requested time. This
+/// runs on the cancellable decoder worker with bounded buffers, never the UI
+/// or audio callback. Cached tracks still use the decoder's indexed seek.
+fn skip_stream_to(
+    decoder: &mut impl Source<Item = Sample>,
+    position: Duration,
+    cancelled: &AtomicBool,
+) {
+    // Round to whole frames before counting interleaved samples; rounding
+    // after multiplying by channels could swap left/right at fractional frames.
+    let frames = position
+        .as_nanos()
+        .saturating_mul(decoder.sample_rate() as u128)
+        / 1_000_000_000;
+    let samples = frames.saturating_mul(decoder.channels() as u128);
+    for _ in 0..samples {
+        if cancelled.load(Ordering::Acquire) {
+            return;
+        }
+        if decoder.next().is_none() {
+            break; // Seeking to the end is ordinary completion, not a playback failure.
+        }
+    }
+}
+
 enum PipelineMessage {
     Ready { playback_id: u64, sink: Sink },
     Failed { playback_id: u64, message: String },
@@ -153,9 +197,11 @@ pub(crate) enum PipelineEvent {
 /// The audio callback owns the corresponding lock-free producer directly.
 /// The mutex is touched only by the UI while swapping/draining consumers, so
 /// UI rendering cannot block the device callback.
+type StereoConsumer = HeapCons<(f32, f32)>;
+
 #[derive(Clone, Default)]
 pub struct SampleTap {
-    consumer: Arc<Mutex<Option<HeapCons<(f32, f32)>>>>,
+    consumer: Arc<Mutex<Option<StereoConsumer>>>,
 }
 
 impl std::fmt::Debug for SampleTap {
@@ -284,9 +330,7 @@ impl Iterator for PcmSource {
         if let Some(sample) = self.consumer.try_pop() {
             return Some(sample);
         }
-        if self.cancelled.load(Ordering::Acquire)
-            || self.finished.load(Ordering::Acquire)
-        {
+        if self.cancelled.load(Ordering::Acquire) || self.finished.load(Ordering::Acquire) {
             return None;
         }
 
@@ -337,7 +381,7 @@ pub struct RodioBackend {
     tap: SampleTap,
     decoder_cancelled: Option<Arc<AtomicBool>>,
     decoder_thread: Option<JoinHandle<()>>,
-    current_data: Option<Arc<Vec<u8>>>,
+    current_data: Option<BufferedInput>,
     base_position: Duration,
     underruns: Arc<AtomicU64>,
     pipeline_tx: std_mpsc::SyncSender<PipelineMessage>,
@@ -359,9 +403,7 @@ impl RodioBackend {
                 })?;
 
                 for device in devices {
-                    let name = device
-                        .name()
-                        .unwrap_or_else(|_| "<unnamed>".to_string());
+                    let name = device.name().unwrap_or_else(|_| "<unnamed>".to_string());
                     match OutputStreamBuilder::from_device(device)
                         .and_then(|builder| builder.open_stream_or_fallback())
                     {
@@ -406,12 +448,26 @@ impl RodioBackend {
     }
 
     fn try_decode(
-        data: Arc<Vec<u8>>,
-    ) -> Result<Decoder<Cursor<SharedBytes>>, AudioError> {
-        let byte_len = data.len() as u64;
+        data: impl Into<BufferedInput>,
+    ) -> Result<Decoder<Box<dyn AudioReader>>, AudioError> {
+        let (reader, byte_len): (Box<dyn AudioReader>, u64) = match data.into() {
+            BufferedInput::Bytes(data) => {
+                let len = data.len() as u64;
+                (Box::new(Cursor::new(SharedBytes(data))), len)
+            }
+            BufferedInput::File(file) => {
+                let input = std::fs::File::open(&file.path)
+                    .map_err(|e| AudioError::DecodeError(e.to_string()))?;
+                let len = input
+                    .metadata()
+                    .map_err(|e| AudioError::DecodeError(e.to_string()))?
+                    .len();
+                (Box::new(std::io::BufReader::new(input)), len)
+            }
+        };
         match crate::util::catch_expected_panic(move || {
             Decoder::builder()
-                .with_data(Cursor::new(SharedBytes(data)))
+                .with_data(reader)
                 .with_byte_len(byte_len)
                 .build()
         }) {
@@ -429,9 +485,7 @@ impl RodioBackend {
     ) -> Result<Decoder<StreamingReader>, AudioError> {
         let (reader, mime_type) = StreamingReader::new(input, cancelled);
         match crate::util::catch_expected_panic(move || {
-            let builder = Decoder::builder()
-                .with_data(reader)
-                .with_seekable(false);
+            let builder = Decoder::builder().with_data(reader).with_seekable(false);
             match mime_type {
                 Some(mime_type) => builder.with_mime_type(&mime_type).build(),
                 None => builder.build(),
@@ -453,20 +507,19 @@ impl RodioBackend {
             cancelled.store(true, Ordering::Release);
         }
         if let Some(handle) = self.decoder_thread.take() {
-            let _ = handle.join();
+            super::finish_thread(handle, "audio decoder", Duration::from_millis(250));
         }
         self.tap.clear();
         self.active_playback_id = None;
         while self.pipeline_rx.try_recv().is_ok() {}
     }
 
-    fn start_buffered(
+    pub(crate) fn start_buffered(
         &mut self,
-        data: Arc<Vec<u8>>,
+        data: BufferedInput,
         start_position: Duration,
     ) -> Result<(), AudioError> {
-        self.stop_pipeline();
-
+        let paused = self.is_paused();
         let mut decoder = Self::try_decode(data.clone())?;
         if !start_position.is_zero() {
             decoder
@@ -483,9 +536,7 @@ impl RodioBackend {
         let capacity = samples_per_second
             .saturating_mul(PCM_BUFFER_SECONDS)
             .max(8_192);
-        let prebuffer_samples = samples_per_second
-            .saturating_mul(PCM_PREBUFFER_MS)
-            / 1_000;
+        let prebuffer_samples = samples_per_second.saturating_mul(PCM_PREBUFFER_MS) / 1_000;
 
         let ring = HeapRb::new(capacity);
         let (mut producer, consumer) = ring.split();
@@ -508,6 +559,8 @@ impl RodioBackend {
             ));
         }
 
+        // Keep the old playback intact until decoding/seeking has succeeded.
+        self.stop_pipeline();
         let finished = Arc::new(AtomicBool::new(false));
         let cancelled = Arc::new(AtomicBool::new(false));
         let worker_finished = finished.clone();
@@ -554,6 +607,9 @@ impl RodioBackend {
         let tapped = TapSource::new(source, &self.tap);
         let sink = Sink::connect_new(self.stream.mixer());
         sink.set_volume(self.volume);
+        if paused {
+            sink.pause();
+        }
         sink.append(tapped);
 
         self.sink = Some(sink);
@@ -582,6 +638,7 @@ impl RodioBackend {
         let volume = self.volume;
         let underruns = self.underruns.clone();
         let failure = input.failure.clone();
+        let start_position = input.start_position;
 
         let decoder_thread = std::thread::Builder::new()
             .name("textamp-stream-decoder".to_string())
@@ -589,90 +646,97 @@ impl RodioBackend {
                 let run_cancelled = worker_cancelled.clone();
                 let run_failure = failure.clone();
                 let ready_tx = pipeline_tx.clone();
-                let result = crate::util::catch_expected_panic(move || -> Result<(), AudioError> {
-                    let mut decoder = Self::try_decode_stream(input, run_cancelled.clone())?;
-                    let channels = decoder.channels();
-                    let sample_rate = decoder.sample_rate();
-                    let samples_per_second = sample_rate as usize * channels as usize;
-                    let capacity = samples_per_second
-                        .saturating_mul(PCM_BUFFER_SECONDS)
-                        .max(8_192);
-                    let prebuffer_samples = samples_per_second
-                        .saturating_mul(PCM_PREBUFFER_MS)
-                        / 1_000;
-                    let ring = HeapRb::new(capacity);
-                    let (mut producer, consumer) = ring.split();
-
-                    for _ in 0..prebuffer_samples {
+                let result =
+                    crate::util::catch_expected_panic(move || -> Result<(), AudioError> {
+                        let mut decoder = Self::try_decode_stream(input, run_cancelled.clone())?;
+                        skip_stream_to(&mut decoder, start_position, &run_cancelled);
                         if run_cancelled.load(Ordering::Acquire) {
                             return Ok(());
                         }
-                        let Some(sample) = decoder.next() else {
-                            if let Some(message) = run_failure.message() {
-                                return Err(AudioError::PlaybackError(message));
+                        let channels = decoder.channels();
+                        let sample_rate = decoder.sample_rate();
+                        let samples_per_second = sample_rate as usize * channels as usize;
+                        let capacity = samples_per_second
+                            .saturating_mul(PCM_BUFFER_SECONDS)
+                            .max(8_192);
+                        let prebuffer_samples =
+                            samples_per_second.saturating_mul(PCM_PREBUFFER_MS) / 1_000;
+                        let ring = HeapRb::new(capacity);
+                        let (mut producer, consumer) = ring.split();
+
+                        for _ in 0..prebuffer_samples {
+                            if run_cancelled.load(Ordering::Acquire) {
+                                return Ok(());
                             }
-                            break;
-                        };
-                        if producer.try_push(sample).is_err() {
-                            break;
-                        }
-                    }
-
-                    if run_cancelled.load(Ordering::Acquire) {
-                        return Ok(());
-                    }
-
-                    let finished = Arc::new(AtomicBool::new(false));
-                    let _finished_guard = DecoderFinished(finished.clone());
-                    let source = PcmSource {
-                        consumer,
-                        finished,
-                        cancelled: run_cancelled.clone(),
-                        underruns,
-                        channels,
-                        sample_rate,
-                        duration: None,
-                    };
-                    let tapped = TapSource::new(source, &tap);
-                    let sink = Sink::connect_new(&mixer);
-                    sink.set_volume(volume);
-                    sink.append(tapped);
-                    if ready_tx
-                        .send(PipelineMessage::Ready { playback_id, sink })
-                        .is_err()
-                    {
-                        return Ok(());
-                    }
-
-                    loop {
-                        if run_cancelled.load(Ordering::Acquire) {
-                            return Ok(());
-                        }
-                        match decoder.next() {
-                            Some(sample) => {
-                                let mut sample = sample;
-                                loop {
-                                    match producer.try_push(sample) {
-                                        Ok(()) => break,
-                                        Err(returned) => {
-                                            if run_cancelled.load(Ordering::Acquire) {
-                                                return Ok(());
-                                            }
-                                            sample = returned;
-                                            std::thread::sleep(Duration::from_millis(1));
-                                        }
-                                    }
-                                }
-                            }
-                            None => {
+                            let Some(sample) = decoder.next() else {
                                 if let Some(message) = run_failure.message() {
                                     return Err(AudioError::PlaybackError(message));
                                 }
-                                return Ok(());
+                                break;
+                            };
+                            if producer.try_push(sample).is_err() {
+                                break;
                             }
                         }
-                    }
-                });
+
+                        if run_cancelled.load(Ordering::Acquire) {
+                            return Ok(());
+                        }
+
+                        let finished = Arc::new(AtomicBool::new(false));
+                        let _finished_guard = DecoderFinished(finished.clone());
+                        let source = PcmSource {
+                            consumer,
+                            finished,
+                            cancelled: run_cancelled.clone(),
+                            underruns,
+                            channels,
+                            sample_rate,
+                            duration: None,
+                        };
+                        let tapped = TapSource::new(source, &tap);
+                        let sink = Sink::connect_new(&mixer);
+                        sink.set_volume(volume);
+                        // The actor applies the latest pause state before starting
+                        // output, including a seek performed while paused.
+                        sink.pause();
+                        sink.append(tapped);
+                        if ready_tx
+                            .send(PipelineMessage::Ready { playback_id, sink })
+                            .is_err()
+                        {
+                            return Ok(());
+                        }
+
+                        loop {
+                            if run_cancelled.load(Ordering::Acquire) {
+                                return Ok(());
+                            }
+                            match decoder.next() {
+                                Some(sample) => {
+                                    let mut sample = sample;
+                                    loop {
+                                        match producer.try_push(sample) {
+                                            Ok(()) => break,
+                                            Err(returned) => {
+                                                if run_cancelled.load(Ordering::Acquire) {
+                                                    return Ok(());
+                                                }
+                                                sample = returned;
+                                                std::thread::sleep(Duration::from_millis(1));
+                                            }
+                                        }
+                                    }
+                                }
+                                None => {
+                                    if let Some(message) = run_failure.message() {
+                                        return Err(AudioError::PlaybackError(message));
+                                    }
+                                    return Ok(());
+                                }
+                            }
+                        }
+                    });
 
                 let message = match result {
                     Ok(Ok(())) => None,
@@ -693,18 +757,21 @@ impl RodioBackend {
         self.decoder_cancelled = Some(cancelled);
         self.decoder_thread = Some(decoder_thread);
         self.current_data = None;
-        self.base_position = Duration::ZERO;
+        self.base_position = start_position;
         self.active_playback_id = Some(playback_id);
         Ok(())
     }
 
-    pub(crate) fn poll_pipeline(&mut self) -> Vec<PipelineEvent> {
+    pub(crate) fn poll_pipeline(&mut self, paused: bool) -> Vec<PipelineEvent> {
         let mut events = Vec::new();
         while let Ok(message) = self.pipeline_rx.try_recv() {
             match message {
                 PipelineMessage::Ready { playback_id, sink }
                     if self.active_playback_id == Some(playback_id) =>
                 {
+                    if !paused {
+                        sink.play();
+                    }
                     self.sink = Some(sink);
                     events.push(PipelineEvent::Ready { playback_id });
                 }
@@ -740,7 +807,7 @@ impl Drop for RodioBackend {
 
 impl AudioBackend for RodioBackend {
     fn play_data(&mut self, data: Arc<Vec<u8>>) -> Result<(), AudioError> {
-        self.start_buffered(data, Duration::ZERO)
+        self.start_buffered(data.into(), Duration::ZERO)
     }
 
     fn pause(&mut self) {
@@ -810,6 +877,83 @@ impl AudioBackend for RodioBackend {
 mod tests {
     use super::*;
 
+    fn seek_wav() -> Vec<u8> {
+        let data_len = 4_000 * 2 * 2;
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data_len as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&1_000u32.to_le_bytes());
+        wav.extend_from_slice(&4_000u32.to_le_bytes());
+        wav.extend_from_slice(&4u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(data_len as u32).to_le_bytes());
+        for frame in 0..4_000i16 {
+            for _ in 0..2 {
+                wav.extend_from_slice(&(frame * 4).to_le_bytes());
+            }
+        }
+        wav
+    }
+
+    #[test]
+    fn streamed_seek_decodes_to_the_requested_stereo_frame() {
+        for millis in [0, 500, 1_500, 3_000] {
+            let (sender, receiver) = tokio_mpsc::channel(1);
+            sender.try_send(Bytes::from(seek_wav())).unwrap();
+            drop(sender);
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let input = StreamingInput::new(
+                receiver,
+                StreamFailure::default(),
+                Some("audio/wav".into()),
+                Duration::ZERO,
+            );
+            let mut decoder = RodioBackend::try_decode_stream(input, cancelled.clone()).unwrap();
+            skip_stream_to(&mut decoder, Duration::from_millis(millis), &cancelled);
+            let expected = (millis * 4) as f32 / 32768.0;
+            for _ in 0..2 {
+                assert!((decoder.next().unwrap() - expected).abs() < 0.0001);
+            }
+        }
+    }
+
+    #[test]
+    fn streamed_seek_preserves_channels_at_fractional_frame_offsets() {
+        let samples: Vec<_> = (0..1_000)
+            .flat_map(|frame| [frame as f32, -(frame as f32)])
+            .collect();
+        let mut decoder = rodio::buffer::SamplesBuffer::new(2, 44_100, samples);
+        skip_stream_to(
+            &mut decoder,
+            Duration::from_millis(5),
+            &AtomicBool::new(false),
+        );
+        assert_eq!(decoder.next(), Some(220.0));
+        assert_eq!(decoder.next(), Some(-220.0));
+    }
+
+    #[test]
+    fn streamed_seek_cancels_and_end_of_track_is_not_an_error() {
+        let mut decoder = rodio::buffer::SamplesBuffer::new(2, 1_000, vec![0.25; 2_000]);
+        skip_stream_to(
+            &mut decoder,
+            Duration::from_secs(10),
+            &AtomicBool::new(true),
+        );
+        assert_eq!(decoder.next(), Some(0.25)); // Cancelled before consuming samples.
+        skip_stream_to(
+            &mut decoder,
+            Duration::from_secs(10),
+            &AtomicBool::new(false),
+        );
+        assert_eq!(decoder.next(), None);
+    }
+
     #[test]
     fn streaming_reader_concatenates_bounded_chunks() {
         let (sender, receiver) = tokio_mpsc::channel(2);
@@ -817,13 +961,13 @@ mod tests {
         sender.try_send(Bytes::from_static(b"def")).unwrap();
         drop(sender);
 
-        let input = StreamingInput::new(receiver, StreamFailure::default(), None);
+        let input = StreamingInput::new(receiver, StreamFailure::default(), None, Duration::ZERO);
         let (mut reader, _) = StreamingReader::new(input, Arc::new(AtomicBool::new(false)));
         let mut output = Vec::new();
         reader.read_to_end(&mut output).unwrap();
 
         assert_eq!(output, b"abcdef");
-        assert_eq!(reader.seek(SeekFrom::Current(0)).unwrap(), 6);
+        assert_eq!(reader.stream_position().unwrap(), 6);
         assert_eq!(
             reader.seek(SeekFrom::Start(0)).unwrap_err().kind(),
             io::ErrorKind::Unsupported,
@@ -834,7 +978,7 @@ mod tests {
     fn streaming_reader_cancellation_does_not_wait_for_network() {
         let (_sender, receiver) = tokio_mpsc::channel(1);
         let cancelled = Arc::new(AtomicBool::new(true));
-        let input = StreamingInput::new(receiver, StreamFailure::default(), None);
+        let input = StreamingInput::new(receiver, StreamFailure::default(), None, Duration::ZERO);
         let (mut reader, _) = StreamingReader::new(input, cancelled);
         let mut output = [0; 8];
 
@@ -847,7 +991,7 @@ mod tests {
         let failure = StreamFailure::default();
         failure.set("network interrupted".to_string());
         drop(sender);
-        let input = StreamingInput::new(receiver, failure, None);
+        let input = StreamingInput::new(receiver, failure, None, Duration::ZERO);
         let (mut reader, _) = StreamingReader::new(input, Arc::new(AtomicBool::new(false)));
         let mut output = [0; 8];
 

@@ -14,36 +14,38 @@
 //! reused directly via FFI or compiled to the target platform.
 
 pub mod artist_alias_service;
-pub mod external_search;
-pub mod track_context;
-mod adventure;
 mod browse_drill;
-mod cache_service;
+pub mod compilations;
+pub mod external_search;
 mod folder_service;
-mod library_service;
+
 mod list_filter_service;
 mod navigation_service;
 mod playback_service;
-mod preload_service;
+pub mod radio;
 mod search_filter_service;
+pub mod track_context;
 
-
-pub use adventure::{generate_adventure, generate_adventure_for_library};
 pub use browse_drill::{plan_drill, ClickContext, DrillPlan};
-pub use cache_service::{CacheDataSources, CacheSaveConditions, CacheService, CACHE_IDLE_THRESHOLD_SECS, CACHE_SAVE_INTERVAL_SECS};
-pub use folder_service::{FolderColumn, FolderItem, FolderItemType, FolderNavigationState, FolderService};
-pub use library_service::LibraryService;
-pub use list_filter_service::{browse_filter_records, filter_with_priority, filter_browse_items, filter_browse_records, filter_folder_items, filter_stations, search_with_ranking, search_albums_with_ranking, search_tracks_with_ranking, BrowseFilterRecord, DEFAULT_MAX_RESULTS};
+pub use folder_service::{
+    FolderColumn, FolderItem, FolderItemType, FolderNavigationState, FolderService,
+};
+
+pub use list_filter_service::{
+    browse_filter_records, filter_browse_items, filter_browse_records, filter_folder_items,
+    filter_stations, filter_with_priority, search_albums_with_ranking, search_tracks_with_ranking,
+    search_with_ranking, BrowseFilterRecord, DEFAULT_MAX_RESULTS,
+};
 pub use navigation_service::NavigationService;
-pub use playback_service::{PlaybackService, QueueManager, NavigationResult, MAX_HISTORY_SIZE};
-pub use preload_service::{ConnectionParams, PreloadService};
+pub use playback_service::{shuffle_queue, MAX_HISTORY_SIZE};
 pub use search_filter_service::{FilteredItem, SearchFilterService};
 
-
-// Re-export waveform from plex module for backward compatibility
-pub use crate::plex::{
-    WaveformCache, WaveformData, WaveformError, decode_to_pcm, generate_waveform,
-    generate_waveform_from_pcm,
+// Re-export waveform from media module for backward compatibility
+pub use crate::media::{
+    generate_waveform, generate_waveform_from_pcm, WaveformCache, WaveformData, WaveformError,
 };
-// Re-export spectrogram from plex module
-pub use crate::plex::{SpectrogramCache, SpectrogramData, generate_spectrogram, generate_spectrogram_from_pcm};
+// Re-export spectrogram from media module
+pub use crate::media::{
+    generate_spectrogram, generate_spectrogram_from_pcm, SpectrogramCache, SpectrogramData,
+};
+pub mod biography;

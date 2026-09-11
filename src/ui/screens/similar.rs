@@ -3,11 +3,11 @@
 //! Shows albums or tracks sonically similar to the selected item,
 //! rendered as a centered popup over the previous view.
 
-use crate::app::AppState;
 use crate::app::state::SimilarMode;
 use crate::services::NavigationService;
 use crate::ui::layout::centered_rect;
 use crate::ui::theme::theme;
+use crate::ui::RenderState as AppState;
 use crate::util::{format_duration, truncate_middle};
 
 use ratatui::prelude::*;
@@ -26,7 +26,10 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         SimilarMode::Tracks => "tracks",
         SimilarMode::Artists => "artists",
     };
-    let title = format!(" similar {} to: {} ", mode_label, state.similar.source_title);
+    let title = format!(
+        " similar {} to: {} ",
+        mode_label, state.similar.source_title
+    );
     let block = Block::default()
         .title(title)
         .title_style(Style::default().fg(t.colors.fg_accent))
@@ -39,7 +42,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     // Register hit regions for mouse handler (tab_hint set below after footer rendering)
     {
         let mut hr = state.hit_regions.borrow_mut();
-        hr.similar_content = Some(crate::ui::hit_regions::SimilarRegions {
+        hr.similar_content = Some(crate::app::presentation::SimilarRegions {
             outer: popup_area,
             inner,
             rows_per_item: 2,
@@ -85,7 +88,10 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         SimilarMode::Tracks => {
             if let Some(ref album_title) = state.similar.tab_album_title {
                 has_tab_hint = true;
-                footer_spans.push(Span::styled("  [Tab] ", Style::default().fg(t.colors.shortcut_key)));
+                footer_spans.push(Span::styled(
+                    "  [Tab] ",
+                    Style::default().fg(t.colors.shortcut_key),
+                ));
                 footer_spans.push(Span::styled(
                     format!("similar albums to: {}", album_title),
                     Style::default().fg(t.colors.fg_muted),
@@ -97,11 +103,16 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
             let track_label = if let Some(ref title) = state.similar.tab_track_title {
                 Some(title.clone())
             } else {
-                state.current_track().map(|t| format!("{} - {}", t.artist_name(), t.title))
+                state
+                    .current_track()
+                    .map(|t| format!("{} - {}", t.artist_name(), t.title))
             };
             if let Some(label) = track_label {
                 has_tab_hint = true;
-                footer_spans.push(Span::styled("  [Tab] ", Style::default().fg(t.colors.shortcut_key)));
+                footer_spans.push(Span::styled(
+                    "  [Tab] ",
+                    Style::default().fg(t.colors.shortcut_key),
+                ));
                 footer_spans.push(Span::styled(
                     format!("similar tracks to: {}", label),
                     Style::default().fg(t.colors.fg_muted),
@@ -152,7 +163,8 @@ fn render_albums(frame: &mut Frame, state: &AppState, inner: Rect, popup_area: R
     let max_text_width = inner.width.saturating_sub(4) as usize;
 
     let items: Vec<ListItem> = state
-        .similar.albums
+        .similar
+        .albums
         .iter()
         .enumerate()
         .skip(scroll_offset)
@@ -211,7 +223,14 @@ fn render_albums(frame: &mut Frame, state: &AppState, inner: Rect, popup_area: R
 
     // Scrollbar + position indicator
     if total > visible_item_count {
-        crate::ui::widgets::render_scrollbar(frame, popup_area, total, visible_item_count, scroll_offset, None);
+        crate::ui::widgets::render_scrollbar(
+            frame,
+            popup_area,
+            total,
+            visible_item_count,
+            scroll_offset,
+            None,
+        );
 
         let footer = format!("{}/{}", selected_idx + 1, total);
         let footer_area = Rect::new(
@@ -251,7 +270,8 @@ fn render_tracks(frame: &mut Frame, state: &AppState, inner: Rect, popup_area: R
     let max_text_width = inner.width.saturating_sub(4) as usize;
 
     let items: Vec<ListItem> = state
-        .similar.tracks
+        .similar
+        .tracks
         .iter()
         .enumerate()
         .skip(scroll_offset)
@@ -304,7 +324,14 @@ fn render_tracks(frame: &mut Frame, state: &AppState, inner: Rect, popup_area: R
 
     // Scrollbar + position indicator
     if total > visible_item_count {
-        crate::ui::widgets::render_scrollbar(frame, popup_area, total, visible_item_count, scroll_offset, None);
+        crate::ui::widgets::render_scrollbar(
+            frame,
+            popup_area,
+            total,
+            visible_item_count,
+            scroll_offset,
+            None,
+        );
 
         let footer = format!("{}/{}", selected_idx + 1, total);
         let footer_area = Rect::new(
@@ -344,7 +371,8 @@ fn render_artists(frame: &mut Frame, state: &AppState, inner: Rect, popup_area: 
     let max_text_width = inner.width.saturating_sub(4) as usize;
 
     let items: Vec<ListItem> = state
-        .similar.artists
+        .similar
+        .artists
         .iter()
         .enumerate()
         .skip(scroll_offset)
@@ -359,7 +387,12 @@ fn render_artists(frame: &mut Frame, state: &AppState, inner: Rect, popup_area: 
             let genres: String = if artist.genre.is_empty() {
                 String::new()
             } else {
-                artist.genre.iter().map(|g| g.tag.as_str()).collect::<Vec<_>>().join(", ")
+                artist
+                    .genre
+                    .iter()
+                    .map(|g| g.tag.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             };
             let subtitle_width = max_text_width.saturating_sub(5);
             let genre_display = truncate_middle(&genres, subtitle_width);
@@ -390,7 +423,14 @@ fn render_artists(frame: &mut Frame, state: &AppState, inner: Rect, popup_area: 
 
     // Scrollbar + position indicator
     if total > visible_item_count {
-        crate::ui::widgets::render_scrollbar(frame, popup_area, total, visible_item_count, scroll_offset, None);
+        crate::ui::widgets::render_scrollbar(
+            frame,
+            popup_area,
+            total,
+            visible_item_count,
+            scroll_offset,
+            None,
+        );
 
         let footer = format!("{}/{}", selected_idx + 1, total);
         let footer_area = Rect::new(

@@ -50,8 +50,8 @@ impl AppLayout {
         let main_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(5),     // Main content
-                Constraint::Length(2),  // Transport bar
+                Constraint::Min(5),    // Main content
+                Constraint::Length(2), // Transport bar
             ])
             .split(area);
 
@@ -76,17 +76,19 @@ impl AppLayout {
     pub fn without_transport(area: Rect) -> Self {
         let content_chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Length(30),
-                Constraint::Min(40),
-            ])
+            .constraints([Constraint::Length(30), Constraint::Min(40)])
             .split(area);
         Self {
             left_panel: content_chunks[0],
             right_panel: content_chunks[1],
             // Zero-size rect — `render_transport` is gated and won't
             // be called, but the field has to exist for the struct.
-            transport: Rect { x: area.x, y: area.y + area.height, width: 0, height: 0 },
+            transport: Rect {
+                x: area.x,
+                y: area.y + area.height,
+                width: 0,
+                height: 0,
+            },
         }
     }
 }
@@ -103,10 +105,7 @@ impl FullScreenLayout {
     pub fn new(area: Rect) -> Self {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(5),
-                Constraint::Length(2),
-            ])
+            .constraints([Constraint::Min(5), Constraint::Length(2)])
             .split(area);
 
         Self {
@@ -120,7 +119,12 @@ impl FullScreenLayout {
     pub fn without_transport(area: Rect) -> Self {
         Self {
             content: area,
-            transport: Rect { x: area.x, y: area.y + area.height, width: 0, height: 0 },
+            transport: Rect {
+                x: area.x,
+                y: area.y + area.height,
+                width: 0,
+                height: 0,
+            },
         }
     }
 }

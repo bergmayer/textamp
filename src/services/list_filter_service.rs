@@ -48,6 +48,133 @@ fn normalize_for_search(s: &str) -> String {
         .collect()
 }
 
+/// Lower-cased text paired with the punctuation/accent-folded form used by
+/// every list search. Keeping the predicates here prevents each ranking loop
+/// from rebuilding the same compound conditions.
+struct SearchText {
+    raw: String,
+    normalized: String,
+}
+
+impl SearchText {
+    fn new(value: &str) -> Self {
+        let raw = value.to_lowercase();
+        let normalized = normalize_for_search(&raw);
+        Self { raw, normalized }
+    }
+
+    fn exact(&self, query: &Self) -> bool {
+        self.raw == query.raw || self.normalized == query.normalized
+    }
+
+    fn starts_with(&self, query: &Self) -> bool {
+        self.raw.starts_with(&query.raw) || self.normalized.starts_with(&query.normalized)
+    }
+
+    fn word_starts_with(&self, query: &Self) -> bool {
+        self.raw
+            .split_whitespace()
+            .any(|word| word.starts_with(&query.raw))
+            || self
+                .normalized
+                .split_whitespace()
+                .any(|word| word.starts_with(&query.normalized))
+    }
+
+    fn last_word_starts_with(&self, query: &Self) -> bool {
+        self.raw
+            .split_whitespace()
+            .next_back()
+            .unwrap_or("")
+            .starts_with(&query.raw)
+            || self
+                .normalized
+                .split_whitespace()
+                .next_back()
+                .unwrap_or("")
+                .starts_with(&query.normalized)
+    }
+
+    fn contains(&self, query: &Self) -> bool {
+        self.raw.contains(&query.raw) || self.normalized.contains(&query.normalized)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FilterRank {
+    StartsWith = 0,
+    WordStartsWith = 1,
+    Contains = 2,
+}
+
+fn filter_rank(text: &SearchText, query: &SearchText, short_query: bool) -> Option<FilterRank> {
+    if text.starts_with(query) {
+        Some(FilterRank::StartsWith)
+    } else if short_query {
+        None
+    } else if text.word_starts_with(query) {
+        Some(FilterRank::WordStartsWith)
+    } else if text.contains(query) {
+        Some(FilterRank::Contains)
+    } else {
+        None
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SearchRank {
+    Exact = 0,
+    LastWordStartsWith = 1,
+    StartsWith = 2,
+    WordStartsWith = 3,
+    Contains = 4,
+}
+
+fn search_rank(text: &SearchText, query: &SearchText) -> Option<SearchRank> {
+    if text.exact(query) {
+        Some(SearchRank::Exact)
+    } else if text.starts_with(query) {
+        Some(SearchRank::StartsWith)
+    } else if text.last_word_starts_with(query) {
+        Some(SearchRank::LastWordStartsWith)
+    } else if text.word_starts_with(query) {
+        Some(SearchRank::WordStartsWith)
+    } else if text.contains(query) {
+        Some(SearchRank::Contains)
+    } else {
+        None
+    }
+}
+
+fn finish_filter<const N: usize>(
+    buckets: [Vec<usize>; N],
+    max_results: usize,
+) -> ListFilterResults {
+    let mut matched_indices: Vec<_> = buckets.into_iter().flatten().collect();
+    let total_matches = matched_indices.len();
+    let has_more = total_matches > max_results;
+    matched_indices.truncate(max_results);
+
+    ListFilterResults {
+        matched_indices,
+        total_matches,
+        has_more,
+    }
+}
+
+fn collect_ranked<T: Clone, const N: usize>(
+    items: &[T],
+    buckets: [Vec<usize>; N],
+    max_results: usize,
+) -> Vec<T> {
+    buckets
+        .into_iter()
+        .flatten()
+        .take(max_results)
+        .map(|index| items[index].clone())
+        .collect()
+}
+
 /// Filter items with priority-based matching.
 ///
 /// Returns indices of matching items in priority order:
@@ -73,45 +200,18 @@ where
         return ListFilterResults::default();
     }
 
-    let query_lower = query.to_lowercase();
-    let query_normalized = normalize_for_search(&query_lower);
     let short_query = query.len() < 2;
-
-    let mut priority1: Vec<usize> = Vec::new(); // Starts with (exact or accent-folded)
-    let mut priority2: Vec<usize> = Vec::new(); // Word starts with
-    let mut priority3: Vec<usize> = Vec::new(); // Contains
+    let query = SearchText::new(query);
+    let mut buckets: [Vec<usize>; 3] = Default::default();
 
     for (idx, item) in items.iter().enumerate() {
-        let title = get_title(item).to_lowercase();
-        let title_norm = normalize_for_search(&title);
-
-        if title.starts_with(&query_lower) || title_norm.starts_with(&query_normalized) {
-            priority1.push(idx);
-        } else if !short_query {
-            if title.split_whitespace().any(|w| w.starts_with(&query_lower))
-                || title_norm.split_whitespace().any(|w| w.starts_with(&query_normalized))
-            {
-                priority2.push(idx);
-            } else if title.contains(&query_lower) || title_norm.contains(&query_normalized) {
-                priority3.push(idx);
-            }
+        let title = SearchText::new(get_title(item));
+        if let Some(rank) = filter_rank(&title, &query, short_query) {
+            buckets[rank as usize].push(idx);
         }
     }
 
-    // Combine results in priority order
-    let mut matched_indices = priority1;
-    matched_indices.extend(priority2);
-    matched_indices.extend(priority3);
-
-    let total_matches = matched_indices.len();
-    let has_more = matched_indices.len() > max_results;
-    matched_indices.truncate(max_results);
-
-    ListFilterResults {
-        matched_indices,
-        total_matches,
-        has_more,
-    }
+    finish_filter(buckets, max_results)
 }
 
 /// Lightweight projection used to move large columns to a filtering worker
@@ -124,9 +224,21 @@ pub struct BrowseFilterRecord {
     pub is_compilations: bool,
 }
 
-pub fn browse_filter_records(
-    items: &[crate::app::state::BrowseItem],
-) -> Vec<BrowseFilterRecord> {
+fn artist_alias_matches(
+    artist_key: &str,
+    aliases_by_artist: &std::collections::HashMap<String, std::collections::HashSet<String>>,
+    query: &str,
+) -> bool {
+    aliases_by_artist.get(artist_key).is_some_and(|aliases| {
+        let query = crate::services::artist_alias_service::normalize_artist_name(query);
+        aliases.iter().any(|alias| {
+            let alias = crate::services::artist_alias_service::normalize_artist_name(alias);
+            alias.starts_with(&query) || alias.contains(&query)
+        })
+    })
+}
+
+pub fn browse_filter_records(items: &[crate::app::state::BrowseItem]) -> Vec<BrowseFilterRecord> {
     use crate::app::state::BrowseItem;
 
     items
@@ -159,68 +271,41 @@ pub fn filter_browse_records(
     }
 
     let query_lower = query.to_lowercase();
-    let query_normalized = normalize_for_search(&query_lower);
+    let query_text = SearchText::new(&query_lower);
     let short_query = query.len() < 2;
-
-    let mut priority1: Vec<usize> = Vec::new(); // Starts with (exact or accent-folded)
-    let mut priority2: Vec<usize> = Vec::new(); // Word starts with
-    let mut priority3: Vec<usize> = Vec::new(); // Contains
-    let mut priority4: Vec<usize> = Vec::new(); // Year match / alias match
+    let mut buckets: [Vec<usize>; 4] = Default::default();
 
     // Track whether any compilation-only artist matched (to inject Compilations entry)
     let mut compilation_artist_matched = false;
 
     for (idx, item) in items.iter().enumerate() {
+        let title = SearchText::new(&item.title);
+
         // Skip compilation-only artists (they appear only on compilations)
         if let Some(key) = item.artist_key.as_deref() {
             if !compilation_artist_keys.is_empty() && compilation_artist_keys.contains(key) {
                 // Check if it matches the query — if so, flag for Compilations injection
-                let title = item.title.to_lowercase();
-                let title_norm = normalize_for_search(&title);
-                if title.starts_with(&query_lower) || title_norm.starts_with(&query_normalized)
-                    || (!short_query && (title.split_whitespace().any(|w| w.starts_with(&query_lower))
-                        || title_norm.split_whitespace().any(|w| w.starts_with(&query_normalized))
-                        || title.contains(&query_lower) || title_norm.contains(&query_normalized)))
-                {
+                if filter_rank(&title, &query_text, short_query).is_some() {
                     compilation_artist_matched = true;
                 }
                 continue; // Skip this artist from results
             }
         }
 
-        let title = item.title.to_lowercase();
-        let title_norm = normalize_for_search(&title);
-
-        if title.starts_with(&query_lower) || title_norm.starts_with(&query_normalized) {
-            priority1.push(idx);
-        } else if !short_query {
-            if title.split_whitespace().any(|w| w.starts_with(&query_lower))
-                || title_norm.split_whitespace().any(|w| w.starts_with(&query_normalized))
-            {
-                priority2.push(idx);
-            } else if title.contains(&query_lower) || title_norm.contains(&query_normalized) {
-                priority3.push(idx);
-            } else if let Some(year) = item.album_year {
-                if year.to_string().contains(&query_lower) {
-                    priority4.push(idx);
-                }
-            } else if let Some(key) = item.artist_key.as_deref() {
-                // Check artist aliases (with normalization)
-                if let Some(aliases) = artist_aliases.get(key) {
-                    let query_norm = crate::services::artist_alias_service::normalize_artist_name(&query_lower);
-                    if aliases.iter().any(|alias| {
-                        let a = crate::services::artist_alias_service::normalize_artist_name(alias);
-                        a.starts_with(&query_norm) || a.contains(&query_norm)
-                    }) {
-                        priority4.push(idx);
+        match filter_rank(&title, &query_text, short_query) {
+            Some(rank) => buckets[rank as usize].push(idx),
+            None => {
+                if let Some(year) = item.album_year {
+                    if year.to_string().contains(&query_lower) {
+                        buckets[3].push(idx);
                     }
-                }
-            }
-        } else {
-            // Short query: check year match for single-char digits too
-            if let Some(year) = item.album_year {
-                if year.to_string().contains(&query_lower) {
-                    priority4.push(idx);
+                } else if !short_query
+                    && item
+                        .artist_key
+                        .as_deref()
+                        .is_some_and(|key| artist_alias_matches(key, artist_aliases, &query_lower))
+                {
+                    buckets[3].push(idx);
                 }
             }
         }
@@ -231,28 +316,13 @@ pub fn filter_browse_records(
     if compilation_artist_matched {
         if let Some(comp_idx) = items.iter().position(|item| item.is_compilations) {
             // Add at the end of priority4 if not already in results
-            if !priority1.contains(&comp_idx) && !priority2.contains(&comp_idx)
-                && !priority3.contains(&comp_idx) && !priority4.contains(&comp_idx)
-            {
-                priority4.push(comp_idx);
+            if !buckets.iter().any(|bucket| bucket.contains(&comp_idx)) {
+                buckets[3].push(comp_idx);
             }
         }
     }
 
-    let mut matched_indices = priority1;
-    matched_indices.extend(priority2);
-    matched_indices.extend(priority3);
-    matched_indices.extend(priority4);
-
-    let total_matches = matched_indices.len();
-    let has_more = matched_indices.len() > max_results;
-    matched_indices.truncate(max_results);
-
-    ListFilterResults {
-        matched_indices,
-        total_matches,
-        has_more,
-    }
+    finish_filter(buckets, max_results)
 }
 
 /// Filter BrowseItem lists with year matching for albums.
@@ -283,7 +353,7 @@ pub fn filter_folder_items(
 
 /// Wrapper for filtering stations.
 pub fn filter_stations(
-    items: &[crate::plex::models::Station],
+    items: &[crate::library::models::Station],
     query: &str,
     max_results: usize,
 ) -> ListFilterResults {
@@ -312,48 +382,17 @@ where
         return vec![];
     }
 
-    let query_lower = query.to_lowercase();
-    let query_normalized = normalize_for_search(&query_lower);
-
-    let mut bucket1: Vec<usize> = Vec::new(); // Exact match
-    let mut bucket2: Vec<usize> = Vec::new(); // Last word starts with
-    let mut bucket3: Vec<usize> = Vec::new(); // Title starts with
-    let mut bucket4: Vec<usize> = Vec::new(); // Any word starts with
-    let mut bucket5: Vec<usize> = Vec::new(); // Contains
+    let query = SearchText::new(query);
+    let mut buckets: [Vec<usize>; 5] = Default::default();
 
     for (idx, item) in items.iter().enumerate() {
-        let title = get_title(item).to_lowercase();
-        let title_norm = normalize_for_search(&title);
-
-        if title == query_lower || title_norm == query_normalized {
-            bucket1.push(idx);
-        } else if title.starts_with(&query_lower) || title_norm.starts_with(&query_normalized) {
-            bucket3.push(idx);
-        } else {
-            let last_word = title.split_whitespace().last().unwrap_or("");
-            let last_word_norm = title_norm.split_whitespace().last().unwrap_or("");
-            if last_word.starts_with(&query_lower) || last_word_norm.starts_with(&query_normalized) {
-                bucket2.push(idx);
-            } else if title.split_whitespace().any(|w| w.starts_with(&query_lower))
-                || title_norm.split_whitespace().any(|w| w.starts_with(&query_normalized))
-            {
-                bucket4.push(idx);
-            } else if title.contains(&query_lower) || title_norm.contains(&query_normalized) {
-                bucket5.push(idx);
-            }
+        let title = SearchText::new(get_title(item));
+        if let Some(rank) = search_rank(&title, &query) {
+            buckets[rank as usize].push(idx);
         }
     }
 
-    let mut result = Vec::new();
-    for bucket in [bucket1, bucket2, bucket3, bucket4, bucket5] {
-        for idx in bucket {
-            if result.len() >= max_results {
-                return result;
-            }
-            result.push(items[idx].clone());
-        }
-    }
-    result
+    collect_ranked(items, buckets, max_results)
 }
 
 /// Search albums with priority-based ranking, including year matching.
@@ -361,59 +400,31 @@ where
 /// Same priorities as `search_with_ranking`, plus:
 /// 7. Year matches query
 pub fn search_albums_with_ranking(
-    albums: &[crate::plex::models::Album],
+    albums: &[crate::library::models::Album],
     query: &str,
     max_results: usize,
-) -> Vec<crate::plex::models::Album> {
+) -> Vec<crate::library::models::Album> {
     if query.is_empty() {
         return vec![];
     }
 
     let query_lower = query.to_lowercase();
-    let query_normalized = normalize_for_search(&query_lower);
-
-    let mut bucket1: Vec<usize> = Vec::new(); // Exact match
-    let mut bucket2: Vec<usize> = Vec::new(); // Last word starts with
-    let mut bucket3: Vec<usize> = Vec::new(); // Title starts with
-    let mut bucket4: Vec<usize> = Vec::new(); // Any word starts with
-    let mut bucket5: Vec<usize> = Vec::new(); // Contains
-    let mut bucket6: Vec<usize> = Vec::new(); // Year match
+    let query_text = SearchText::new(&query_lower);
+    let mut buckets: [Vec<usize>; 6] = Default::default();
 
     for (idx, album) in albums.iter().enumerate() {
-        let title = album.title.to_lowercase();
-        let title_norm = normalize_for_search(&title);
-
-        if title == query_lower || title_norm == query_normalized {
-            bucket1.push(idx);
-        } else if title.starts_with(&query_lower) || title_norm.starts_with(&query_normalized) {
-            bucket3.push(idx);
-        } else {
-            let last_word = title.split_whitespace().last().unwrap_or("");
-            let last_word_norm = title_norm.split_whitespace().last().unwrap_or("");
-            if last_word.starts_with(&query_lower) || last_word_norm.starts_with(&query_normalized) {
-                bucket2.push(idx);
-            } else if title.split_whitespace().any(|w| w.starts_with(&query_lower))
-                || title_norm.split_whitespace().any(|w| w.starts_with(&query_normalized))
-            {
-                bucket4.push(idx);
-            } else if title.contains(&query_lower) || title_norm.contains(&query_normalized) {
-                bucket5.push(idx);
-            } else if album.year.map(|y| y.to_string().contains(&query_lower)).unwrap_or(false) {
-                bucket6.push(idx);
-            }
+        let title = SearchText::new(&album.title);
+        if let Some(rank) = search_rank(&title, &query_text) {
+            buckets[rank as usize].push(idx);
+        } else if album
+            .year
+            .is_some_and(|year| year.to_string().contains(&query_lower))
+        {
+            buckets[5].push(idx);
         }
     }
 
-    let mut result = Vec::new();
-    for bucket in [bucket1, bucket2, bucket3, bucket4, bucket5, bucket6] {
-        for idx in bucket {
-            if result.len() >= max_results {
-                return result;
-            }
-            result.push(albums[idx].clone());
-        }
-    }
-    result
+    collect_ranked(albums, buckets, max_results)
 }
 
 /// Search tracks with multi-field priority-based ranking.
@@ -428,62 +439,43 @@ pub fn search_albums_with_ranking(
 /// 7. Artist name contains query
 /// 8. Normalized contains (either field)
 pub fn search_tracks_with_ranking(
-    tracks: &[crate::plex::models::Track],
+    tracks: &[crate::library::models::Track],
     query: &str,
     max_results: usize,
-) -> Vec<crate::plex::models::Track> {
+) -> Vec<crate::library::models::Track> {
     if query.is_empty() {
         return vec![];
     }
 
-    let query_lower = query.to_lowercase();
-    let query_normalized = normalize_for_search(&query_lower);
-
-    let mut bucket1: Vec<usize> = Vec::new(); // Exact title match
-    let mut bucket2: Vec<usize> = Vec::new(); // Title starts with
-    let mut bucket3: Vec<usize> = Vec::new(); // Artist starts with
-    let mut bucket4: Vec<usize> = Vec::new(); // Any word in title starts with
-    let mut bucket5: Vec<usize> = Vec::new(); // Any word in artist starts with
-    let mut bucket6: Vec<usize> = Vec::new(); // Title contains
-    let mut bucket7: Vec<usize> = Vec::new(); // Artist contains
+    let query = SearchText::new(query);
+    let mut buckets: [Vec<usize>; 7] = Default::default();
 
     for (idx, track) in tracks.iter().enumerate() {
-        let title = track.title.to_lowercase();
-        let artist = track.grandparent_title.as_deref().unwrap_or("").to_lowercase();
-        let title_norm = normalize_for_search(&title);
-        let artist_norm = normalize_for_search(&artist);
-
-        if title == query_lower || title_norm == query_normalized {
-            bucket1.push(idx);
-        } else if title.starts_with(&query_lower) || title_norm.starts_with(&query_normalized) {
-            bucket2.push(idx);
-        } else if artist.starts_with(&query_lower) || artist_norm.starts_with(&query_normalized) {
-            bucket3.push(idx);
-        } else if title.split_whitespace().any(|w| w.starts_with(&query_lower))
-            || title_norm.split_whitespace().any(|w| w.starts_with(&query_normalized))
-        {
-            bucket4.push(idx);
-        } else if artist.split_whitespace().any(|w| w.starts_with(&query_lower))
-            || artist_norm.split_whitespace().any(|w| w.starts_with(&query_normalized))
-        {
-            bucket5.push(idx);
-        } else if title.contains(&query_lower) || title_norm.contains(&query_normalized) {
-            bucket6.push(idx);
-        } else if artist.contains(&query_lower) || artist_norm.contains(&query_normalized) {
-            bucket7.push(idx);
+        let title = SearchText::new(&track.title);
+        let artist = SearchText::new(track.grandparent_title.as_deref().unwrap_or(""));
+        let rank = if title.exact(&query) {
+            Some(0)
+        } else if title.starts_with(&query) {
+            Some(1)
+        } else if artist.starts_with(&query) {
+            Some(2)
+        } else if title.word_starts_with(&query) {
+            Some(3)
+        } else if artist.word_starts_with(&query) {
+            Some(4)
+        } else if title.contains(&query) {
+            Some(5)
+        } else if artist.contains(&query) {
+            Some(6)
+        } else {
+            None
+        };
+        if let Some(rank) = rank {
+            buckets[rank].push(idx);
         }
     }
 
-    let mut result = Vec::new();
-    for bucket in [bucket1, bucket2, bucket3, bucket4, bucket5, bucket6, bucket7] {
-        for idx in bucket {
-            if result.len() >= max_results {
-                return result;
-            }
-            result.push(tracks[idx].clone());
-        }
-    }
-    result
+    collect_ranked(tracks, buckets, max_results)
 }
 
 #[cfg(test)]
@@ -551,5 +543,57 @@ mod tests {
 
         assert!(results.matched_indices.is_empty());
         assert_eq!(results.total_matches, 0);
+    }
+
+    #[test]
+    fn search_ranking_preserves_last_word_priority() {
+        let items = vec!["Bach Ensemble", "Johann Sebastian Bach", "Bach"];
+        let results = search_with_ranking(&items, "bach", |item| *item, 100);
+
+        assert_eq!(
+            results,
+            vec!["Bach", "Johann Sebastian Bach", "Bach Ensemble"]
+        );
+    }
+
+    #[test]
+    fn album_search_falls_back_to_year() {
+        let albums = vec![
+            crate::library::models::Album {
+                title: "Older Album".to_string(),
+                year: Some(1999),
+                ..Default::default()
+            },
+            crate::library::models::Album {
+                title: "Newer Album".to_string(),
+                year: Some(2024),
+                ..Default::default()
+            },
+        ];
+
+        let results = search_albums_with_ranking(&albums, "1999", 100);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "Older Album");
+    }
+
+    #[test]
+    fn track_search_ranks_title_before_artist() {
+        let tracks = vec![
+            crate::library::models::Track {
+                title: "Something Else".to_string(),
+                grandparent_title: Some("Blue Train".to_string()),
+                ..Default::default()
+            },
+            crate::library::models::Track {
+                title: "Blue Train".to_string(),
+                grandparent_title: Some("John Coltrane".to_string()),
+                ..Default::default()
+            },
+        ];
+
+        let results = search_tracks_with_ranking(&tracks, "blue", 100);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].title, "Blue Train");
+        assert_eq!(results[1].title, "Something Else");
     }
 }
