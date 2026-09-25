@@ -41,10 +41,11 @@ pub async fn dispatch_action(
         }
         let provider_actions = crate::app::sources::route(&next, state, audio, event_tx);
         if let Some(actions) = provider_actions {
+            pending.extend(restore_column_artwork(state, config).into_iter().rev());
             pending.extend(actions.into_iter().rev());
             continue;
         }
-        let follow_ups = match next {
+        let mut follow_ups = match next {
             Action::Source(a) => {
                 crate::app::sources::dispatch(a, state, audio, config, event_tx).await?
             }
@@ -79,6 +80,8 @@ pub async fn dispatch_action(
             }
         };
 
+        follow_ups.extend(restore_column_artwork(state, config));
+
         // Depth-first, in returned order, matching recursive dispatch without
         // allocating a boxed future for every follow-up.
         for f in follow_ups.into_iter().rev() {
@@ -87,7 +90,62 @@ pub async fn dispatch_action(
     }
 
     crate::app::sources::sonic::reconcile(state);
+    crate::app::sources::dialogs::restore_parent(state);
     Ok(())
+}
+
+fn restore_column_artwork(state: &mut AppState, config: &Config) -> Vec<Action> {
+    let Some(library_key) = state.active_library.as_deref() else {
+        return vec![];
+    };
+    let Some(views) = config
+        .ui
+        .library_view_settings
+        .get(library_key)
+        .map(|settings| settings.columns.clone())
+    else {
+        return vec![];
+    };
+    let category = state.browse_category;
+    let mut enabled_columns = Vec::new();
+    {
+        let Some(nav) = state.browse_nav_mut() else {
+            return vec![];
+        };
+        for index in 0..nav.columns.len() {
+            let Some(key) = crate::app::state::column_artwork_key(category, &nav.columns, index)
+            else {
+                continue;
+            };
+            let Some(&visible) = views.get(&key) else {
+                continue;
+            };
+            let Some(column) = nav.columns.get_mut(index) else {
+                continue;
+            };
+            if column.artwork_visible != visible {
+                column.artwork_visible = visible;
+                if visible {
+                    enabled_columns.push(index);
+                }
+            }
+        }
+    }
+    let mut batch = Vec::new();
+    if let Some(nav) = state.browse_nav() {
+        for index in enabled_columns {
+            batch.extend(crate::app::handlers::dispatch_miller::collect_art_to_load(
+                nav.columns.get(index),
+                &state.artwork.grid_cache,
+                &state.artwork.grid_pending,
+            ));
+        }
+    }
+    if batch.is_empty() {
+        vec![]
+    } else {
+        vec![SystemAction::LoadAlbumArt(batch).into()]
+    }
 }
 
 /// Translate a core event into zero or more `Action`s without dispatching.

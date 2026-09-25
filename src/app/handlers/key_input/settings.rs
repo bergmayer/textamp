@@ -54,164 +54,129 @@ pub(super) fn handle_help_keys(key: event::KeyEvent, state: &mut AppState) -> Ve
     }
 }
 
-/// Handle Settings view keys.
+/// Settings owns navigation; Tab visits menus and controls in screen order.
 pub(super) fn handle_settings_keys(
     key: event::KeyEvent,
     state: &mut AppState,
     _config: &crate::config::Config,
 ) -> Vec<Action> {
-    use crate::app::state::{SettingsFocus, SettingsSection};
-
+    use crate::app::state::{SettingsFocus as Focus, SettingsSection as Section};
+    let textamp = state.settings_state.section == Section::Textamp;
+    let focus = state.settings_state.focus;
+    if matches!(key.code, KeyCode::F(10)) {
+        state.settings_state.focus = Focus::Sections;
+        return vec![];
+    }
+    if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
+        state.settings_state.focus = match (focus, key.code == KeyCode::Tab, textamp) {
+            (Focus::Sections, true, true) | (Focus::Content, false, true) => Focus::Pages,
+            (Focus::Sections, _, _) | (Focus::Pages, true, _) => Focus::Content,
+            _ => Focus::Sections,
+        };
+        return vec![];
+    }
+    if key.code == KeyCode::Esc {
+        if focus == Focus::Sections {
+            return vec![NavigationAction::SetView(View::Browse).into()];
+        }
+        state.settings_state.focus = Focus::Sections;
+        return vec![];
+    }
     if matches!(
         key.code,
         KeyCode::Up
             | KeyCode::Down
-            | KeyCode::PageUp
-            | KeyCode::PageDown
-            | KeyCode::Home
-            | KeyCode::End
             | KeyCode::Left
             | KeyCode::Right
-            | KeyCode::Tab
-            | KeyCode::BackTab
+            | KeyCode::Home
+            | KeyCode::End
+            | KeyCode::PageUp
+            | KeyCode::PageDown
     ) {
         state.scroll.settings_textamp = None;
+        state.sources.picker_scroll_pin = None;
     }
-    if matches!(state.settings_state.section, SettingsSection::Textamp)
-        && state.settings_state.focus == SettingsFocus::Content
-    {
-        let last = state.textamp_settings().len().saturating_sub(1);
-        let index = state.settings_state.item_index;
-        match key.code {
-            KeyCode::PageUp => state.settings_state.item_index = index.saturating_sub(10),
-            KeyCode::PageDown => {
-                state.settings_state.item_index = index.saturating_add(10).min(last)
-            }
-            KeyCode::Home => state.settings_state.item_index = 0,
-            KeyCode::End => state.settings_state.item_index = last,
-            _ => {}
-        }
-    }
-    match key.code {
-        KeyCode::Esc => vec![NavigationAction::SetView(View::Browse).into()],
-        // Tab/Shift+Tab always switch sidebar/content; arrows navigate within it.
-        KeyCode::Tab | KeyCode::BackTab => {
-            state.settings_state.focus = match state.settings_state.focus {
-                SettingsFocus::Sections => SettingsFocus::Content,
-                SettingsFocus::Content => SettingsFocus::Sections,
+    match focus {
+        Focus::Sections => {
+            let section = state.settings_state.section;
+            state.settings_state.section = match key.code {
+                KeyCode::Left => section.prev(),
+                KeyCode::Right => section.next(),
+                KeyCode::Char('1') => Section::Libraries,
+                KeyCode::Char('2') => Section::Textamp,
+                KeyCode::Char('3') => Section::About,
+                KeyCode::Down | KeyCode::Enter | KeyCode::Char(' ') => {
+                    state.settings_state.focus = if textamp {
+                        Focus::Pages
+                    } else {
+                        Focus::Content
+                    };
+                    section
+                }
+                _ => section,
             };
-            vec![]
-        }
-        KeyCode::Right => {
-            if state.settings_state.focus == SettingsFocus::Sections {
-                state.settings_state.focus = SettingsFocus::Content;
+            if section != state.settings_state.section {
                 state.settings_state.item_index = 0;
                 state.settings_state.scroll = 0;
+                state.scroll.settings_textamp = None;
             }
-            vec![]
         }
-        KeyCode::Left => {
-            if state.settings_state.focus == SettingsFocus::Content {
-                state.settings_state.focus = SettingsFocus::Sections;
-                state.settings_state.scroll = 0;
-                state.sources.picker_scroll_pin = None;
-            }
-            vec![]
-        }
-        KeyCode::Up => {
-            match state.settings_state.focus {
-                SettingsFocus::Sections => {
-                    // Navigate sections
-                    state.settings_state.section = state.settings_state.section.prev();
-                    state.settings_state.item_index = 0;
-                    state.settings_state.scroll = 0;
-                }
-                SettingsFocus::Content => {
-                    if state.settings_state.section == SettingsSection::About {
-                        // Scroll About content
-                        state.settings_state.scroll = state.settings_state.scroll.saturating_sub(1);
-                    } else {
-                        // Navigate items within section
-                        if state.settings_state.item_index > 0 {
-                            state.settings_state.item_index -= 1;
-                        }
-                    }
-                }
-            }
-            vec![]
-        }
-        KeyCode::Down => {
-            match state.settings_state.focus {
-                SettingsFocus::Sections => {
-                    // Navigate sections
-                    state.settings_state.section = state.settings_state.section.next();
-                    state.settings_state.item_index = 0;
-                    state.settings_state.scroll = 0;
-                }
-                SettingsFocus::Content => {
-                    if state.settings_state.section == SettingsSection::About {
-                        // Scroll About content (renderer will clamp to max)
-                        state.settings_state.scroll = state.settings_state.scroll.saturating_add(1);
-                    } else {
-                        // Navigate items within section with bounds check
-                        let max_index = match state.settings_state.section {
-                            SettingsSection::Textamp => {
-                                state.textamp_settings().len().saturating_sub(1)
-                            }
-                            SettingsSection::Libraries => 0,
-                            SettingsSection::About => 0,
-                        };
-                        if state.settings_state.item_index < max_index {
-                            state.settings_state.item_index += 1;
-                        }
-                    }
-                }
-            }
-            vec![]
-        }
-        KeyCode::PageUp => {
-            if state.settings_state.section == SettingsSection::About
-                && state.settings_state.focus == SettingsFocus::Content
-            {
-                state.settings_state.scroll = state.settings_state.scroll.saturating_sub(10);
-            }
-            vec![]
-        }
-        KeyCode::PageDown => {
-            if state.settings_state.section == SettingsSection::About
-                && state.settings_state.focus == SettingsFocus::Content
-            {
-                state.settings_state.scroll = state.settings_state.scroll.saturating_add(10);
-            }
-            vec![]
-        }
-        KeyCode::Home => {
-            if state.settings_state.section == SettingsSection::About
-                && state.settings_state.focus == SettingsFocus::Content
-            {
-                state.settings_state.scroll = 0;
-            }
-            vec![]
-        }
-        KeyCode::End => {
-            if state.settings_state.section == SettingsSection::About
-                && state.settings_state.focus == SettingsFocus::Content
-            {
-                state.settings_state.scroll = u16::MAX; // renderer will clamp
-            }
-            vec![]
-        }
-        KeyCode::Enter => {
-            if state.settings_state.focus == SettingsFocus::Sections {
-                // Enter on section -> move to content
-                state.settings_state.focus = SettingsFocus::Content;
+        Focus::Pages => match key.code {
+            KeyCode::Left | KeyCode::Right => {
+                state.settings_state.page =
+                    state.settings_state.page.step(key.code == KeyCode::Right);
                 state.settings_state.item_index = 0;
-                vec![]
+            }
+            KeyCode::Up => state.settings_state.focus = Focus::Sections,
+            KeyCode::Down | KeyCode::Enter | KeyCode::Char(' ') => {
+                state.settings_state.focus = Focus::Content
+            }
+            _ => {}
+        },
+        Focus::Content => {
+            if key.code == KeyCode::Left {
+                state.settings_state.focus = if textamp {
+                    Focus::Pages
+                } else {
+                    Focus::Sections
+                };
+                return vec![];
+            }
+            if state.settings_state.section == Section::Libraries {
+                if key.code == KeyCode::Up && state.popups.library_picker_index == 0 {
+                    state.settings_state.focus = Focus::Sections;
+                    return vec![];
+                }
+                return super::handle_library_picker_keys(key, state);
+            }
+            if state.settings_state.section == Section::About {
+                let scroll = &mut state.settings_state.scroll;
+                match key.code {
+                    KeyCode::Up => *scroll = scroll.saturating_sub(1),
+                    KeyCode::Down => *scroll = scroll.saturating_add(1),
+                    KeyCode::PageUp => *scroll = scroll.saturating_sub(10),
+                    KeyCode::PageDown => *scroll = scroll.saturating_add(10),
+                    KeyCode::Home => *scroll = 0,
+                    KeyCode::End => *scroll = u16::MAX,
+                    _ => {}
+                }
             } else {
-                // Enter on content -> select item
-                vec![SettingsAction::SettingsSelect.into()]
+                let last = state.textamp_settings().len().saturating_sub(1);
+                let index = &mut state.settings_state.item_index;
+                match key.code {
+                    KeyCode::Up => *index = index.saturating_sub(1),
+                    KeyCode::Down => *index = index.saturating_add(1).min(last),
+                    KeyCode::PageUp => *index = index.saturating_sub(10),
+                    KeyCode::PageDown => *index = index.saturating_add(10).min(last),
+                    KeyCode::Home => *index = 0,
+                    KeyCode::End => *index = last,
+                    KeyCode::Enter | KeyCode::Char(' ') => {
+                        return vec![SettingsAction::SettingsSelect.into()]
+                    }
+                    _ => {}
+                }
             }
         }
-        _ => vec![],
     }
+    vec![]
 }

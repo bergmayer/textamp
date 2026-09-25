@@ -91,6 +91,8 @@ pub fn route(
 
 #[derive(Debug, Clone, Default)]
 pub struct SourceState {
+    /// Saved connection edits take effect on explicit activation, not on Save.
+    pub reconnect_sources: std::collections::HashSet<String>,
     pub nav_connection_task: Option<TaskLease>,
     pub audiomuse: audiomuse::State,
     pub sonic_tasks: std::collections::HashMap<&'static str, TaskLease>,
@@ -153,6 +155,21 @@ pub enum LibraryChoice {
     AddFolder,
 }
 impl LibraryChoice {
+    /// Stable identity shared by artwork preferences and the image cache.
+    pub fn artwork_key(&self) -> Option<String> {
+        match self {
+            Self::Folder(source) => Some(format!("folder:{}", source.id)),
+            Self::Navidrome { source, folder, .. } => Some(format!(
+                "navidrome:{}:{}",
+                source.id,
+                source
+                    .canonical_folder(folder.clone())
+                    .as_deref()
+                    .unwrap_or("all")
+            )),
+            _ => None,
+        }
+    }
     pub fn label(&self) -> String {
         match self {
             Self::AddWebdav => "WebDAV share".into(),
@@ -258,6 +275,15 @@ async fn reset_source(
     Ok(())
 }
 
+/// Apply the selected library's saved artwork choices after a source switch.
+fn restore_library_artwork(state: &mut AppState, config: &Config) {
+    if let Some(key) = state.active_library.as_deref() {
+        let (mode, visible) = config.artwork_preferences(key);
+        state.artwork.mode = mode;
+        state.artwork.default_visible = visible;
+    }
+}
+
 pub fn cache_store(state: &AppState) -> Option<anyhow::Result<crate::library::cache::Store>> {
     if let Some(session) = state.sources.active.navidrome() {
         return Some(session.cache_store());
@@ -283,6 +309,10 @@ pub enum SourceAction {
     Navidrome(Box<navidrome::NavAction>),
     Choose(LibraryChoice),
     AddLocation(String),
+    SaveLocal {
+        path: String,
+        name: String,
+    },
     Rename {
         id: String,
         name: String,
@@ -301,7 +331,14 @@ pub async fn dispatch(
     tx: &mpsc::Sender<Event>,
 ) -> anyhow::Result<Vec<Action>> {
     if let SourceAction::Choose(choice) = &action {
-        if choice.active(state) {
+        let reconnect = match choice {
+            LibraryChoice::Navidrome { source, .. } => {
+                state.sources.reconnect_sources.contains(&source.id)
+            }
+            LibraryChoice::Folder(source) => state.sources.reconnect_sources.contains(&source.id),
+            _ => false,
+        };
+        if choice.active(state) && !reconnect {
             if manager::settings_active(state) {
                 state.set_view(View::Browse);
             }
@@ -358,13 +395,15 @@ pub async fn dispatch(
         SourceAction::Choose(LibraryChoice::Folder(source)) => {
             cache::resume(&LibraryChoice::Folder(source.clone()), state);
             config.default_navidrome = None;
-            if state.sources.active.folder() == Some(&source.id) {
+            let reconnect = state.sources.reconnect_sources.remove(&source.id);
+            if !reconnect && state.sources.active.folder() == Some(&source.id) {
                 state.popups.library_picker_active = false;
                 return Ok(vec![]);
             }
             reset_source(state, audio, tx).await?;
             state.sources.active = crate::app::sources::ActiveSource::Folder(source.id.clone());
             state.active_library = Some(format!("folder:{}", source.id));
+            restore_library_artwork(state, config);
             radio::load_folder_stations(state);
             state.view = View::Browse;
             state.browse_category = BrowseCategory::Folders;
@@ -377,11 +416,49 @@ pub async fn dispatch(
         }
 
         SourceAction::Choose(LibraryChoice::AddFolder) => {
-            state.popups.input_dialog = Some(InputDialog {
-                title: "Local folder path".into(),
-                input: Default::default(),
-                action_type: InputDialogAction::FolderLocation,
-            });
+            state.popups.library_dialog = Some(dialogs::Dialog::Local(Default::default()));
+        }
+        SourceAction::SaveLocal { path, name } => {
+            if !matches!(state.popups.library_dialog, Some(dialogs::Dialog::Local(_))) {
+                return Ok(vec![]);
+            }
+            let saved = config.folder_sources.clone();
+            let result = super::tasks::spawn_blocking(move || -> anyhow::Result<FolderSource> {
+                let mut source = source_from_location(&path)?;
+                let FolderLocation::Local { path } = &source.location else {
+                    anyhow::bail!("Choose WebDAV for a network URL");
+                };
+                anyhow::ensure!(path.is_dir(), "Enter an existing folder path");
+                anyhow::ensure!(
+                    !saved.iter().any(|s| s.same_library(&source)),
+                    "That folder library is already added"
+                );
+                if !name.trim().is_empty() {
+                    source.name = name.trim().into();
+                }
+                Ok(source)
+            })
+            .await?;
+            match result {
+                Ok(source) => {
+                    let id = source.id.clone();
+                    config.folder_sources.push(source);
+                    state.sources.folders = config.folder_sources.clone();
+                    state.popups.library_dialog = None;
+                    manager::reset_selection(state);
+                    state.popups.library_picker_index = choices(state)
+                        .iter()
+                        .position(|c| matches!(c, LibraryChoice::Folder(s) if s.id == id))
+                        .unwrap_or(0);
+                    dispatch_settings::save_config_in_background(tx, config, "add folder library");
+                    state.set_status("Library added. Use General > Make active to open it.".into());
+                }
+                Err(error) => {
+                    if let Some(dialogs::Dialog::Local(form)) = &mut state.popups.library_dialog {
+                        form.error = Some(error.to_string());
+                    }
+                }
+            }
         }
         SourceAction::AddLocation(location) => match source_from_location(&location) {
             Ok(source) => {
@@ -447,6 +524,10 @@ pub async fn dispatch(
                 };
             }
             config.folder_sources.retain(|s| s.id != id);
+            config
+                .ui
+                .library_view_settings
+                .remove(&format!("folder:{id}"));
             state.sources.folders = config.folder_sources.clone();
             if config.default_folder_source.as_ref() == Some(&id) {
                 config.default_folder_source = None;

@@ -342,7 +342,7 @@ pub fn get_artist_for_bio(state: &crate::app::state::AppState) -> Option<(String
     //    should target THAT artist, not the parent track's.
     if state.palette_target_is_similar() {
         if let Some(parent) = state.focused_track() {
-            let sim_idx = state.track_pane_index - 1;
+            let sim_idx = state.track_pane_index - 2;
             if let Some(sim) = state
                 .track_pane_similar
                 .get(&parent.rating_key)

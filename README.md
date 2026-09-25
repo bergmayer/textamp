@@ -22,17 +22,42 @@ saved source if necessary. It never starts playback automatically. With no saved
 source, add one in **F2 → Libraries → Add library**.
 
 **F3** is the compact switcher: Enter switches, Esc cancels, F2 manages.
-Settings → Libraries is one list, grouped by type and account. `[Active]` marks
-the playing library. Highlighting a row does not switch it. Left returns to the
-settings sidebar; Tab switches sidebar/content.
+Settings opens a DOS-style setup screen: a menu bar, framed pages, radio buttons,
+checkboxes and a key legend, using the active app theme. **F10** focuses the menu;
+**Left/Right** selects a menu or page, **Down** enters its contents, and **Tab**
+changes panels. **Enter/Space** selects controls; **Esc** backs out.
+**:** or **Ctrl+P** opens the command palette from settings.
+Every visible control also works with the mouse.
 
-- **Add library** (or **A**) asks for Local folder, WebDAV, or Subsonic/Navidrome.
-  Server connections use one URL/username/password/name form. A blank password
-  while editing the same account keeps the saved password.
-- Enter opens a library-options popover: **Make active**, rename, connection,
-  Sonic/AudioMuse and cache controls. **R** renames, **C** edits the connection,
-  and **Delete** removes after confirmation. Removing a Navidrome account removes
-  all its libraries and associated saved sign-ins from Textamp, not server music.
+- **Libraries** lists saved sources by type and account. `[Active]` identifies the
+  current library. **Up** from the first row returns to the Settings menu.
+  Enter opens options for the highlighted library; **Left/Right**
+  switches between **General**, **Analysis** (when available), and **Cache**.
+- **General** contains **Make active**, rename, connection and removal. Saving a
+  connection does not activate another library. Canceling a connection or rename
+  form returns to its library setup page. Removal names its scope: a Navidrome
+  account includes all its libraries; music and server playlists are kept.
+- **Analysis** contains the Sonic checkbox and AudioMuse connection.
+- **Textamp → Display & audio** shows artwork rendering and the default cover
+  visibility for the active library. Changing either saves it for that library;
+  each library restores its own choice when opened. A column's artwork toggle
+  also updates only that library's default.
+- **Cache** shows metadata and artwork size for that library. Downloaded
+  Navidrome images are stored separately for each library. **Clear downloaded
+  artwork** removes only that library's image files.
+  **Refresh catalog now** shows metadata refresh status. **Refresh catalog
+  now** updates metadata and enabled analysis; the same button cancels a running
+  refresh. **Clear library cache** asks for confirmation. These actions do not
+  change the active library or download audio.
+- **Add library** (or **A**) opens a source-type chooser. Local folders have one
+  path/name form; servers have one URL/username/password/name form. Add or Save
+  checks the source before storing it. A blank password while editing the same
+  account keeps the saved password.
+- **Textamp** has Themes, Display & audio, Sidebar and Search services pages.
+  Themes retain the live ANSI preview; Enter applies a theme. Radio buttons and
+  checkboxes save immediately. Artwork cache cleanup is under each library's
+  Cache page.
+- **About** retains the original ANSI artwork and program information.
 - Multiple accounts and music folders are supported. A single-folder account
   has no duplicate “All music” entry. Duplicate connections are rejected.
 - Local paths accept `~/Music`. WebDAV uses the exact collection URL; redirects
@@ -65,8 +90,11 @@ plays; right-click opens the track menu. Drag reorders queue rows. Clicking or
 dragging the waveform or scrubber seeks; streams may rebuffer.
 
 **Search…** sits above **browse**. Highlight it for the theme-colored logo and
-press Enter to search. Settings → Textamp shows the active theme's logo, or previews a highlighted theme.
-The same page controls which sidebar sections and system lists are shown.
+press Enter to search. Settings → Textamp → Themes shows the active theme's logo, or previews a highlighted theme.
+Search boxes support `AND`, `OR`, and `NOT`, with parentheses and quoted exact
+phrases. Adjacent terms imply `AND`; `NOT` binds first, then `AND`, then `OR`.
+The “white on black” theme uses pure black backgrounds and 50% white text, with underlining for selected list items.
+Textamp → Sidebar controls which sections and system lists are shown.
 
 Local/WebDAV browse lazily, directories first, in natural filename order (`2`
 before `10`). Playing a file queues its folder from that point. Search covers
@@ -133,6 +161,8 @@ analysis export (`/api/sync`) is required. The **audiomuse** sidebar offers labe
 tempo, energy, key, analyzed tracks, Describe music and Search lyrics. CLAP and
 lyrics searches require their respective indexes. Partial scans yield partial
 results. Inferred labels remain separate from genres in file tags.
+Describe music uses a larger wrapped prompt. Track details show all track genre
+tags and offer Play Track++ to play the selected track and following tracks.
 
 Results resolve by exact server track IDs, not guessed titles. No playlist is
 created unless you save the queue. Textamp does not start scans, alter tags,

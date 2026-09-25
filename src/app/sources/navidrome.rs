@@ -147,11 +147,13 @@ pub async fn choose(
             ))
         }
         LibraryChoice::Navidrome { source, folder, .. } => {
-            if state
-                .sources
-                .active
-                .navidrome()
-                .is_some_and(|s| s.source.id == source.id && s.client.folder == folder)
+            let reconnect = state.sources.reconnect_sources.remove(&source.id);
+            if !reconnect
+                && state
+                    .sources
+                    .active
+                    .navidrome()
+                    .is_some_and(|s| s.source.id == source.id && s.client.folder == folder)
             {
                 state.popups.library_picker_active = false;
                 return Ok(vec![]);
@@ -502,6 +504,37 @@ pub async fn dispatch(
                     return Ok(vec![]);
                 }
             }
+            // Checking a setup form saves the account. Choosing a library is a
+            // separate action, so another source and its playback stay active.
+            if super::manager::settings_active(state)
+                && matches!(
+                    state.popups.library_dialog,
+                    Some(super::dialogs::Dialog::Navidrome(_))
+                )
+            {
+                let id = session.source.id.clone();
+                config.navidrome_sources.retain(|s| s.id != id);
+                config.navidrome_sources.push(session.source);
+                state.sources.navidrome = config.navidrome_sources.clone();
+                state.sources.reconnect_sources.insert(id.clone());
+                state.popups.library_dialog = None;
+                super::manager::reset_selection(state);
+                state.popups.library_picker_index = super::choices(state)
+                    .iter()
+                    .position(
+                        |c| matches!(c, LibraryChoice::Navidrome { source, .. } if source.id == id),
+                    )
+                    .unwrap_or(0);
+                dispatch_settings::save_config_in_background(
+                    tx,
+                    config,
+                    "save Navidrome connection",
+                );
+                state.set_status(
+                    "Connection saved. Open this library from General to use it.".into(),
+                );
+                return Ok(vec![]);
+            }
             state.popups.library_dialog = None;
             super::reset_source(state, audio, tx).await?;
             config
@@ -520,6 +553,7 @@ pub async fn dispatch(
                 session.client.folder.as_deref().unwrap_or("all")
             ));
             state.sources.active = ActiveSource::Navidrome(Box::new(session));
+            super::restore_library_artwork(state, config);
             crate::config::canonicalize_navidrome(config);
             state.sources.sonic_disabled_libraries = config.sonic_disabled_libraries.clone(); // Request slots own server health and retries.
             state.view = View::Browse;
@@ -599,6 +633,10 @@ pub async fn dispatch(
                 state.popups.library_picker_active = !managing;
             }
             config.navidrome_sources.retain(|s| s.id != id);
+            config
+                .ui
+                .library_view_settings
+                .retain(|key, _| !key.starts_with(&format!("navidrome:{id}:")));
             for key in analysis_keys {
                 config.audiomuse_connections.remove(&key);
                 state.sources.audiomuse.connections.remove(&key);

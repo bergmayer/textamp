@@ -519,7 +519,7 @@ pub async fn dispatch(
                 Some(n) => n.focused_column,
                 None => return Ok(vec![]),
             };
-            super::key_input::sort_popup::toggle_artwork(state, col_idx);
+            follow_ups.extend(super::key_input::sort_popup::toggle_artwork(state, col_idx));
         }
         SearchAction::ToggleFocusedColumnGrouping => {
             let col_idx = match state.browse_nav() {

@@ -16,6 +16,7 @@ pub enum ThemeName {
     Dark,
     Platinum,
     BlackAndWhite,
+    WhiteOnBlack,
     /// Vintage amber-on-black CRT (IBM 3270 / DEC monochrome look).
     Amber,
     /// Vintage green-on-black CRT (Apple ][ / DEC VT terminal look).
@@ -41,6 +42,7 @@ impl ThemeName {
             ThemeName::Norton,
             ThemeName::Platinum,
             ThemeName::BlackAndWhite,
+            ThemeName::WhiteOnBlack,
             ThemeName::Amber,
             ThemeName::PhosphorGreen,
         ]
@@ -54,6 +56,7 @@ impl ThemeName {
             ThemeName::SolarizedLight => "solarized light",
             ThemeName::Platinum => "platinum",
             ThemeName::BlackAndWhite => "black and white",
+            ThemeName::WhiteOnBlack => "white on black",
             ThemeName::Amber => "amber crt",
             ThemeName::PhosphorGreen => "phosphor green",
             ThemeName::Norton => "norton",
@@ -70,6 +73,7 @@ impl ThemeName {
             ThemeName::SolarizedLight => "solarized-light",
             ThemeName::Platinum => "platinum",
             ThemeName::BlackAndWhite => "black-and-white",
+            ThemeName::WhiteOnBlack => "white-on-black",
             ThemeName::Amber => "amber",
             ThemeName::PhosphorGreen => "phosphor-green",
             ThemeName::Norton => "norton",
@@ -86,6 +90,7 @@ impl ThemeName {
             "dark" => ThemeName::Dark,
             "platinum" | "mac" | "macos9" => ThemeName::Platinum,
             "black-and-white" | "blackandwhite" | "bw" | "mono" => ThemeName::BlackAndWhite,
+            "white-on-black" | "whiteonblack" => ThemeName::WhiteOnBlack,
             "amber" | "amber-crt" | "ambercrt" => ThemeName::Amber,
             "phosphor" | "phosphor-green" | "phosphorgreen" | "green" => ThemeName::PhosphorGreen,
             // Old "borland" config values map to Norton — they're the

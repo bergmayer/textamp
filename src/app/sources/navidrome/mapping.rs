@@ -65,6 +65,15 @@ impl Session {
         }
     }
     pub fn track(&self, t: n::Song) -> Track {
+        let mut seen = std::collections::HashSet::new();
+        let genres = t
+            .genres
+            .iter()
+            .map(|g| g.name.clone())
+            .chain(t.genre.clone())
+            .map(|name| clean(name).trim().to_owned())
+            .filter(|name| !name.is_empty() && seen.insert(name.clone()))
+            .collect();
         Track {
             view_count: t.play_count,
             parent_index: t.disc_number,
@@ -75,6 +84,7 @@ impl Session {
             rating_key: self.key(&t.id),
             key: self.key(&t.id),
             title: clean(t.title),
+            genres,
             parent_title: t.album.map(clean),
             parent_rating_key: t.album_id.map(|s| self.key(&s)),
             grandparent_title: t.album_artist.or_else(|| t.artist.clone()).map(clean),

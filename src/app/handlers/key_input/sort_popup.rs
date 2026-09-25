@@ -224,8 +224,7 @@ pub fn toggle_group_by_album(state: &mut AppState, col_idx: usize) -> Vec<Action
 }
 
 /// Toggle artwork visibility for an album column.
-/// Updates both the current column and the global default so all album columns
-/// reflect the new setting (not just the one being viewed).
+/// Updates the current column and this library's default for new album columns.
 ///
 /// When turning artwork ON, the dispatcher also queues a load of
 /// EVERY row's art (not just the viewport) so a long playlist's
@@ -233,6 +232,7 @@ pub fn toggle_group_by_album(state: &mut AppState, col_idx: usize) -> Vec<Action
 /// behaviour would only fetch ~30 thumbnails near the cursor and
 /// leave the rest blank.
 pub fn toggle_artwork(state: &mut AppState, col_idx: usize) -> Vec<Action> {
+    let column_key = state.column_artwork_key(col_idx);
     let (new_visible, persist_state) = {
         let nav = match state.browse_nav_mut() {
             Some(n) => n,
@@ -254,10 +254,21 @@ pub fn toggle_artwork(state: &mut AppState, col_idx: usize) -> Vec<Action> {
         }
     };
 
-    // Update the global default so all future/existing album columns use this setting
+    // Keep this library's default for newly opened columns in sync; the
+    // context-specific value below takes precedence when that column returns.
     state.artwork.default_visible = new_visible;
 
     let mut actions: Vec<Action> = Vec::new();
+    if let Some(library_key) = state.active_library.clone() {
+        actions.push(
+            SettingsAction::SaveColumnArtwork {
+                library_key,
+                column_key,
+                visible: new_visible,
+            }
+            .into(),
+        );
+    }
 
     // Eager-load every row's artwork for the column we just turned
     // ON. The viewport-window loader runs on scroll for cheap, but a

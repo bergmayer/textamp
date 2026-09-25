@@ -75,6 +75,9 @@ pub struct Song {
     pub size: Option<u64>,
     pub path: Option<String>,
     pub genre: Option<String>,
+    /// OpenSubsonic track-level genre list.
+    #[serde(default)]
+    pub genres: Vec<Genre>,
     pub starred: Option<String>,
     pub user_rating: Option<u8>,
 }

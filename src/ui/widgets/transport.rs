@@ -198,7 +198,7 @@ fn render_tab_strip(frame: &mut Frame, state: &AppState, area: Rect) {
     // Mirrors classic vim chrome — same row as the Library / Now
     // Playing tabs, on the right edge.
     let palette_hint = if state.view == View::Settings {
-        " ← sidebar · ↑↓ items · Enter select · Tab pane · Esc close "
+        " F10 menu · ↓/Tab panel · Enter select · : commands · Esc back "
     } else if state.tall_mode {
         " :  /  Tab focus  ,  \\  | "
     } else {

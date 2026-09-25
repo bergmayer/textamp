@@ -57,11 +57,55 @@ impl Config {
             .or_default();
         if view.is_default() {
             lib.playlists.remove(playlist_key);
-            if lib.playlists.is_empty() {
+            if lib.is_empty() {
                 self.ui.library_view_settings.remove(lib_key);
             }
         } else {
             lib.playlists.insert(playlist_key.to_string(), view);
+        }
+    }
+
+    /// Resolve the saved artwork choices for one library. Older global values
+    /// remain the starting values until this library has its own choices.
+    pub fn artwork_preferences(&self, lib_key: &str) -> (crate::app::state::ArtworkMode, bool) {
+        let library = self.ui.library_view_settings.get(lib_key);
+        (
+            crate::app::state::ArtworkMode::from_config(
+                library
+                    .and_then(|view| view.artwork_mode.as_deref())
+                    .unwrap_or(&self.ui.artwork_mode),
+            ),
+            library
+                .and_then(|view| view.artwork_visible)
+                .unwrap_or(self.ui.cover_art_view),
+        )
+    }
+
+    pub fn set_artwork_mode(&mut self, lib_key: &str, mode: crate::app::state::ArtworkMode) {
+        self.ui
+            .library_view_settings
+            .entry(lib_key.to_string())
+            .or_default()
+            .artwork_mode = Some(mode.name().to_string());
+    }
+
+    pub fn set_artwork_visible(&mut self, lib_key: &str, visible: bool) {
+        self.ui
+            .library_view_settings
+            .entry(lib_key.to_string())
+            .or_default()
+            .artwork_visible = Some(visible);
+    }
+
+    pub fn set_column_artwork(&mut self, lib_key: &str, column_key: &str, visible: bool) {
+        let lib = self
+            .ui
+            .library_view_settings
+            .entry(lib_key.to_string())
+            .or_default();
+        lib.columns.insert(column_key.to_string(), visible);
+        if lib.is_empty() {
+            self.ui.library_view_settings.remove(lib_key);
         }
     }
 
@@ -75,7 +119,7 @@ impl Config {
     ) {
         if let Some(lib) = self.ui.library_view_settings.get_mut(lib_key) {
             lib.playlists.retain(|k, _| live_playlist_keys.contains(k));
-            if lib.playlists.is_empty() {
+            if lib.is_empty() {
                 self.ui.library_view_settings.remove(lib_key);
             }
         }
@@ -138,14 +182,11 @@ pub struct UiConfig {
     #[serde(default = "default_theme")]
     pub theme: String,
 
-    /// Persist cover art view mode across sessions (Alt+C toggle).
-    /// Default ON — album art is a core part of the browsing experience.
-    /// TUI users on limited terminals can turn it off and the choice
-    /// will stick after Alt+C persists the flag.
+    /// Legacy default for libraries without their own visibility choice.
     #[serde(default = "default_cover_art_view")]
     pub cover_art_view: bool,
 
-    /// Artwork rendering mode: "auto", "halfblocks", or "braille".
+    /// Legacy default for libraries without their own rendering choice.
     #[serde(default = "default_artwork_mode")]
     pub artwork_mode: String,
 
@@ -174,8 +215,7 @@ pub struct UiConfig {
     #[serde(default = "default_enable_search_service")]
     pub enable_youtube_search: bool,
 
-    /// Per-library view settings (currently per-playlist toggles for
-    /// "Group by album" and "Show album artwork"). Outer key is the
+    /// Per-library artwork and playlist view settings. Outer key is the
     /// library's `lib_key`, inner is the playlist's `rating_key`.
     /// Pruned on `PlaylistsLoaded` so deleted playlists don't keep
     /// accumulating stale entries.
@@ -223,6 +263,23 @@ pub struct LibraryViewSettings {
     /// Per-playlist toggles, keyed by the playlist's server rating_key.
     #[serde(default)]
     pub playlists: std::collections::HashMap<String, PlaylistView>,
+    /// Per-column artwork overrides, keyed by browse category and parent item.
+    #[serde(default)]
+    pub columns: std::collections::HashMap<String, bool>,
+    /// Rendering method and default visibility for this library.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artwork_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artwork_visible: Option<bool>,
+}
+
+impl LibraryViewSettings {
+    fn is_empty(&self) -> bool {
+        self.playlists.is_empty()
+            && self.columns.is_empty()
+            && self.artwork_mode.is_none()
+            && self.artwork_visible.is_none()
+    }
 }
 
 /// View toggles for a single playlist's tracks column.

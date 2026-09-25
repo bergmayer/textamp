@@ -103,6 +103,7 @@ fn apply_artwork_cache_clear(count: usize, state: &mut AppState) {
     state.artwork.clear_grid_art();
     state.artwork.grid_pending.clear();
     state.artwork.current_data = None;
+    state.artwork.current_thumb = None;
     state.artwork.pending_thumb = None;
     state.artwork.loading = false;
     state.artwork.cache_stats = Some((0, 0));
@@ -147,10 +148,28 @@ pub async fn dispatch(
                         save_config_in_background(event_tx, config, "save theme preference");
                     }
                     TextampSetting::Artwork(mode) => {
-                        state.artwork.mode = mode;
-                        state.set_status(format!("Artwork: {}", mode.name()));
-                        config.ui.artwork_mode = mode.name().to_string();
-                        save_config_in_background(event_tx, config, "save artwork preference");
+                        if let Some(key) = state.active_library.as_deref() {
+                            state.artwork.mode = mode;
+                            config.set_artwork_mode(key, mode);
+                            state.set_status(format!("Artwork rendering: {}", mode.name()));
+                            save_config_in_background(event_tx, config, "save artwork preference");
+                        }
+                    }
+                    TextampSetting::ArtworkVisible => {
+                        if let Some(key) = state.active_library.as_deref() {
+                            let visible = !state.artwork.default_visible;
+                            state.artwork.default_visible = visible;
+                            config.set_artwork_visible(key, visible);
+                            state.set_status(
+                                if visible {
+                                    "Covers in new album columns: on"
+                                } else {
+                                    "Covers in new album columns: off"
+                                }
+                                .into(),
+                            );
+                            save_config_in_background(event_tx, config, "save artwork visibility");
+                        }
                     }
 
                     TextampSetting::Transcode => {
@@ -185,6 +204,17 @@ pub async fn dispatch(
 
         SettingsAction::SaveSettings => {
             save_config_in_background(event_tx, config, "save library selection");
+        }
+        SettingsAction::SaveColumnArtwork {
+            library_key,
+            column_key,
+            visible,
+        } => {
+            config.set_artwork_visible(&library_key, visible);
+            if let Some(column_key) = column_key {
+                config.set_column_artwork(&library_key, &column_key, visible);
+            }
+            follow_ups.push(SettingsAction::SaveSettings.into());
         }
         SettingsAction::RescanSourceCache(choice) => {
             crate::app::sources::cache::start(choice, true, state, event_tx);
@@ -253,10 +283,18 @@ pub async fn dispatch(
             }
             follow_ups.push(SettingsAction::RefreshCacheStats.into());
         }
-        SettingsAction::CacheSizes { request, entries } => {
+        SettingsAction::CacheSizes {
+            request,
+            entries,
+            artwork,
+        } => {
             if request == state.settings_state.cache_request {
                 state.settings_state.cache_task = None;
                 state.settings_state.cache_entries = entries;
+                state.settings_state.artwork_cache_entries = artwork
+                    .into_iter()
+                    .map(|(key, count, bytes)| (key, (count, bytes)))
+                    .collect();
             }
         }
         SettingsAction::ClearLibraryCache => {
@@ -277,19 +315,41 @@ pub async fn dispatch(
             }
             Err(error) => state.set_error(format!("Failed to clear library cache: {error}")),
         },
-        SettingsAction::ClearArtworkCache => {
-            state.set_status("Clearing artwork cache...".to_string());
+        SettingsAction::ClearArtworkCache(choice) => {
+            let Some(key) = choice.artwork_key() else {
+                return Ok(vec![]);
+            };
+            if choice.active(state) {
+                state.sources.nav_tasks.remove("artwork");
+                state.sources.nav_tasks.remove("art-grid");
+                state.artwork.clear_grid_art();
+                state.artwork.grid_pending.clear();
+                state.artwork.current_data = None;
+                state.artwork.current_thumb = None;
+                state.artwork.pending_thumb = None;
+            }
+            state.set_status(format!("Clearing artwork for {}...", choice.label()));
             let tx = event_tx.clone();
             crate::app::tasks::spawn_blocking(move || {
-                let removed = crate::media::ArtworkCache::default().clear_all();
+                let removed = crate::media::ArtworkCache::for_library(&key).clear_all();
                 let _ = tx.blocking_send(Event::Effect(
-                    SettingsAction::ArtworkCacheCleared(removed).into(),
+                    SettingsAction::ArtworkCacheCleared { choice, removed }.into(),
                 ));
             });
         }
-        SettingsAction::ArtworkCacheCleared(removed) => {
+        SettingsAction::ArtworkCacheCleared { choice, removed } => {
             tracing::info!("Cleared {} artwork cache files", removed);
-            apply_artwork_cache_clear(removed, state);
+            if choice.active(state) {
+                apply_artwork_cache_clear(removed, state);
+                if state.sources.active.navidrome().is_some() && state.current_track().is_some() {
+                    follow_ups.push(crate::app::action::SystemAction::LoadArtwork.into());
+                }
+            } else {
+                state.set_status(format!(
+                    "Cleared {removed} artwork files for {}",
+                    choice.label()
+                ));
+            }
             follow_ups.push(SettingsAction::RefreshCacheStats.into());
         }
         SettingsAction::AllCachesCleared { library, artwork } => {
@@ -309,6 +369,16 @@ pub async fn dispatch(
             let choices = crate::app::sources::library_choices(state);
             let event_tx = event_tx.clone();
             let task = crate::app::tasks::spawn_blocking(move || {
+                let artwork = choices
+                    .iter()
+                    .filter_map(|choice| {
+                        choice.artwork_key().map(|key| {
+                            let (count, bytes) =
+                                crate::media::ArtworkCache::for_library(&key).stats();
+                            (key, count, bytes)
+                        })
+                    })
+                    .collect();
                 let entries = choices
                     .into_iter()
                     .map(|choice| {
@@ -320,13 +390,13 @@ pub async fn dispatch(
                     })
                     .collect();
                 let _ = event_tx.blocking_send(Event::Effect(
-                    SettingsAction::CacheSizes { request, entries }.into(),
+                    SettingsAction::CacheSizes {
+                        request,
+                        entries,
+                        artwork,
+                    }
+                    .into(),
                 ));
-                let (count, total_bytes) = crate::media::ArtworkCache::default().stats();
-                let _ = event_tx.blocking_send(
-                    crate::app::event::ArtworkEvent::ArtworkCacheStats { count, total_bytes }
-                        .into(),
-                );
                 let (count, total_bytes) = crate::media::WaveformCache::default().stats();
                 let _ = event_tx.blocking_send(
                     crate::app::event::CacheEvent::WaveformCacheStats { count, total_bytes }.into(),
@@ -342,7 +412,7 @@ pub async fn dispatch(
             let tx = event_tx.clone();
             crate::app::tasks::spawn_blocking(move || {
                 let library = crate::library::cache::clear_all().map_err(|e| e.to_string());
-                let artwork = crate::media::ArtworkCache::default().clear_all();
+                let artwork = crate::media::ArtworkCache::clear_all_libraries();
                 let _ = tx.blocking_send(Event::Effect(
                     SettingsAction::AllCachesCleared { library, artwork }.into(),
                 ));

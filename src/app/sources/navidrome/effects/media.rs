@@ -120,9 +120,16 @@ pub fn artwork(state: &mut AppState, tx: &mpsc::Sender<Event>, session: &Session
     state.artwork.pending_thumb = Some(thumb_path.clone());
     state.artwork.current_data = None;
     let generation = state.artwork.grid_generation;
+    let library_key = state.active_library.clone().unwrap_or_else(|| {
+        format!(
+            "navidrome:{}:{}",
+            session.source.id,
+            session.client.folder.as_deref().unwrap_or("all")
+        )
+    });
     let session = session.clone();
     spawn(state, tx, "artwork", async move {
-        let result = cover(&session, &thumb_path).await;
+        let result = cover(&session, &thumb_path, &library_key).await;
         Ok(vec![event(match result {
             Ok(data) => ArtworkEvent::ArtworkLoaded {
                 generation,
@@ -139,12 +146,24 @@ pub fn artwork(state: &mut AppState, tx: &mpsc::Sender<Event>, session: &Session
         })])
     });
 }
-async fn cover(session: &Session, key: &str) -> anyhow::Result<Vec<u8>> {
+async fn cover(session: &Session, key: &str, library_key: &str) -> anyhow::Result<Vec<u8>> {
+    let cache = crate::media::ArtworkCache::for_library(library_key);
+    let cache_key = key.to_owned();
+    if let Some(data) =
+        crate::app::tasks::spawn_blocking(move || cache.load(&cache_key, 32 * 86400)).await?
+    {
+        return Ok(data);
+    }
     let url = session.client.url(
         "getCoverArt",
         &[("id", session.id(key)?), ("size", "600".into())],
     )?;
-    session.client.bytes(url, 8 * 1024 * 1024).await
+    let data = session.client.bytes(url, 8 * 1024 * 1024).await?;
+    let cache = crate::media::ArtworkCache::for_library(library_key);
+    let cache_key = key.to_owned();
+    let cached = data.clone();
+    let _ = crate::app::tasks::spawn_blocking(move || cache.save(&cache_key, &cached)).await;
+    Ok(data)
 }
 pub fn art_batch(
     state: &mut AppState,
@@ -170,13 +189,21 @@ pub fn art_batch(
         .grid_pending
         .extend(batch.iter().map(|(k, _)| k.clone()));
     let generation = state.artwork.grid_generation;
+    let library_key = state.active_library.clone().unwrap_or_else(|| {
+        format!(
+            "navidrome:{}:{}",
+            session.source.id,
+            session.client.folder.as_deref().unwrap_or("all")
+        )
+    });
     let session = session.clone();
     spawn(state, tx, "art-grid", async move {
         let actions = stream::iter(batch)
             .map(|(key, thumb)| {
                 let session = session.clone();
+                let library_key = library_key.clone();
                 async move {
-                    event(match cover(&session, &thumb).await {
+                    event(match cover(&session, &thumb, &library_key).await {
                         Ok(data) => ArtworkEvent::AlbumArtLoaded {
                             generation,
                             key,

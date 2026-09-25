@@ -169,8 +169,8 @@ pub fn handle_key(
                         ConfirmAction::ClearLibraryCache => {
                             vec![SettingsAction::ClearLibraryCache.into()]
                         }
-                        ConfirmAction::ClearArtworkCache => {
-                            vec![SettingsAction::ClearArtworkCache.into()]
+                        ConfirmAction::ClearArtworkCache(choice) => {
+                            vec![SettingsAction::ClearArtworkCache(choice).into()]
                         }
 
                         ConfirmAction::RemoveFolder(id) => vec![Action::Source(
@@ -201,6 +201,7 @@ pub fn handle_key(
                     };
                 } else {
                     // No selected — dismiss
+                    crate::app::sources::dialogs::restore_parent(state);
                     return vec![];
                 }
             }
@@ -214,8 +215,8 @@ pub fn handle_key(
                     ConfirmAction::ClearLibraryCache => {
                         vec![SettingsAction::ClearLibraryCache.into()]
                     }
-                    ConfirmAction::ClearArtworkCache => {
-                        vec![SettingsAction::ClearArtworkCache.into()]
+                    ConfirmAction::ClearArtworkCache(choice) => {
+                        vec![SettingsAction::ClearArtworkCache(choice).into()]
                     }
 
                     ConfirmAction::RemoveFolder(id) => vec![Action::Source(
@@ -242,6 +243,7 @@ pub fn handle_key(
                 };
             }
             KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                crate::app::sources::dialogs::restore_parent(state);
                 return vec![];
             }
             KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::BackTab => {
@@ -266,6 +268,7 @@ pub fn handle_key(
                     crate::app::state::InputDialogAction::AdventureLength
                 );
                 state.popups.input_dialog = None;
+                crate::app::sources::dialogs::restore_parent(state);
                 if was_adventure {
                     return vec![SettingsAction::CancelAdventure.into()];
                 }
@@ -399,7 +402,6 @@ pub fn handle_key(
         && !key.modifiers.contains(KeyModifiers::ALT)
         && !key.modifiers.contains(KeyModifiers::SUPER)
         && !state.list_filter.active
-        && !crate::app::sources::manager::settings_active(state)
     {
         crate::app::command_palette::open(state);
         return vec![];
@@ -431,22 +433,15 @@ pub fn handle_key(
 
     // Modal owners have returned. An inline filter can still reserve function keys.
     let in_text_capture = state.list_filter.active;
-    if crate::app::sources::manager::settings_active(state)
-        && state.settings_state.focus == crate::app::state::SettingsFocus::Content
+    if state.view == View::Settings
+        && !(matches!(key.code, KeyCode::Char('f' | 'p'))
+            && key.modifiers.contains(KeyModifiers::CONTROL))
         && !matches!(
             key.code,
-            KeyCode::Esc
-                | KeyCode::Left
-                | KeyCode::Right
-                | KeyCode::Tab
-                | KeyCode::BackTab
-                | KeyCode::F(1)
-                | KeyCode::F(2)
-                | KeyCode::F(3)
-                | KeyCode::Char(',')
+            KeyCode::F(1) | KeyCode::F(2) | KeyCode::F(3) | KeyCode::Char(',')
         )
     {
-        return handle_library_picker_keys(key, state);
+        return settings::handle_settings_keys(key, state, config);
     }
     match (key.modifiers, key.code) {
         // Cmd+A / Ctrl+A — select all rows in the currently focused
@@ -1730,9 +1725,9 @@ pub fn build_external_search_query(state: &AppState) -> String {
     //    when the user has picked a similar song, third-party
     //    search should target THAT track's artist+album, not the
     //    parent miller row's.
-    if state.track_pane_focused && state.track_pane_index > 0 {
+    if state.track_pane_focused && state.track_pane_index > 1 {
         if let Some(parent) = state.focused_track() {
-            let sim_idx = state.track_pane_index - 1;
+            let sim_idx = state.track_pane_index - 2;
             if let Some(sim) = state
                 .track_pane_similar
                 .get(&parent.rating_key)

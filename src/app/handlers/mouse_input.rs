@@ -266,8 +266,8 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
                                     ConfirmAction::ClearLibraryCache => {
                                         vec![SettingsAction::ClearLibraryCache.into()]
                                     }
-                                    ConfirmAction::ClearArtworkCache => {
-                                        vec![SettingsAction::ClearArtworkCache.into()]
+                                    ConfirmAction::ClearArtworkCache(choice) => {
+                                        vec![SettingsAction::ClearArtworkCache(choice).into()]
                                     }
 
                                     ConfirmAction::RemoveFolder(id) => vec![Action::Source(
@@ -281,6 +281,7 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
                                     ConfirmAction::Quit => vec![SystemAction::Quit.into()],
                                 };
                             }
+                            crate::app::sources::dialogs::restore_parent(state);
                             return vec![];
                         } else {
                             state.popups.confirm_dialog.as_mut().unwrap().selected_yes =
@@ -1799,7 +1800,7 @@ fn handle_right_click_select(click_row: u16, click_col: u16, state: &mut AppStat
                             && click_col < row_rect.x + row_rect.width
                         {
                             state.track_pane_focused = true;
-                            state.track_pane_index = *sim_idx + 1;
+                            state.track_pane_index = *sim_idx + 2;
                             state.category_column_focused = false;
                             return;
                         }
@@ -2013,6 +2014,16 @@ fn handle_browse_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
                     return vec![QueueAction::PlayTrack(Box::new(track)).into()];
                 }
             }
+            if click_row == pane.following_button.y
+                && click_col >= pane.following_button.x
+                && click_col < pane.following_button.x + pane.following_button.width
+            {
+                state.track_pane_focused = true;
+                state.track_pane_index = 1;
+                if let Some((tracks, index)) = state.palette_track_list() {
+                    return vec![QueueAction::PlayTracksNow(tracks[index..].to_vec()).into()];
+                }
+            }
             // Sonically Similar rows: first click highlights only;
             // a second click on the same row (or pressing Enter on
             // the focused similar row) drills into the track's
@@ -2027,9 +2038,9 @@ fn handle_browse_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
                     && click_col >= row_rect.x
                     && click_col < row_rect.x + row_rect.width
                 {
-                    // `track_pane_index = 0` is the Play button;
-                    // similar rows occupy indices 1..=N.
-                    let new_pane_idx = *sim_idx + 1;
+                    // The two playback buttons are 0 and 1;
+                    // similar rows start at index 2.
+                    let new_pane_idx = *sim_idx + 2;
                     let was_selected =
                         state.track_pane_focused && state.track_pane_index == new_pane_idx;
                     state.track_pane_focused = true;
@@ -2661,50 +2672,43 @@ fn handle_search_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
 fn handle_settings_click(click_row: u16, click_col: u16, state: &mut AppState) -> Vec<Action> {
     use crate::app::state::{SettingsFocus, SettingsSection};
 
-    // Settings layout: left panel (sections, 16 wide) | right panel (content)
-    let left_panel_width = 16u16;
-
-    // Account for top border (content starts at row 0, border adds 1)
-    let visual_row = click_row.saturating_sub(1) as usize;
-
-    if click_col < left_panel_width {
-        // Click on section list
-        let sections = SettingsSection::all();
-        if visual_row < sections.len() {
-            state.settings_state.section = sections[visual_row];
-            state.scroll.settings_textamp = None;
-            state.settings_state.item_index = 0;
-            state.settings_state.focus = SettingsFocus::Sections;
-        }
-    } else {
-        // Click on items in right panel - map visual row to item index
-        // Each section has different header/blank line layouts before selectable items
-        let item_index = if state.settings_state.section == SettingsSection::Textamp {
-            state
-                .hit_regions
-                .settings_textamp
-                .as_ref()
-                .and_then(|region| {
-                    let (_, index) = region
-                        .rows
-                        .iter()
-                        .find(|(rect, _)| rect.contains((click_col, click_row).into()))?;
-                    state.scroll.settings_textamp = Some(region.scroll_offset);
-                    Some(*index)
-                })
-        } else {
-            None
-        };
-
-        if let Some(idx) = item_index {
-            let was_selected = state.settings_state.focus == SettingsFocus::Content
-                && state.settings_state.item_index == idx;
-            state.settings_state.focus = SettingsFocus::Content;
-            state.settings_state.item_index = idx;
-
-            if was_selected {
-                // Double-click / click already-selected: activate
-                return vec![SettingsAction::SettingsSelect.into()];
+    let point = (click_col, click_row).into();
+    if let Some((_, section)) = state
+        .hit_regions
+        .settings_sections
+        .iter()
+        .find(|(rect, _)| rect.contains(point))
+    {
+        state.settings_state.section = *section;
+        state.settings_state.focus = SettingsFocus::Sections;
+        state.settings_state.item_index = 0;
+        state.settings_state.scroll = 0;
+        state.scroll.settings_textamp = None;
+        return vec![];
+    }
+    if let Some((_, page)) = state
+        .hit_regions
+        .settings_pages
+        .iter()
+        .find(|(rect, _)| rect.contains(point))
+    {
+        state.settings_state.page = *page;
+        state.settings_state.focus = SettingsFocus::Pages;
+        state.settings_state.item_index = 0;
+        state.scroll.settings_textamp = None;
+        return vec![];
+    }
+    if state.settings_state.section == SettingsSection::Textamp {
+        if let Some(region) = &state.hit_regions.settings_textamp {
+            if let Some((_, index)) = region.rows.iter().find(|(rect, _)| rect.contains(point)) {
+                let was_selected = state.settings_state.focus == SettingsFocus::Content
+                    && state.settings_state.item_index == *index;
+                state.scroll.settings_textamp = Some(region.scroll_offset);
+                state.settings_state.item_index = *index;
+                state.settings_state.focus = SettingsFocus::Content;
+                if was_selected {
+                    return vec![SettingsAction::SettingsSelect.into()];
+                }
             }
         }
     }

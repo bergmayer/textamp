@@ -6,6 +6,11 @@ use ratatui::layout::Rect;
 /// Registry of all clickable regions, populated each frame during render.
 #[derive(Debug, Default, Clone)]
 pub struct HitRegions {
+    pub settings_sections: Vec<(Rect, crate::app::state::SettingsSection)>,
+    pub settings_pages: Vec<(Rect, crate::app::state::SettingsPage)>,
+    pub settings_preview: Option<Rect>,
+    pub library_option_pages: Vec<(Rect, crate::app::sources::options::OptionsPage)>,
+    pub library_option_scroll: usize,
     pub biography_google: Option<Rect>,
     pub biography_text: Option<ScrollableTextRegion>,
     pub settings_textamp: Option<SettingsContentRegion>,
@@ -279,12 +284,13 @@ pub struct AlphabetStripRegions {
 }
 
 /// Track-details pane click regions — Play button + similar-track
-/// rows. Index space matches `state.track_pane_index`: 0 is the
-/// Play button, 1..=N are the similar tracks in order.
+/// rows. Index space matches `state.track_pane_index`: 0 and 1 are
+/// playback buttons; 2..=N+1 are similar tracks in order.
 #[derive(Debug, Clone)]
 pub struct TrackPaneRegions {
     pub outer: Rect,
     pub play_button: Rect,
+    pub following_button: Rect,
     /// (rect, index-into-similar-list) per visible similar track.
     pub similar_rows: Vec<(Rect, usize)>,
     /// Hit rect for the small "x" close glyph in the top-right

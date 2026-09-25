@@ -54,10 +54,17 @@ fn tab_and_arrows_reach_all_three_sections() {
     for section in SettingsSection::all() {
         assert_eq!(state.settings_state.section, *section);
         press(&mut state, KeyCode::Tab);
+        if *section == SettingsSection::Textamp {
+            assert_eq!(state.settings_state.focus, SettingsFocus::Pages);
+            press(&mut state, KeyCode::Tab);
+        }
         assert_eq!(state.settings_state.focus, SettingsFocus::Content);
         press(&mut state, KeyCode::BackTab);
+        if *section == SettingsSection::Textamp {
+            press(&mut state, KeyCode::BackTab);
+        }
         assert_eq!(state.settings_state.focus, SettingsFocus::Sections);
-        press(&mut state, KeyCode::Down);
+        press(&mut state, KeyCode::Right);
     }
 }
 
@@ -140,7 +147,7 @@ fn manager_owns_navigation_and_refresh_keys_instead_of_the_underlying_view() {
     let mut state = AppState::new();
     manager::initialize(&mut state, &config());
     open_settings(&mut state);
-    for key in ['a', 'p', 's', 'n'] {
+    for key in ['a', 's', 'n'] {
         assert!(key_input::handle_key(
             KeyEvent::new(KeyCode::Char(key), KeyModifiers::CONTROL),
             &mut state,
@@ -397,4 +404,23 @@ async fn switching_and_managing_are_separate_and_cancel_preserves_player_state()
         "opening the active library leaves settings without reloading it"
     );
     assert_eq!(state.playback.position_ms, 1234);
+}
+
+#[test]
+fn up_from_first_saved_library_returns_to_settings_menu() {
+    let mut state = AppState::new();
+    manager::initialize(&mut state, &config());
+    open_settings(&mut state);
+    state.popups.library_picker_index = 1;
+    press(&mut state, KeyCode::Up);
+    assert_eq!(state.popups.library_picker_index, 0);
+    assert_eq!(state.settings_state.focus, SettingsFocus::Content);
+    press(&mut state, KeyCode::Up);
+    assert_eq!(state.popups.library_picker_index, 0);
+    assert_eq!(state.settings_state.focus, SettingsFocus::Sections);
+    press(&mut state, KeyCode::Right);
+    assert_eq!(state.settings_state.section, SettingsSection::Textamp);
+    press(&mut state, KeyCode::Down);
+    assert_eq!(state.settings_state.focus, SettingsFocus::Pages);
+    assert!(state.popups.library_dialog.is_none());
 }

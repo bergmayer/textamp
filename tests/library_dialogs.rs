@@ -115,7 +115,7 @@ fn navidrome_form_shows_all_fields_and_cancels_inflight_sign_in() {
         "URL",
         "Username",
         "Password",
-        "Name (optional)",
+        "Account name (optional)",
         "Add library",
         "Cancel",
     ] {

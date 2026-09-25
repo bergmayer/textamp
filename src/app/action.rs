@@ -625,10 +625,14 @@ pub enum SettingsAction {
     CacheSizes {
         request: u64,
         entries: Vec<(crate::app::sources::LibraryChoice, Result<u64, String>)>,
+        artwork: Vec<(String, usize, u64)>,
     },
     LibraryCacheCleared(Result<usize, String>),
-    ClearArtworkCache,
-    ArtworkCacheCleared(usize),
+    ClearArtworkCache(crate::app::sources::LibraryChoice),
+    ArtworkCacheCleared {
+        choice: crate::app::sources::LibraryChoice,
+        removed: usize,
+    },
     AllCachesCleared {
         library: Result<usize, String>,
         artwork: usize,
@@ -670,6 +674,12 @@ pub enum SettingsAction {
     /// half, Now Playing on bottom half). Persisted via
     /// `UiConfig::tall_mode`. Bound to `|` and to a palette command.
     ToggleTallMode,
+    /// Persist a column's artwork visibility for its browse context.
+    SaveColumnArtwork {
+        library_key: String,
+        column_key: Option<String>,
+        visible: bool,
+    },
     /// Persist the (library, playlist) -> view-toggles mapping. Sent
     /// when the user changes a playlist tracks column's "Group by
     /// album" or "Show album artwork" toggles. Settings disk-saver

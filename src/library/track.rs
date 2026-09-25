@@ -34,6 +34,9 @@ pub struct Track {
     pub key: String,
     #[serde(default)]
     pub title: String,
+    /// All track-level genre tags, in source order.
+    #[serde(default)]
+    pub genres: Vec<String>,
     #[serde(default)]
     pub parent_title: Option<String>,
     #[serde(default)]
@@ -151,6 +154,9 @@ impl Track {
                     Some(StandardTagKey::Album) => self.parent_title = Some(value),
                     Some(StandardTagKey::Artist) => self.original_title = Some(value),
                     Some(StandardTagKey::AlbumArtist) => self.grandparent_title = Some(value),
+                    Some(StandardTagKey::Genre) if !self.genres.contains(&value) => {
+                        self.genres.push(value);
+                    }
                     _ => {}
                 }
             }

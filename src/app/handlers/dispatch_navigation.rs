@@ -27,9 +27,6 @@ pub async fn dispatch(
 
     match action {
         NavigationAction::SetView(view) => {
-            // Clear artwork cache when leaving Similar view to force re-render
-            // (Similar popup's Clear widget can corrupt terminal images)
-
             state.set_view(view);
             // Load stations when entering Queue view if not already loaded
             if view == View::Queue

@@ -2450,6 +2450,17 @@ impl MillerState<StationColumn> {
 }
 
 impl AppState {
+    /// Stable identity for an artwork toggle in a browse column. The
+    /// category, parent row, and content kind let each artist/album/track
+    /// listing retain its own choice when rebuilt.
+    pub fn column_artwork_key(&self, column_index: usize) -> Option<String> {
+        column_artwork_key(
+            self.browse_category,
+            &self.browse_nav()?.columns,
+            column_index,
+        )
+    }
+
     fn loaded_stations(&self) -> impl Iterator<Item = &Station> {
         self.station_nav
             .columns
@@ -2842,7 +2853,7 @@ impl AppState {
                             .get(&parent.rating_key)?
                             .as_ref()
                             .ok()?,
-                        self.track_pane_index - 1,
+                        self.track_pane_index - 2,
                     )
                 } else {
                     self.focused_track()?;
@@ -2869,12 +2880,12 @@ impl AppState {
         self.view == View::Browse
             && !self.category_column_focused
             && self.track_pane_focused
-            && self.track_pane_index > 0
+            && self.track_pane_index > 1
             && self
                 .focused_track()
                 .and_then(|p| self.track_pane_similar.get(&p.rating_key))
                 .and_then(|result| result.as_ref().ok())
-                .map(|v| v.get(self.track_pane_index - 1).is_some())
+                .map(|v| v.get(self.track_pane_index - 2).is_some())
                 .unwrap_or(false)
     }
 
@@ -3319,6 +3330,30 @@ impl AppState {
             self.queue.history.pop_front();
         }
     }
+}
+
+pub fn column_artwork_key(
+    category: BrowseCategory,
+    columns: &[BrowseColumn],
+    column_index: usize,
+) -> Option<String> {
+    let column = columns.get(column_index)?;
+    let parent = if column_index == 0 {
+        "root"
+    } else {
+        columns.get(column_index - 1)?.selected_item()?.key()
+    };
+    let kind = column.items.iter().find_map(|item| match item {
+        BrowseItem::Artist { .. } => Some("artists"),
+        BrowseItem::Album { .. } => Some("albums"),
+        BrowseItem::Track { .. } => Some("tracks"),
+        BrowseItem::Genre { .. } => Some("genres"),
+        BrowseItem::GenreCategory { .. } => Some("genre-categories"),
+        BrowseItem::Playlist { .. } => Some("playlists"),
+        BrowseItem::AllTracks { .. } => Some("all-tracks"),
+        _ => None,
+    })?;
+    Some(format!("v1:{}:{}:{}", category.name(), kind, parent))
 }
 
 impl Default for AppState {
@@ -4127,6 +4162,8 @@ pub enum SettingsFocus {
     /// Sections panel (left)
     #[default]
     Sections,
+    /// Textamp page menu.
+    Pages,
     /// Content panel (right)
     Content,
 }
@@ -4137,22 +4174,72 @@ pub enum SettingsFocus {
 pub enum TextampSetting {
     Theme(crate::app::theme::ThemeName),
     Artwork(ArtworkMode),
+    ArtworkVisible,
 
     Transcode,
     ExternalSearch(crate::services::external_search::SearchTarget),
     Sidebar(SidebarSection),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SettingsPage {
+    #[default]
+    Themes,
+    Display,
+    Sidebar,
+    Services,
+}
+
+impl SettingsPage {
+    pub const ALL: [Self; 4] = [Self::Themes, Self::Display, Self::Sidebar, Self::Services];
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Themes => "Themes",
+            Self::Display => "Display & audio",
+            Self::Sidebar => "Sidebar",
+            Self::Services => "Search services",
+        }
+    }
+    pub fn step(self, forward: bool) -> Self {
+        let index = Self::ALL.iter().position(|p| *p == self).unwrap_or(0);
+        Self::ALL[(index + if forward { 1 } else { Self::ALL.len() - 1 }) % Self::ALL.len()]
+    }
+}
+
 impl AppState {
     pub fn textamp_settings(&self) -> Vec<TextampSetting> {
         use crate::services::external_search::SearchTarget;
         use TextampSetting::*;
-        let mut items: Vec<_> = crate::app::theme::ThemeName::all()
-            .iter()
-            .copied()
-            .map(Theme)
-            .chain(ArtworkMode::all().iter().copied().map(Artwork))
+        if self.settings_state.page == SettingsPage::Themes {
+            return crate::app::theme::ThemeName::all()
+                .iter()
+                .copied()
+                .map(Theme)
+                .collect();
+        }
+        if self.settings_state.page == SettingsPage::Sidebar {
+            return self.sidebar_sections().into_iter().map(Sidebar).collect();
+        }
+        if self.settings_state.page == SettingsPage::Services {
+            return [
+                SearchTarget::AppleMusic,
+                SearchTarget::Spotify,
+                SearchTarget::YouTube,
+            ]
+            .into_iter()
+            .map(ExternalSearch)
             .collect();
+        }
+        let mut items: Vec<_> = if self.active_library.is_some() {
+            ArtworkMode::all()
+                .iter()
+                .copied()
+                .map(Artwork)
+                .chain([ArtworkVisible])
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         if self
             .sources
@@ -4162,15 +4249,6 @@ impl AppState {
         {
             items.push(Transcode);
         }
-        items.extend(
-            [
-                SearchTarget::AppleMusic,
-                SearchTarget::Spotify,
-                SearchTarget::YouTube,
-            ]
-            .map(ExternalSearch),
-        );
-        items.extend(self.sidebar_sections().into_iter().map(Sidebar));
         items
     }
 }
@@ -4178,10 +4256,14 @@ impl AppState {
 /// Settings screen state.
 #[derive(Debug, Clone, Default)]
 pub struct SettingsState {
+    pub page: SettingsPage,
+    /// Return from a connection or rename form to its library setup page.
+    pub library_return: Option<crate::app::sources::options::Options>,
     pub cache_scans: std::collections::HashMap<String, crate::app::sources::cache::ScanState>,
     pub scan_request: u64,
     pub cache_request: u64,
     pub cache_entries: Vec<(crate::app::sources::LibraryChoice, Result<u64, String>)>,
+    pub artwork_cache_entries: std::collections::HashMap<String, (usize, u64)>,
     pub cache_task: Option<crate::app::tasks::TaskLease>,
 
     /// Which panel has focus
@@ -4394,7 +4476,7 @@ pub enum ConfirmAction {
     RefreshCache,
     ClearLibraryCache,
     ClearSourceCache(crate::app::sources::LibraryChoice),
-    ClearArtworkCache,
+    ClearArtworkCache(crate::app::sources::LibraryChoice),
 
     Quit,
 }

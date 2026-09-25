@@ -649,7 +649,7 @@ fn handle_track_pane_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Act
         .and_then(|result| result.as_ref().ok())
         .map(|v| v.len())
         .unwrap_or(0);
-    let max_idx = similar_count; // 0 = play, 1..=N = similar
+    let max_idx = similar_count + 1; // 0/1 = playback, 2..=N+1 = similar
 
     match key.code {
         KeyCode::F(1) => return vec![NavigationAction::SetView(View::Help).into()],
@@ -668,11 +668,17 @@ fn handle_track_pane_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Act
             if state.track_pane_index == 0 {
                 return vec![QueueAction::PlayTrack(Box::new(track)).into()];
             }
+            if state.track_pane_index == 1 {
+                if let Some((tracks, index)) = state.palette_track_list() {
+                    return vec![QueueAction::PlayTracksNow(tracks[index..].to_vec()).into()];
+                }
+                return vec![];
+            }
             // Open the command palette as the contextual menu for the
             // highlighted similar-track row. The palette's context-
             // aware section reads `palette_target_track()`, which
             // returns the similar track when `track_pane_focused &&
-            // track_pane_index > 0` — so the user gets Play Track /
+            // track_pane_index > 1` — so the user gets Play Track /
             // Open in Library (always shown for similar rows) /
             // Artist Bio / Sonic Adventure / external search at the
             // top of the list.

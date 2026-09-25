@@ -21,7 +21,7 @@
 //! The untitled sidebar starts with Search, followed by lowercase group headings.
 //! Highlighting Search shows a themed logo and Enter prompt.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use super::artwork::ArtworkRenderer;
 use super::layout::{centered_rect, AppLayout, FullScreenLayout};
@@ -38,6 +38,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 
 thread_local! {
     static BIO_ARTWORK_RENDERER: RefCell<ArtworkRenderer> = RefCell::new(ArtworkRenderer::new());
+    static LAST_RENDERED_VIEW: Cell<Option<View>> = const { Cell::new(None) };
 }
 
 /// Initialize the bio popup artwork renderer with a pre-detected picker.
@@ -65,6 +66,17 @@ pub fn restore_bio_artwork_native_protocol() {
 
 /// Render the entire UI.
 pub fn render(frame: &mut Frame, state: &AppState) {
+    LAST_RENDERED_VIEW.with(|last| {
+        if last.get() == Some(View::Similar) && state.view != View::Similar {
+            // The modal's Clear widget can cover terminal graphics while
+            // leaving the underlying ratatui cells unchanged. Drop cached
+            // image protocols so artwork in the restored browse view is
+            // placed again on the terminal.
+            super::artwork::clear_grid_cache();
+        }
+        last.set(Some(state.view));
+    });
+
     // Clear hit-test registry for this frame
     state.hit_regions.borrow_mut().clear();
 
@@ -201,7 +213,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
 
     // Render input dialog if present
     if let Some(ref dialog) = state.popups.input_dialog {
-        render_input_dialog(frame, dialog);
+        render_input_dialog(frame, state, dialog);
     }
 
     // Render confirm dialog if present
@@ -1661,10 +1673,8 @@ fn render_track_details_pane(
         None
     };
 
-    // Top row: clickable Play Track button. Highlighted when the
-    // pane has keyboard focus and `track_pane_index == 0`. Anchored
-    // to the right side of the row so it lines up with the GUI's
-    // primary-action button on its track-details pane.
+    // Two pinned playback actions: play only this track, or start here
+    // and continue through the current ordered track column.
     //
     // The Play row is pinned at the top of the pane; everything else
     // (artwork, metadata, similar list) renders in the scrollable
@@ -1692,17 +1702,44 @@ fn render_track_details_pane(
     };
     frame.render_widget(Paragraph::new(play_label).style(play_style), play_area);
 
-    // Scrollable body region below the pinned Play row. Reserve the
+    let following_label = " ▶  Play Track++ ";
+    let following_w = if inner.height > 1 {
+        (following_label.chars().count() as u16).min(inner.width)
+    } else {
+        0
+    };
+    let following_area = Rect {
+        x: inner.x + inner.width.saturating_sub(following_w),
+        y: inner.y + 1,
+        width: following_w,
+        height: 1,
+    };
+    if inner.height > 1 {
+        let style = if pane_focused && pane_idx == 1 {
+            Style::default()
+                .fg(t.colors.selection_text)
+                .bg(t.colors.bg_selection)
+                .add_modifier(ratatui::style::Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(t.colors.fg_accent)
+                .add_modifier(ratatui::style::Modifier::BOLD)
+        };
+        frame.render_widget(Paragraph::new(following_label).style(style), following_area);
+    }
+
+    // Scrollable body region below the pinned playback rows. Reserve the
     // rightmost column for the scrollbar so content doesn't bleed
     // under it.
-    let body_y = inner.y + 1;
-    let body_h = inner.height.saturating_sub(1);
+    let body_y = inner.y + 2;
+    let body_h = inner.height.saturating_sub(2);
     if body_h == 0 {
         // No room for a body; register hit regions and return.
         let mut hr = state.hit_regions.borrow_mut();
         hr.track_pane = Some(crate::app::presentation::TrackPaneRegions {
             outer: area,
             play_button: play_area,
+            following_button: following_area,
             similar_rows: Vec::new(),
             close_x: close_x_rect,
         });
@@ -1769,6 +1806,13 @@ fn render_track_details_pane(
         ));
     }
 
+    if !track.genres.is_empty() {
+        let genre_text = format!("Genres: {}", track.genres.join(", "));
+        for row in wrap_text(&genre_text, max_w) {
+            lines.push((Style::default().fg(t.colors.fg_muted), row));
+        }
+    }
+
     // Blank spacer.
     lines.push((Style::default(), String::new()));
 
@@ -1821,11 +1865,9 @@ fn render_track_details_pane(
 
     // Auto-scroll: when the pane has focus and the user has highlighted
     // a similar row that lives outside the visible window, slide the
-    // window so the row is on screen. Selection at index 0 (Play) is
-    // pinned at the top and never affects scroll.
-    let selected_content_y: Option<u16> = if pane_focused && pane_idx > 0 {
-        // similar_y(i) = list_y + i (where i = pane_idx - 1)
-        Some(list_y + (pane_idx as u16 - 1))
+    // window so the row is on screen. The two playback rows are pinned.
+    let selected_content_y: Option<u16> = if pane_focused && pane_idx > 1 {
+        Some(list_y + (pane_idx as u16 - 2))
     } else {
         None
     };
@@ -1983,7 +2025,7 @@ fn render_track_details_pane(
                     };
                     let label = format!("\u{2022} {} \u{2014} {}", sim.title, sim.track_artist(),);
                     let truncated = truncate_middle(&label, max_w);
-                    let row_focused = pane_focused && pane_idx == i + 1;
+                    let row_focused = pane_focused && pane_idx == i + 2;
                     let style = if row_focused {
                         Style::default()
                             .fg(t.colors.selection_text)
@@ -2060,6 +2102,7 @@ fn render_track_details_pane(
     hr.track_pane = Some(crate::app::presentation::TrackPaneRegions {
         outer: area,
         play_button: play_area,
+        following_button: following_area,
         similar_rows,
         close_x: close_x_rect,
     });
@@ -3284,39 +3327,67 @@ fn render_library_picker(frame: &mut Frame, state: &AppState) {
 
 /// Settings content, not a startup screen or full-window modal.
 pub(super) fn render_library_manager(frame: &mut Frame, state: &AppState, inner: Rect) {
-    // Sidebar | account-grouped library list → selected library options popover.
-    // Add library opens a type chooser, followed by a single connection form.
-    let t = theme();
-    let rows = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Min(1),
-        Constraint::Length(2),
-    ])
-    .split(inner);
+    // Saved libraries sit below the setup menu; Up at the first row returns there.
+    use screens::settings::{panel, paper};
     let active = crate::app::sources::library_choices(state)
         .into_iter()
         .find(|entry| entry.active(state))
         .map(|entry| entry.label())
         .unwrap_or_else(|| "None".into());
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .split(inner);
     frame.render_widget(
-        Paragraph::new(format!("Active: {active}")).style(Style::default().fg(t.colors.fg_accent)),
-        Rect::new(
-            rows[0].x,
-            rows[0].y.saturating_add(1),
-            rows[0].width,
-            rows[0].height.saturating_sub(1),
-        ),
+        Paragraph::new(format!(" Active: {active}")).style(paper()),
+        rows[0],
     );
-    render_managed_libraries(frame, state, rows[1]);
-    let shortcuts = "← sidebar · ↑↓ library · Enter options · A add";
+    let (list, detail) = if rows[1].width >= 74 {
+        let panes = Layout::horizontal([Constraint::Percentage(46), Constraint::Percentage(54)])
+            .split(rows[1]);
+        (panes[0], Some(panes[1]))
+    } else {
+        (rows[1], None)
+    };
+    let block = panel(" Saved libraries ");
+    let list_inner = block.inner(list);
+    frame.render_widget(block, list);
+    render_managed_libraries(frame, state, list_inner);
+    if let Some(detail) = detail {
+        let block = panel(" Library information ");
+        let content = block.inner(detail);
+        frame.render_widget(block, detail);
+        let choice = crate::app::sources::choices(state)
+            .get(state.popups.library_picker_index)
+            .cloned();
+        let text = match choice {
+            Some(crate::app::sources::LibraryChoice::Add) | None => {
+                "Local folder\nWebDAV share\nSubsonic / Navidrome".to_string()
+            }
+            Some(choice) => format!(
+                "{}\n{}\n\n{}",
+                choice.label(),
+                choice.provider(),
+                choice.location()
+            ),
+        };
+        frame.render_widget(
+            Paragraph::new(text)
+                .style(paper())
+                .wrap(Wrap { trim: true }),
+            content,
+        );
+    }
     frame.render_widget(
-        Paragraph::new(vec![Line::from(shortcuts)]).style(Style::default().fg(t.colors.fg_muted)),
+        Paragraph::new(" ↑ Menu   Enter Open   A Add ").style(paper().fg(theme().colors.fg_accent)),
         rows[2],
     );
 }
 
 fn render_managed_libraries(frame: &mut Frame, state: &AppState, area: Rect) {
-    let t = theme();
+    use screens::settings::{paper, selected};
     let entries = crate::app::sources::choices(state);
     let mut lines = Vec::new();
     let mut rows = Vec::new();
@@ -3331,7 +3402,7 @@ fn render_managed_libraries(frame: &mut Frame, state: &AppState, area: Rect) {
             if !group.is_empty() {
                 lines.push(Line::styled(
                     group.clone(),
-                    Style::default().fg(t.colors.fg_muted),
+                    paper().fg(theme().colors.fg_accent),
                 ));
             }
             previous = group;
@@ -3339,15 +3410,9 @@ fn render_managed_libraries(frame: &mut Frame, state: &AppState, area: Rect) {
         if index == state.popups.library_picker_index {
             selected_line = lines.len();
         }
-        let selected = index == state.popups.library_picker_index
+        let is_selected = index == state.popups.library_picker_index
             && state.settings_state.focus == crate::app::state::SettingsFocus::Content;
-        let style = if selected {
-            Style::default()
-                .fg(t.colors.selection_text)
-                .bg(t.colors.selection_bar_bg)
-        } else {
-            Style::default().fg(t.colors.fg_primary)
-        };
+        let style = if is_selected { selected() } else { paper() };
         let name = match entry {
             crate::app::sources::LibraryChoice::Navidrome { name, .. } => name.clone(),
             _ => entry.label(),
@@ -3356,7 +3421,7 @@ fn render_managed_libraries(frame: &mut Frame, state: &AppState, area: Rect) {
         lines.push(Line::styled(
             format!(
                 "{}{}{}",
-                if selected { "> " } else { "  " },
+                if is_selected { "> " } else { "  " },
                 if entry.active(state) { "[Active] " } else { "" },
                 name
             ),
@@ -3385,6 +3450,12 @@ fn render_managed_libraries(frame: &mut Frame, state: &AppState, area: Rect) {
             total_lines: total,
         });
     frame.render_widget(Paragraph::new(lines).scroll((offset as u16, 0)), area);
+    screens::settings::scroll_marker(
+        frame,
+        Rect::new(area.right(), area.y, 1, area.height),
+        total,
+        offset,
+    );
 }
 
 fn render_library_choices(frame: &mut Frame, state: &AppState, outer: Rect, list_area: Rect) {
@@ -3702,10 +3773,47 @@ fn render_error_popup(frame: &mut Frame, error: &str) {
     frame.render_widget(text, area);
 }
 
-fn render_input_dialog(frame: &mut Frame, dialog: &InputDialog) {
+/// Wrap plain input/metadata without discarding characters in a narrow pane.
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthChar;
+    if width == 0 {
+        return Vec::new();
+    }
+    let mut rows = vec![String::new()];
+    let mut row_width = 0;
+    for word in text.split_whitespace() {
+        let word_width = unicode_width::UnicodeWidthStr::width(word);
+        if row_width > 0 && row_width + 1 + word_width <= width {
+            rows.last_mut().unwrap().push(' ');
+            row_width += 1;
+        } else if row_width > 0 {
+            rows.push(String::new());
+            row_width = 0;
+        }
+        for ch in word.chars() {
+            let ch_width = ch.width().unwrap_or(0);
+            if row_width > 0 && row_width + ch_width > width {
+                rows.push(String::new());
+                row_width = 0;
+            }
+            rows.last_mut().unwrap().push(ch);
+            row_width += ch_width;
+        }
+    }
+    rows
+}
+
+fn render_input_dialog(frame: &mut Frame, state: &AppState, dialog: &InputDialog) {
     let t = theme();
-    // Use 50% width and 25% height to ensure the dialog is visible
-    let area = centered_rect(50, 25, frame.area());
+    let describe = matches!(
+        dialog.action_type,
+        crate::app::state::InputDialogAction::AudioMuseSearch(crate::audiomuse::Feature::Describe)
+    );
+    let area = if describe {
+        centered_rect(75, 55, frame.area())
+    } else {
+        centered_rect(50, 25, frame.area())
+    };
 
     frame.render_widget(Clear, area);
 
@@ -3716,37 +3824,65 @@ fn render_input_dialog(frame: &mut Frame, dialog: &InputDialog) {
         .border_style(Style::default().fg(t.colors.border))
         .style(Style::default().bg(t.colors.bg_primary));
 
+    let block = if state.view == View::Settings {
+        screens::settings::panel(format!(" {} ", dialog.title))
+    } else {
+        block
+    };
+    let text_style = if state.view == View::Settings {
+        screens::settings::paper()
+    } else {
+        Style::default().fg(t.colors.fg_primary)
+    };
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // Split inner area for input and hint
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1), // input label
-            Constraint::Length(1), // input field
-            Constraint::Length(1), // hint
-        ])
-        .split(inner);
-
-    // Input field with cursor
+    let input_area = Rect {
+        y: inner.y,
+        height: inner.height.saturating_sub(1),
+        ..inner
+    };
+    let hint_area = Rect {
+        y: inner.y + inner.height.saturating_sub(1),
+        height: 1,
+        ..inner
+    };
     let input_text = format!("{}▋", dialog.input.as_str());
-    let input = Paragraph::new(input_text).style(Style::default().fg(t.colors.fg_primary));
-    frame.render_widget(input, chunks[1]);
+    if describe {
+        let rows = wrap_text(&input_text, input_area.width as usize);
+        let start = rows.len().saturating_sub(input_area.height as usize);
+        frame.render_widget(
+            Paragraph::new(rows[start..].join("\n")).style(text_style),
+            input_area,
+        );
+    } else {
+        frame.render_widget(Paragraph::new(input_text).style(text_style), input_area);
+    }
 
     // Hint text
     let hint = Paragraph::new(format!(
         "Enter: {}  |  Esc: Cancel",
         dialog.action_type.submit_label()
     ))
-    .style(Style::default().fg(t.colors.fg_muted))
+    .style(text_style)
     .alignment(Alignment::Center);
-    frame.render_widget(hint, chunks[2]);
+    frame.render_widget(hint, hint_area);
 }
 
 fn render_confirm_dialog(frame: &mut Frame, state: &AppState, dialog: &ConfirmDialog) {
     let t = theme();
-    let area = centered_rect(50, 25, frame.area());
+    let area = if state.view == View::Settings {
+        let width = frame.area().width.saturating_sub(4).min(72);
+        let height = frame.area().height.saturating_sub(2).min(11);
+        Rect::new(
+            (frame.area().width - width) / 2,
+            (frame.area().height - height) / 2,
+            width,
+            height,
+        )
+    } else {
+        centered_rect(50, 25, frame.area())
+    };
 
     frame.render_widget(Clear, area);
 
@@ -3757,12 +3893,22 @@ fn render_confirm_dialog(frame: &mut Frame, state: &AppState, dialog: &ConfirmDi
         .border_style(Style::default().fg(t.colors.border_focused))
         .style(Style::default().bg(t.colors.bg_primary));
 
+    let block = if state.view == View::Settings {
+        screens::settings::panel(format!(" {} ", dialog.title))
+    } else {
+        block
+    };
+    let text_style = if state.view == View::Settings {
+        screens::settings::paper()
+    } else {
+        Style::default().fg(t.colors.fg_primary)
+    };
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     // Message
     let msg = Paragraph::new(dialog.message.as_str())
-        .style(Style::default().fg(t.colors.fg_primary))
+        .style(text_style)
         .wrap(Wrap { trim: true });
     let msg_area = Rect {
         height: inner.height.saturating_sub(2),
@@ -3821,6 +3967,15 @@ fn render_confirm_dialog(frame: &mut Frame, state: &AppState, dialog: &ConfirmDi
         )
     };
 
+    let (yes_style, no_style) = if state.view == View::Settings {
+        if dialog.selected_yes {
+            (screens::settings::selected(), screens::settings::paper())
+        } else {
+            (screens::settings::paper(), screens::settings::selected())
+        }
+    } else {
+        (yes_style, no_style)
+    };
     frame.render_widget(Paragraph::new(yes_text).style(yes_style), yes_area);
     frame.render_widget(Paragraph::new(no_text).style(no_style), no_area);
 
@@ -3828,7 +3983,7 @@ fn render_confirm_dialog(frame: &mut Frame, state: &AppState, dialog: &ConfirmDi
     let hint_y = btn_y.saturating_sub(1);
     if hint_y > inner.y + 1 {
         let hint = Paragraph::new("Y/N or Enter to confirm")
-            .style(Style::default().fg(t.colors.fg_muted))
+            .style(text_style)
             .alignment(Alignment::Center);
         let hint_area = Rect {
             x: inner.x,

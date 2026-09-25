@@ -78,10 +78,16 @@ fn search_landing_replaces_content_without_receiving_hidden_content_input() {
 #[test]
 fn unfocused_and_non_theme_rows_show_the_applied_theme() {
     let mut state = AppState::new();
+    state.active_library = Some("folder:fixture".into());
     state.view = View::Settings;
     state.settings_state.section = SettingsSection::Textamp;
     state.theme = *ThemeName::all().last().unwrap();
     for focus in [SettingsFocus::Sections, SettingsFocus::Content] {
+        state.settings_state.page = if focus == SettingsFocus::Content {
+            textamp::app::state::SettingsPage::Display
+        } else {
+            textamp::app::state::SettingsPage::Themes
+        };
         state.settings_state.focus = focus;
         state.settings_state.item_index = if focus == SettingsFocus::Content {
             state.textamp_settings().len() - 1
@@ -89,9 +95,9 @@ fn unfocused_and_non_theme_rows_show_the_applied_theme() {
             0
         };
         let terminal = draw(&mut state, 160, 40);
-        let list = state.hit_regions.settings_textamp.as_ref().unwrap().inner;
+        let preview = state.hit_regions.settings_preview.unwrap();
         assert_eq!(
-            terminal.backend().buffer()[(list.right(), list.y)].bg,
+            terminal.backend().buffer()[(preview.x, preview.y)].bg,
             Theme::new(state.theme).colors.bg_primary
         );
     }
@@ -111,17 +117,17 @@ fn highlighted_theme_previews_without_applying_and_preview_is_not_clickable() {
             .position(|item| *item == TextampSetting::Theme(*name))
             .unwrap();
         let terminal = draw(&mut state, 160, 40);
-        let list = state.hit_regions.settings_textamp.as_ref().unwrap().inner;
-        let x = list.right();
+        let preview = state.hit_regions.settings_preview.unwrap();
+        let x = preview.x;
         assert!(x < 100, "space remains to the right of the list");
-        let color = terminal.backend().buffer()[(x, list.y)].bg;
+        let color = terminal.backend().buffer()[(x, preview.y)].bg;
         assert_eq!(color, Theme::new(*name).colors.bg_primary);
         let selected = state.settings_state.item_index;
         assert!(mouse_input::handle_mouse(
             MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: x + 3,
-                row: list.y + 3,
+                row: preview.y + 3,
                 modifiers: KeyModifiers::NONE,
             },
             &mut state

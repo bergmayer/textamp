@@ -259,6 +259,40 @@ impl ThemeColors {
         }
     }
 
+    /// Pure black backgrounds with half-bright white text.
+    pub fn white_on_black() -> Self {
+        let background = Color::Rgb(0, 0, 0);
+        let foreground = Color::Rgb(128, 128, 128);
+
+        Self {
+            bg_primary: background,
+            bg_secondary: background,
+            bg_highlight: background,
+            bg_selection: background,
+
+            fg_primary: foreground,
+            fg_secondary: foreground,
+            fg_muted: foreground,
+            fg_accent: foreground,
+            fg_accent_dim: foreground,
+
+            border: foreground,
+            border_focused: foreground,
+            title_focused: foreground,
+
+            error: foreground,
+            success: foreground,
+            warning: foreground,
+
+            selection_bar_bg: background,
+            selection_bar_fg: foreground,
+            selection_text: foreground,
+            transport_bg: background,
+            shortcut_key: foreground,
+            shortcut_text: foreground,
+        }
+    }
+
     /// Vintage amber-on-black CRT — IBM 3270 / DEC monochrome look.
     /// One hue, three brightnesses; the highlight states use a dim
     /// amber background so foreground amber stays legible on top.
@@ -472,6 +506,7 @@ impl ThemeColors {
             ThemeName::SolarizedLight => Self::solarized_light(),
             ThemeName::Platinum => Self::platinum(),
             ThemeName::BlackAndWhite => Self::black_and_white(),
+            ThemeName::WhiteOnBlack => Self::white_on_black(),
             ThemeName::Amber => Self::amber(),
             ThemeName::PhosphorGreen => Self::phosphor_green(),
             ThemeName::Norton => Self::norton(),
@@ -757,9 +792,14 @@ impl Theme {
     pub fn list_item_style(is_selected: bool) -> Style {
         let t = theme();
         if is_selected {
-            Style::default()
+            let style = Style::default()
                 .fg(t.colors.selection_text)
-                .bg(t.colors.selection_bar_bg)
+                .bg(t.colors.selection_bar_bg);
+            if t.name == ThemeName::WhiteOnBlack {
+                style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+            } else {
+                style
+            }
         } else {
             Style::default().fg(t.colors.fg_primary)
         }

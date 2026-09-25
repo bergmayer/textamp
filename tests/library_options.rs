@@ -10,7 +10,7 @@ use textamp::app::handlers::{key_input, mouse_input};
 use textamp::app::sources::{
     cache,
     dialogs::Dialog,
-    options::{self, OptionAction},
+    options::{self, OptionAction, OptionsPage},
     ActiveSource, LibraryChoice, SourceAction,
 };
 use textamp::app::state::{PlayStatus, SettingsFocus, SettingsSection, View};
@@ -40,6 +40,14 @@ fn press(state: &mut AppState, key: KeyCode) -> Vec<Action> {
     )
 }
 fn select(state: &mut AppState, action: OptionAction) {
+    if let Some(Dialog::Library(options)) = &mut state.popups.library_dialog {
+        options.set_page(match action {
+            OptionAction::Clear | OptionAction::Rescan => OptionsPage::Cache,
+            OptionAction::Sonic | OptionAction::AudioMuse => OptionsPage::Analysis,
+            OptionAction::Close => options.page,
+            _ => OptionsPage::General,
+        });
+    }
     let Some(Dialog::Library(options)) = &state.popups.library_dialog else {
         panic!("No library options")
     };
@@ -84,8 +92,17 @@ fn enter_manages_and_only_make_active_switches_mouse_and_keyboard_agree() {
     ));
     let text = draw(&mut state, 110, 35);
     assert!(text.contains("Make active"));
+    assert!(text.contains("General") && text.contains("Cache"));
+    assert!(
+        !text.contains("Clear library cache"),
+        "maintenance is on its own page"
+    );
+    press(&mut state, KeyCode::Right);
+    let text = draw(&mut state, 110, 35);
     assert!(text.contains("Clear library cache"));
-    assert!(text.contains("Re-scan cache"));
+    assert!(text.contains("Refresh catalog now"));
+    press(&mut state, KeyCode::Left);
+    draw(&mut state, 110, 35);
     assert_eq!(
         state.sources.active.folder().map(String::as_str),
         Some("playing-elsewhere")

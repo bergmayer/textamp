@@ -8,6 +8,25 @@ use crossterm::event::KeyCode;
 pub struct Options {
     pub choice: LibraryChoice,
     pub selected: usize,
+    pub page: OptionsPage,
+    pub scroll_pin: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OptionsPage {
+    #[default]
+    General,
+    Analysis,
+    Cache,
+}
+impl OptionsPage {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::General => "General",
+            Self::Analysis => "Analysis",
+            Self::Cache => "Cache",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,24 +38,45 @@ pub enum OptionAction {
     AudioMuse,
     Rescan,
     Clear,
-    SharedArtwork,
+    ClearArtwork,
     Remove,
     Close,
 }
 impl Options {
+    pub fn pages(&self, state: &AppState) -> Vec<OptionsPage> {
+        let mut pages = vec![OptionsPage::General];
+        if sonic::choice_key(&self.choice, state).is_some() {
+            pages.push(OptionsPage::Analysis);
+        }
+        pages.push(OptionsPage::Cache);
+        pages
+    }
+    pub fn set_page(&mut self, page: OptionsPage) {
+        self.page = page;
+        self.selected = 0;
+        self.scroll_pin = None;
+    }
     pub fn items(&self, state: &AppState) -> Vec<(OptionAction, String)> {
         use OptionAction::*;
         let mut items = vec![
             (
                 Activate,
                 if self.choice.active(state) {
-                    "Active library"
+                    "Open active library"
                 } else {
                     "Make active"
                 }
                 .into(),
             ),
-            (Rename, "Rename…".into()),
+            (
+                Rename,
+                if matches!(self.choice, LibraryChoice::Navidrome { .. }) {
+                    "Rename account..."
+                } else {
+                    "Rename library..."
+                }
+                .into(),
+            ),
         ];
         if matches!(
             &self.choice,
@@ -60,14 +100,14 @@ impl Options {
             (
                 Rescan,
                 if super::cache::running(&self.choice, state) {
-                    "Cancel re-scan"
+                    "Cancel refresh"
                 } else {
-                    "Re-scan cache"
+                    "Refresh catalog now"
                 }
                 .into(),
             ),
             (Clear, "Clear library cache…".into()),
-            (SharedArtwork, "Clear shared artwork cache…".into()),
+            (ClearArtwork, "Clear downloaded artwork…".into()),
             (
                 Remove,
                 if matches!(self.choice, LibraryChoice::Navidrome { .. }) {
@@ -79,6 +119,12 @@ impl Options {
             ),
             (Close, "Close".into()),
         ]);
+        items.retain(|(action, _)| match action {
+            Sonic | AudioMuse => self.page == OptionsPage::Analysis,
+            Rescan | Clear | ClearArtwork => self.page == OptionsPage::Cache,
+            Close => true,
+            _ => self.page == OptionsPage::General,
+        });
         items
     }
 }
@@ -98,6 +144,8 @@ pub fn open(choice: LibraryChoice, state: &mut AppState) -> Vec<Action> {
     state.popups.library_dialog = Some(dialogs::Dialog::Library(Options {
         choice,
         selected: 0,
+        page: OptionsPage::General,
+        scroll_pin: None,
     }));
     vec![SettingsAction::RefreshCacheStats.into()]
 }
@@ -111,13 +159,16 @@ pub fn activate(state: &mut AppState) -> Vec<Action> {
         return vec![];
     };
     use OptionAction::*;
+    if matches!(action, Rename | Connection | AudioMuse | Remove) {
+        state.settings_state.library_return = Some(options.clone());
+    }
     if action == Sonic {
         return vec![SourceAction::ToggleSonic(choice).into()];
     }
     if action == Rescan {
         return vec![SettingsAction::RescanSourceCache(choice).into()];
     }
-    if !matches!(action, Clear | SharedArtwork) {
+    if !matches!(action, Clear | ClearArtwork) {
         state.popups.library_dialog = None;
     }
     match action {
@@ -126,24 +177,24 @@ pub fn activate(state: &mut AppState) -> Vec<Action> {
         Connection => shortcut(&choice, KeyCode::Char('c'), state),
         AudioMuse => shortcut(&choice, KeyCode::Char('m'), state),
         Remove => shortcut(&choice, KeyCode::Delete, state),
-        Clear | SharedArtwork => {
+        Clear | ClearArtwork => {
             state.popups.confirm_dialog = Some(ConfirmDialog {
                 title: if action == Clear {
-                    "Clear library cache?"
+                    "Clear library metadata?"
                 } else {
-                    "Clear shared artwork?"
+                    "Clear this library's artwork?"
                 }
                 .into(),
                 message: if action == Clear {
-                    format!("Clear metadata and analysis for {}? Music and sign-ins are kept. Re-scan to rebuild.", choice.label())
+                    format!("Clear metadata and analysis for {}? Music and sign-ins are kept. Use Refresh catalog to rebuild.", choice.label())
                 } else {
-                    "Artwork is shared across libraries and will download again when needed.".into()
+                    format!("Remove downloaded artwork for {}? Other libraries' artwork and display choices are kept.", choice.label())
                 },
                 selected_yes: false,
                 on_confirm: if action == Clear {
                     ConfirmAction::ClearSourceCache(choice)
                 } else {
-                    ConfirmAction::ClearArtworkCache
+                    ConfirmAction::ClearArtworkCache(choice)
                 },
             });
             vec![]

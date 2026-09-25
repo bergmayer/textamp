@@ -198,6 +198,11 @@ fn settings_checkbox_uses_the_highlighted_library_and_is_not_on_accounts_or_fold
     state.settings_state.focus = SettingsFocus::Content;
     let choice = textamp::app::sources::choices(&state)[state.popups.library_picker_index].clone();
     textamp::app::sources::options::open(choice, &mut state);
+    if let Some(textamp::app::sources::dialogs::Dialog::Library(options)) =
+        &mut state.popups.library_dialog
+    {
+        options.set_page(textamp::app::sources::options::OptionsPage::Analysis);
+    }
     let option_index = match &state.popups.library_dialog {
         Some(textamp::app::sources::dialogs::Dialog::Library(options)) => options
             .items(&state)

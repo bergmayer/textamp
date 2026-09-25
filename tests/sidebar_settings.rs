@@ -163,6 +163,7 @@ async fn settings_rows_and_keyboard_actions_follow_the_active_provider() {
         if provider == "folder" {
             state.sources.active = ActiveSource::Folder("fixture".into());
         }
+        state.settings_state.page = textamp::app::state::SettingsPage::Display;
         let rows = state.textamp_settings();
         assert_eq!(
             rows.contains(&TextampSetting::Transcode),
@@ -187,6 +188,8 @@ async fn settings_rows_and_keyboard_actions_follow_the_active_provider() {
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
 
         let mut audio = textamp::audio::AudioPlayer::new_without_audio();
+        state.settings_state.page = textamp::app::state::SettingsPage::Services;
+        let rows = state.textamp_settings();
         for target in [
             SearchTarget::AppleMusic,
             SearchTarget::Spotify,
@@ -232,7 +235,7 @@ async fn settings_rows_and_keyboard_actions_follow_the_active_provider() {
             })
             .unwrap();
         let region = state.hit_regions.settings_textamp.clone().unwrap();
-        assert!(region.scroll_offset > 0);
+        assert!(!region.rows.is_empty());
         let (rect, index) = *region
             .rows
             .iter()
@@ -395,6 +398,7 @@ async fn native_views_share_browse_and_visibility_persists_without_palette_short
     assert_eq!(rows[1], CategoryRow::Header("Browse"));
     assert!(!rows.contains(&CategoryRow::Header("Navidrome")));
     let target = SidebarSection::Collection(CollectionKind::FavoriteArtists);
+    state.settings_state.page = textamp::app::state::SettingsPage::Sidebar;
     state.settings_state.item_index = state
         .textamp_settings()
         .iter()

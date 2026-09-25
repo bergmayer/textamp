@@ -7,6 +7,7 @@ ESSENTIAL
   :q Enter       Quit (q or Q selects Quit first)
   /              Filter the focused column (type to narrow, ↑↓ to filtered results, Enter activates)
   Ctrl+F         Search (current-folder files for Local/WebDAV)
+  Search boxes: AND, OR, NOT; parentheses; quotes for exact phrases. Adjacent terms imply AND.
   F1   Ctrl+H    Toggle this help
   Tab / Shift+Tab Switch Library ↔ Now Playing (keyboard focus in split mode)
   Click           Focus the clicked pane; wheel scrolls under the pointer
@@ -31,6 +32,7 @@ PLAY-ALBUM ROW  (tracks columns)
   column. Enter plays the whole album / playlist; ↓ drops to the
   first track; ↑ from the first track jumps back to the play row.
   Click the row to play; click an item below to select it.
+  Track details: Play Track plays one; Play Track++ plays it and following tracks.
 
 VIEWS  (Ctrl+key)
   L  Library     G  Genres        O  Folders
@@ -78,23 +80,28 @@ TOOLS
 
   Startup opens your last library. F3: Enter switches, Esc cancels, F2 manages.
   F2 Settings → Libraries: add libraries, manage accounts and credentials.
-  Settings: Tab / Shift+Tab switches sidebar/content; ↑↓ selects items.
+  Settings: ←→ selects menus/pages; ↓ enters contents; Tab / Shift+Tab changes panels.
   Settings → Textamp: Enter / Space hides or shows sidebar sections for this library type.
   Playback is local; streaming quality is configurable for server libraries.
   Navidrome system lists and connected AudioMuse views are individually configurable.
   Hidden collections can be restored in Settings → Textamp.
-  Libraries are grouped by type/account in one list. ← returns to the sidebar.
-  [Active] marks the current library; Enter opens options, including Make active.
+  Setup: F10 menu; ↑↓ moves through controls; Enter/Space selects; Esc backs out.
+  : / Ctrl+P opens the command palette in settings. Setup uses the active app theme.
+  Libraries are grouped by type/account. [Active] marks the current library.
+  Up from the first saved library returns to the menu. Enter opens its options.
+  Left/Right selects General, Analysis or Cache.
+  General: Make active, rename, connection and removal. Saving does not switch libraries.
+  Analysis: Sonic checkbox and AudioMuse connection, where supported.
+  Cache: measured metadata and artwork size; refresh metadata or clear either cache
+  for the selected library. Other libraries' artwork stays in place.
+  Refresh again cancels the job. Clear asks first. Music and sign-ins are kept.
   Add library / A: choose Local, WebDAV, or Subsonic / Navidrome.
-  R rename · C credentials · Del remove from Textamp (never server music)
-  I toggles Sonic features for the selected server library; click also works.
-  M on a Navidrome library opens its AudioMuse connection form (also clickable).
+  Local folder: path and name in one form. Servers: URL, username, password and name.
+  Enter checks/saves; Esc cancels. Blank password keeps the existing sign-in.
   Removing a server account removes its libraries/sign-ins from Textamp, not music.
-  WebDAV / Navidrome: one connection form; Enter checks/saves, Esc cancels.
-  C edits WebDAV; blank password keeps it. Use the server's exact http:// or https:// URL.
+  Textamp pages: Themes, Display & audio, Sidebar, Search services.
+  Library Cache clears that library's metadata or downloaded artwork separately.
   Folder libraries: filename order, / filter, F5 reload, F4 artist biography.
-  Library options: cache size, Clear and Re-scan (again cancels); no library switch.
-  Shared artwork has a separately labelled clear control.
   Saved catalogs/folder trees open first; weekly refresh plus F5. Album listings load on demand.
   Re-scan refreshes enabled AudioMuse too; it never scans audio on the server.
   Navidrome Folders is an artist/album tree, not disk directories.
@@ -104,12 +111,14 @@ TOOLS
   Navidrome palette (:): favorite/unfavorite selection, ratings, lyrics,
   random mix, saved playback queues and playlist rename/replace/delete.
   Search… sits above browse: highlight for the logo, Enter for the Ctrl+F search popup.
-  Settings → Textamp: arrows preview theme colors on the right; Enter applies.
+  Settings → Textamp → Themes: highlight previews the ANSI art; Enter applies.
+  Settings → Textamp → Display: artwork rendering and new-column covers are per library.
   Local/WebDAV search: current-folder audio filenames; / also filters directory names.
   browse includes Navidrome system lists; audiomuse and playlists have separate headings.
   AudioMuse: AI labels, tempo, energy and key browse analyzed tracks, not file tags.
   AudioMuse: analysis cache updates weekly with library metadata; F5 updates it now.
   AudioMuse: Describe music… needs CLAP; Search lyrics… needs lyrics analysis.
+  Describe music: text wraps in the expanded prompt; Enter submits, Esc cancels.
   AudioMuse: use the command palette's AudioMuse analysis for the selected track's details.
   Bios: provider first, Wikipedia fallback. ↑↓ scroll, ←→ photos, B source.
   Ctrl+R  Related artists

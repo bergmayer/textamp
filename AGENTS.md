@@ -59,10 +59,20 @@ F3 switches libraries; F2 → Libraries manages sources/accounts. Startup opens 
 saved selection, then another saved source if needed; no source opens normal
 browsing with an add-library prompt. Startup must not start playback.
 
-Settings has Libraries, Textamp and About. Libraries is a single list
-grouped by provider/account, with Add library and inline connection forms. Enter
-opens per-library options (Make active, connection/AI and cache size/clear/re-scan).
-F3 remains switch-only. Cache jobs must not switch the active source or playback.
+Settings uses a DOS-style menu bar with Libraries, Textamp and About. F10 focuses
+that menu; Left/Right selects menus/pages, Down enters their contents; Tab moves
+between menus and controls; Esc backs out. The command palette works in settings.
+Setup and its dialogs use the active app theme.
+Libraries is grouped by provider/account. Up from its first row focuses the
+Settings menu. Enter opens General / Analysis / Cache pages; Left/Right changes
+pages. The library detail card stays concise. Add opens a type chooser and a single form.
+Saving a connection must not activate a different library. Child forms return to
+the owning setup page. F3 remains switch-only. Cache jobs must not switch the
+active source or playback. Artwork downloads and their clear action are scoped
+to individual libraries, alongside metadata and analysis caches.
+Artwork rendering and default album-column visibility are per library; restore
+both on source switches and show the active library in Display settings. Legacy
+global values are fallback defaults. The downloaded image cache is per library.
 Sidebar visibility belongs in Textamp settings. Theme artwork uses the active
 theme unless a different theme row has content focus. Cache sizes are measured
 on disk per library (including AudioMuse), not estimated from in-memory structs.

@@ -48,6 +48,168 @@ fn normalize_for_search(s: &str) -> String {
         .collect()
 }
 
+#[derive(Debug, Clone)]
+enum QueryExpr {
+    Term(String),
+    Phrase(String),
+    Not(Box<QueryExpr>),
+    And(Box<QueryExpr>, Box<QueryExpr>),
+    Or(Box<QueryExpr>, Box<QueryExpr>),
+}
+
+fn query_matches(text: &str, query: &str) -> bool {
+    let Some(tokens) = tokenize_query(query) else {
+        return false;
+    };
+    let mut parser = QueryParser {
+        tokens: &tokens,
+        pos: 0,
+    };
+    let Some(expr) = parser.parse_or() else {
+        return false;
+    };
+    parser.pos == tokens.len() && eval_query(&expr, text)
+}
+fn is_boolean_query(query: &str) -> bool {
+    query.contains('"')
+        || query.contains('(')
+        || query.contains(')')
+        || query.split_whitespace().count() > 1
+        || query
+            .split_whitespace()
+            .any(|w| matches!(w.to_ascii_uppercase().as_str(), "AND" | "OR" | "NOT"))
+}
+
+#[derive(Debug, Clone)]
+enum QueryToken {
+    Word(String),
+    Phrase(String),
+    And,
+    Or,
+    Not,
+    LParen,
+    RParen,
+}
+
+fn tokenize_query(query: &str) -> Option<Vec<QueryToken>> {
+    let mut chars = query.chars().peekable();
+    let mut out = Vec::new();
+    while let Some(c) = chars.next() {
+        if c.is_whitespace() {
+            continue;
+        }
+        match c {
+            '(' => out.push(QueryToken::LParen),
+            ')' => out.push(QueryToken::RParen),
+            '"' => {
+                let mut s = String::new();
+                let mut closed = false;
+                for x in chars.by_ref() {
+                    if x == '"' {
+                        closed = true;
+                        break;
+                    }
+                    s.push(x);
+                }
+                if !closed || s.is_empty() {
+                    return None;
+                }
+                out.push(QueryToken::Phrase(s));
+            }
+            _ => {
+                let mut s = String::from(c);
+                while chars
+                    .peek()
+                    .is_some_and(|x| !x.is_whitespace() && *x != '(' && *x != ')' && *x != '"')
+                {
+                    s.push(chars.next()?);
+                }
+                out.push(match s.to_ascii_uppercase().as_str() {
+                    "AND" => QueryToken::And,
+                    "OR" => QueryToken::Or,
+                    "NOT" => QueryToken::Not,
+                    _ => QueryToken::Word(s),
+                });
+            }
+        }
+    }
+    Some(out)
+}
+
+struct QueryParser<'a> {
+    tokens: &'a [QueryToken],
+    pos: usize,
+}
+impl QueryParser<'_> {
+    fn parse_or(&mut self) -> Option<QueryExpr> {
+        let mut e = self.parse_and()?;
+        while matches!(self.tokens.get(self.pos), Some(QueryToken::Or)) {
+            self.pos += 1;
+            e = QueryExpr::Or(Box::new(e), Box::new(self.parse_and()?));
+        }
+        Some(e)
+    }
+    fn parse_and(&mut self) -> Option<QueryExpr> {
+        let mut e = self.parse_unary()?;
+        loop {
+            if matches!(self.tokens.get(self.pos), Some(QueryToken::And)) {
+                self.pos += 1;
+                e = QueryExpr::And(Box::new(e), Box::new(self.parse_unary()?));
+            } else if matches!(
+                self.tokens.get(self.pos),
+                Some(
+                    QueryToken::Word(_)
+                        | QueryToken::Phrase(_)
+                        | QueryToken::Not
+                        | QueryToken::LParen
+                )
+            ) {
+                e = QueryExpr::And(Box::new(e), Box::new(self.parse_unary()?));
+            } else {
+                break;
+            }
+        }
+        Some(e)
+    }
+    fn parse_unary(&mut self) -> Option<QueryExpr> {
+        if matches!(self.tokens.get(self.pos), Some(QueryToken::Not)) {
+            self.pos += 1;
+            return Some(QueryExpr::Not(Box::new(self.parse_unary()?)));
+        }
+        self.parse_atom()
+    }
+    fn parse_atom(&mut self) -> Option<QueryExpr> {
+        let t = self.tokens.get(self.pos)?;
+        self.pos += 1;
+        match t {
+            QueryToken::Word(s) => Some(QueryExpr::Term(s.clone())),
+            QueryToken::Phrase(s) => Some(QueryExpr::Phrase(s.clone())),
+            QueryToken::LParen => {
+                let e = self.parse_or()?;
+                if !matches!(self.tokens.get(self.pos), Some(QueryToken::RParen)) {
+                    return None;
+                }
+                self.pos += 1;
+                Some(e)
+            }
+            _ => None,
+        }
+    }
+}
+fn eval_query(expr: &QueryExpr, text: &str) -> bool {
+    match expr {
+        QueryExpr::Term(s) => {
+            let t = SearchText::new(text);
+            let q = SearchText::new(s);
+            t.contains(&q)
+        }
+        QueryExpr::Phrase(s) => text.to_lowercase().contains(&s.to_lowercase()),
+        QueryExpr::Not(a) => !eval_query(a, text),
+        QueryExpr::And(a, b) => eval_query(a, text) && eval_query(b, text),
+        QueryExpr::Or(a, b) => eval_query(a, text) || eval_query(b, text),
+    }
+}
+
 /// Lower-cased text paired with the punctuation/accent-folded form used by
 /// every list search. Keeping the predicates here prevents each ranking loop
 /// from rebuilding the same compound conditions.
@@ -383,11 +545,16 @@ where
     }
 
     let query = SearchText::new(query);
+    let boolean_query = is_boolean_query(&query.raw);
     let mut buckets: [Vec<usize>; 5] = Default::default();
 
     for (idx, item) in items.iter().enumerate() {
         let title = SearchText::new(get_title(item));
-        if let Some(rank) = search_rank(&title, &query) {
+        if boolean_query {
+            if query_matches(get_title(item), &query.raw) {
+                buckets[4].push(idx);
+            }
+        } else if let Some(rank) = search_rank(&title, &query) {
             buckets[rank as usize].push(idx);
         }
     }
@@ -410,17 +577,31 @@ pub fn search_albums_with_ranking(
 
     let query_lower = query.to_lowercase();
     let query_text = SearchText::new(&query_lower);
+    let boolean_query = is_boolean_query(query);
     let mut buckets: [Vec<usize>; 6] = Default::default();
 
     for (idx, album) in albums.iter().enumerate() {
         let title = SearchText::new(&album.title);
-        if let Some(rank) = search_rank(&title, &query_text) {
-            buckets[rank as usize].push(idx);
-        } else if album
-            .year
-            .is_some_and(|year| year.to_string().contains(&query_lower))
+        if boolean_query
+            && query_matches(
+                &format!(
+                    "{} {}",
+                    album.title,
+                    album.year.map(|y| y.to_string()).unwrap_or_default()
+                ),
+                query,
+            )
         {
-            buckets[5].push(idx);
+            buckets[4].push(idx);
+        } else if !boolean_query {
+            if let Some(rank) = search_rank(&title, &query_text) {
+                buckets[rank as usize].push(idx);
+            } else if album
+                .year
+                .is_some_and(|year| year.to_string().contains(&query_lower))
+            {
+                buckets[5].push(idx);
+            }
         }
     }
 
@@ -448,12 +629,26 @@ pub fn search_tracks_with_ranking(
     }
 
     let query = SearchText::new(query);
+    let boolean_query = is_boolean_query(&query.raw);
     let mut buckets: [Vec<usize>; 7] = Default::default();
 
     for (idx, track) in tracks.iter().enumerate() {
         let title = SearchText::new(&track.title);
         let artist = SearchText::new(track.grandparent_title.as_deref().unwrap_or(""));
-        let rank = if title.exact(&query) {
+        let rank = if boolean_query {
+            if query_matches(
+                &format!(
+                    "{} {}",
+                    track.title,
+                    track.grandparent_title.as_deref().unwrap_or("")
+                ),
+                &query.raw,
+            ) {
+                Some(6)
+            } else {
+                None
+            }
+        } else if title.exact(&query) {
             Some(0)
         } else if title.starts_with(&query) {
             Some(1)
@@ -481,6 +676,18 @@ pub fn search_tracks_with_ranking(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn boolean_search_uses_standard_precedence_and_phrases() {
+        assert!(query_matches("A B", "(A AND B) OR (C AND D)"));
+        assert!(query_matches("C D", "(A AND B) OR (C AND D)"));
+        assert!(!query_matches("A C", "(A AND B) OR (C AND D)"));
+        assert!(query_matches("Blue Monday", "\"Blue Monday\""));
+        assert!(!query_matches("Blue New Monday", "\"Blue Monday\""));
+        assert!(query_matches("Blue Monday", "Blue NOT Tuesday"));
+        assert!(!query_matches("Blue Tuesday", "Blue NOT Tuesday"));
+        assert!(!query_matches("Blue", "(Blue OR"));
+    }
 
     #[test]
     fn test_filter_starts_with() {

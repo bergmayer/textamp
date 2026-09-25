@@ -45,7 +45,25 @@ fn settings_have_one_library_account_home_and_cache_controls_for_each_provider()
             .unwrap();
         let buffer = terminal.backend().buffer();
         let text: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
-        assert!(text.contains("Clear shared artwork"));
+        assert!(!text.contains("Clear downloaded artwork"));
+        if let Some(textamp::app::sources::dialogs::Dialog::Library(options)) =
+            &mut state.popups.library_dialog
+        {
+            options.set_page(textamp::app::sources::options::OptionsPage::Cache);
+        }
+        terminal
+            .draw(|frame| {
+                textamp::ui::render(frame, &state);
+            })
+            .unwrap();
+        let storage: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(storage.contains("Clear downloaded artwork"));
         assert!(!text.contains("Cache all subfolders"));
     }
 }
@@ -249,6 +267,9 @@ fn cache_settings_are_available_for_folder_sources_without_plex_login() {
         state.settings_state.cache_entries[0].0.clone(),
         &mut state,
     );
+    if let Some(sources::dialogs::Dialog::Library(options)) = &mut state.popups.library_dialog {
+        options.set_page(sources::options::OptionsPage::Cache);
+    }
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
     terminal
         .draw(|frame| {
@@ -307,6 +328,7 @@ async fn cache_sizes_are_request_scoped_and_clear_confirmation_names_the_library
             SettingsAction::CacheSizes {
                 request,
                 entries: vec![(choice.clone(), Ok(1234))],
+                artwork: vec![("folder:fixture-target".into(), 2, 1024)],
             }
             .into(),
             &mut state,
@@ -328,6 +350,8 @@ async fn cache_sizes_are_request_scoped_and_clear_confirmation_names_the_library
     let mut options = Options {
         choice,
         selected: 0,
+        page: textamp::app::sources::options::OptionsPage::Cache,
+        scroll_pin: None,
     };
     options.selected = options
         .items(&state)

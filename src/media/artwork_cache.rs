@@ -19,6 +19,32 @@ impl ArtworkCache {
         Self { cache_dir }
     }
 
+    /// Keep downloaded images for each library in its own directory. Hash the
+    /// library identity so account URLs and folder paths never become filenames.
+    pub fn for_library(library_key: &str) -> Self {
+        let root = get_artwork_cache_dir().unwrap_or_else(|| PathBuf::from("/tmp/textamp_images"));
+        let mut hasher = DefaultHasher::new();
+        library_key.hash(&mut hasher);
+        Self::new(
+            root.join("by-library")
+                .join(format!("{:016x}", hasher.finish())),
+        )
+    }
+
+    /// Clear every library cache and legacy unscoped image files.
+    pub fn clear_all_libraries() -> usize {
+        let root = get_artwork_cache_dir().unwrap_or_else(|| PathBuf::from("/tmp/textamp_images"));
+        let mut removed = Self::new(root.clone()).clear_all();
+        if let Ok(entries) = std::fs::read_dir(root.join("by-library")) {
+            for entry in entries.flatten() {
+                if entry.path().is_dir() {
+                    removed += Self::new(entry.path()).clear_all();
+                }
+            }
+        }
+        removed
+    }
+
     /// Get the cache file path for a key (album/artist rating key).
     fn cache_path(&self, key: &str) -> PathBuf {
         let mut hasher = DefaultHasher::new();
