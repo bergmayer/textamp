@@ -26,6 +26,26 @@ pub async fn dispatch(
     }
 
     match action {
+        NavigationAction::ToggleFullscreen | NavigationAction::FullscreenArtwork => {
+            state.fullscreen_active = if matches!(action, NavigationAction::FullscreenArtwork) {
+                state.fullscreen_artwork = true;
+                true
+            } else {
+                !state.fullscreen_active
+            };
+            if state.fullscreen_active {
+                state.popups.close_all();
+                state.palette.close();
+                state.seek_drag = None;
+                state.volume_drag = false;
+                state.scroll.scrollbar_drag = None;
+                state.miller_h_drag_grab = None;
+                if !state.fullscreen_artwork {
+                    follow_ups.push(SystemAction::LoadWaveform.into());
+                    follow_ups.push(SystemAction::LoadSpectrogram.into());
+                }
+            }
+        }
         NavigationAction::SetView(view) => {
             state.set_view(view);
             // Load stations when entering Queue view if not already loaded
@@ -76,7 +96,7 @@ pub async fn dispatch(
             // Without this, the View menu / Ctrl+L|P|G|O shortcuts
             // would silently change the category state but leave the
             // user stuck on Queue/Now Playing/Help/etc.
-            if state.view != View::Browse {
+            if state.view != View::Browse || state.fullscreen_active {
                 state.set_view(View::Browse);
             }
 

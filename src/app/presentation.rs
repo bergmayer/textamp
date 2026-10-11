@@ -6,6 +6,10 @@ use ratatui::layout::Rect;
 /// Registry of all clickable regions, populated each frame during render.
 #[derive(Debug, Default, Clone)]
 pub struct HitRegions {
+    pub fullscreen_modes: Vec<(Rect, usize)>,
+    pub fullscreen_exit: Option<Rect>,
+    pub sound_output_rows: Vec<(Rect, usize)>,
+    pub sound_output_buttons: Vec<(Rect, usize)>,
     pub settings_sections: Vec<(Rect, crate::app::state::SettingsSection)>,
     pub settings_pages: Vec<(Rect, crate::app::state::SettingsPage)>,
     pub settings_preview: Option<Rect>,

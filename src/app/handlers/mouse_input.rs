@@ -126,6 +126,9 @@ fn is_one_row_item(item: &BrowseItem) -> bool {
 
 /// Handle mouse events.
 pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -> Vec<Action> {
+    if state.popups.sound_output_active {
+        return crate::app::sound_output::mouse(event, state);
+    }
     // These overlays have no pointer controls; never let input reach the player.
     if state.popups.input_dialog.is_some() || state.notifications.last_error.is_some() {
         state.seek_drag = None;
@@ -147,6 +150,9 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
         return vec![];
     }
 
+    if state.fullscreen_active && !state.palette.open && state.popups.confirm_dialog.is_none() {
+        return crate::app::fullscreen::mouse(event, state);
+    }
     let click_row = event.row;
     let click_col = event.column;
     if matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) {
@@ -165,13 +171,13 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
             | MouseEventKind::Down(MouseButton::Right)
             | MouseEventKind::Down(MouseButton::Middle)
     );
-    if is_click_down && state.select_mode {
+    if is_click_down && state.select_mode && !state.fullscreen_active {
         state.select_mode = false;
     }
     // Same for the track-details pane focus: any click outside the
     // pane drops focus from it. The pane click handler below will
     // re-set the flag when the click lands on the pane's rect.
-    if is_click_down && state.track_pane_focused {
+    if is_click_down && state.track_pane_focused && !state.fullscreen_active {
         state.track_pane_focused = false;
     }
 

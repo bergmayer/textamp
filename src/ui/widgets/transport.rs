@@ -2,7 +2,7 @@
 //!
 //! Layout:
 //! Left:  ▶ 00:00 ━━●──────────── 04:32  │  Track by Artist from Album
-//! Right: [notification OR volume]
+//! Right: [notification OR volume]; lower row shows the selected AirPlay output.
 //!
 //! Notifications temporarily cover the volume widget when active.
 
@@ -199,10 +199,32 @@ fn render_tab_strip(frame: &mut Frame, state: &AppState, area: Rect) {
     // Playing tabs, on the right edge.
     let palette_hint = if state.view == View::Settings {
         " F10 menu · ↓/Tab panel · Enter select · : commands · Esc back "
+    } else if state.view == View::Browse
+        && state.category_column_focused
+        && state.browse_category == crate::app::state::BrowseCategory::Library
+        && matches!(state.category_rows().get(state.category_column_index),
+            Some(crate::app::state::CategoryRow::NavidromeCollection(kind))
+                if Some(*kind) == state.sources.nav_collection
+                    && matches!(kind,
+                        crate::app::sources::navidrome::commands::CollectionKind::AudioMuse(f)
+                            if f.is_search()))
+    {
+        " → results · Enter new search · : commands "
     } else if state.tall_mode {
         " :  /  Tab focus  ,  \\  | "
     } else {
         " :  /  \u{21e5}  ,  \\  | "
+    };
+
+    let palette_hint = format!("F7 full screen · F8 output {}", palette_hint);
+    let palette_hint = if state.sound_output.current != crate::audio::AudioOutput::Local {
+        format!(
+            "{} [{}]",
+            palette_hint,
+            truncate_str(&state.sound_output.current.label(), 28)
+        )
+    } else {
+        palette_hint
     };
 
     // Active tab uses an inverted (selection-style) background so the
@@ -224,7 +246,7 @@ fn render_tab_strip(frame: &mut Frame, state: &AppState, area: Rect) {
     let lib_w = UnicodeWidthStr::width(lib_label) as u16;
     let div_w = UnicodeWidthStr::width(divider) as u16;
     let np_w = UnicodeWidthStr::width(np_label) as u16;
-    let hint_w = (UnicodeWidthStr::width(palette_hint) as u16)
+    let hint_w = (UnicodeWidthStr::width(palette_hint.as_str()) as u16)
         .min(area.width.saturating_sub(lib_w + div_w + np_w));
 
     let lib_x = area.x;

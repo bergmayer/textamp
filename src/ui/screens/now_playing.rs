@@ -139,9 +139,18 @@ fn render_now_playing_sidebar(frame: &mut Frame, state: &AppState, area: Rect) {
     use ratatui::widgets::{Block, Borders};
     let t = theme();
 
+    let sidebar_focused = state.view == View::Queue
+        && matches!(
+            state.now_playing_focus,
+            crate::app::state::NowPlayingFocus::Sidebar
+        );
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(t.colors.border))
+        .border_style(Style::default().fg(if sidebar_focused {
+            t.colors.title_focused
+        } else {
+            t.colors.border
+        }))
         .style(
             Style::default()
                 .bg(t.colors.bg_primary)
@@ -152,11 +161,6 @@ fn render_now_playing_sidebar(frame: &mut Frame, state: &AppState, area: Rect) {
 
     let buttons = state.now_playing_sidebar_buttons();
 
-    let sidebar_focused = state.view == View::Queue
-        && matches!(
-            state.now_playing_focus,
-            crate::app::state::NowPlayingFocus::Sidebar
-        );
     let mut regions: Vec<(Rect, NpSidebarButton)> = Vec::with_capacity(4);
     for (i, btn) in buttons.iter().copied().enumerate() {
         let label = btn.label();
@@ -233,13 +237,50 @@ fn render_artwork(frame: &mut Frame, state: &AppState, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    render_current_artwork(frame, state, inner);
+}
+
+/// Shared artwork canvas for normal and full-screen views.
+pub(crate) fn render_current_artwork(frame: &mut Frame, state: &AppState, inner: Rect) {
+    if inner.is_empty() {
+        return;
+    }
     if let (Some(ref data), Some(ref thumb)) =
         (&state.artwork.current_data, &state.artwork.current_thumb)
     {
         ARTWORK_RENDERER.with(|renderer| {
             let mut renderer = renderer.borrow_mut();
             if renderer.load_image(data, thumb) {
-                renderer.render(frame, inner);
+                let canvas = if state.fullscreen_active {
+                    // Scale preserves aspect ratio but anchors at the top left.
+                    // Center its canvas using image headers, without decoding again.
+                    image::ImageReader::new(std::io::Cursor::new(data))
+                        .with_guessed_format()
+                        .ok()
+                        .and_then(|reader| reader.into_dimensions().ok())
+                        .filter(|(width, height)| *width > 0 && *height > 0)
+                        .map(|(width, height)| {
+                            let ratio = width as f64 / height as f64;
+                            let columns = (inner.height as f64 * 2.0 * ratio)
+                                .round()
+                                .clamp(1.0, inner.width as f64)
+                                as u16;
+                            let rows = (columns as f64 / (2.0 * ratio))
+                                .round()
+                                .clamp(1.0, inner.height as f64)
+                                as u16;
+                            Rect::new(
+                                inner.x + (inner.width - columns) / 2,
+                                inner.y + (inner.height - rows) / 2,
+                                columns,
+                                rows,
+                            )
+                        })
+                        .unwrap_or(inner)
+                } else {
+                    inner
+                };
+                renderer.render(frame, canvas);
             } else {
                 render_artwork_placeholder(frame, inner, "Image load failed");
             }
@@ -730,6 +771,25 @@ pub(crate) fn render_visualizer_panel(frame: &mut Frame, state: &AppState, area:
 
     render_visualizer_tab_bar(frame, state, tab_area);
 
+    render_visualizer_canvas(frame, state, content_area);
+}
+
+/// Shared canvas; full-screen input does not enable waveform seeking.
+pub(crate) fn render_visualizer_canvas(frame: &mut Frame, state: &AppState, content_area: Rect) {
+    if matches!(
+        state.sound_output.current,
+        crate::audio::AudioOutput::AirPlay(_)
+    ) && matches!(
+        state.visualizer_tab,
+        VisualizerTab::Meters | VisualizerTab::Vectorscope
+    ) {
+        frame.render_widget(
+            Paragraph::new("Live audio samples unavailable on AirPlay")
+                .alignment(Alignment::Center),
+            content_area,
+        );
+        return;
+    }
     let content_height = content_area.height as usize;
     let content_width = content_area.width as usize;
     if content_height == 0 || content_width == 0 {

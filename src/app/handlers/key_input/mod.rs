@@ -64,6 +64,17 @@ pub fn handle_key(
         state.popups.close_all();
         return vec![SystemAction::Quit.into()];
     }
+    if state.popups.sound_output_active {
+        return crate::app::sound_output::key(key, state);
+    }
+    if key.code == KeyCode::F(8)
+        && key.modifiers.is_empty()
+        && state.popups.input_dialog.is_none()
+        && state.popups.library_dialog.is_none()
+        && state.popups.confirm_dialog.is_none()
+    {
+        return vec![PlaybackAction::OpenOutputPicker.into()];
+    }
     if state.palette.open {
         use crate::app::command_palette::{handle_key, run, PaletteOutcome};
         return match handle_key(state, key) {
@@ -77,6 +88,18 @@ pub fn handle_key(
                 run(command, state)
             }
         };
+    }
+    if state.popups.input_dialog.is_none()
+        && state.popups.library_dialog.is_none()
+        && state.popups.confirm_dialog.is_none()
+        && state.popups.text.is_none()
+    {
+        if key.code == KeyCode::F(7) && key.modifiers.is_empty() {
+            return vec![NavigationAction::ToggleFullscreen.into()];
+        }
+        if state.fullscreen_active {
+            return crate::app::fullscreen::key(key, state);
+        }
     }
     if let Some(popup) = &mut state.popups.text {
         match key.code {

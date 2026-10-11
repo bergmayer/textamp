@@ -181,7 +181,7 @@ impl ThemeColors {
         }
     }
 
-    /// Platinum theme — inspired by classic Mac OS 9 "Platinum" UI:
+    /// Platinum theme â€” inspired by classic Mac OS 9 "Platinum" UI:
     /// light gray window chrome, black text, blue highlight.
     pub fn platinum() -> Self {
         let bg = Color::Rgb(221, 221, 221); // platinum gray #DDDDDD
@@ -223,7 +223,7 @@ impl ThemeColors {
         }
     }
 
-    /// Black and white theme — pure black and pure white, no greys.
+    /// Black and white theme â€” pure black and pure white, no greys.
     /// Selection inverts to white-on-black, everything else is one of
     /// the two extremes. Keeps the look strictly tonal.
     pub fn black_and_white() -> Self {
@@ -293,7 +293,7 @@ impl ThemeColors {
         }
     }
 
-    /// Vintage amber-on-black CRT — IBM 3270 / DEC monochrome look.
+    /// Vintage amber-on-black CRT â€” IBM 3270 / DEC monochrome look.
     /// One hue, three brightnesses; the highlight states use a dim
     /// amber background so foreground amber stays legible on top.
     pub fn amber() -> Self {
@@ -365,7 +365,7 @@ impl ThemeColors {
         }
     }
 
-    /// Norton Commander DOS file manager — blue background with the
+    /// Norton Commander DOS file manager â€” blue background with the
     /// classic cyan title, yellow accents, white body text. The
     /// surviving member of the DOS-blue family (the older Borland
     /// theme has been removed).
@@ -405,7 +405,7 @@ impl ThemeColors {
         }
     }
 
-    /// Dracula — popular dark theme: dark gray background with
+    /// Dracula â€” popular dark theme: dark gray background with
     /// purple, pink, cyan, and green accents.
     /// Reference palette: https://draculatheme.com/contribute
     pub fn dracula() -> Self {
@@ -448,7 +448,7 @@ impl ThemeColors {
         }
     }
 
-    /// Nord — muted icy-blue dark theme.
+    /// Nord â€” muted icy-blue dark theme.
     /// Reference palette: https://www.nordtheme.com/docs/colors-and-palettes
     pub fn nord() -> Self {
         // Polar Night
@@ -461,14 +461,14 @@ impl ThemeColors {
         let nord5 = Color::Rgb(229, 233, 240); // #e5e9f0
         let _nord6 = Color::Rgb(236, 239, 244); // #eceff4
                                                 // Frost
-        let nord7 = Color::Rgb(143, 188, 187); // #8fbcbb
+        let focus_pink = Color::Rgb(196, 145, 162); // #c491a2 - subdued focus pink
         let nord8 = Color::Rgb(136, 192, 208); // #88c0d0
         let nord9 = Color::Rgb(129, 161, 193); // #81a1c1
         let nord10 = Color::Rgb(94, 129, 172); // #5e81ac
                                                // Aurora
-        let nord11 = Color::Rgb(191, 97, 106); // #bf616a — red
-        let nord13 = Color::Rgb(235, 203, 139); // #ebcb8b — yellow
-        let nord14 = Color::Rgb(163, 190, 140); // #a3be8c — green
+        let nord11 = Color::Rgb(191, 97, 106); // #bf616a â€” red
+        let nord13 = Color::Rgb(235, 203, 139); // #ebcb8b â€” yellow
+        let nord14 = Color::Rgb(163, 190, 140); // #a3be8c â€” green
         Self {
             bg_primary: nord0,
             bg_secondary: nord1,
@@ -482,8 +482,8 @@ impl ThemeColors {
             fg_accent_dim: nord9,
 
             border: nord3,
-            border_focused: nord8,
-            title_focused: nord7,
+            border_focused: focus_pink,
+            title_focused: focus_pink,
 
             error: nord11,
             success: nord14,

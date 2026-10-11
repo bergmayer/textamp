@@ -5,8 +5,10 @@
 mod app;
 pub mod artwork;
 pub mod command_palette;
+mod fullscreen;
 pub mod layout;
 pub mod screens;
+mod sound_output;
 pub mod theme;
 pub mod widgets;
 

@@ -1508,6 +1508,7 @@ pub struct Popups {
     pub input_dialog: Option<InputDialog>,
     pub library_dialog: Option<crate::app::sources::dialogs::Dialog>,
     pub confirm_dialog: Option<ConfirmDialog>,
+    pub sound_output_active: bool,
     pub library_picker_active: bool,
     pub library_picker_index: usize,
     pub search_active: bool,
@@ -1525,6 +1526,7 @@ impl Popups {
         self.input_dialog = None;
         self.library_dialog = None;
         self.confirm_dialog = None;
+        self.sound_output_active = false;
         self.library_picker_active = false;
         self.search_active = false;
     }
@@ -1772,6 +1774,37 @@ pub struct QueueState {
     pub shuffle_undo_index: Option<usize>,
 }
 
+/// One shared output selection and discovery state for every entry route.
+#[derive(Debug, Clone, Default)]
+pub struct SoundOutputState {
+    pub scroll_pin: Option<usize>,
+    pub current: crate::audio::AudioOutput,
+    pub local_devices: Vec<String>,
+    pub destinations: Vec<crate::audio::airplay::AirplayDestination>,
+    pub index: usize,
+    pub request_id: u64,
+    pub loading: bool,
+    pub error: Option<String>,
+}
+impl SoundOutputState {
+    pub fn choices(&self) -> Vec<crate::audio::AudioOutput> {
+        std::iter::once(crate::audio::AudioOutput::Local)
+            .chain(
+                self.local_devices
+                    .iter()
+                    .cloned()
+                    .map(crate::audio::AudioOutput::Device),
+            )
+            .chain(
+                self.destinations
+                    .iter()
+                    .cloned()
+                    .map(crate::audio::AudioOutput::AirPlay),
+            )
+            .collect()
+    }
+}
+
 /// Root application state.
 #[derive(Debug)]
 pub struct AppState {
@@ -2013,6 +2046,8 @@ pub struct AppState {
     pub loading_tick: u32,
 
     // Visualizer tab (existing plots, spectral landscape, or studio meters)
+    pub fullscreen_active: bool,
+    pub fullscreen_artwork: bool,
     pub visualizer_tab: VisualizerTab,
     /// Whether the visualizer tab bar is focused (for arrow key navigation)
     pub visualizer_tab_focused: bool,
@@ -2036,6 +2071,7 @@ pub struct AppState {
     /// always present so render/dispatch code doesn't need feature
     /// gates; the GUI just never sets `open = true`.
     pub palette: PaletteState,
+    pub sound_output: SoundOutputState,
 
     // Marquee state is updated by Tick and explicit render feedback.
     pub marquee: MarqueeState,
@@ -2621,6 +2657,8 @@ impl AppState {
             studio_meters: crate::app::meters::StudioMeters::default(),
             vectorscope_buffer: std::collections::VecDeque::with_capacity(VECTORSCOPE_BUFFER_LEN),
             loading_tick: 0,
+            fullscreen_active: false,
+            fullscreen_artwork: false,
             visualizer_tab: VisualizerTab::default(),
             visualizer_tab_focused: false,
             cache_mgmt: CacheManagement::default(),
@@ -2628,6 +2666,7 @@ impl AppState {
             spectrogram: SpectrogramState::default(),
             list_filter: ListFilterState::default(),
             palette: PaletteState::default(),
+            sound_output: SoundOutputState::default(),
             marquee: MarqueeState::default(),
             marquee_subtitle: MarqueeState::default(),
             hit_regions: crate::app::presentation::HitRegions::default(),
@@ -2900,6 +2939,7 @@ impl AppState {
 
     /// Switch to a new view, deactivating the inline filter and clearing queue multi-select.
     pub fn set_view(&mut self, view: View) {
+        self.fullscreen_active = false;
         if self.view == view {
             return;
         }
@@ -3739,6 +3779,9 @@ pub struct TextPopup {
 /// the GUI never needs to import the TUI module.
 #[derive(Debug, Clone)]
 pub enum PaletteCommandKind {
+    ToggleFullscreen,
+    FullscreenArtwork,
+    OpenOutputPicker,
     Navidrome(crate::app::sources::navidrome::commands::Command),
     Quit,
     GotoLibrary,
@@ -4172,6 +4215,7 @@ pub enum SettingsFocus {
 /// capabilities determine the rows, so hidden controls cannot shift action indices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextampSetting {
+    SoundOutput,
     Theme(crate::app::theme::ThemeName),
     Artwork(ArtworkMode),
     ArtworkVisible,
@@ -4249,6 +4293,7 @@ impl AppState {
         {
             items.push(Transcode);
         }
+        items.push(SoundOutput);
         items
     }
 }

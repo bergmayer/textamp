@@ -996,7 +996,9 @@ pub fn handle_app_event(
             // bottom half, so we trip this on both View::NowPlaying and
             // View::Queue. Catches all edge cases (track change, re-entry,
             // failed downloads) without fragile event-based triggering.
-            if matches!(state.view, View::NowPlaying | View::Queue) {
+            if matches!(state.view, View::NowPlaying | View::Queue)
+                || (state.fullscreen_active && !state.fullscreen_artwork)
+            {
                 if let Some(track) = state.current_track().cloned() {
                     let tk = &track.rating_key;
 

@@ -88,6 +88,8 @@ pub enum SystemAction {
 
 #[derive(Debug, Clone)]
 pub enum NavigationAction {
+    ToggleFullscreen,
+    FullscreenArtwork,
     SetView(View),
     NextView,
     PrevView,
@@ -282,6 +284,13 @@ pub enum MillerAction {
 
 #[derive(Debug, Clone)]
 pub enum PlaybackAction {
+    OpenOutputPicker,
+    DiscoverAirplay,
+    AirplayDiscovered {
+        request_id: u64,
+        result: Result<crate::audio::airplay::OutputDiscovery, String>,
+    },
+    SelectOutput(crate::audio::AudioOutput),
     TogglePlayPause,
     Stop,
     /// Stop local audio and discard playback state without reporting to server.

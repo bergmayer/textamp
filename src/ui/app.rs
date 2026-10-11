@@ -1,5 +1,6 @@
 //! Root UI rendering (musikcube-style).
 //!
+//! F7 replaces the panes with a full-screen visualizer/artwork canvas; Esc restores them.
 //! Layout:
 //! ┌──────────────────────────────────────────────────────────────┐
 //! │ ┌─ artists ─────────┬─ track list ─────────────────────────┐ │
@@ -38,6 +39,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 
 thread_local! {
     static BIO_ARTWORK_RENDERER: RefCell<ArtworkRenderer> = RefCell::new(ArtworkRenderer::new());
+    static LAST_FULLSCREEN: Cell<(bool, bool, bool)> = const { Cell::new((false, false, false)) };
     static LAST_RENDERED_VIEW: Cell<Option<View>> = const { Cell::new(None) };
 }
 
@@ -66,6 +68,19 @@ pub fn restore_bio_artwork_native_protocol() {
 
 /// Render the entire UI.
 pub fn render(frame: &mut Frame, state: &AppState) {
+    LAST_FULLSCREEN.with(|last| {
+        let signature = (
+            state.fullscreen_active,
+            state.fullscreen_artwork,
+            state.fullscreen_active
+                && state.fullscreen_artwork
+                && (state.palette.open || state.popups.sound_output_active),
+        );
+        if last.replace(signature) != signature {
+            super::artwork::clear_grid_cache();
+            screens::now_playing::clear_artwork_cache();
+        }
+    });
     LAST_RENDERED_VIEW.with(|last| {
         if last.get() == Some(View::Similar) && state.view != View::Similar {
             // The modal's Clear widget can cover terminal graphics while
@@ -95,7 +110,10 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         state.view,
         View::Browse | View::Queue | View::NowPlaying | View::Settings | View::Help
     );
-    if state.tall_mode && tall_eligible {
+    // Full-screen viewer replaces both panes; modal overlays still render above it.
+    if state.fullscreen_active {
+        super::fullscreen::render(frame, state, frame.area());
+    } else if state.tall_mode && tall_eligible {
         use ratatui::layout::{Constraint, Direction, Layout};
         // Tall split is 40 / 60 — Library on top (40%), Now Playing
         // on bottom (60%). Now-playing gets the larger share because
@@ -154,6 +172,8 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         screens::filter::render(frame, state, frame.area());
     }
 
+    // Radio/DJ and Linux AirPlay output selection use the command palette.
+    // Output selection is stopped-only; discovery never changes playback.
     // Radio/DJ controls use the shared capability-filtered command palette.
     // Shortcut labels and activation use the same presentation rows.
     // Render adventure launcher popup if active
@@ -224,6 +244,10 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     // Render toast notification if present (bottom-right, non-blocking)
     if let Some(ref toast) = state.notifications.toast_message {
         render_toast(frame, toast, frame.area());
+    }
+
+    if state.popups.sound_output_active {
+        crate::ui::sound_output::render(frame, state);
     }
 
     // Command-palette overlay rides ABOVE every other layer so the
@@ -3810,7 +3834,16 @@ fn render_input_dialog(frame: &mut Frame, state: &AppState, dialog: &InputDialog
         crate::app::state::InputDialogAction::AudioMuseSearch(crate::audiomuse::Feature::Describe)
     );
     let area = if describe {
-        centered_rect(75, 55, frame.area())
+        // Leave room for a sentence or two; longer input scrolls as it wraps.
+        let bounds = frame.area();
+        let width = bounds.width.saturating_sub(4).min(68);
+        let height = bounds.height.saturating_sub(2).min(8);
+        Rect::new(
+            bounds.x + (bounds.width - width) / 2,
+            bounds.y + (bounds.height - height) / 2,
+            width,
+            height,
+        )
     } else {
         centered_rect(50, 25, frame.area())
     };

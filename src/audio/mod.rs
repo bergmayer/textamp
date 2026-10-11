@@ -14,6 +14,9 @@
 //! - Web: Implement `AudioBackend` using Web Audio API
 //! - The rest of the app interacts only with the trait, not concrete implementations
 
+pub mod airplay;
+mod output;
+pub use output::{local_devices, AudioOutput};
 pub mod player;
 mod rodio_backend;
 mod traits;

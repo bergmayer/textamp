@@ -96,6 +96,9 @@ fuzzy-matcher = "0.3"
 name = "textamp"
 path = "src/bin/textamp_tui.rs"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
 [profile.release]
 lto = true
 strip = true

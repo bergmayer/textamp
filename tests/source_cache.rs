@@ -75,7 +75,9 @@ async fn receive(
     tx: &mpsc::Sender<Event>,
     rx: &mut mpsc::Receiver<Event>,
 ) {
-    let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+    // A filtered loopback port can use the WebDAV client's full 10-second
+    // connect timeout. Allow its failure event to arrive before failing the test.
+    let event = tokio::time::timeout(Duration::from_secs(15), rx.recv())
         .await
         .unwrap()
         .unwrap();

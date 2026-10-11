@@ -4,10 +4,10 @@
 //! dedicated OS thread, and all completions carry a playback generation. The
 //! UI thread only sends commands and reads atomics.
 
+use super::output::{AudioOutput, Backend};
 use super::rodio_backend::{
-    BufferedInput, PipelineEvent, RodioBackend, SampleTap, StreamFailure, StreamingInput,
+    BufferedInput, PipelineEvent, SampleTap, StreamFailure, StreamingInput,
 };
-use super::traits::AudioBackend;
 use anyhow::{anyhow, Result};
 use bytes::Bytes;
 use futures::StreamExt;
@@ -91,7 +91,7 @@ struct BackendActor {
 }
 
 impl BackendActor {
-    fn spawn(generation: Arc<AtomicU64>, timeout: Duration) -> Result<Self> {
+    fn spawn(generation: Arc<AtomicU64>, timeout: Duration, output: AudioOutput) -> Result<Self> {
         let (command_tx, command_rx) = std::sync::mpsc::sync_channel(BACKEND_COMMAND_CAPACITY);
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
         let state = Arc::new(BackendState::new());
@@ -102,7 +102,7 @@ impl BackendActor {
         let thread = std::thread::Builder::new()
             .name("textamp-audio-actor".to_string())
             .spawn(move || {
-                let backend = RodioBackend::new();
+                let backend = Backend::new(output);
                 let mut backend = match backend {
                     Ok(backend) => backend,
                     Err(error) => {
@@ -165,7 +165,7 @@ impl BackendActor {
                                 .playback_id
                                 .store(playback_id, Ordering::Release);
                             stream_events = None;
-                            match backend.start_buffered(data, Duration::ZERO) {
+                            match backend.start_buffered(playback_id, data, Duration::ZERO) {
                                 Ok(()) if generation.load(Ordering::Acquire) == playback_id => {
                                     actor_state.mode.store(BACKEND_PLAYING, Ordering::Release);
                                     active_playback_id = Some(playback_id);
@@ -378,6 +378,7 @@ struct StreamSession {
 
 pub struct AudioPlayer {
     backend: Option<BackendActor>,
+    output: AudioOutput,
 
     stream: Option<Arc<StreamSession>>,
     playback_generation: Arc<AtomicU64>,
@@ -388,9 +389,14 @@ impl AudioPlayer {
     pub fn new() -> Result<Self> {
         let playback_generation = Arc::new(AtomicU64::new(0));
         let (cancellation_tx, _) = watch::channel(0);
-        let backend = BackendActor::spawn(playback_generation.clone(), Duration::from_secs(5))?;
+        let backend = BackendActor::spawn(
+            playback_generation.clone(),
+            Duration::from_secs(5),
+            AudioOutput::Local,
+        )?;
         Ok(Self {
             backend: Some(backend),
+            output: AudioOutput::Local,
             stream: None,
 
             playback_generation,
@@ -402,6 +408,7 @@ impl AudioPlayer {
         let (cancellation_tx, _) = watch::channel(0);
         Self {
             backend: None,
+            output: AudioOutput::Local,
             stream: None,
 
             playback_generation: Arc::new(AtomicU64::new(0)),
@@ -416,6 +423,15 @@ impl AudioPlayer {
             .saturating_add(1);
         self.cancellation_tx.send_replace(playback_id);
         playback_id
+    }
+
+    /// Selection is explicit and stopped; a failed network output stays unavailable.
+    pub fn set_output(&mut self, output: AudioOutput) -> Result<()> {
+        self.stop();
+        self.backend = None;
+        self.output = output;
+        self.try_attach_backend()?;
+        Ok(())
     }
 
     pub fn playback_id(&self) -> u64 {
@@ -507,6 +523,7 @@ impl AudioPlayer {
         self.backend = Some(BackendActor::spawn(
             self.playback_generation.clone(),
             Duration::from_secs(5),
+            self.output.clone(),
         )?);
         Ok(true)
     }

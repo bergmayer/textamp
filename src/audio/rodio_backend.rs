@@ -33,7 +33,7 @@ impl From<Arc<Vec<u8>>> for BufferedInput {
         Self::Bytes(bytes)
     }
 }
-trait AudioReader: Read + Seek + Send + Sync {}
+pub(crate) trait AudioReader: Read + Seek + Send + Sync {}
 impl<T: Read + Seek + Send + Sync> AudioReader for T {}
 use tokio::sync::mpsc as tokio_mpsc;
 
@@ -53,7 +53,7 @@ impl StreamFailure {
         *super::lock_or_recover(&self.0) = Some(message);
     }
 
-    fn message(&self) -> Option<String> {
+    pub(crate) fn message(&self) -> Option<String> {
         super::lock_or_recover(&self.0).clone()
     }
 }
@@ -61,7 +61,7 @@ impl StreamFailure {
 /// Bounded compressed-byte stream consumed by the decoder worker.
 pub(crate) struct StreamingInput {
     receiver: tokio_mpsc::Receiver<Bytes>,
-    failure: StreamFailure,
+    pub(crate) failure: StreamFailure,
     mime_type: Option<String>,
     pub(crate) start_position: Duration,
 }
@@ -86,7 +86,7 @@ impl StreamingInput {
 /// advertised as non-seekable. Reads wait on the bounded Tokio channel from a
 /// dedicated decoder thread. The short polling interval makes cancellation
 /// deterministic, so stopping playback cannot hang while joining this worker.
-struct StreamingReader {
+pub(crate) struct StreamingReader {
     receiver: Mutex<tokio_mpsc::Receiver<Bytes>>,
     current: Cursor<Bytes>,
     position: u64,
@@ -160,7 +160,7 @@ impl Seek for StreamingReader {
 /// Non-seekable HTTP bodies must be decoded up to the requested time. This
 /// runs on the cancellable decoder worker with bounded buffers, never the UI
 /// or audio callback. Cached tracks still use the decoder's indexed seek.
-fn skip_stream_to(
+pub(crate) fn skip_stream_to(
     decoder: &mut impl Source<Item = Sample>,
     position: Duration,
     cancelled: &AtomicBool,
@@ -390,8 +390,28 @@ pub struct RodioBackend {
 }
 
 impl RodioBackend {
+    pub fn new_for_device(name: &str) -> Result<Self, AudioError> {
+        let host = rodio::cpal::default_host();
+        let mut matches = host
+            .output_devices()
+            .map_err(|e| AudioError::NoDevice(e.to_string()))?
+            .filter(|device| device.name().is_ok_and(|n| n == name));
+        let device = matches.next().ok_or_else(|| {
+            AudioError::NoDevice(format!("Selected output {name} is no longer available"))
+        })?;
+        if matches.next().is_some() {
+            return Err(AudioError::NoDevice(format!(
+                "Multiple outputs are named {name}; select the system default instead"
+            )));
+        }
+        let stream = OutputStreamBuilder::from_device(device)
+            .and_then(|builder| builder.open_stream())
+            .map_err(|e| AudioError::NoDevice(e.to_string()))?;
+        Ok(Self::from_stream(stream))
+    }
+
     pub fn new() -> Result<Self, AudioError> {
-        let mut stream = match OutputStreamBuilder::open_default_stream() {
+        let stream = match OutputStreamBuilder::open_default_stream() {
             Ok(stream) => stream,
             Err(default_error) => {
                 let host = rodio::cpal::default_host();
@@ -422,12 +442,16 @@ impl RodioBackend {
                 opened.ok_or(AudioError::NoDevice(last_error))?
             }
         };
+        Ok(Self::from_stream(stream))
+    }
+
+    fn from_stream(mut stream: OutputStream) -> Self {
         stream.log_on_drop(false);
 
         // A decoder emits at most Ready plus Failed. Keeping this bounded
         // prevents a detached or buggy worker from growing actor memory.
         let (pipeline_tx, pipeline_rx) = std_mpsc::sync_channel(2);
-        Ok(Self {
+        Self {
             stream,
             sink: None,
             volume: 0.8,
@@ -440,14 +464,14 @@ impl RodioBackend {
             pipeline_tx,
             pipeline_rx,
             active_playback_id: None,
-        })
+        }
     }
 
     pub fn sample_tap(&self) -> SampleTap {
         self.tap.clone()
     }
 
-    fn try_decode(
+    pub(crate) fn try_decode(
         data: impl Into<BufferedInput>,
     ) -> Result<Decoder<Box<dyn AudioReader>>, AudioError> {
         let (reader, byte_len): (Box<dyn AudioReader>, u64) = match data.into() {
@@ -479,7 +503,7 @@ impl RodioBackend {
         }
     }
 
-    fn try_decode_stream(
+    pub(crate) fn try_decode_stream(
         input: StreamingInput,
         cancelled: Arc<AtomicBool>,
     ) -> Result<Decoder<StreamingReader>, AudioError> {

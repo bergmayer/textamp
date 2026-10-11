@@ -104,25 +104,30 @@ with tempfile.TemporaryDirectory(prefix="textamp-folder-tui-") as temporary:
             os.write(master, b"\x1b")  # cancel, leaving the library untouched
             time.sleep(0.2)
             output.clear()
-            os.write(master, b"\x1b[D\x1b[B\x1b[C")  # sidebar -> Textamp
-            wait_for(b"theme:")
-            os.write(master, b"\x1b[F")  # End: integrated sidebar visibility
-            wait_for(b"show in left column:")
+            # Settings now has a top menu and separate pages, rather than the
+            # former sidebar and one long settings list. F10 focuses the menu.
+            os.write(master, b"\x1b[21~2\x1b[B\x1b[B")  # Textamp -> Themes content
+            wait_for(b"Highlight to preview")
             output.clear()
-            os.write(master, b"\x1b[D\x1b[A\x1b[C\x1b[H\r")  # Libraries -> first library options
-            wait_for(b"Clear library cache")
+            os.write(master, b"\x1b[D\x1b[C\x1b[C\x1b[B")  # pages -> Sidebar content
+            wait_for(b"appears in the browse sidebar")
+            output.clear()
+            os.write(master, b"\x1b[21~1\x1b[B\x1b[H\r")  # Libraries -> first library options
+            wait_for(b"Open active library")
+            os.write(master, b"\x1b[C")  # local-library General -> Cache page
             # Force a complete redraw: differential updates can skip letters
             # that happen to match cells from the previous settings panel.
             output.clear()
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 36, 131, 0, 0))
             process.send_signal(signal.SIGWINCH)
             wait_for(b"Fixture Library")
-            wait_for(b"Cache:")
+            wait_for(b"Metadata:")
+            wait_for(b"Clear library cache")
             os.write(master, b"\x1b")
             time.sleep(0.2)
         os.write(master, b"\x1bOR")  # F3 library switcher
         wait_for(b"Switch library")
-        process.send_signal(signal.SIGTERM)
+        os.write(master, b"\x11")  # Ctrl+Q: normal keyboard/controller-mapped quit
         deadline = time.monotonic() + 10
         while process.poll() is None and time.monotonic() < deadline:
             if select.select([master], [], [], 0.1)[0]:
@@ -132,6 +137,7 @@ with tempfile.TemporaryDirectory(prefix="textamp-folder-tui-") as temporary:
         print("PASS: folder-only startup, filename navigation, library switcher, shutdown, and terminal restoration")
         if browse_only:
             print("PASS: unified library manager, add/cancel connection form, integrated settings, per-library cache display")
+            print("PASS: Ctrl+Q quit and terminal restoration")
         if not browse_only:
             print("PASS: silent playback input")
         if wikipedia:

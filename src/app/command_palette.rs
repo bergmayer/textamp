@@ -439,6 +439,34 @@ fn static_entries() -> Vec<StaticEntry> {
 ///   4. **Radio stations** — every loaded station as a plain row.
 pub fn materialize_entries(state: &AppState) -> Vec<PaletteEntry> {
     let mut out: Vec<PaletteEntry> = Vec::new();
+    for (label, hint, command, aliases) in [
+        (
+            "Full-screen Visualizer",
+            "F7",
+            PaletteCommandKind::ToggleFullscreen,
+            "fullscreen visualizer cinema",
+        ),
+        (
+            "Full-screen Artwork",
+            "",
+            PaletteCommandKind::FullscreenArtwork,
+            "fullscreen artwork album cover",
+        ),
+    ] {
+        out.push(PaletteEntry {
+            label: label.into(),
+            hint: hint.into(),
+            command,
+            aliases: vec![aliases.into()],
+        });
+    }
+
+    out.push(PaletteEntry {
+        label: "Sound Output".into(),
+        hint: "F8".into(),
+        command: PaletteCommandKind::OpenOutputPicker,
+        aliases: vec!["airplay speaker audio output device".into()],
+    });
 
     // 1. Context-aware row entries — listed first so a single Enter
     //    on `:` performs the most relevant action for whatever's
@@ -676,6 +704,9 @@ pub fn run(cmd: PaletteCommandKind, state: &mut AppState) -> Vec<Action> {
             }
             vec![crate::app::sources::navidrome::NavAction::Command(command).into()]
         }
+        PaletteCommandKind::ToggleFullscreen => vec![NavigationAction::ToggleFullscreen.into()],
+        PaletteCommandKind::FullscreenArtwork => vec![NavigationAction::FullscreenArtwork.into()],
+        PaletteCommandKind::OpenOutputPicker => vec![PlaybackAction::OpenOutputPicker.into()],
         PaletteCommandKind::Quit => vec![SystemAction::Quit.into()],
         PaletteCommandKind::GotoLibrary => {
             vec![NavigationAction::set_category(BrowseCategory::Library).into()]

@@ -610,3 +610,82 @@ fn source_specific_choices_and_empty_groups_do_not_leave_unselectable_focus() {
         .iter()
         .any(|s| matches!(s, SidebarSection::Collection(_))));
 }
+
+#[test]
+fn right_reenters_audiomuse_search_results_while_enter_starts_a_new_search() {
+    let config = Config::default();
+    for feature in [Feature::Describe, Feature::Lyrics] {
+        for loading in [false, true] {
+            let mut state = nav_state();
+            state.view = View::Browse;
+            state.browse_category = BrowseCategory::Library;
+            let kind = CollectionKind::AudioMuse(feature);
+            state.sources.nav_collection = Some(kind);
+            state.category_column_index = state
+                .category_rows()
+                .iter()
+                .position(|row| *row == CategoryRow::NavidromeCollection(kind))
+                .unwrap();
+            state.category_column_focused = true;
+            state.artist_nav =
+                textamp::app::state::BrowseNavigationState::with_root("Existing search", vec![]);
+            let tracks: Vec<textamp::library::models::Track> =
+                serde_json::from_value(serde_json::json!([
+                    {"ratingKey":"result-one", "title":"One"},
+                    {"ratingKey":"result-two", "title":"Two"}
+                ]))
+                .unwrap();
+            state.artist_nav.columns[0] = textamp::app::state::BrowseColumn::new_with_tracks(
+                "Existing search",
+                textamp::app::state::BrowseItem::from_tracks(&tracks),
+                tracks,
+            );
+            state.artist_nav.columns[0].selected_index = 1;
+            state.artist_nav.loading = loading;
+            let actions = key_input::handle_key(
+                KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+                &mut state,
+                &config,
+            );
+            assert!(actions.is_empty(), "Right must not restart the search");
+            assert!(!state.category_column_focused);
+            assert_eq!(state.artist_nav.columns[0].title, "Existing search");
+            assert_eq!(state.artist_nav.loading, loading);
+            assert_eq!(state.artist_nav.columns[0].selected_index, 1);
+            assert_eq!(
+                state.artist_nav.columns[0].tracks[1].rating_key,
+                "result-two"
+            );
+            assert_eq!(state.sources.nav_collection, Some(kind));
+            assert!(state.popups.input_dialog.is_none());
+
+            state.category_column_focused = true;
+            let actions = key_input::handle_key(
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                &mut state,
+                &config,
+            );
+            assert_eq!(actions.len(), 1, "Enter opens a new search");
+
+            state.sources.nav_collection =
+                Some(CollectionKind::AudioMuse(if feature == Feature::Describe {
+                    Feature::Lyrics
+                } else {
+                    Feature::Describe
+                }));
+            let actions = key_input::handle_key(
+                KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+                &mut state,
+                &config,
+            );
+            assert_eq!(actions.len(), 1, "Another feature must open its prompt");
+            state.sources.nav_collection = None;
+            let actions = key_input::handle_key(
+                KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+                &mut state,
+                &config,
+            );
+            assert_eq!(actions.len(), 1, "The first search still opens its prompt");
+        }
+    }
+}

@@ -4,6 +4,8 @@
 pub const HELP_TEXT: &str = r#"
 ESSENTIAL
   :              Command palette
+  F7             Full-screen viewer: 1 artwork, 2–7 visualizers; Esc returns
+  F8             Sound output (local devices / Linux AirPlay)
   :q Enter       Quit (q or Q selects Quit first)
   /              Filter the focused column (type to narrow, ↑↓ to filtered results, Enter activates)
   Ctrl+F         Search (current-folder files for Local/WebDAV)
@@ -87,6 +89,9 @@ TOOLS
   Hidden collections can be restored in Settings → Textamp.
   Setup: F10 menu; ↑↓ moves through controls; Enter/Space selects; Esc backs out.
   : / Ctrl+P opens the command palette in settings. Setup uses the active app theme.
+  Textamp -> Display & audio -> Sound output opens the same F8 speaker picker.
+  Sound output: arrows select, Enter applies, F5 finds speakers, Esc cancels.
+  Stop playback before changing outputs. AirPlay setup errors appear in the picker.
   Libraries are grouped by type/account. [Active] marks the current library.
   Up from the first saved library returns to the menu. Enter opens its options.
   Left/Right selects General, Analysis or Cache.
@@ -118,7 +123,8 @@ TOOLS
   AudioMuse: AI labels, tempo, energy and key browse analyzed tracks, not file tags.
   AudioMuse: analysis cache updates weekly with library metadata; F5 updates it now.
   AudioMuse: Describe music… needs CLAP; Search lyrics… needs lyrics analysis.
-  Describe music: text wraps in the expanded prompt; Enter submits, Esc cancels.
+  Describe music: text wraps and scrolls in the prompt; Enter submits, Esc cancels.
+  Describe / lyrics sidebar: Right returns to current results; Enter starts a new search.
   AudioMuse: use the command palette's AudioMuse analysis for the selected track's details.
   Bios: provider first, Wikipedia fallback. ↑↓ scroll, ←→ photos, B source.
   Ctrl+R  Related artists

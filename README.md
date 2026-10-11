@@ -15,6 +15,55 @@ half-block and Braille rendering are also available. The optional macOS
 `Textamp.app` launcher opens the adjacent `textamp` binary in a new Ghostty window.
 It does not embed a terminal or contain another player.
 
+## Full-screen viewer
+
+**F7** toggles the full-screen visualizer/artwork viewer from any main view.
+**Esc** returns to the same view and focus without changing playback. Use
+**Left/Right** or **Tab/Shift+Tab** to cycle six visualizers and artwork;
+**1–7** selects a mode directly: 1 artwork, 2 waveform, 3 spectrum,
+4 spectrogram, 5 vectorscope, 6 landscape, 7 meters. Click a mode
+label to select it. The command palette includes **Full-screen Visualizer** and
+**Full-screen Artwork**. Missing art shows a placeholder; resizing uses the
+existing artwork and visualizer renderers. Live meters/vectorscope samples are
+unavailable on AirPlay; cached analysis visualizers remain available.
+
+## AirPlay output (Linux)
+
+Press **F8**, choose **Sound Output** in `:` / Ctrl+P, or open
+**F2 -> Textamp -> Display & audio -> Sound output**. All three open the same
+picker with the current output, local devices and discovered AirPlay speakers.
+F5 refreshes discovery; arrows highlight; Enter or Select applies; Esc or Cancel
+closes without changing output. AirPlay discovery uses the existing
+`avahi-browse` command and Avahi service. Stop playback before selecting an
+output, then play normally. Choose **System default** to return to local output.
+Discovery does not interrupt audio;
+output selection never silently falls back to local speakers after an error.
+
+Install the current [Music Assistant airplay-cli](https://github.com/music-assistant/airplay-cli)
+sender separately from its official release and set `TEXTAMP_AIRPLAY_HELPER` to
+the executable path, put the executable named `cliairplay` on PATH, or place it
+at `textamp-airplay/cliairplay` beside the Textamp executable. Textamp does not
+download or link this GPL-3.0 helper. Its licensing and source
+obligations must accompany any separate redistribution. Textamp remains under
+the Unlicense. Textamp installs no persistent network service, firewall rule or
+pairing credential. The sender uses temporary LAN protocol sockets while playing.
+
+Protocol selection uses the full receiver TXT feature/status flags, including
+AirPlay 2 advertised through the RAOP service. It does not infer the protocol
+from the service name.
+
+This first version selects one IPv4 destination. It sends 44.1 kHz stereo PCM,
+supports local files, WebDAV and Subsonic/Navidrome streams, and forwards volume,
+pause/resume and stop. Seeks and track changes reconnect the sender, with startup
+buffering. Position follows the sender's scheduled start rather than decoded
+bytes written ahead. Live visualizers are unavailable on this output.
+
+The sender supports original AirPlay and AirPlay 2, but Textamp uses unprivileged
+NTP timing and does not create persistent pairing credentials. Receivers requiring paired credentials
+or PTP timing (which can include HomePods and Apple TVs) report an error and need
+explicitly approved setup before they can be supported. Stereo pairs and
+synchronized multiroom have not been validated and are not offered here.
+
 ## Libraries
 
 Startup opens the last selected library from its cache, falling back to another
@@ -161,8 +210,12 @@ analysis export (`/api/sync`) is required. The **audiomuse** sidebar offers labe
 tempo, energy, key, analyzed tracks, Describe music and Search lyrics. CLAP and
 lyrics searches require their respective indexes. Partial scans yield partial
 results. Inferred labels remain separate from genres in file tags.
-Describe music uses a larger wrapped prompt. Track details show all track genre
-tags and offer Play Track++ to play the selected track and following tracks.
+Describe music uses a compact wrapped prompt that scrolls as you type. When its
+sidebar row (or Search lyrics) is highlighted, Right returns to the current
+results; Enter opens a new search prompt. Before a search, Right also opens the
+prompt. Track
+details show all track genre tags and offer Play Track++ to play the selected
+track and following tracks.
 
 Results resolve by exact server track IDs, not guessed titles. No playlist is
 created unless you save the queue. Textamp does not start scans, alter tags,

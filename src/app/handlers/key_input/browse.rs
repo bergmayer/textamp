@@ -409,6 +409,22 @@ fn handle_category_column_keys(key: event::KeyEvent, state: &mut AppState) -> Ve
             vec![]
         }
 
+        // Right returns to the current AudioMuse search results without
+        // reopening the prompt or discarding the result columns. Enter still
+        // starts a new search; Right opens the prompt when this is another view.
+        KeyCode::Right
+            if state.browse_category == BrowseCategory::Library
+                && matches!(rows.get(state.category_column_index),
+                    Some(CategoryRow::NavidromeCollection(kind))
+                        if Some(*kind) == state.sources.nav_collection
+                            && matches!(kind,
+                                crate::app::sources::navidrome::commands::CollectionKind::AudioMuse(f)
+                                    if f.is_search())) =>
+        {
+            state.category_column_focused = false;
+            vec![]
+        }
+
         // Right/Enter drills into the selected row and takes focus.
         KeyCode::Right | KeyCode::Enter => drill_section_row(state, true),
 

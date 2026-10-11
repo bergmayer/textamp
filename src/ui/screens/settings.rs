@@ -248,7 +248,7 @@ fn render_textamp(frame: &mut Frame, state: &AppState, area: Rect) {
     );
     let help = match page {
         SettingsPage::Themes => "Highlight to preview. Enter applies and saves the theme.",
-        SettingsPage::Display if state.active_library.is_none() => "Open a library to set its artwork rendering and default cover visibility.",
+        SettingsPage::Display if state.active_library.is_none() => "Enter Sound output to choose speakers. Open a library to configure its artwork.",
         SettingsPage::Display if settings.contains(&TextampSetting::Transcode) => "Artwork choices apply to this library. ( ) sets rendering; [X] shows covers in new columns. Streaming quality cycles bit rates.",
         SettingsPage::Display => "Artwork choices apply to this library. ( ) sets rendering; [X] shows covers in new album columns.",
         SettingsPage::Sidebar => "[X] appears in the browse sidebar. Space toggles the selected entry. Changes save immediately.",
@@ -284,6 +284,10 @@ fn setting_label(state: &AppState, setting: TextampSetting) -> (&'static str, St
     let radio = |yes: bool| if yes { "(*)" } else { "( )" };
     let check = |yes: bool| if yes { "[X]" } else { "[ ]" };
     match setting {
+        TextampSetting::SoundOutput => (
+            "Sound output",
+            format!("[ {} ]  F8", state.sound_output.current.label()),
+        ),
         TextampSetting::Theme(name) => (
             "Color scheme",
             format!("{} {}", radio(name == state.theme), name.display_name()),

@@ -141,6 +141,10 @@ pub async fn dispatch(
                     return Ok(vec![]);
                 };
                 match item {
+                    TextampSetting::SoundOutput => {
+                        follow_ups
+                            .push(crate::app::action::PlaybackAction::OpenOutputPicker.into());
+                    }
                     TextampSetting::Theme(name) => {
                         state.theme = name;
                         state.set_status(format!("Theme: {}", name.display_name()));
