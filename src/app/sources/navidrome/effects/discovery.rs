@@ -241,8 +241,11 @@ fn load_similar(
     title: String,
     mode: SimilarMode,
 ) {
+    state.similar.details = Default::default();
     state.similar.source_title = title;
     state.similar.mode = mode;
+    state.similar.source_key = Some(key.clone());
+    state.similar.error = None;
     state.similar.request_key = Some(key.clone());
     state.similar.loading = true;
     state.similar.tracks.clear();
@@ -321,9 +324,9 @@ fn load_similar(
         }
         .await;
         Ok(vec![event(result.unwrap_or_else(|e: anyhow::Error| {
-            DataEvent::ScopedLoadError {
+            DataEvent::SimilarLoadFailed {
                 request_key: key,
-                message: format!("Recommendations: {e:#}"),
+                message: format!("{e:#}"),
             }
         }))])
     });

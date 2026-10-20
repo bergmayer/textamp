@@ -181,6 +181,26 @@ pub(super) fn handle_browse_keys(key: event::KeyEvent, state: &mut AppState) -> 
         }
     }
 
+    if !state.track_pane_focused
+        && matches!(
+            key.code,
+            KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::Home
+                | KeyCode::End
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+                | KeyCode::Left
+                | KeyCode::Esc
+                | KeyCode::Backspace
+        )
+    {
+        state.sonic_details = None;
+    }
+    if let Some(actions) = crate::app::sonic_details::key(key, state) {
+        return actions;
+    }
+
     // Track-details pane has keyboard focus — Up/Down moves
     // between the Play button and the Sonically-Similar rows;
     // Enter activates; Left/Esc returns to the focused Miller
@@ -409,19 +429,35 @@ fn handle_category_column_keys(key: event::KeyEvent, state: &mut AppState) -> Ve
             vec![]
         }
 
-        // Right returns to the current AudioMuse search results without
-        // reopening the prompt or discarding the result columns. Enter still
-        // starts a new search; Right opens the prompt when this is another view.
         KeyCode::Right
-            if state.browse_category == BrowseCategory::Library
-                && matches!(rows.get(state.category_column_index),
-                    Some(CategoryRow::NavidromeCollection(kind))
-                        if Some(*kind) == state.sources.nav_collection
-                            && matches!(kind,
-                                crate::app::sources::navidrome::commands::CollectionKind::AudioMuse(f)
-                                    if f.is_search())) =>
+            if matches!(
+                rows.get(state.category_column_index),
+                Some(CategoryRow::NavidromeCollection(
+                    crate::app::sources::navidrome::commands::CollectionKind::AudioMuse(
+                        crate::audiomuse::Feature::Describe
+                    )
+                ))
+            ) =>
         {
-            state.category_column_focused = false;
+            vec![
+                crate::app::sources::audiomuse::Command::BrowseDescriptions { take_focus: true }
+                    .into(),
+            ]
+        }
+        // Lyrics also reserves text entry for Enter.
+        KeyCode::Right
+            if matches!(rows.get(state.category_column_index),
+            Some(CategoryRow::NavidromeCollection(crate::app::sources::navidrome::commands::CollectionKind::AudioMuse(f))) if f.is_search()) =>
+        {
+            if state.sources.nav_collection
+                == Some(
+                    crate::app::sources::navidrome::commands::CollectionKind::AudioMuse(
+                        crate::audiomuse::Feature::Lyrics,
+                    ),
+                )
+            {
+                state.category_column_focused = false;
+            }
             vec![]
         }
 
@@ -471,6 +507,21 @@ fn drill_section_row(state: &mut AppState, take_focus: bool) -> Vec<Action> {
     let Some(row) = rows.get(state.category_column_index).copied() else {
         return vec![];
     };
+    if !take_focus
+        && matches!(
+            row,
+            CategoryRow::NavidromeCollection(
+                crate::app::sources::navidrome::commands::CollectionKind::AudioMuse(
+                    crate::audiomuse::Feature::Describe
+                )
+            )
+        )
+    {
+        return vec![
+            crate::app::sources::audiomuse::Command::BrowseDescriptions { take_focus: false }
+                .into(),
+        ];
+    }
     // Popup entries require activation; arrowing past them must not open a modal.
     if matches!(row, CategoryRow::Search)
         || matches!(row,
@@ -646,9 +697,8 @@ fn handle_alphabet_strip_keys(key: event::KeyEvent, state: &mut AppState) -> Vec
 
 /// Handle keys when the right-side track-details pane has keyboard
 /// focus. Up/Down moves between the Play button (index 0) and the
-/// Sonically-Similar rows (index 1..=N); Enter triggers the
-/// highlighted action (play track / drill into similar track's
-/// album); Left, Esc, or Backspace returns focus to the focused
+/// Sonically-Similar rows (index 2..=N); Enter plays only on the
+/// explicit playback actions, otherwise opens the adjacent details; Left, Esc, or Backspace returns focus to the focused
 /// Miller column.
 fn handle_track_pane_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
     let track = match state.focused_track() {
@@ -680,6 +730,11 @@ fn handle_track_pane_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Act
         KeyCode::Home => state.track_pane_index = 0,
         KeyCode::End => state.track_pane_index = max_idx,
 
+        KeyCode::Right => {
+            if let Some(child) = state.sonic_details.as_mut() {
+                child.details.focused = true;
+            }
+        }
         KeyCode::Enter => {
             if state.track_pane_index == 0 {
                 return vec![QueueAction::PlayTrack(Box::new(track)).into()];
@@ -690,17 +745,7 @@ fn handle_track_pane_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Act
                 }
                 return vec![];
             }
-            // Open the command palette as the contextual menu for the
-            // highlighted similar-track row. The palette's context-
-            // aware section reads `palette_target_track()`, which
-            // returns the similar track when `track_pane_focused &&
-            // track_pane_index > 1` — so the user gets Play Track /
-            // Open in Library (always shown for similar rows) /
-            // Artist Bio / Sonic Adventure / external search at the
-            // top of the list.
-            let _ = track;
-            crate::app::command_palette::open(state);
-            return vec![];
+            return crate::app::sonic_details::open(state, state.track_pane_index - 2, false);
         }
 
         KeyCode::Left | KeyCode::Esc | KeyCode::Backspace => {
@@ -1020,6 +1065,13 @@ pub(super) fn drill_actions_for_focused_artist_item(
         return vec![];
     };
     match item {
+        BrowseItem::Description { query } => vec![
+            crate::app::sources::audiomuse::Command::RestoreDescription {
+                query,
+                replace_child,
+            }
+            .into(),
+        ],
         BrowseItem::Genre { key, .. } => vec![MillerAction::LoadGenreAlbumsForMiller {
             genre_key: key,
             replace_child,

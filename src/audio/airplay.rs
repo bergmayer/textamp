@@ -1,4 +1,4 @@
-//! Optional Linux AirPlay sender. No library linking, pairing or privilege changes.
+//! Built-in mDNS discovery and an external AirPlay sender. No audio-device fallback.
 use std::net::IpAddr;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,6 +23,7 @@ pub fn discover_outputs() -> Result<OutputDiscovery, String> {
     })
 }
 
+#[cfg(test)]
 /// Avahi's parsable format escapes separators and non-ASCII bytes as decimal octets.
 fn unescape(value: &str) -> String {
     let bytes = value.as_bytes();
@@ -77,7 +78,8 @@ fn advertises_airplay2(txt: &[(String, String)]) -> bool {
     features & ((1 << 38) | (1 << 48)) != 0
 }
 
-pub fn parse_discovery(text: &str) -> Vec<AirplayDestination> {
+#[cfg(test)]
+fn parse_discovery(text: &str) -> Vec<AirplayDestination> {
     let mut devices: Vec<AirplayDestination> = Vec::new();
     for line in text.lines() {
         let fields: Vec<_> = line.split(';').collect();
@@ -129,64 +131,145 @@ pub fn parse_discovery(text: &str) -> Vec<AirplayDestination> {
             airplay2,
             txt,
         };
-        if let Some(existing) = devices.iter_mut().find(|d| d.address == address) {
-            // Preserve both services' properties: RAOP may carry ft/sf, codecs and
-            // encryption flags while the native service adds grouping/model fields.
-            let mut merged = existing.txt.clone();
-            for (key, value) in &device.txt {
-                if let Some((_, old)) = merged.iter_mut().find(|(k, _)| k == key) {
-                    *old = value.clone();
-                } else {
-                    merged.push((key.clone(), value.clone()));
-                }
-            }
-            if native_service {
-                *existing = device;
-            }
-            existing.airplay2 = advertises_airplay2(&merged);
-            existing.txt = merged;
-        } else {
-            devices.push(device);
-        }
+        merge_destination(&mut devices, device, native_service);
     }
     devices.sort_by_key(|d| d.name.to_lowercase());
     devices
 }
 
-#[cfg(not(target_os = "linux"))]
-pub fn discover() -> Result<Vec<AirplayDestination>, String> {
-    Err("AirPlay discovery is supported on Linux".into())
-}
-
-#[cfg(target_os = "linux")]
-pub fn discover() -> Result<Vec<AirplayDestination>, String> {
-    let mut text = String::new();
-    for service in ["_airplay._tcp", "_raop._tcp"] {
-        let output = linux::capture(
-            std::process::Command::new("avahi-browse").args([
-                "--parsable",
-                "--resolve",
-                "--terminate",
-                service,
-            ]),
-            std::time::Duration::from_secs(8),
-        )
-        .map_err(|e| {
-            format!(
-                "AirPlay discovery: {e}. avahi-browse and a running Avahi service are required."
-            )
-        })?;
-        text.push_str(&output);
-        text.push('\n');
+fn merge_destination(
+    devices: &mut Vec<AirplayDestination>,
+    device: AirplayDestination,
+    native_service: bool,
+) {
+    if let Some(existing) = devices.iter_mut().find(|d| d.address == device.address) {
+        let mut merged = existing.txt.clone();
+        for (key, value) in &device.txt {
+            if let Some((_, old)) = merged.iter_mut().find(|(k, _)| k == key) {
+                *old = value.clone();
+            } else {
+                merged.push((key.clone(), value.clone()));
+            }
+        }
+        if native_service {
+            *existing = device;
+        }
+        existing.airplay2 = advertises_airplay2(&merged);
+        existing.txt = merged;
+    } else {
+        devices.push(device);
     }
-    Ok(parse_discovery(&text))
 }
 
-#[cfg(target_os = "linux")]
-pub(crate) use linux::AirplayBackend;
+fn append_resolved(devices: &mut Vec<AirplayDestination>, info: &mdns_sd::ResolvedService) {
+    let service = info.ty_domain.as_str();
+    if !["_airplay._tcp.local.", "_raop._tcp.local."].contains(&service) {
+        return;
+    }
+    let native = service == "_airplay._tcp.local.";
+    let name = info
+        .fullname
+        .strip_suffix(service)
+        .unwrap_or(&info.fullname)
+        .trim_end_matches('.');
+    let name = if native {
+        name
+    } else {
+        name.split_once('@').map_or(name, |(_, name)| name)
+    };
+    let name: String = name.chars().filter(|c| !c.is_control()).collect();
+    let txt = info
+        .get_properties()
+        .iter()
+        .map(|p| (p.key().to_string(), p.val_str().to_string()))
+        .collect::<Vec<_>>();
+    for address in info.get_addresses_v4() {
+        let address = IpAddr::V4(address);
+        if info.port == 0 || address.is_unspecified() || address.is_multicast() {
+            continue;
+        }
+        merge_destination(
+            devices,
+            AirplayDestination {
+                name: name.clone(),
+                address,
+                port: info.port,
+                airplay2: advertises_airplay2(&txt),
+                txt: txt.clone(),
+            },
+            native,
+        );
+    }
+}
 
-#[cfg(target_os = "linux")]
-mod linux {
+/// Discover both AirPlay service types without platform commands or a system daemon.
+/// The bounded scan runs on the output-discovery worker, never on the UI thread.
+pub fn discover() -> Result<Vec<AirplayDestination>, String> {
+    use mdns_sd::{ServiceDaemon, ServiceEvent};
+    use std::time::{Duration, Instant};
+    let daemon = ServiceDaemon::new().map_err(|e| format!("AirPlay discovery: {e}"))?;
+    let result = (|| {
+        let mut browsers = Vec::new();
+        for service in ["_raop._tcp.local.", "_airplay._tcp.local."] {
+            browsers.push((
+                service,
+                daemon
+                    .browse(service)
+                    .map_err(|e| format!("AirPlay discovery: {e}"))?,
+            ));
+        }
+        let deadline = Instant::now() + Duration::from_secs(4);
+        let mut resolved = std::collections::BTreeMap::new();
+        while Instant::now() < deadline {
+            for (service, receiver) in &browsers {
+                // Drain only a bounded number per iteration so a busy LAN cannot
+                // defeat the deadline or starve the other service type.
+                for _ in 0..128 {
+                    match receiver.try_recv() {
+                        Ok(ServiceEvent::ServiceResolved(info)) => {
+                            if resolved.len() >= 1024 {
+                                return Err("AirPlay discovery exceeded the service limit".into());
+                            }
+                            resolved.insert((*service, info.fullname.clone()), info);
+                        }
+                        Ok(ServiceEvent::ServiceRemoved(_, name)) => {
+                            resolved.remove(&(*service, name));
+                        }
+                        Ok(_) => {}
+                        Err(_) if receiver.is_disconnected() => {
+                            return Err("AirPlay discovery stopped unexpectedly".into())
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let mut devices = Vec::new();
+        // RAOP first; the native service supplies the preferred name and endpoint.
+        for service in ["_raop._tcp.local.", "_airplay._tcp.local."] {
+            for ((kind, _), info) in &resolved {
+                if *kind != service {
+                    continue;
+                }
+                append_resolved(&mut devices, info);
+            }
+        }
+        devices.sort_by_key(|d| (d.name.to_lowercase(), d.address));
+        Ok(devices)
+    })();
+    // Shut down after success or failure; a refresh must not leak another mDNS worker.
+    if let Ok(stopped) = daemon.shutdown() {
+        let _ = stopped.recv_timeout(Duration::from_secs(1));
+    }
+    result
+}
+
+#[cfg(unix)]
+pub(crate) use sender::AirplayBackend;
+
+#[cfg(unix)]
+mod sender {
     use super::AirplayDestination;
     use crate::audio::rodio_backend::{BufferedInput, PipelineEvent, RodioBackend, StreamingInput};
     use crate::audio::{AudioError, SampleTap};
@@ -208,7 +291,7 @@ mod linux {
     const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
     const STALL_TIMEOUT: Duration = Duration::from_secs(15);
 
-    /// Drain bounded process output while enforcing a deadline (including stalled Avahi).
+    /// Drain bounded process output while enforcing a deadline (including a stalled sender).
     pub(super) fn capture(command: &mut Command, timeout: Duration) -> Result<String, String> {
         let mut child = OwnedChild(
             command
@@ -1025,5 +1108,60 @@ mod routing_tests {
                 assert!(devices[0].txt.iter().any(|(k, _)| k == key));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod mdns_tests {
+    use super::*;
+    #[test]
+    fn resolved_services_merge_names_endpoints_and_all_protocol_properties() {
+        let raop = mdns_sd::ServiceInfo::new(
+            "_raop._tcp.local.",
+            "AABBCCDDEEFF@Living Room",
+            "speaker.local.",
+            "192.0.2.10",
+            5000,
+            [("ft", "0x0,0x40"), ("et", "0,1,3"), ("am", "Receiver")].as_slice(),
+        )
+        .unwrap()
+        .as_resolved_service();
+        let native = mdns_sd::ServiceInfo::new(
+            "_airplay._tcp.local.",
+            "Living Room",
+            "speaker.local.",
+            "192.0.2.10",
+            7000,
+            [("features", "0x0,0x40"), ("flags", "0x4")].as_slice(),
+        )
+        .unwrap()
+        .as_resolved_service();
+        let mut devices = Vec::new();
+        append_resolved(&mut devices, &raop);
+        append_resolved(&mut devices, &native);
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].name, "Living Room");
+        assert_eq!(devices[0].port, 7000);
+        assert!(devices[0].airplay2);
+        for key in ["ft", "features", "et", "am", "flags"] {
+            assert!(devices[0].txt.iter().any(|(k, _)| k == key));
+        }
+        let mut invalid = native.clone();
+        invalid.port = 0;
+        let mut empty = Vec::new();
+        append_resolved(&mut empty, &invalid);
+        assert!(empty.is_empty());
+        let unrelated = mdns_sd::ServiceInfo::new(
+            "_http._tcp.local.",
+            "Web",
+            "web.local.",
+            "192.0.2.11",
+            80,
+            None,
+        )
+        .unwrap()
+        .as_resolved_service();
+        append_resolved(&mut empty, &unrelated);
+        assert!(empty.is_empty());
     }
 }

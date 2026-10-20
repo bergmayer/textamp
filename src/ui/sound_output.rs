@@ -79,7 +79,8 @@ pub fn render(frame: &mut Frame, state: &RenderState) {
     } else if state.sound_output.loading {
         "Finding local outputs and AirPlay speakers...".into()
     } else if state.sound_output.destinations.is_empty() {
-        "No AirPlay speakers found. F5 refreshes. Linux AirPlay requires avahi-browse and cliairplay.".into()
+        "No AirPlay speakers found. Check that the speaker is on this network, then press F5."
+            .into()
     } else {
         "One AirPlay destination. Pairing/PTP requirements are reported as errors; multiroom is not enabled.".into()
     };

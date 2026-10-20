@@ -156,6 +156,7 @@ pub async fn dispatch(
             state.track_pane_open = true;
         }
         BrowseAction::CloseTrackDetails => {
+            state.sonic_details = None;
             state.track_pane_open = false;
         }
         BrowseAction::OpenInLibrary {
@@ -164,10 +165,12 @@ pub async fn dispatch(
             album_key,
             album_title,
         } => {
+            state.popups.close_all();
+            state.sonic_details = None;
             state.track_pane_open = false;
-            if let Some(ak) = album_key {
-                state.search.pending_album_key = Some(ak);
-            }
+            state.sources.nav_collection = None;
+            state.artist_nav.columns.clear();
+            state.search.pending_album_key = album_key;
             if let Some(at) = album_title {
                 state.library.selected_album_title = at;
             }

@@ -336,6 +336,13 @@ pub fn get_artist_for_bio(state: &crate::app::state::AppState) -> Option<(String
         None
     };
 
+    if crate::app::sonic_details::focused(state) {
+        return state
+            .palette_target_track()
+            .as_ref()
+            .and_then(artist_from_track);
+    }
+
     // 0. Highlighted Sonically-Similar row inside the track pane
     //    wins ahead of everything else — when the user has navigated
     //    into the pane and picked a similar song, "Artist Bio"

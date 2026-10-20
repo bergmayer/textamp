@@ -1,4 +1,4 @@
-//! DOS-style setup: menu bar, framed pages, radio controls and contextual help.
+//! Two-pane settings: flat categories, focused controls, and contextual actions.
 use crate::app::state::{SettingsFocus, SettingsPage, SettingsSection, TextampSetting};
 use crate::ui::theme::theme;
 use crate::ui::RenderState as AppState;
@@ -20,13 +20,11 @@ pub(crate) fn selected() -> Style {
 pub(crate) fn panel(title: impl Into<Line<'static>>) -> Block<'static> {
     Block::default()
         .title(title)
-        .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
-        .border_type(BorderType::Double)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme().colors.fg_accent))
         .style(paper())
 }
-
 pub(crate) fn scroll_marker(frame: &mut Frame, column: Rect, total: usize, offset: usize) {
     if total <= column.height as usize || column.is_empty() {
         return;
@@ -48,154 +46,190 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     if area.is_empty() {
         return;
     }
-    frame.render_widget(Block::default().style(paper()), area);
-    let block = panel(" TEXTAMP  /  SETUP ");
+    let block = panel(" Settings ");
     let inside = block.inner(area);
     frame.render_widget(block, area);
-    let rows = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(0),
-        Constraint::Length(1),
-    ])
-    .split(inside);
-    let sections = SettingsSection::all();
-    let slots = Layout::horizontal(
-        sections
-            .iter()
-            .map(|_| Constraint::Ratio(1, sections.len() as u32)),
-    )
-    .split(rows[0]);
-    for (i, section) in sections.iter().enumerate() {
-        let active = *section == state.settings_state.section;
-        let name = match section {
-            SettingsSection::Libraries => "Libraries",
-            SettingsSection::Textamp => "Textamp",
-            SettingsSection::About => "About",
-        };
-        let label = format!(" {} {name} ", i + 1);
-        frame.render_widget(
-            Paragraph::new(label)
-                .alignment(Alignment::Center)
-                .style(if active {
-                    if state.settings_state.focus == SettingsFocus::Sections {
-                        selected()
-                    } else {
-                        paper()
-                            .bg(theme().colors.bg_highlight)
-                            .add_modifier(Modifier::BOLD)
-                    }
-                } else {
-                    paper()
-                }),
-            slots[i],
-        );
-        state
-            .hit_regions
-            .borrow_mut()
-            .settings_sections
-            .push((slots[i], *section));
-    }
-    match state.settings_state.section {
-        SettingsSection::Libraries => {
-            super::super::app::render_library_manager(frame, state, rows[1])
+    let rows = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(inside);
+    // Wide terminals show both panes. Narrow terminals show the category list
+    // or the focused page at full width; Tab and Esc use the same focus model.
+    let navigation = state.settings_state.focus == SettingsFocus::Sections;
+    let content = if area.width >= 65 {
+        let panes = Layout::horizontal([Constraint::Length(17), Constraint::Min(0)]).split(rows[0]);
+        render_categories(frame, state, panes[0]);
+        Some(panes[1])
+    } else if navigation {
+        render_categories(frame, state, rows[0]);
+        None
+    } else {
+        Some(rows[0])
+    };
+    if let Some(content) = content {
+        match state.settings_state.section {
+            SettingsSection::Libraries => {
+                super::super::app::render_library_manager(frame, state, content)
+            }
+            SettingsSection::Textamp => render_textamp(frame, state, content),
+            SettingsSection::About => render_about(frame, state, content),
         }
-        SettingsSection::Textamp => render_textamp(frame, state, rows[1]),
-        SettingsSection::About => render_about(frame, state, rows[1]),
     }
-    frame.render_widget(
-        Paragraph::new(if inside.width >= 75 {
-            " F10 Menu  ←→ Menu  ↓ Enter panel  Enter Select  : Commands  Esc Back "
+    let navigation = state.settings_state.focus == SettingsFocus::Sections;
+    let help = if inside.width >= 72 {
+        if navigation {
+            "↑↓ Category  Enter Open  Tab Controls  : Commands"
         } else {
-            " ↓/Tab Panel  Enter Select  : Cmd  Esc Back "
-        })
-        .style(selected()),
-        rows[2],
+            "↑↓ Move  Enter Select  Tab Categories  : Commands"
+        }
+    } else if inside.width >= 48 {
+        if navigation {
+            "↑↓ Category  Enter Open  Tab Pane"
+        } else {
+            "↑↓ Move  Enter Select  Tab Pane"
+        }
+    } else if navigation {
+        "↑↓ Move  → Open"
+    } else {
+        "↑↓ Move  Enter Select"
+    };
+    let footer = Layout::horizontal([Constraint::Min(0), Constraint::Length(10)]).split(rows[1]);
+    frame.render_widget(
+        Paragraph::new(help).style(paper().fg(theme().colors.fg_muted)),
+        footer[0],
+    );
+    frame.render_widget(
+        Paragraph::new(if navigation { "Esc Close" } else { "Esc Back" })
+            .alignment(Alignment::Right)
+            .style(paper().fg(theme().colors.fg_accent)),
+        footer[1],
+    );
+    state.hit_regions.borrow_mut().settings_back = Some(footer[1]);
+}
+
+fn render_categories(frame: &mut Frame, state: &AppState, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::RIGHT)
+        .border_style(paper().fg(theme().colors.border));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    state.hit_regions.borrow_mut().settings_categories = Some(inner);
+    let index = state.settings_state.category_index();
+    let offset = index.saturating_sub(inner.height.saturating_sub(1) as usize);
+    let labels = [
+        "Libraries",
+        "Appearance",
+        "Artwork",
+        "Audio",
+        "Sidebar",
+        "Search",
+        "About",
+    ];
+    for (i, label) in labels
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(inner.height as usize)
+    {
+        let active = index == i;
+        let focus = state.settings_state.focus == SettingsFocus::Sections;
+        let style = if active && focus {
+            selected()
+        } else if active {
+            paper()
+                .bg(theme().colors.bg_highlight)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            paper()
+        };
+        let rect = Rect::new(inner.x, inner.y + (i - offset) as u16, inner.width, 1);
+        frame.render_widget(
+            Paragraph::new(format!("{}{label}", if active { "› " } else { "  " })).style(style),
+            rect,
+        );
+        let mut hits = state.hit_regions.borrow_mut();
+        match i {
+            0 => hits
+                .settings_sections
+                .push((rect, SettingsSection::Libraries)),
+            6 => hits.settings_sections.push((rect, SettingsSection::About)),
+            _ => hits.settings_pages.push((rect, SettingsPage::ALL[i - 1])),
+        }
+    }
+    scroll_marker(
+        frame,
+        Rect::new(area.right().saturating_sub(1), inner.y, 1, inner.height),
+        labels.len(),
+        offset,
     );
 }
 
 fn render_textamp(frame: &mut Frame, state: &AppState, area: Rect) {
-    let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
-    // A compact page selector works at 80 columns and keeps the controls in one list.
     let page = state.settings_state.page;
-    let index = SettingsPage::ALL
-        .iter()
-        .position(|p| *p == page)
-        .unwrap_or(0);
-    let slots = Layout::horizontal(SettingsPage::ALL.iter().map(|_| Constraint::Ratio(1, 4)))
-        .split(Rect {
-            height: rows[0].height.min(1),
-            ..rows[0]
-        });
-    for (i, p) in SettingsPage::ALL.iter().enumerate() {
-        let short = if area.width < 60 {
-            ["Theme", "Display", "Sidebar", "Search"][i]
+    let focused = state.settings_state.focus == SettingsFocus::Content;
+    let block = panel(format!(" {} ", page.name()))
+        .borders(Borders::TOP)
+        .border_style(paper().fg(if focused {
+            theme().colors.border_focused
         } else {
-            ["Themes", "Display", "Sidebar", "Services"][i]
-        };
-        frame.render_widget(
-            Paragraph::new(short)
-                .alignment(Alignment::Center)
-                .style(if i == index {
-                    if state.settings_state.focus == SettingsFocus::Pages {
-                        selected()
-                    } else {
-                        paper()
-                            .bg(theme().colors.bg_highlight)
-                            .add_modifier(Modifier::BOLD)
-                    }
-                } else {
-                    paper()
-                }),
-            slots[i],
-        );
-        state
-            .hit_regions
-            .borrow_mut()
-            .settings_pages
-            .push((slots[i], *p));
-    }
-    let content = rows[1];
-    let (controls, preview) = if content.width >= 74 {
-        let panes = Layout::horizontal([Constraint::Length(38), Constraint::Min(0)]).split(content);
-        (panes[0], Some(panes[1]))
-    } else {
-        (content, None)
-    };
-    let page_title = if page == SettingsPage::Display {
-        let library = crate::app::sources::library_choices(state)
+            theme().colors.border
+        }));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let settings = state.textamp_settings();
+    let subtitle = match page {
+        SettingsPage::Themes => "Color theme · Enter applies".to_string(),
+        SettingsPage::Display => crate::app::sources::library_choices(state)
             .into_iter()
-            .find(|choice| choice.active(state))
-            .map_or_else(|| "No library".to_string(), |choice| choice.label());
-        format!(" {} · {} ", page.name(), library)
-    } else {
-        format!(" {} ", page.name())
+            .find(|c| c.active(state))
+            .map_or_else(
+                || "Open a library to set its artwork.".into(),
+                |c| format!("Library: {}", c.label()),
+            ),
+        SettingsPage::Audio => "Output and streaming quality".into(),
+        SettingsPage::Sidebar => "Visible in your library sidebar".into(),
+        SettingsPage::Services => "Search links in the command palette".into(),
     };
-    let block = panel(page_title);
-    let inner = block.inner(controls);
-    frame.render_widget(block, controls);
+    let help_height = if inner.height >= 12 {
+        3
+    } else if inner.height >= 7 {
+        2
+    } else {
+        0
+    };
     let rows = Layout::vertical([
-        Constraint::Min(1),
-        Constraint::Length(if inner.height >= 9 { 4 } else { 0 }),
+        Constraint::Length(1),
+        Constraint::Min(0),
+        Constraint::Length(help_height),
+        Constraint::Length(u16::from(inner.height >= 5)),
     ])
     .split(inner);
-    let settings = state.textamp_settings();
-    let focused = state.settings_state.focus == SettingsFocus::Content;
+    frame.render_widget(
+        Paragraph::new(subtitle).style(paper().fg(theme().colors.fg_muted)),
+        rows[0],
+    );
+    let (controls, preview) =
+        if page == SettingsPage::Themes && rows[1].width >= 54 && rows[1].height >= 8 {
+            let panes =
+                Layout::horizontal([Constraint::Length(25), Constraint::Min(0)]).split(rows[1]);
+            (panes[0], Some(panes[1]))
+        } else {
+            (rows[1], None)
+        };
     let mut lines = Vec::new();
     let mut item_lines = Vec::new();
-    let mut previous_heading = "";
+    let mut previous = "";
     for (i, setting) in settings.iter().enumerate() {
         let (heading, label) = setting_label(state, *setting);
-        if heading != previous_heading {
+        if heading != previous {
             if !lines.is_empty() {
                 lines.push(Line::from(""));
             }
-            lines.push(Line::styled(heading, paper().add_modifier(Modifier::BOLD)));
-            previous_heading = heading;
+            lines.push(Line::styled(heading, paper().fg(theme().colors.fg_accent)));
+            previous = heading;
         }
         item_lines.push((lines.len(), i));
+        let active = i == state.settings_state.item_index;
         lines.push(Line::styled(
-            format!(" {label}"),
-            if focused && i == state.settings_state.item_index {
+            format!("{}{label}", if active && focused { "› " } else { "  " }),
+            if active && focused {
                 selected()
             } else {
                 paper()
@@ -210,21 +244,21 @@ fn render_textamp(frame: &mut Frame, state: &AppState, area: Rect) {
     let offset = state
         .scroll
         .settings_textamp
-        .unwrap_or_else(|| selected_line.saturating_sub(rows[0].height.saturating_sub(1) as usize))
-        .min(total.saturating_sub(rows[0].height as usize));
+        .unwrap_or_else(|| selected_line.saturating_sub(controls.height.saturating_sub(1) as usize))
+        .min(total.saturating_sub(controls.height as usize));
     let hits = item_lines
         .into_iter()
         .filter_map(|(line, i)| {
             let y = line.checked_sub(offset)?;
-            (y < rows[0].height as usize).then_some((
-                Rect::new(rows[0].x, rows[0].y + y as u16, rows[0].width, 1),
+            (y < controls.height as usize).then_some((
+                Rect::new(controls.x, controls.y + y as u16, controls.width, 1),
                 i,
             ))
         })
         .collect();
     state.hit_regions.borrow_mut().settings_textamp =
         Some(crate::app::presentation::SettingsContentRegion {
-            inner: rows[0],
+            inner: controls,
             rows: hits,
             scroll_offset: offset,
             total_lines: total,
@@ -233,86 +267,138 @@ fn render_textamp(frame: &mut Frame, state: &AppState, area: Rect) {
         Paragraph::new(lines)
             .scroll((offset as u16, 0))
             .style(paper()),
-        rows[0],
+        controls,
     );
     scroll_marker(
         frame,
         Rect::new(
             controls.right().saturating_sub(1),
-            rows[0].y,
+            controls.y,
             1,
-            rows[0].height,
+            controls.height,
         ),
         total,
         offset,
     );
-    let help = match page {
-        SettingsPage::Themes => "Highlight to preview. Enter applies and saves the theme.",
-        SettingsPage::Display if state.active_library.is_none() => "Enter Sound output to choose speakers. Open a library to configure its artwork.",
-        SettingsPage::Display if settings.contains(&TextampSetting::Transcode) => "Artwork choices apply to this library. ( ) sets rendering; [X] shows covers in new columns. Streaming quality cycles bit rates.",
-        SettingsPage::Display => "Artwork choices apply to this library. ( ) sets rendering; [X] shows covers in new album columns.",
-        SettingsPage::Sidebar => "[X] appears in the browse sidebar. Space toggles the selected entry. Changes save immediately.",
-        SettingsPage::Services => "Enable external search commands. Enter or Space toggles a service. Changes save immediately.",
+    let help = match settings.get(state.settings_state.item_index) {
+        Some(TextampSetting::Theme(_)) => {
+            "Highlight to preview. Enter or click Apply theme to save."
+        }
+        Some(TextampSetting::SoundOutput) => {
+            "Choose local speakers or AirPlay. Stop playback before changing output."
+        }
+        Some(TextampSetting::Transcode) => {
+            "Enter cycles the bitrate limit for the next track. Original requests the original file."
+        }
+        Some(TextampSetting::Artwork(_)) => "Rendering method for this library's cover art.",
+        Some(TextampSetting::ArtworkVisible) => {
+            "Show covers in new album columns for this library."
+        }
+        Some(TextampSetting::Sidebar(_)) => {
+            "Enter, Space or click to show or hide this sidebar entry."
+        }
+        Some(TextampSetting::ExternalSearch(_)) => {
+            "Enable this service in search commands. Links open in your browser."
+        }
+        None => "Use Libraries to add a source, or F3 to switch libraries.",
     };
     frame.render_widget(
         Paragraph::new(help)
-            .style(paper().fg(theme().colors.fg_accent))
-            .wrap(Wrap { trim: true }),
-        rows[1],
+            .wrap(Wrap { trim: true })
+            .style(paper().fg(theme().colors.fg_muted)),
+        rows[2],
     );
-    if let Some(preview) = preview {
-        state.hit_regions.borrow_mut().settings_preview = Some(preview);
-        let name = match settings.get(state.settings_state.item_index) {
-            Some(TextampSetting::Theme(name)) if focused => *name,
-            _ => state.theme,
-        };
-        let colors = crate::ui::theme::Theme::new(name).colors;
-        let block = Block::default()
-            .title(format!(" {} — preview ", name.display_name()))
-            .borders(Borders::ALL)
-            .border_type(BorderType::Double)
-            .border_style(Style::default().fg(colors.fg_accent))
-            .style(Style::default().bg(colors.bg_primary));
-        let inner = block.inner(preview);
-        frame.render_widget(block, preview);
-        crate::ui::widgets::logo::render_themed(frame, inner, &colors);
+    if page == SettingsPage::Themes {
+        frame.render_widget(
+            Paragraph::new("[ Apply theme ]").style(paper().fg(theme().colors.fg_accent)),
+            rows[3],
+        );
+        if !rows[3].is_empty() {
+            state.hit_regions.borrow_mut().settings_apply = Some(rows[3]);
+        }
+    } else if !settings.is_empty() {
+        frame.render_widget(
+            Paragraph::new("Changes save automatically").style(paper().fg(theme().colors.fg_muted)),
+            rows[3],
+        );
     }
+    if let Some(preview) = preview {
+        render_preview(frame, state, preview, focused, &settings);
+    }
+}
+
+fn render_preview(
+    frame: &mut Frame,
+    state: &AppState,
+    area: Rect,
+    focused: bool,
+    settings: &[TextampSetting],
+) {
+    let name = match settings.get(state.settings_state.item_index) {
+        Some(TextampSetting::Theme(name)) if focused => *name,
+        _ => state.theme,
+    };
+    let colors = crate::ui::theme::Theme::new(name).colors;
+    let base = Style::default().fg(colors.fg_primary).bg(colors.bg_primary);
+    let block = Block::default()
+        .title(" Preview ")
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(base.fg(colors.fg_accent))
+        .style(base);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    state.hit_regions.borrow_mut().settings_preview = Some(area);
+    let lines = vec![
+        Line::styled(name.display_name(), base.add_modifier(Modifier::BOLD)),
+        Line::from(""),
+        Line::styled(" Library", base.fg(colors.fg_accent)),
+        Line::styled(
+            " › A favorite album",
+            Style::default()
+                .fg(colors.selection_bar_fg)
+                .bg(colors.selection_bar_bg),
+        ),
+        Line::styled("   First track      3:24", base),
+        Line::styled("   Second track     4:08", base),
+        Line::from(""),
+        Line::styled(" Playing ━━━━━───  2:10", base.fg(colors.fg_accent)),
+        Line::styled(" Enter Play   Esc Back", base.fg(colors.fg_muted)),
+    ];
+    frame.render_widget(Paragraph::new(lines).style(base), inner);
 }
 
 fn setting_label(state: &AppState, setting: TextampSetting) -> (&'static str, String) {
     use crate::services::external_search::SearchTarget;
-    let radio = |yes: bool| if yes { "(*)" } else { "( )" };
-    let check = |yes: bool| if yes { "[X]" } else { "[ ]" };
+    let radio = |yes| if yes { "(•)" } else { "( )" };
+    let check = |yes| if yes { "[x]" } else { "[ ]" };
     match setting {
-        TextampSetting::SoundOutput => (
-            "Sound output",
-            format!("[ {} ]  F8", state.sound_output.current.label()),
-        ),
         TextampSetting::Theme(name) => (
-            "Color scheme",
+            "Theme",
             format!("{} {}", radio(name == state.theme), name.display_name()),
         ),
+        TextampSetting::SoundOutput => (
+            "Sound output",
+            format!("{}  ›", state.sound_output.current.label()),
+        ),
         TextampSetting::Artwork(mode) => (
-            "This library's artwork",
+            "Cover rendering",
             format!("{} {}", radio(mode == state.artwork.mode), mode.name()),
         ),
         TextampSetting::ArtworkVisible => (
-            "This library's artwork",
+            "Album columns",
             format!(
                 "{} Show covers in new columns",
                 check(state.artwork.default_visible)
             ),
         ),
         TextampSetting::Transcode => (
-            "streaming quality",
-            format!(
-                "[ {} ]",
-                if state.transcode_kbps == 0 {
-                    "Original audio".into()
-                } else {
-                    format!("{} kbps", state.transcode_kbps)
-                }
-            ),
+            "Streaming quality",
+            if state.transcode_kbps == 0 {
+                "Original audio  ›".into()
+            } else {
+                format!("Up to {} kbps  ›", state.transcode_kbps)
+            },
         ),
         TextampSetting::Sidebar(section) => (
             "Show in sidebar",
@@ -324,43 +410,53 @@ fn setting_label(state: &AppState, setting: TextampSetting) -> (&'static str, St
                 SearchTarget::Spotify => ("Spotify", state.external_search.spotify),
                 SearchTarget::YouTube => ("YouTube", state.external_search.youtube),
             };
-            ("Search commands", format!("{} {label}", check(enabled)))
+            ("Search services", format!("{} {label}", check(enabled)))
         }
     }
 }
 
 fn render_about(frame: &mut Frame, state: &AppState, area: Rect) {
-    let t = crate::ui::theme::theme();
-    let block = panel(" About Textamp ");
+    let block = panel(" About ").borders(Borders::TOP);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let mut lines = crate::ui::widgets::logo::original(t.colors.bg_primary);
-    lines.extend([
+    let lines = vec![
+        Line::styled(
+            format!("Textamp {}", env!("CARGO_PKG_VERSION")),
+            paper().add_modifier(Modifier::BOLD),
+        ),
         Line::from(""),
-        Line::from(format!("Textamp {}", env!("CARGO_PKG_VERSION"))),
-        Line::from("A terminal player for Subsonic, Navidrome and music folders."),
-        Line::from("John Bergmayer  |  Unlicense"),
-        Line::from("https://github.com/bergmayer/textamp"),
+        Line::from("Music in your terminal."),
+        Line::from("Subsonic · Navidrome · Local folders · WebDAV"),
+        Line::from(""),
+        Line::from("John Bergmayer · Unlicense"),
+        Line::from("github.com/bergmayer/textamp"),
         Line::from(""),
         Line::from(format!(
-            "Graphics: {}  |  Terminal: {} x {}",
-            crate::ui::screens::now_playing::artwork_protocol_name(),
-            state.terminal_width,
-            state.terminal_height
+            "Graphics: {}",
+            crate::ui::screens::now_playing::artwork_protocol_name()
         )),
-    ]);
-    let scroll = state
-        .settings_state
-        .scroll
-        .min(lines.len().saturating_sub(inner.height as usize) as u16);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .style(
-                Style::default()
-                    .fg(t.colors.fg_primary)
-                    .bg(t.colors.bg_primary),
-            )
-            .scroll((scroll, 0)),
-        inner,
+        Line::from(format!(
+            "Terminal: {} × {}",
+            state.terminal_width, state.terminal_height
+        )),
+    ];
+    let paragraph = Paragraph::new(lines)
+        .wrap(Wrap { trim: true })
+        .style(paper());
+    let total = paragraph.line_count(inner.width);
+    let offset =
+        (state.settings_state.scroll as usize).min(total.saturating_sub(inner.height as usize));
+    state.hit_regions.borrow_mut().settings_about =
+        Some(crate::app::presentation::ScrollableTextRegion {
+            area: inner,
+            lines: total,
+            visible: inner.height as usize,
+        });
+    frame.render_widget(paragraph.scroll((offset as u16, 0)), inner);
+    scroll_marker(
+        frame,
+        Rect::new(area.right().saturating_sub(1), inner.y, 1, inner.height),
+        total,
+        offset,
     );
 }

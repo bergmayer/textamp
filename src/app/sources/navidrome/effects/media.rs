@@ -31,13 +31,7 @@ pub fn play(state: &mut AppState, audio: &mut AudioPlayer, tx: &mpsc::Sender<Eve
             track_key: Some(track.rating_key.clone()),
             ..Default::default()
         };
-        let mut params = vec![("id", song_id.clone())];
-        if state.transcode_kbps > 0 {
-            params.push(("maxBitRate", state.transcode_kbps.to_string()));
-        } else {
-            params.push(("format", "raw".into()));
-        }
-        let url = session.client.url("stream", &params)?;
+        let url = session.client.stream_url(song_id, state.transcode_kbps)?;
         audio.play_url_with_headers(
             url.as_str(),
             Default::default(),

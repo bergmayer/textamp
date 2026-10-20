@@ -1058,6 +1058,12 @@ async fn server(
                         String::from_utf8_lossy(&bytes[end..end + len])
                     ))
                     .unwrap();
+                    let song_ids: Vec<_> = form
+                        .query_pairs()
+                        .filter(|(k, _)| k == "songId")
+                        .map(|(_, v)| v.into_owned())
+                        .collect();
+                    params.insert("_songIds".into(), serde_json::to_string(&song_ids).unwrap());
                     params.extend(
                         form.query_pairs()
                             .map(|(k, v)| (k.into_owned(), v.into_owned())),
@@ -2641,4 +2647,386 @@ async fn sole_folder_startup_migrates_aggregate_cache_without_network() {
         .read::<Value>(textamp::library::cache::REFRESH_INTERVAL)
         .unwrap()
         .is_some());
+}
+
+#[tokio::test]
+async fn description_playlist_save_uses_snapshot_order_and_does_not_touch_queue() {
+    use crossterm::event::{
+        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
+    use ratatui::{backend::TestBackend, Terminal};
+    use textamp::app::sources::navidrome::commands::CollectionKind;
+    use textamp::app::{
+        command_palette,
+        handlers::{key_input, mouse_input},
+        sources::audiomuse,
+        state::{BrowseColumn, PaletteCommandKind},
+    };
+    let (url, requests, task) = server(|m, p| (200, envelope(fixture(m, p)))).await;
+    let session = session(url);
+    let mut app = App::new(session.clone());
+    let tracks: Vec<_> = ["third", "first", "second"]
+        .into_iter()
+        .map(|id| session.track(serde_json::from_value(song(id, 1, 1)).unwrap()))
+        .collect();
+    app.state.sources.nav_collection = Some(CollectionKind::AudioMuse(
+        textamp::audiomuse::Feature::Describe,
+    ));
+    app.state.category_column_focused = false;
+    app.state.artist_nav.columns = vec![
+        BrowseColumn::new("Description history", vec![]),
+        BrowseColumn::new_with_tracks(
+            "Warm acoustic songs",
+            BrowseItem::from_tracks(&tracks),
+            tracks.clone(),
+        ),
+    ];
+    app.state.artist_nav.focused_column = 1;
+    app.state.artist_nav.columns[1].selected_index = 2;
+    app.state.queue.tracks = vec![tracks[1].clone()];
+    app.state.queue.index = Some(0);
+    app.state.playback.position_ms = 1200;
+    let entry = command_palette::materialize_entries(&app.state)
+        .into_iter()
+        .find(|e| e.label == "Save as playlist")
+        .unwrap();
+    assert!(matches!(
+        entry.command,
+        PaletteCommandKind::SaveDescriptionPlaylist
+    ));
+    for action in command_palette::run(entry.command, &mut app.state) {
+        app.send(action).await;
+    }
+    assert_eq!(
+        app.state
+            .popups
+            .input_dialog
+            .as_ref()
+            .unwrap()
+            .input
+            .as_str(),
+        "Warm acoustic songs"
+    );
+    // Cancel writes nothing and leaves the results open.
+    for action in key_input::handle_key(
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        &mut app.state,
+        &app.config,
+    ) {
+        app.send(action).await;
+    }
+    assert!(requests.lock().await.is_empty());
+    app.state.terminal_width = 120;
+    app.state.terminal_height = 32;
+    let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
+    terminal
+        .draw(|f| {
+            app.state
+                .apply_render_feedback(textamp::ui::render(f, &app.state))
+        })
+        .unwrap();
+    let button = app.state.hit_regions.description_save.unwrap();
+    let actions = mouse_input::handle_mouse(
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: button.x,
+            row: button.y,
+            modifiers: KeyModifiers::NONE,
+        },
+        &mut app.state,
+    );
+    for action in actions {
+        app.send(action).await;
+    }
+    assert!(app.state.popups.input_dialog.is_some());
+    // The captured displayed list, not a later selection/list, is saved.
+    app.state.artist_nav.columns[1].tracks.reverse();
+    app.state.popups.input_dialog.as_mut().unwrap().input = " Saved description ".into();
+    for action in key_input::handle_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut app.state,
+        &app.config,
+    ) {
+        app.send(action).await;
+    }
+    while app.state.sources.nav_tasks.contains_key("playlist-write") {
+        app.receive().await;
+    }
+    let calls = requests.lock().await;
+    let writes: Vec<_> = calls
+        .iter()
+        .filter(|(m, _)| m == "createPlaylist")
+        .collect();
+    assert_eq!(writes.len(), 1);
+    let params = &writes[0].1;
+    assert_eq!(params["name"], "Saved description");
+    assert_eq!(params["_verb"], "POST");
+    assert_eq!(
+        serde_json::from_str::<Vec<String>>(&params["_songIds"]).unwrap(),
+        ["third", "first", "second"]
+    );
+    assert!(!params.contains_key("playlistId"));
+    drop(calls);
+    assert_eq!(app.state.queue.tracks.len(), 1);
+    assert_eq!(app.state.queue.tracks[0].rating_key, tracks[1].rating_key);
+    assert_eq!(app.state.queue.index, Some(0));
+    assert_eq!(app.state.playback.position_ms, 1200);
+    assert!(app
+        .state
+        .notifications
+        .status_message
+        .as_deref()
+        .unwrap()
+        .contains("3 tracks"));
+    // A pending dialog cannot write into a different library.
+    let action = audiomuse::Command::SavePlaylist {
+        library_key: "different library".into(),
+        name: "Wrong".into(),
+        tracks: tracks.clone(),
+    };
+    assert!(dispatch_action(
+        action.into(),
+        &mut app.state,
+        &mut app.audio,
+        &mut app.config,
+        &app.tx
+    )
+    .await
+    .is_err());
+    app.state.artist_nav.columns[1].tracks.clear();
+    assert!(!command_palette::materialize_entries(&app.state)
+        .iter()
+        .any(|e| e.label == "Save as playlist"));
+    task.abort();
+}
+
+#[tokio::test]
+async fn description_playlist_failure_preserves_results_and_reports_error() {
+    use textamp::app::sources::audiomuse;
+    let (url, requests, task) = server(|m, p| {
+        if m == "createPlaylist" {
+            (500, "failure".into())
+        } else {
+            (200, envelope(fixture(m, p)))
+        }
+    })
+    .await;
+    let session = session(url);
+    let mut app = App::new(session.clone());
+    let tracks = vec![session.track(serde_json::from_value(song("one", 1, 1)).unwrap())];
+    app.send(audiomuse::Command::SavePlaylist {
+        library_key: audiomuse::key(&session),
+        name: "Fixture".into(),
+        tracks,
+    })
+    .await;
+    while app.state.sources.nav_tasks.contains_key("playlist-write") {
+        app.receive().await;
+    }
+    assert!(app.state.notifications.last_error.is_some());
+    assert!(!app
+        .state
+        .notifications
+        .status_message
+        .as_deref()
+        .is_some_and(|s| s.starts_with("Saved")));
+    assert_eq!(
+        requests
+            .lock()
+            .await
+            .iter()
+            .filter(|(m, _)| m == "createPlaylist")
+            .count(),
+        1
+    );
+    assert!(app.state.queue.tracks.is_empty());
+    task.abort();
+}
+
+#[tokio::test]
+async fn jump_to_artist_and_album_leave_overlays_and_analysis_for_real_library_columns() {
+    use textamp::app::sources::navidrome::commands::CollectionKind;
+    use textamp::app::{command_palette, state::PaletteCommandKind};
+    let (url, _, task) = server(|m, p| (200, envelope(fixture(m, p)))).await;
+    let session = session(url);
+    let mut app = App::new(session.clone());
+    app.catalog().await;
+    let track = session.track(serde_json::from_value(song("song", 1, 1)).unwrap());
+    for album in [false, true] {
+        app.state.sources.nav_collection = Some(CollectionKind::AudioMuse(
+            textamp::audiomuse::Feature::Describe,
+        ));
+        app.state.search.pending_album_key = Some("stale-album".into());
+        app.state.popups.search_active = true;
+        app.state.view = View::Queue;
+        let cmd = if album {
+            PaletteCommandKind::JumpToAlbum(Box::new(track.clone()))
+        } else {
+            PaletteCommandKind::JumpToArtist(Box::new(track.clone()))
+        };
+        for action in command_palette::run(cmd, &mut app.state) {
+            app.send(action).await;
+        }
+        while !app.state.sources.nav_tasks.is_empty() {
+            app.receive().await;
+        }
+        assert!(!app.state.popups.search_active);
+        assert!(app.state.sources.nav_collection.is_none());
+        assert_eq!(app.state.view, View::Browse);
+        assert!(app.state.search.pending_album_key.is_none());
+        assert_eq!(
+            app.state.artist_nav.columns.len(),
+            if album { 3 } else { 2 }
+        );
+        assert_eq!(
+            app.state.artist_nav.focused_column,
+            if album { 2 } else { 1 }
+        );
+        assert!(app.state.queue.tracks.is_empty());
+    }
+    task.abort();
+}
+
+#[tokio::test]
+async fn similarity_failure_stays_in_results_and_retry_recovers_without_changing_playback() {
+    use crossterm::event::{
+        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
+    use textamp::app::event::DataEvent;
+    use textamp::app::handlers::{key_input, mouse_input};
+    let failing = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let check = failing.clone();
+    let (url, requests, task) = server(move |m,p| {
+        if m == "getOpenSubsonicExtensions" {
+            return (200, envelope(json!({"openSubsonicExtensions":[{"name":"sonicSimilarity"}]})));
+        }
+        if m == "getSonicSimilarTracks" {
+            if check.load(std::sync::atomic::Ordering::Relaxed) {
+                return (200, json!({"subsonic-response":{"status":"failed","version":"1.16.1","error":{"code":0,"message":"Analysis service unavailable"}}}).to_string());
+            }
+            return (200, envelope(json!({"sonicMatch":[{"entry":song("second",2,1),"similarity":0.9}]})));
+        }
+        (200, envelope(fixture(m,p)))
+    }).await;
+    let mut session = session(url);
+    session.extensions.insert("sonicSimilarity".into());
+    let seed = session.key("first");
+    let mut app = App::new(session);
+    app.catalog().await;
+    app.state.view = View::Queue;
+    app.state.queue.tracks = app.state.library.all_tracks.clone();
+    app.state.queue.index = Some(0);
+    app.state.list_state.queue_index = 1;
+    let queue = app.state.queue.tracks.clone();
+    app.send(DataAction::LoadSimilarTracks {
+        rating_key: seed.clone(),
+        title: "First".into(),
+    })
+    .await;
+    while app.state.similar.loading {
+        app.receive().await;
+    }
+    assert!(app
+        .state
+        .similar
+        .error
+        .as_ref()
+        .unwrap()
+        .contains("getSonicSimilarTracks"));
+    assert!(app.state.notifications.last_error.is_none());
+    assert_eq!(app.state.previous_view, Some(View::Queue));
+    assert_eq!(app.state.similar.source_key.as_deref(), Some(seed.as_str()));
+
+    app.state.terminal_width = 100;
+    app.state.terminal_height = 32;
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 32)).unwrap();
+    terminal
+        .draw(|frame| {
+            app.state
+                .apply_render_feedback(textamp::ui::render(frame, &app.state))
+        })
+        .unwrap();
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|c| c.symbol())
+        .collect();
+    if let Ok(dir) = std::env::var("TEXTAMP_SETTINGS_PREVIEW_DIR") {
+        let cells: Vec<_> = terminal.backend().buffer().content.iter().map(|c| serde_json::json!({"s":c.symbol(),"fg":format!("{:?}",c.fg),"bg":format!("{:?}",c.bg)})).collect();
+        std::fs::write(
+            std::path::Path::new(&dir).join("similar-error-100x32.json"),
+            serde_json::to_vec(&serde_json::json!({"width":100,"height":32,"cells":cells}))
+                .unwrap(),
+        )
+        .unwrap();
+    }
+    assert!(text.contains("Couldn’t load similar tracks"));
+    assert!(text.contains("[F5] retry"));
+    assert!(!text.contains("No similar tracks found"));
+    let rect = app
+        .state
+        .hit_regions
+        .similar_content
+        .as_ref()
+        .unwrap()
+        .retry_hint
+        .unwrap();
+    let click = mouse_input::handle_mouse(
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: rect.x,
+            row: rect.y,
+            modifiers: KeyModifiers::NONE,
+        },
+        &mut app.state,
+    );
+    let keys = key_input::handle_key(
+        KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE),
+        &mut app.state,
+        &app.config,
+    );
+    for actions in [&click, &keys] {
+        assert!(
+            matches!(actions.as_slice(), [Action::Data(DataAction::LoadSimilarTracks {rating_key,..})] if rating_key == &seed),
+            "{actions:?}"
+        );
+    }
+    failing.store(false, std::sync::atomic::Ordering::Relaxed);
+    for action in keys {
+        app.send(action).await;
+    }
+    assert!(app.state.similar.error.is_none());
+    while app.state.similar.loading {
+        app.receive().await;
+    }
+    assert!(app.state.similar.error.is_none());
+    assert_eq!(app.state.similar.tracks[0].title, "Song second");
+    handle_core_event(
+        Event::Data(DataEvent::SimilarLoadFailed {
+            request_key: seed,
+            message: "late failure".into(),
+        }),
+        &mut app.state,
+        &app.tx,
+    );
+    assert!(app.state.similar.error.is_none());
+    assert_eq!(
+        app.state
+            .queue
+            .tracks
+            .iter()
+            .map(|t| &t.rating_key)
+            .collect::<Vec<_>>(),
+        queue.iter().map(|t| &t.rating_key).collect::<Vec<_>>()
+    );
+    assert_eq!(app.state.queue.index, Some(0));
+    assert_eq!(app.state.list_state.queue_index, 1);
+    assert!(!requests
+        .lock()
+        .await
+        .iter()
+        .any(|r| r.0 == "getSimilarSongs2"));
+    task.abort();
 }

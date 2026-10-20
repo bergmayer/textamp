@@ -83,6 +83,15 @@ pub async fn dispatch(
     state: &mut AppState,
 ) -> Result<Vec<Action>> {
     match action {
+        SystemAction::ActivateFooterShortcut(code) => {
+            // Clicking a control ends text entry instead of inserting its glyph.
+            state.list_filter.deactivate();
+            return Ok(super::key_input::handle_key(
+                crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE),
+                state,
+                config,
+            ));
+        }
         SystemAction::Quit => {
             let navidrome_track = state.sources.active.navidrome().and_then(|session| {
                 let track = state.current_track()?;

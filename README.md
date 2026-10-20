@@ -10,6 +10,9 @@ cargo build --release --bin textamp
 ./target/release/textamp
 ```
 
+Click the lower-right shortcut labels to activate them. They are not keyboard
+focus stops; existing Tab and arrow navigation is unchanged.
+
 Use a color terminal. Kitty, Sixel or iTerm2 graphics support improves artwork;
 half-block and Braille rendering are also available. The optional macOS
 `Textamp.app` launcher opens the adjacent `textamp` binary in a new Ghostty window.
@@ -27,14 +30,14 @@ label to select it. The command palette includes **Full-screen Visualizer** and
 existing artwork and visualizer renderers. Live meters/vectorscope samples are
 unavailable on AirPlay; cached analysis visualizers remain available.
 
-## AirPlay output (Linux)
+## AirPlay output (macOS and Linux)
 
 Press **F8**, choose **Sound Output** in `:` / Ctrl+P, or open
-**F2 -> Textamp -> Display & audio -> Sound output**. All three open the same
+**F2 -> Audio -> Sound output**. All three open the same
 picker with the current output, local devices and discovered AirPlay speakers.
 F5 refreshes discovery; arrows highlight; Enter or Select applies; Esc or Cancel
-closes without changing output. AirPlay discovery uses the existing
-`avahi-browse` command and Avahi service. Stop playback before selecting an
+closes without changing output. Built-in mDNS discovery finds speakers on the
+local network without Avahi or another discovery command. Stop playback before selecting an
 output, then play normally. Choose **System default** to return to local output.
 Discovery does not interrupt audio;
 output selection never silently falls back to local speakers after an error.
@@ -52,7 +55,7 @@ Protocol selection uses the full receiver TXT feature/status flags, including
 AirPlay 2 advertised through the RAOP service. It does not infer the protocol
 from the service name.
 
-This first version selects one IPv4 destination. It sends 44.1 kHz stereo PCM,
+Textamp selects one IPv4 destination. It sends 44.1 kHz stereo PCM,
 supports local files, WebDAV and Subsonic/Navidrome streams, and forwards volume,
 pause/resume and stop. Seeks and track changes reconnect the sender, with startup
 buffering. Position follows the sender's scheduled start rather than decoded
@@ -71,15 +74,17 @@ saved source if necessary. It never starts playback automatically. With no saved
 source, add one in **F2 → Libraries → Add library**.
 
 **F3** is the compact switcher: Enter switches, Esc cancels, F2 manages.
-Settings opens a DOS-style setup screen: a menu bar, framed pages, radio buttons,
-checkboxes and a key legend, using the active app theme. **F10** focuses the menu;
-**Left/Right** selects a menu or page, **Down** enters its contents, and **Tab**
-changes panels. **Enter/Space** selects controls; **Esc** backs out.
-**:** or **Ctrl+P** opens the command palette from settings.
-Every visible control also works with the mouse.
+Settings has a category list and one content pane. **Up/Down** chooses a category;
+**Enter**, **Right**, or **Tab** enters its controls. **Tab / Shift+Tab** switches
+between the two panes; **Left / Esc** returns to categories, and **Esc** there
+closes settings. **F10** focuses categories; **1–7** jumps to a category while
+that list has focus. Narrow terminals show one pane at a time.
+**Enter / Space** activates a control. Click a checkbox or radio button to change
+it; click a theme to preview it, then **Apply theme** to save. Library rows open
+on a second click. **:** or **Ctrl+P** opens the command palette.
 
 - **Libraries** lists saved sources by type and account. `[Active]` identifies the
-  current library. **Up** from the first row returns to the Settings menu.
+  current library. **Up** from the first row returns to categories.
   Enter opens options for the highlighted library; **Left/Right**
   switches between **General**, **Analysis** (when available), and **Cache**.
 - **General** contains **Make active**, rename, connection and removal. Saving a
@@ -87,7 +92,7 @@ Every visible control also works with the mouse.
   form returns to its library setup page. Removal names its scope: a Navidrome
   account includes all its libraries; music and server playlists are kept.
 - **Analysis** contains the Sonic checkbox and AudioMuse connection.
-- **Textamp → Display & audio** shows artwork rendering and the default cover
+- **Artwork** shows artwork rendering and the default cover
   visibility for the active library. Changing either saves it for that library;
   each library restores its own choice when opened. A column's artwork toggle
   also updates only that library's default.
@@ -102,11 +107,11 @@ Every visible control also works with the mouse.
   path/name form; servers have one URL/username/password/name form. Add or Save
   checks the source before storing it. A blank password while editing the same
   account keeps the saved password.
-- **Textamp** has Themes, Display & audio, Sidebar and Search services pages.
-  Themes retain the live ANSI preview; Enter applies a theme. Radio buttons and
-  checkboxes save immediately. Artwork cache cleanup is under each library's
-  Cache page.
-- **About** retains the original ANSI artwork and program information.
+- **Appearance** previews a theme with a sample music list; Enter applies it.
+- **Audio** contains sound output and server streaming quality. **Sidebar** controls
+  visible browse entries; **Search** controls external search services.
+  Changes save automatically. Artwork settings apply to the active library.
+- **About** shows version, project and terminal information.
 - Multiple accounts and music folders are supported. A single-folder account
   has no duplicate “All music” entry. Duplicate connections are rejected.
 - Local paths accept `~/Music`. WebDAV uses the exact collection URL; redirects
@@ -139,7 +144,7 @@ plays; right-click opens the track menu. Drag reorders queue rows. Clicking or
 dragging the waveform or scrubber seeks; streams may rebuffer.
 
 **Search…** sits above **browse**. Highlight it for the theme-colored logo and
-press Enter to search. Settings → Textamp → Themes shows the active theme's logo, or previews a highlighted theme.
+press Enter to search. Settings → Appearance previews a highlighted theme using a sample music list.
 Search boxes support `AND`, `OR`, and `NOT`, with parentheses and quoted exact
 phrases. Adjacent terms imply `AND`; `NOT` binds first, then `AND`, then `OR`.
 The “white on black” theme uses pure black backgrounds and 50% white text, with underlining for selected list items.
@@ -284,3 +289,50 @@ they modify fixture playlists, favorites, ratings, play history and saved queues
 ## License
 
 Unlicense. See [LICENSE](LICENSE).
+
+Describe music keeps the last 30 successful descriptions and their ranked results
+for each library, including across restarts. **Enter** on **Describe music…**
+opens a new prompt; **Right** enters history. Arrows browse descriptions and
+results without opening a prompt or starting playback. Results use the playlist
+layout: title on the first row, artist and album on the second.
+The former Analyzed tracks sidebar entry only listed tracks with AudioMuse
+analysis; use the analysis categories and individual track information instead.
+
+Streaming quality is a server bitrate limit, saved in Settings → Audio. It applies
+to the next opened Subsonic/Navidrome stream; the current track keeps its existing
+stream. **Original** requests the original file. Other values request a maximum
+bitrate; the server controls transcoding and may impose its own limits. Local
+files and WebDAV use their original audio.
+
+Show similar tracks opens over the current view, including the play queue and
+split layout. Closing it preserves the queue selection and scroll position.
+The palette has one **Show Similar Tracks** command (Ctrl+M); album and artist
+selections offer their corresponding command. Request errors appear inside the
+results view, with **F5 retry** available by keyboard or click. A missing AudioMuse
+analysis or server mapping is reported separately from a successful empty result,
+with guidance to check the track’s analysis and Navidrome connection in AudioMuse.
+
+In search and Similar Tracks, Enter opens an adjacent track-details pane.
+Choose **Play Track** for one track or **Play Track++** for that track and the
+following results. Left returns to results; Page Up/Down scrolls details.
+The play queue keeps Enter-to-play.
+
+Describe music results can be saved as a new Navidrome playlist: choose
+**Save as playlist** in the command palette or click the button at the top of
+the results. Edit the suggested name and press Enter to save the complete
+result list in order. Saving does not change the queue or start playback.
+
+In a track's **Sonically Similar** list, Enter opens that track's details to the
+right. Opening another related track there replaces the right-hand pane; the
+original track stays on the left. Left/Esc returns to the original details,
+and Right re-enters the adjacent pane. Playback uses the explicit play actions.
+
+The command palette always offers **Jump to artist** and **Jump to album** for
+the highlighted track, including in the queue, search, and related-track details.
+With no track highlighted, these commands use the now-playing track. They open
+the corresponding library location without changing playback.
+
+AudioMuse background imports retain cached or partial results on failure and
+report a nonblocking status message. Retry from an analysis category with F5.
+Large imports have no fixed overall deadline; each HTTP request still times out
+and invalid or repeated pagination is rejected.

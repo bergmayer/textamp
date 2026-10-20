@@ -117,17 +117,6 @@ impl Client {
             .map_err(|e| e.without_url())
             .context("Contact AudioMuse")?;
         let status = response.status();
-        ensure!(
-            status.is_success(),
-            "AudioMuse {path}: HTTP {}{}",
-            status.as_u16(),
-            match status.as_u16() {
-                401 | 403 => " (check credentials)",
-                404 => " (feature unavailable)",
-                503 => " (analysis index not ready)",
-                _ => "",
-            }
-        );
         let mut bytes = Vec::new();
         while let Some(chunk) = response.chunk().await.map_err(|e| e.without_url())? {
             ensure!(
@@ -136,6 +125,24 @@ impl Client {
             );
             bytes.extend_from_slice(&chunk);
         }
+        if status.as_u16() == 404 && path == "api/similar_tracks" {
+            let error = serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null);
+            ensure!(
+                error["error_code"].as_u64() != Some(1004),
+                "AudioMuse couldn’t provide similar tracks for this song.\n\nIt may not have been analyzed yet, or its analysis may not be linked to this Navidrome library.\n\nCheck this track’s analysis and Navidrome connection in AudioMuse, then retry."
+            );
+        }
+        ensure!(
+            status.is_success(),
+            "AudioMuse {path}: HTTP {}{}",
+            status.as_u16(),
+            match status.as_u16() {
+                401 | 403 => " (check credentials)",
+                404 => " (endpoint or item unavailable)",
+                503 => " (analysis index not ready)",
+                _ => "",
+            }
+        );
         let value: Value = serde_json::from_slice(&bytes).context("Invalid AudioMuse response")?;
         ensure!(
             value.get("error").is_none(),
@@ -630,6 +637,13 @@ impl Analysis {
     }
 }
 
+/// A successful description and its ranked results, scoped to one music library.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DescriptionHistory {
+    pub query: String,
+    pub ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Feature {
@@ -642,12 +656,11 @@ pub enum Feature {
     Lyrics,
 }
 impl Feature {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 6] = [
         Self::Labels,
         Self::Tempo,
         Self::Energy,
         Self::Key,
-        Self::Analyzed,
         Self::Describe,
         Self::Lyrics,
     ];

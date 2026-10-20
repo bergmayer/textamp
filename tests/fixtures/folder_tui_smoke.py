@@ -60,14 +60,31 @@ with tempfile.TemporaryDirectory(prefix="textamp-folder-tui-") as temporary:
         def normalized(value):
             return re.sub(rb"\s+", b"", re.sub(rb"\x1b\[[0-9;?]*[a-zA-Z]", b"", value))
         deadline = time.monotonic() + (50 if wikipedia else 20)
+        refresh_at = time.monotonic() + 2
         while normalized(text) not in normalized(output) and time.monotonic() < deadline:
             if select.select([master], [], [], 0.1)[0]:
                 output.extend(os.read(master, 65536))
             if process.poll() is not None:
                 break
+            if time.monotonic() >= refresh_at:
+                redraw()
+                refresh_at = time.monotonic() + 2
         plain = re.sub(rb"\x1b\[[0-9;?]*[a-zA-Z]", b"", output)
         diagnostic = re.sub(r"[\u2500-\u28ff]", "", plain.decode("utf-8", errors="replace"))
         assert normalized(text) in normalized(output), f"UI did not display {text!r}; exit={process.poll()}; tail={diagnostic[-6000:]!r}"
+
+    columns = 130
+
+    def redraw():
+        # Ratatui redraws only changed cells. Resize to obtain a complete frame
+        # before asserting text that may share characters with the old page.
+        next_columns = 131 if redraw.columns == 130 else 130
+        time.sleep(0.2)
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 36, next_columns, 0, 0))
+        redraw.columns = next_columns
+        process.send_signal(signal.SIGWINCH)
+
+    redraw.columns = columns
 
     try:
         wait_for(b"Fixture Album")
@@ -93,6 +110,16 @@ with tempfile.TemporaryDirectory(prefix="textamp-folder-tui-") as temporary:
             time.sleep(0.2)
         if browse_only:
             output.clear()
+            os.write(master, b"\x06Silence")  # Ctrl+F: local search, without playback
+            wait_for(b"02 Silence")
+            os.write(master, b"\r\r")  # results -> details, not playback
+            redraw()
+            wait_for(b"Play Track++")
+            os.write(master, b"\x1b")  # details -> results
+            time.sleep(0.2)
+            os.write(master, b"\x1b")  # close search
+            time.sleep(0.2)
+            output.clear()
             os.write(master, b"\x1bOQ")  # F2: unified Libraries
             wait_for(b"Add library")
             wait_for(b"[Active]")
@@ -104,22 +131,23 @@ with tempfile.TemporaryDirectory(prefix="textamp-folder-tui-") as temporary:
             os.write(master, b"\x1b")  # cancel, leaving the library untouched
             time.sleep(0.2)
             output.clear()
-            # Settings now has a top menu and separate pages, rather than the
-            # former sidebar and one long settings list. F10 focuses the menu.
-            os.write(master, b"\x1b[21~2\x1b[B\x1b[B")  # Textamp -> Themes content
+            # F10 focuses the flat category list; numbers jump to categories.
+            os.write(master, b"\x1b[21~2\r")  # Appearance controls
+            redraw()
             wait_for(b"Highlight to preview")
             output.clear()
-            os.write(master, b"\x1b[D\x1b[C\x1b[C\x1b[B")  # pages -> Sidebar content
-            wait_for(b"appears in the browse sidebar")
+            os.write(master, b"\x1b[21~5\r")  # Sidebar controls
+            redraw()
+            wait_for(b"show or hide this sidebar entry")
             output.clear()
-            os.write(master, b"\x1b[21~1\x1b[B\x1b[H\r")  # Libraries -> first library options
+            os.write(master, b"\x1b[21~1\r\x1b[H\r")  # Libraries -> first library options
+            redraw()
             wait_for(b"Open active library")
             os.write(master, b"\x1b[C")  # local-library General -> Cache page
             # Force a complete redraw: differential updates can skip letters
             # that happen to match cells from the previous settings panel.
             output.clear()
-            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 36, 131, 0, 0))
-            process.send_signal(signal.SIGWINCH)
+            redraw()
             wait_for(b"Fixture Library")
             wait_for(b"Metadata:")
             wait_for(b"Clear library cache")
@@ -137,6 +165,7 @@ with tempfile.TemporaryDirectory(prefix="textamp-folder-tui-") as temporary:
         print("PASS: folder-only startup, filename navigation, library switcher, shutdown, and terminal restoration")
         if browse_only:
             print("PASS: unified library manager, add/cancel connection form, integrated settings, per-library cache display")
+            print("PASS: search result details and explicit playback buttons without starting audio")
             print("PASS: Ctrl+Q quit and terminal restoration")
         if not browse_only:
             print("PASS: silent playback input")

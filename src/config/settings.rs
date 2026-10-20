@@ -6,8 +6,11 @@ use std::collections::HashMap;
 /// Root configuration structure.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
-    /// Optional analysis connection keyed by the exact Navidrome library identity.
+    /// Recent successful descriptions and ranked result IDs, keyed by exact library identity.
     #[serde(default)]
+    pub description_history: HashMap<String, Vec<crate::audiomuse::DescriptionHistory>>,
+    #[serde(default)]
+    /// Optional analysis connection keyed by the exact Navidrome library identity.
     pub audiomuse_connections: HashMap<String, crate::audiomuse::Connection>,
     /// Source/account/server/library-scoped opt-outs. Absent preserves existing behavior.
     #[serde(default)]
@@ -145,7 +148,7 @@ pub struct PlaybackConfig {
     #[serde(default = "default_buffer_size")]
     pub buffer_size_kb: u32,
 
-    /// Transcode bitrate in kbps. 0 = disabled (direct play), e.g. 256 = transcode to 256kbps MP3.
+    /// Maximum server streaming bitrate in kbps; 0 requests the original file.
     /// Useful for remote connections where bandwidth is limited.
     #[serde(default)]
     pub transcode_kbps: u32,

@@ -14,6 +14,12 @@ pub(in crate::app::handlers) fn handle_similar_keys(
 ) -> Vec<Action> {
     use crate::app::state::SimilarMode;
 
+    if let Some(actions) = crate::app::result_details::key(key, state) {
+        return actions;
+    }
+    if key.code == KeyCode::Right && crate::app::result_details::open(state) {
+        return vec![];
+    }
     match key.code {
         KeyCode::Esc => {
             // Return to previous view, or Browse if none
@@ -143,7 +149,7 @@ pub(in crate::app::handlers) fn handle_similar_keys(
 }
 
 /// Activate the currently highlighted similar item (Enter or second click).
-/// Albums: navigate to album in library (Miller columns). Tracks: play the track.
+/// Albums: navigate to album in library (Miller columns). Tracks: open details without starting playback.
 /// Artists: navigate to artist in Library (Miller columns).
 pub(in crate::app::handlers) fn activate_similar_item(state: &mut AppState) -> Vec<Action> {
     use crate::app::state::SimilarMode;
@@ -191,13 +197,8 @@ pub(in crate::app::handlers) fn activate_similar_item(state: &mut AppState) -> V
             }
         }
         SimilarMode::Tracks => {
-            // Play this track + all following similar tracks (replaces queue)
-            let tracks: Vec<_> = state.similar.tracks[idx..].to_vec();
-            if !tracks.is_empty() {
-                vec![QueueAction::PlayTracksNow(tracks).into()]
-            } else {
-                vec![]
-            }
+            crate::app::result_details::open(state);
+            vec![]
         }
         SimilarMode::Artists => {
             if let Some(artist) = state.similar.artists.get(idx).cloned() {

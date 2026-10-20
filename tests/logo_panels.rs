@@ -95,11 +95,18 @@ fn unfocused_and_non_theme_rows_show_the_applied_theme() {
             0
         };
         let terminal = draw(&mut state, 160, 40);
-        let preview = state.hit_regions.settings_preview.unwrap();
-        assert_eq!(
-            terminal.backend().buffer()[(preview.x, preview.y)].bg,
-            Theme::new(state.theme).colors.bg_primary
-        );
+        if focus == SettingsFocus::Content {
+            assert!(
+                state.hit_regions.settings_preview.is_none(),
+                "artwork uses space for controls, not a theme preview"
+            );
+        } else {
+            let preview = state.hit_regions.settings_preview.unwrap();
+            assert_eq!(
+                terminal.backend().buffer()[(preview.x, preview.y)].bg,
+                Theme::new(state.theme).colors.bg_primary
+            );
+        }
     }
 }
 

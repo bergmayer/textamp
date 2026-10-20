@@ -489,6 +489,27 @@ pub fn materialize_entries(state: &AppState) -> Vec<PaletteEntry> {
             || state.browse_category.is_tag_section());
     let not_in_library = !in_library_context;
     let target_track = state.palette_target_track();
+    if let Some(track) = target_track.as_ref().or_else(|| state.current_track()) {
+        for (label, command, aliases) in [
+            (
+                "Jump to artist",
+                PaletteCommandKind::JumpToArtist(Box::new(track.clone())),
+                "go to artist library",
+            ),
+            (
+                "Jump to album",
+                PaletteCommandKind::JumpToAlbum(Box::new(track.clone())),
+                "go to album library",
+            ),
+        ] {
+            out.push(PaletteEntry {
+                label: label.into(),
+                hint: String::new(),
+                command,
+                aliases: vec![aliases.into()],
+            });
+        }
+    }
     let target_is_similar = state.palette_target_is_similar();
     let focused_album = (state.view == View::Browse && !state.category_column_focused)
         .then(|| state.focused_album())
@@ -614,6 +635,17 @@ pub fn materialize_entries(state: &AppState) -> Vec<PaletteEntry> {
     // Artist Bio; either implies the static row should be hidden.
     let context_has_artist_bio = target_track.is_some() || focused_album.is_some();
     let context_has_enqueue = target_track.is_some();
+    if crate::app::sources::audiomuse::description_results(state).is_some() {
+        out.push(PaletteEntry {
+            label: "Save as playlist".into(),
+            hint: String::new(),
+            command: PaletteCommandKind::SaveDescriptionPlaylist,
+            aliases: vec![
+                "save description results".into(),
+                "save music description".into(),
+            ],
+        });
+    }
     out.extend(crate::app::sources::navidrome::commands::entries(state));
     out.extend(static_entries().into_iter().filter_map(|e| {
         let is_dj_or_remix = matches!(
@@ -647,8 +679,32 @@ pub fn materialize_entries(state: &AppState) -> Vec<PaletteEntry> {
         {
             return None;
         }
+        let label = if matches!(e.command, PaletteCommandKind::OpenSimilar) {
+            if target_track.is_some() {
+                return None;
+            }
+            if focused_album.is_some() {
+                "Show Similar Albums"
+            } else if state.view == View::Browse
+                && !state.category_column_focused
+                && state
+                    .browse_nav()
+                    .and_then(|nav| nav.selected_item())
+                    .is_some_and(|item| {
+                        matches!(item, crate::app::state::BrowseItem::Artist { .. })
+                    })
+            {
+                "Show Similar Artists"
+            } else if state.current_track().is_some() {
+                "Show Similar Tracks"
+            } else {
+                return None;
+            }
+        } else {
+            e.label
+        };
         Some(PaletteEntry {
-            label: e.label.to_string(),
+            label: label.to_string(),
             hint: e.hint.to_string(),
             command: e.command,
             aliases: e.aliases.iter().map(|s| (*s).to_string()).collect(),
@@ -729,6 +785,9 @@ pub fn run(cmd: PaletteCommandKind, state: &mut AppState) -> Vec<Action> {
         }
         PaletteCommandKind::OpenRelated => {
             crate::app::handlers::key_input::get_related_action(state)
+        }
+        PaletteCommandKind::SaveDescriptionPlaylist => {
+            vec![crate::app::sources::audiomuse::Command::PromptSavePlaylist.into()]
         }
         PaletteCommandKind::SaveQueue => vec![QueueAction::PromptSavePlaylist.into()],
         PaletteCommandKind::ClearQueue => vec![QueueAction::ClearQueue.into()],
@@ -818,6 +877,8 @@ pub fn run(cmd: PaletteCommandKind, state: &mut AppState) -> Vec<Action> {
                 }
             }
         }
+        PaletteCommandKind::JumpToArtist(track) => jump_to_track(state, &track, false),
+        PaletteCommandKind::JumpToAlbum(track) => jump_to_track(state, &track, true),
         PaletteCommandKind::OpenInLibrary => {
             use crate::app::state::BrowseItem;
 
@@ -1027,6 +1088,11 @@ pub fn run(cmd: PaletteCommandKind, state: &mut AppState) -> Vec<Action> {
                 }
                 .into()],
                 ContextKind::ShowSimilarTracks { rating_key, title } => {
+                    state.similar.tab_album_key = track.parent_rating_key.clone();
+                    state.similar.tab_album_title = Some(track.album_name().to_string());
+                    state.similar.tab_track_key = Some(track.rating_key.clone());
+                    state.similar.tab_track_title =
+                        Some(format!("{} - {}", track.artist_name(), track.title));
                     state.similar.mode = SimilarMode::Tracks;
                     state.similar.source_title = title.clone();
                     vec![
@@ -1035,6 +1101,11 @@ pub fn run(cmd: PaletteCommandKind, state: &mut AppState) -> Vec<Action> {
                     ]
                 }
                 ContextKind::ShowSimilarAlbums { rating_key, title } => {
+                    state.similar.tab_album_key = track.parent_rating_key.clone();
+                    state.similar.tab_album_title = Some(track.album_name().to_string());
+                    state.similar.tab_track_key = Some(track.rating_key.clone());
+                    state.similar.tab_track_title =
+                        Some(format!("{} - {}", track.artist_name(), track.title));
                     state.similar.mode = SimilarMode::Albums;
                     state.similar.source_title = title.clone();
                     vec![
@@ -1181,4 +1252,56 @@ pub fn handle_key(state: &mut AppState, key: KeyEvent) -> PaletteOutcome {
     state.palette.selected = 0;
     refresh_matches(state);
     PaletteOutcome::Continue
+}
+
+/// Resolve the captured highlighted track; never redirect a missing destination to playback.
+fn jump_to_track(
+    state: &mut AppState,
+    track: &crate::library::models::Track,
+    album: bool,
+) -> Vec<Action> {
+    let catalog_album = state
+        .library
+        .albums
+        .iter()
+        .chain(state.library.selected_artist_albums.iter())
+        .find(|a| track.parent_rating_key.as_ref() == Some(&a.rating_key));
+    let artist_key = if album {
+        catalog_album
+            .and_then(|a| a.parent_rating_key.clone())
+            .or_else(|| track.grandparent_rating_key.clone())
+    } else {
+        track.grandparent_rating_key.clone()
+    }
+    .or_else(|| {
+        state
+            .library
+            .artists
+            .iter()
+            .find(|a| a.title == track.artist_name())
+            .map(|a| a.rating_key.clone())
+    });
+    let Some(artist_key) = artist_key else {
+        state.set_status("This track has no library artist".into());
+        return vec![];
+    };
+    if album && track.parent_rating_key.is_none() {
+        state.set_status("This track has no library album".into());
+        return vec![];
+    }
+    vec![BrowseAction::OpenInLibrary {
+        artist_key,
+        artist_name: track.artist_name().to_owned(),
+        album_key: if album {
+            track.parent_rating_key.clone()
+        } else {
+            None
+        },
+        album_title: if album {
+            track.parent_title.clone()
+        } else {
+            None
+        },
+    }
+    .into()]
 }

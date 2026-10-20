@@ -9,6 +9,15 @@ use crate::app::AppState;
 
 /// Handle search popup keys (Ctrl+F floating dialog).
 pub(super) fn handle_search_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
+    if let Some(actions) = crate::app::result_details::key(key, state) {
+        return actions;
+    }
+    if key.code == KeyCode::Right
+        && state.search.focus == SearchFocus::Results
+        && crate::app::result_details::open(state)
+    {
+        return vec![];
+    }
     // Clear mouse scroll pin on any keyboard navigation
     state.scroll.search = None;
     if state.sources.active.folder().is_some()

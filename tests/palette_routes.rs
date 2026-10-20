@@ -322,3 +322,148 @@ fn filtered_station_choices_are_leaves_regardless_of_their_identifiers() {
         ));
     }
 }
+
+#[tokio::test]
+async fn context_similar_popup_stays_over_queue_and_restores_selection_and_split_layout() {
+    use ratatui::{backend::TestBackend, Terminal};
+    for view in [View::Queue, View::NowPlaying] {
+        for tall_mode in [false, true] {
+            let mut state = common::navidrome_state();
+            state.view = view;
+            state.tall_mode = tall_mode;
+            state.queue.tracks = vec![
+                track("navidrome:fixture:first"),
+                track("navidrome:fixture:selected"),
+            ];
+            state.list_state.queue_index = 1;
+            state.queue.selected.insert(1);
+            state.scroll.queue = Some(0);
+            let mut config = Config::default();
+            let mut audio = AudioPlayer::new_without_audio();
+            let (tx, _rx) = mpsc::channel(16);
+            let mut terminal = Terminal::new(TestBackend::new(100, 36)).unwrap();
+            terminal
+                .draw(|frame| state.apply_render_feedback(textamp::ui::render(frame, &state)))
+                .unwrap();
+            let before = terminal.backend().buffer().clone();
+            let actions = run_label(&mut state, "Show Similar Tracks");
+            for action in actions {
+                dispatch_action(action, &mut state, &mut audio, &mut config, &tx)
+                    .await
+                    .unwrap();
+            }
+            // No personal server: cancel the fixture request after synchronous popup entry.
+            state.sources.nav_tasks.clear();
+            assert_eq!(state.view, View::Similar);
+            assert_eq!(state.previous_view, Some(view));
+            assert_eq!(state.list_state.queue_index, 1);
+            assert!(state.queue.selected.contains(&1));
+            terminal
+                .draw(|frame| state.apply_render_feedback(textamp::ui::render(frame, &state)))
+                .unwrap();
+            let popup = state.hit_regions.similar_content.as_ref().unwrap().outer;
+            assert_eq!(state.hit_regions.tall_mode_split.is_some(), tall_mode);
+            // The visible title/queue rows outside the overlay stay in place.
+            for y in 0..30 {
+                for x in 0..100 {
+                    if x < popup.x || x >= popup.right() || y < popup.y || y >= popup.bottom() {
+                        assert_eq!(
+                            terminal.backend().buffer()[(x, y)].symbol(),
+                            before[(x, y)].symbol(),
+                            "background changed at {x},{y}, view {view:?}, split {tall_mode}"
+                        );
+                    }
+                }
+            }
+            // Re-entering or changing the similar mode does not replace its return view.
+            state.set_view(View::Similar);
+            assert_eq!(state.previous_view, Some(view));
+            let actions = key_input::handle_key(
+                KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+                &mut state,
+                &config,
+            );
+            for action in actions {
+                dispatch_action(action, &mut state, &mut audio, &mut config, &tx)
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(state.view, view);
+            assert_eq!(state.list_state.queue_index, 1);
+            assert_eq!(state.scroll.queue, Some(0));
+            assert!(state.queue.selected.contains(&1));
+            // Outside-click dismissal follows the same return path.
+            state.set_view(View::Similar);
+            terminal
+                .draw(|frame| state.apply_render_feedback(textamp::ui::render(frame, &state)))
+                .unwrap();
+            let actions = textamp::app::handlers::mouse_input::handle_mouse(
+                crossterm::event::MouseEvent {
+                    kind: crossterm::event::MouseEventKind::Down(
+                        crossterm::event::MouseButton::Left,
+                    ),
+                    column: 0,
+                    row: 0,
+                    modifiers: KeyModifiers::NONE,
+                },
+                &mut state,
+            );
+            for action in actions {
+                dispatch_action(action, &mut state, &mut audio, &mut config, &tx)
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(state.view, view);
+        }
+    }
+}
+
+#[test]
+fn similar_palette_is_unique_and_matches_the_keyboard_target() {
+    use textamp::app::action::DataAction;
+    let mut state = common::navidrome_state();
+    state.view = View::Queue;
+    state.queue.tracks = vec![track("playing"), track("selected")];
+    state.queue.index = Some(0);
+    state.list_state.queue_index = 1;
+    let entries = command_palette::materialize_entries(&state);
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|e| e.label == "Show Similar Tracks")
+            .count(),
+        1
+    );
+    assert!(!entries.iter().any(|e| e.label == "Similar"));
+    let palette_actions = run_label(&mut state, "Show Similar Tracks");
+    let keyboard_actions = key_input::handle_key(
+        KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL),
+        &mut state,
+        &Config::default(),
+    );
+    for actions in [palette_actions, keyboard_actions] {
+        assert!(
+            matches!(actions.first(), Some(Action::Data(DataAction::LoadSimilarTracks {rating_key, ..})) if rating_key == "selected")
+        );
+    }
+    assert_eq!(state.similar.tab_track_key.as_deref(), Some("selected"));
+
+    state.view = View::Settings;
+    let entries = command_palette::materialize_entries(&state);
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|e| e.label == "Show Similar Tracks")
+            .count(),
+        1
+    );
+    let actions = run_label(&mut state, "Show Similar Tracks");
+    assert!(
+        matches!(actions.first(), Some(Action::Data(DataAction::LoadSimilarTracks {rating_key, ..})) if rating_key == "playing")
+    );
+    state.queue.tracks.clear();
+    state.queue.index = None;
+    assert!(!command_palette::materialize_entries(&state)
+        .iter()
+        .any(|e| matches!(e.command, PaletteCommandKind::OpenSimilar)));
+}

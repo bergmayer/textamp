@@ -121,6 +121,16 @@ impl Client {
             .extend_pairs(params.iter().map(|(k, v)| (*k, v.as_str())));
         Ok(url)
     }
+    /// Select the original file or ask the server for a maximum streaming bitrate.
+    pub fn stream_url(&self, song_id: &str, max_kbps: u32) -> Result<reqwest::Url> {
+        let mut params = vec![("id", song_id.to_owned())];
+        if max_kbps == 0 {
+            params.push(("format", "raw".into()));
+        } else {
+            params.push(("maxBitRate", max_kbps.to_string()));
+        }
+        self.url("stream", &params)
+    }
     pub async fn call(&self, method: &str, params: &[(&str, String)]) -> Result<Value> {
         let write = matches!(
             method,

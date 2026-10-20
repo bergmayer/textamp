@@ -17,13 +17,29 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     let t = theme();
 
     // Popup takes 50% width, 70% height, centered
-    let popup_area = centered_rect(50, 70, area);
+    let details = state
+        .search
+        .details
+        .open
+        .then(|| crate::app::result_details::track_list(state))
+        .flatten();
+    let popup_area = centered_rect(
+        if details.is_some() { 94 } else { 50 },
+        if details.is_some() { 90 } else { 70 },
+        area,
+    );
+    state.hit_regions.borrow_mut().track_pane = None;
 
     // Clear the area behind the popup
     frame.render_widget(Clear, popup_area);
 
     let block = Block::default()
         .title(" search ")
+        .title_bottom(if state.search.details.focused {
+            " ← results · ↑↓ action · Enter select · PgUp/PgDn scroll "
+        } else {
+            " Enter details · Esc close "
+        })
         .title_style(Style::default().fg(t.colors.fg_accent))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(t.colors.fg_accent))
@@ -41,6 +57,14 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         ])
         .split(inner);
 
+    let panes = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(chunks[2]);
+    let results_area = if details.is_some() {
+        panes[0]
+    } else {
+        chunks[2]
+    };
+
     // Register hit regions for mouse handler
     {
         let mut hr = state.hit_regions.borrow_mut();
@@ -48,7 +72,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
             outer: popup_area,
             tab_area: chunks[0],
             input_area: chunks[1],
-            results_area: chunks[2],
+            results_area,
         });
     }
 
@@ -59,7 +83,16 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     render_search_input(frame, state, chunks[1]);
 
     // Results
-    render_results(frame, state, chunks[2]);
+    render_results(frame, state, results_area);
+    if let Some((tracks, index)) = details {
+        crate::ui::app::render_track_details_pane(
+            frame,
+            state,
+            panes[1],
+            &tracks[index],
+            Some(&state.search.details),
+        );
+    }
 }
 
 fn render_tabs(frame: &mut Frame, state: &AppState, area: Rect) {
@@ -179,7 +212,8 @@ fn render_results(frame: &mut Frame, state: &AppState, area: Rect) {
         }
     };
 
-    let is_results_focused = state.search.focus == SearchFocus::Results;
+    let is_results_focused =
+        state.search.focus == SearchFocus::Results && !state.search.details.focused;
     let selected_idx = state.list_state.search_item_index;
 
     match state.search.tab {
@@ -370,6 +404,10 @@ fn render_all_tab(
                     Style::default()
                         .fg(t.colors.selection_text)
                         .bg(t.colors.selection_bar_bg)
+                } else if global_index == selected_idx {
+                    Style::default()
+                        .fg(t.colors.fg_primary)
+                        .bg(t.colors.bg_highlight)
                 } else {
                     Style::default().fg(t.colors.fg_primary)
                 };
@@ -436,6 +474,10 @@ fn render_single_section<T, F>(
                 Style::default()
                     .fg(t.colors.selection_text)
                     .bg(t.colors.selection_bar_bg)
+            } else if i == selected_idx {
+                Style::default()
+                    .fg(t.colors.fg_primary)
+                    .bg(t.colors.bg_highlight)
             } else {
                 Style::default().fg(t.colors.fg_primary)
             };

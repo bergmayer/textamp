@@ -155,6 +155,13 @@ pub fn plan_drill(state: &mut AppState, ctx: ClickContext) -> DrillPlan {
     let mut is_drill_action = true;
     let mut local_push_drill = false;
     let actions: Vec<Action> = match item {
+        BrowseItem::Description { query } => vec![
+            crate::app::sources::audiomuse::Command::RestoreDescription {
+                query,
+                replace_child: true,
+            }
+            .into(),
+        ],
         BrowseItem::Artist { key, title, .. } => {
             state.library.selected_artist_name = title;
             vec![MillerAction::LoadArtistAlbumsForMiller {

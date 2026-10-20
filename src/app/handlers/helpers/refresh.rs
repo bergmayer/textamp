@@ -10,6 +10,27 @@ use tokio::sync::mpsc;
 pub fn refresh_current_view(state: &mut AppState) -> Vec<Action> {
     use crate::app::state::RefreshCategory;
 
+    if state.view == View::Similar {
+        let Some(key) = state.similar.source_key.clone() else {
+            return vec![];
+        };
+        let title = state.similar.source_title.clone();
+        return vec![match state.similar.mode {
+            crate::app::state::SimilarMode::Tracks => DataAction::LoadSimilarTracks {
+                rating_key: key,
+                title,
+            },
+            crate::app::state::SimilarMode::Albums => DataAction::LoadSimilarAlbums {
+                rating_key: key,
+                title,
+            },
+            crate::app::state::SimilarMode::Artists => DataAction::LoadSimilarArtists {
+                artist_key: key,
+                title,
+            },
+        }
+        .into()];
+    }
     if state.view == View::Settings
         && state.settings_state.section == crate::app::state::SettingsSection::Libraries
     {

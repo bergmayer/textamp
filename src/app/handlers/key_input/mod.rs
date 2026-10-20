@@ -337,6 +337,17 @@ pub fn handle_key(
                             name: input,
                         })]
                     }
+                    crate::app::state::InputDialogAction::SaveDescriptionPlaylist {
+                        library_key,
+                        tracks,
+                    } => {
+                        return vec![crate::app::sources::audiomuse::Command::SavePlaylist {
+                            library_key,
+                            tracks,
+                            name: input,
+                        }
+                        .into()];
+                    }
                     crate::app::state::InputDialogAction::SavePlaylist => {
                         return vec![QueueAction::SaveQueueAsPlaylist(input).into()];
                     }
@@ -461,7 +472,7 @@ pub fn handle_key(
             && key.modifiers.contains(KeyModifiers::CONTROL))
         && !matches!(
             key.code,
-            KeyCode::F(1) | KeyCode::F(2) | KeyCode::F(3) | KeyCode::Char(',')
+            KeyCode::F(1) | KeyCode::F(2) | KeyCode::F(3) | KeyCode::F(8) | KeyCode::Char(',')
         )
     {
         return settings::handle_settings_keys(key, state, config);
@@ -1146,11 +1157,11 @@ fn handle_artist_bio_popup_keys(key: event::KeyEvent, state: &mut AppState) -> V
 ///
 /// Priority: highlighted artist → highlighted track → highlighted album → now-playing track.
 pub(crate) fn get_similar_action(state: &mut AppState) -> Vec<Action> {
-    // Store current view so we can return to it
-    state.previous_view = Some(state.view);
-
     // 0. Highlighted artist → LoadSimilarArtists
-    if state.view == View::Browse {
+    if state.view == View::Browse
+        && !state.category_column_focused
+        && state.palette_target_track().is_none()
+    {
         if let Some(nav) = state.browse_nav() {
             if let Some(BrowseItem::Artist { key, title, .. }) = nav.selected_item() {
                 let key = key.clone();
@@ -1169,7 +1180,7 @@ pub(crate) fn get_similar_action(state: &mut AppState) -> Vec<Action> {
     }
 
     // 1. Highlighted track → LoadSimilarTracks
-    if let Some(track) = get_selected_track(state) {
+    if let Some(track) = state.palette_target_track() {
         let title = format!("{} - {}", track.artist_name(), track.title);
         state.similar.tab_album_key = track.parent_rating_key.clone();
         state.similar.tab_album_title = Some(track.album_name().to_string());
@@ -1183,7 +1194,11 @@ pub(crate) fn get_similar_action(state: &mut AppState) -> Vec<Action> {
     }
 
     // 2. Highlighted album → LoadSimilarAlbums
-    if let Some((rating_key, title)) = get_selected_album(state) {
+    if let Some((rating_key, title)) = (state.view == View::Browse
+        && !state.category_column_focused)
+        .then(|| state.focused_album())
+        .flatten()
+    {
         state.similar.tab_album_key = None;
         state.similar.tab_album_title = None;
         state.similar.tab_track_key = None;
@@ -1212,8 +1227,6 @@ pub(crate) fn get_similar_action(state: &mut AppState) -> Vec<Action> {
 ///
 /// Priority: highlighted artist → highlighted album's artist → highlighted track's artist → now-playing track's artist.
 pub(crate) fn get_related_action(state: &mut AppState) -> Vec<Action> {
-    state.previous_view = Some(state.view);
-
     // 1. Highlighted artist in Browse nav
     if state.view == View::Browse {
         if let Some(nav) = state.browse_nav() {
@@ -1623,8 +1636,15 @@ fn get_selected_album(state: &AppState) -> Option<(String, String)> {
 pub fn close_focused_browse_column(state: &mut AppState) {
     use crate::app::state::BrowseCategory;
 
+    // Close the reusable related-track pane before its original track.
+    if crate::app::sonic_details::visible(state).is_some() {
+        state.sonic_details = None;
+        state.track_pane_focused = true;
+        return;
+    }
     // Pane visible? Close ONLY the pane.
     if state.pane_track().is_some() {
+        state.sonic_details = None;
         state.track_pane_open = false;
         state.track_pane_focused = false;
         state.track_pane_index = 0;
@@ -1744,6 +1764,12 @@ pub fn close_browse_column_at(state: &mut AppState, col_idx: usize) {
 }
 
 pub fn build_external_search_query(state: &AppState) -> String {
+    if crate::app::sonic_details::focused(state) {
+        return state
+            .palette_target_track()
+            .map(|t| format!("{} - {}", t.artist_name(), t.album_name()))
+            .unwrap_or_default();
+    }
     // 0. Highlighted Sonically-Similar row inside the track pane —
     //    when the user has picked a similar song, third-party
     //    search should target THAT track's artist+album, not the

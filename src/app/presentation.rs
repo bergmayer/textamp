@@ -6,6 +6,7 @@ use ratatui::layout::Rect;
 /// Registry of all clickable regions, populated each frame during render.
 #[derive(Debug, Default, Clone)]
 pub struct HitRegions {
+    pub description_save: Option<Rect>,
     pub fullscreen_modes: Vec<(Rect, usize)>,
     pub fullscreen_exit: Option<Rect>,
     pub sound_output_rows: Vec<(Rect, usize)>,
@@ -13,6 +14,10 @@ pub struct HitRegions {
     pub settings_sections: Vec<(Rect, crate::app::state::SettingsSection)>,
     pub settings_pages: Vec<(Rect, crate::app::state::SettingsPage)>,
     pub settings_preview: Option<Rect>,
+    pub settings_apply: Option<Rect>,
+    pub settings_back: Option<Rect>,
+    pub settings_categories: Option<Rect>,
+    pub settings_about: Option<ScrollableTextRegion>,
     pub library_option_pages: Vec<(Rect, crate::app::sources::options::OptionsPage)>,
     pub library_option_scroll: usize,
     pub biography_google: Option<Rect>,
@@ -54,6 +59,8 @@ pub struct HitRegions {
 
     /// Command/shortcut bar (bottom rows).
     pub command_bar: Option<CommandBarRegions>,
+    /// Pointer-only footer controls; never part of keyboard focus traversal.
+    pub footer_shortcuts: Vec<(Rect, crossterm::event::KeyCode)>,
 
     // ── Content (view-dependent, mutually exclusive) ────────────────────────
     /// Category selector column (Browse view, column 0).
@@ -73,6 +80,7 @@ pub struct HitRegions {
     /// and the per-similar-track row rects so the mouse handler
     /// can dispatch the right action.
     pub track_pane: Option<TrackPaneRegions>,
+    pub sonic_details: Option<TrackPaneRegions>,
 
     /// Queue view content areas.
     pub queue_content: Option<QueueRegions>,
@@ -292,6 +300,8 @@ pub struct AlphabetStripRegions {
 /// playback buttons; 2..=N+1 are similar tracks in order.
 #[derive(Debug, Clone)]
 pub struct TrackPaneRegions {
+    pub scroll: u16,
+    pub max_scroll: u16,
     pub outer: Rect,
     pub play_button: Rect,
     pub following_button: Rect,
@@ -373,6 +383,10 @@ pub struct NowPlayingRegions {
 /// Similar popup regions.
 #[derive(Debug, Clone)]
 pub struct SimilarRegions {
+    /// Footer retry action, without a keyboard focus stop.
+    pub retry_hint: Option<Rect>,
+    /// Border enclosing the results list, separate from the whole popup.
+    pub list_outer: Rect,
     /// Outer popup rect.
     pub outer: Rect,
     /// Inner content area (border excluded).

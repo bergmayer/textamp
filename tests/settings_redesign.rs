@@ -41,6 +41,8 @@ fn press(state: &mut AppState, code: KeyCode) -> Vec<textamp::app::Action> {
     )
 }
 fn draw(state: &mut AppState, width: u16, height: u16, name: &str) {
+    state.terminal_width = width;
+    state.terminal_height = height;
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     terminal
         .draw(|frame| state.apply_render_feedback(textamp::ui::render(frame, state)))
@@ -62,11 +64,13 @@ fn setup_pages_have_matching_mouse_targets_and_keep_playback_unchanged() {
     state.playback.position_ms = 12345;
     for (width, height) in [(100, 32), (80, 24), (40, 12)] {
         draw(&mut state, width, height, "libraries");
+        state.settings_state.focus = SettingsFocus::Sections;
+        draw(&mut state, width, height, "categories");
         let target = state
             .hit_regions
-            .settings_sections
+            .settings_pages
             .iter()
-            .find(|(_, s)| *s == SettingsSection::Textamp)
+            .find(|(_, p)| *p == SettingsPage::Themes)
             .unwrap()
             .0;
         mouse_input::handle_mouse(
@@ -79,13 +83,11 @@ fn setup_pages_have_matching_mouse_targets_and_keep_playback_unchanged() {
             &mut state,
         );
         assert_eq!(state.settings_state.section, SettingsSection::Textamp);
-        press(&mut state, KeyCode::Tab);
-        assert_eq!(state.settings_state.focus, SettingsFocus::Pages);
+        assert_eq!(state.settings_state.focus, SettingsFocus::Content);
         for page in SettingsPage::ALL {
             state.settings_state.page = page;
             state.settings_state.item_index = 0;
             draw(&mut state, width, height, page.name());
-            assert_eq!(state.hit_regions.settings_pages.len(), 4);
             assert!(!state
                 .hit_regions
                 .settings_textamp
@@ -307,32 +309,46 @@ async fn editing_active_webdav_returns_to_setup_without_interrupting_playback() 
 }
 
 #[test]
-fn down_enters_menus_and_pages_without_changing_selection() {
+fn categories_and_controls_are_reachable_with_two_focus_targets() {
     let mut state = fixture();
     state.settings_state.focus = SettingsFocus::Sections;
-    state.sources.picker_scroll_pin = Some(3);
-    press(&mut state, KeyCode::Down);
+    for index in 0..textamp::app::state::SettingsState::CATEGORY_COUNT {
+        assert_eq!(state.settings_state.category_index(), index);
+        for (width, height) in [(100, 32), (80, 24), (40, 12)] {
+            draw(&mut state, width, height, "navigation");
+            assert!(
+                state
+                    .hit_regions
+                    .settings_sections
+                    .iter()
+                    .any(|(_, s)| *s == state.settings_state.section)
+                    || state
+                        .hit_regions
+                        .settings_pages
+                        .iter()
+                        .any(|(_, p)| *p == state.settings_state.page)
+            );
+        }
+        press(&mut state, KeyCode::Right);
+        assert_eq!(state.settings_state.focus, SettingsFocus::Content);
+        assert!(state.popups.library_dialog.is_none());
+        press(&mut state, KeyCode::BackTab);
+        assert_eq!(state.settings_state.focus, SettingsFocus::Sections);
+        press(&mut state, KeyCode::Tab);
+        assert_eq!(state.settings_state.focus, SettingsFocus::Content);
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.settings_state.focus, SettingsFocus::Sections);
+        press(&mut state, KeyCode::Down);
+    }
+    press(&mut state, KeyCode::Home);
     assert_eq!(state.settings_state.section, SettingsSection::Libraries);
-    assert_eq!(state.settings_state.focus, SettingsFocus::Content);
-    assert_eq!(state.sources.picker_scroll_pin, None);
-    assert!(state.popups.library_dialog.is_none());
-    press(&mut state, KeyCode::F(10));
-    press(&mut state, KeyCode::Right);
-    assert_eq!(state.settings_state.section, SettingsSection::Textamp);
-    press(&mut state, KeyCode::Down);
-    assert_eq!(state.settings_state.focus, SettingsFocus::Pages);
-    press(&mut state, KeyCode::Right);
-    assert_eq!(state.settings_state.page, SettingsPage::Display);
-    press(&mut state, KeyCode::Down);
-    assert_eq!(state.settings_state.page, SettingsPage::Display);
-    assert_eq!(state.settings_state.focus, SettingsFocus::Content);
-    assert_eq!(state.settings_state.item_index, 0);
-    press(&mut state, KeyCode::Down);
-    assert_eq!(state.settings_state.item_index, 1);
-    press(&mut state, KeyCode::Left);
-    press(&mut state, KeyCode::Up);
-    assert_eq!(state.settings_state.focus, SettingsFocus::Sections);
     assert_eq!(state.sources.active.folder().unwrap(), "music");
+    assert!(matches!(
+        press(&mut state, KeyCode::Esc).as_slice(),
+        [textamp::app::Action::Navigation(
+            textamp::app::action::NavigationAction::SetView(View::Browse)
+        )]
+    ));
 }
 
 #[test]
@@ -340,11 +356,7 @@ fn command_palette_opens_cancels_and_executes_from_settings() {
     let mut state = fixture();
     for section in SettingsSection::all() {
         state.settings_state.section = *section;
-        for focus in [
-            SettingsFocus::Sections,
-            SettingsFocus::Pages,
-            SettingsFocus::Content,
-        ] {
+        for focus in [SettingsFocus::Sections, SettingsFocus::Content] {
             state.settings_state.focus = focus;
             for key in [
                 KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE),
@@ -553,4 +565,112 @@ fn downloaded_artwork_cache_is_scoped_to_each_library() {
         Some(b"second library".as_slice())
     );
     assert_eq!(second.clear_all(), 1);
+}
+
+#[test]
+fn mouse_opens_categories_previews_themes_and_applies_only_on_request() {
+    use textamp::app::{action::SettingsAction, Action};
+    for (width, height) in [(100, 32), (80, 24), (40, 12)] {
+        let mut state = fixture();
+        state.settings_state.focus = SettingsFocus::Sections;
+        draw(&mut state, width, height, "mouse-categories");
+        let target = state
+            .hit_regions
+            .settings_pages
+            .iter()
+            .find(|(_, p)| *p == SettingsPage::Themes)
+            .unwrap()
+            .0;
+        let click = |rect: ratatui::layout::Rect| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: rect.x,
+            row: rect.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(mouse_input::handle_mouse(click(target), &mut state).is_empty());
+        assert_eq!(state.settings_state.focus, SettingsFocus::Content);
+        draw(&mut state, width, height, "mouse-appearance");
+        let region = state.hit_regions.settings_textamp.clone().unwrap();
+        let (row, index) = *region.rows.last().unwrap();
+        let original = state.theme;
+        assert!(mouse_input::handle_mouse(click(row), &mut state).is_empty());
+        assert_eq!(state.settings_state.item_index, index);
+        assert_eq!(state.theme, original);
+        draw(&mut state, width, height, "mouse-preview");
+        assert_eq!(
+            state
+                .hit_regions
+                .settings_textamp
+                .as_ref()
+                .unwrap()
+                .scroll_offset,
+            region.scroll_offset
+        );
+        if let Some(apply) = state.hit_regions.settings_apply {
+            assert!(matches!(
+                mouse_input::handle_mouse(click(apply), &mut state).as_slice(),
+                [Action::Settings(SettingsAction::SettingsSelect)]
+            ));
+        }
+        assert!(matches!(
+            press(&mut state, KeyCode::Enter).as_slice(),
+            [Action::Settings(SettingsAction::SettingsSelect)]
+        ));
+        let back = state.hit_regions.settings_back.unwrap();
+        assert!(mouse_input::handle_mouse(click(back), &mut state).is_empty());
+        assert_eq!(state.settings_state.focus, SettingsFocus::Sections);
+        assert_eq!(state.sources.active.folder().unwrap(), "music");
+    }
+}
+
+#[test]
+fn resizing_keeps_selection_and_keyboard_navigation_releases_mouse_scroll() {
+    let mut state = fixture();
+    state.settings_state.section = SettingsSection::Textamp;
+    state.settings_state.page = SettingsPage::Themes;
+    press(&mut state, KeyCode::End);
+    let selected = state.settings_state.item_index;
+    for (width, height) in [(100, 32), (40, 12), (80, 24), (28, 10), (100, 32)] {
+        draw(&mut state, width, height, "resize");
+        assert_eq!(state.settings_state.item_index, selected);
+        assert!(state
+            .hit_regions
+            .settings_textamp
+            .as_ref()
+            .unwrap()
+            .rows
+            .iter()
+            .any(|(_, i)| *i == selected));
+    }
+    state.scroll.settings_textamp = Some(0);
+    press(&mut state, KeyCode::Up);
+    assert!(state.scroll.settings_textamp.is_none());
+    assert_eq!(state.settings_state.item_index, selected - 1);
+}
+
+#[test]
+fn empty_artwork_page_and_audio_page_are_distinct_and_navigate_back() {
+    let mut state = AppState::new();
+    state.view = View::Settings;
+    state.settings_state.section = SettingsSection::Textamp;
+    state.settings_state.page = SettingsPage::Display;
+    state.settings_state.focus = SettingsFocus::Content;
+    assert!(state.textamp_settings().is_empty());
+    draw(&mut state, 80, 24, "empty-artwork");
+    assert!(state
+        .hit_regions
+        .settings_textamp
+        .as_ref()
+        .unwrap()
+        .rows
+        .is_empty());
+    press(&mut state, KeyCode::Left);
+    press(&mut state, KeyCode::Down);
+    assert_eq!(state.settings_state.page, SettingsPage::Audio);
+    press(&mut state, KeyCode::Right);
+    assert_eq!(
+        state.textamp_settings(),
+        vec![textamp::app::state::TextampSetting::SoundOutput]
+    );
+    draw(&mut state, 80, 24, "empty-audio");
 }

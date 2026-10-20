@@ -163,7 +163,7 @@ async fn settings_rows_and_keyboard_actions_follow_the_active_provider() {
         if provider == "folder" {
             state.sources.active = ActiveSource::Folder("fixture".into());
         }
-        state.settings_state.page = textamp::app::state::SettingsPage::Display;
+        state.settings_state.page = textamp::app::state::SettingsPage::Audio;
         let rows = state.textamp_settings();
         assert_eq!(
             rows.contains(&TextampSetting::Transcode),
@@ -183,7 +183,7 @@ async fn settings_rows_and_keyboard_actions_follow_the_active_provider() {
             .map(|cell| cell.symbol())
             .collect();
         assert!(!text.contains("refresh players"));
-        assert_eq!(text.contains("streaming quality"), provider != "folder");
+        assert_eq!(text.contains("Streaming quality"), provider != "folder");
         let mut config = Config::default();
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
 
@@ -247,7 +247,10 @@ async fn settings_rows_and_keyboard_actions_follow_the_active_provider() {
             row: rect.y,
             modifiers: KeyModifiers::NONE,
         };
-        assert!(mouse_input::handle_mouse(click, &mut state).is_empty());
+        assert!(matches!(
+            mouse_input::handle_mouse(click, &mut state).as_slice(),
+            [Action::Settings(SettingsAction::SettingsSelect)]
+        ));
         assert_eq!(state.settings_state.item_index, index);
         terminal
             .draw(|frame| {
@@ -510,8 +513,15 @@ fn small_settings_scroll_and_mouse_selection_preserve_the_viewport() {
             .scroll_offset,
         region.scroll_offset
     );
+    // Theme rows only preview, including repeated clicks. Apply is explicit.
+    assert!(mouse_input::handle_mouse(mouse, &mut state).is_empty());
     assert!(matches!(
-        mouse_input::handle_mouse(mouse, &mut state).as_slice(),
+        key_input::handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut state,
+            &config
+        )
+        .as_slice(),
         [Action::Settings(SettingsAction::SettingsSelect)]
     ));
     key_input::handle_key(
@@ -614,7 +624,7 @@ fn source_specific_choices_and_empty_groups_do_not_leave_unselectable_focus() {
 #[test]
 fn right_reenters_audiomuse_search_results_while_enter_starts_a_new_search() {
     let config = Config::default();
-    for feature in [Feature::Describe, Feature::Lyrics] {
+    for feature in [Feature::Lyrics] {
         for loading in [false, true] {
             let mut state = nav_state();
             state.view = View::Browse;
@@ -678,14 +688,14 @@ fn right_reenters_audiomuse_search_results_while_enter_starts_a_new_search() {
                 &mut state,
                 &config,
             );
-            assert_eq!(actions.len(), 1, "Another feature must open its prompt");
+            assert!(actions.is_empty(), "Right must not open a prompt");
             state.sources.nav_collection = None;
             let actions = key_input::handle_key(
                 KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
                 &mut state,
                 &config,
             );
-            assert_eq!(actions.len(), 1, "The first search still opens its prompt");
+            assert!(actions.is_empty(), "Enter is required for the first prompt");
         }
     }
 }

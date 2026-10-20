@@ -169,8 +169,8 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
 
 /// Bottom-row tab strip — Library / Now Playing — mirroring the
 /// GUI's transport-bar tab strip. Active tab uses the selection
-/// background. Hit regions are registered so a future click handler
-/// can dispatch SetView; the `:` palette hint sits on the right.
+/// background. The right-hand shortcuts have pointer hit regions, but
+/// never become keyboard focus stops. Labels and hit regions share one layout.
 fn render_tab_strip(frame: &mut Frame, state: &AppState, area: Rect) {
     use crate::app::state::View;
     let t = theme();
@@ -197,8 +197,13 @@ fn render_tab_strip(frame: &mut Frame, state: &AppState, area: Rect) {
     // toggle scrolling Miller layout, `|` = toggle tall split.
     // Mirrors classic vim chrome — same row as the Library / Now
     // Playing tabs, on the right edge.
-    let palette_hint = if state.view == View::Settings {
-        " F10 menu · ↓/Tab panel · Enter select · : commands · Esc back "
+    use crossterm::event::KeyCode;
+    let mut shortcuts = if state.view == View::Settings {
+        vec![
+            (" F2 close settings ", Some(KeyCode::F(2))),
+            ("·", None),
+            (" F10 categories ", Some(KeyCode::F(10))),
+        ]
     } else if state.view == View::Browse
         && state.category_column_focused
         && state.browse_category == crate::app::state::BrowseCategory::Library
@@ -209,23 +214,49 @@ fn render_tab_strip(frame: &mut Frame, state: &AppState, area: Rect) {
                         crate::app::sources::navidrome::commands::CollectionKind::AudioMuse(f)
                             if f.is_search()))
     {
-        " → results · Enter new search · : commands "
-    } else if state.tall_mode {
-        " :  /  Tab focus  ,  \\  | "
+        vec![
+            (" → browse ", Some(KeyCode::Right)),
+            ("·", None),
+            (" Enter new search ", Some(KeyCode::Enter)),
+            ("·", None),
+            (" : commands ", Some(KeyCode::Char(':'))),
+        ]
     } else {
-        " :  /  \u{21e5}  ,  \\  | "
+        vec![
+            (" : ", Some(KeyCode::Char(':'))),
+            (" / ", Some(KeyCode::Char('/'))),
+            (
+                if state.tall_mode {
+                    " Tab focus "
+                } else {
+                    " ⇥ "
+                },
+                Some(KeyCode::Tab),
+            ),
+            (" , ", Some(KeyCode::Char(','))),
+            (" \\ ", Some(KeyCode::Char('\\'))),
+            (" | ", Some(KeyCode::Char('|'))),
+        ]
     };
-
-    let palette_hint = format!("F7 full screen · F8 output {}", palette_hint);
-    let palette_hint = if state.sound_output.current != crate::audio::AudioOutput::Local {
-        format!(
-            "{} [{}]",
-            palette_hint,
+    if state.view != View::Settings {
+        shortcuts.splice(
+            0..0,
+            [
+                ("F7 full screen ", Some(KeyCode::F(7))),
+                ("·", None),
+                (" F8 output ", Some(KeyCode::F(8))),
+            ],
+        );
+    }
+    let output_label;
+    if state.sound_output.current != crate::audio::AudioOutput::Local {
+        output_label = format!(
+            " [{}]",
             truncate_str(&state.sound_output.current.label(), 28)
-        )
-    } else {
-        palette_hint
-    };
+        );
+        shortcuts.push((&output_label, Some(KeyCode::F(8))));
+    }
+    let palette_hint: String = shortcuts.iter().map(|(label, _)| *label).collect();
 
     // Active tab uses an inverted (selection-style) background so the
     // selected/unselected distinction is obvious in every theme — in
@@ -302,6 +333,21 @@ fn render_tab_strip(frame: &mut Frame, state: &AppState, area: Rect) {
             height: 1,
         },
     );
+
+    // Clip targets to exactly the displayed portion, including narrow terminals.
+    let mut offset = 0_u16;
+    for (label, key) in shortcuts {
+        let width = UnicodeWidthStr::width(label) as u16;
+        let visible_width = width.min(hint_w.saturating_sub(offset));
+        if let Some(key) = key.filter(|_| visible_width > 0) {
+            state
+                .hit_regions
+                .borrow_mut()
+                .footer_shortcuts
+                .push((Rect::new(hint_x + offset, area.y, visible_width, 1), key));
+        }
+        offset = offset.saturating_add(width);
+    }
 
     // Register click hit regions. The shared tab_bar_action handler
     // expects index 0 = Library (Browse) and index 2 = Now Playing.

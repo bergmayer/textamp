@@ -177,7 +177,15 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
     // Same for the track-details pane focus: any click outside the
     // pane drops focus from it. The pane click handler below will
     // re-set the flag when the click lands on the pane's rect.
-    if is_click_down && state.track_pane_focused && !state.fullscreen_active {
+    if is_click_down
+        && state.track_pane_focused
+        && !state.fullscreen_active
+        && !state
+            .hit_regions
+            .track_pane
+            .as_ref()
+            .is_some_and(|p| p.outer.contains((event.column, event.row).into()))
+    {
         state.track_pane_focused = false;
     }
 
@@ -321,6 +329,13 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
         return handle_library_picker_mouse(event, state);
     }
 
+    if let Some(actions) = crate::app::sonic_details::mouse(event, state) {
+        return actions;
+    }
+    if let Some(actions) = crate::app::result_details::mouse(event, state) {
+        return actions;
+    }
+
     // Search popup intercepts mouse clicks when active
     if state.popups.search_active {
         if let crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) =
@@ -406,13 +421,23 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
         return vec![];
     }
 
+    // Discovery overlays own their clicks even over retained queue/visualizer regions.
+    if event.kind == MouseEventKind::Down(MouseButton::Left) {
+        match state.view {
+            View::Similar => return handle_similar_click(click_row, click_col, state),
+            View::Related => return handle_related_click(click_row, click_col, state),
+            _ => {}
+        }
+    }
+
     // Resolve clicks against rendered panes, not the previous keyboard focus.
     // The Search landing panel covers retained navigation state, not clickable
     // tracks. Consume wheel/right-click too, before legacy geometry fallbacks.
-    if state
-        .hit_regions
-        .search_landing
-        .is_some_and(|area| area.contains(ratatui::layout::Position::new(click_col, click_row)))
+    if !matches!(state.view, View::Similar | View::Related)
+        && state
+            .hit_regions
+            .search_landing
+            .is_some_and(|area| area.contains(ratatui::layout::Position::new(click_col, click_row)))
     {
         return vec![];
     }
@@ -464,6 +489,14 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
             // the shared tab-bar handler. The top row is the actual
             // playback transport.
             if click_row == tab_strip_row {
+                if let Some((_, key)) = state
+                    .hit_regions
+                    .footer_shortcuts
+                    .iter()
+                    .find(|(rect, _)| rect.contains((click_col, click_row).into()))
+                {
+                    return vec![SystemAction::ActivateFooterShortcut(*key).into()];
+                }
                 let tab_result = handle_tab_bar_click(click_col, state);
                 if !tab_result.is_empty() {
                     return tab_result;
@@ -619,6 +652,9 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
 
 /// Resolve the input owner from actual rendered geometry, in split or single view.
 fn pointer_view(state: &AppState, column: u16, row: u16) -> View {
+    if matches!(state.view, View::Similar | View::Related) {
+        return state.view;
+    }
     let point = (column, row).into();
     let regions = &state.hit_regions;
     if regions.now_playing_content.as_ref().is_some_and(|r| {
@@ -1908,6 +1944,13 @@ fn handle_right_click_select(click_row: u16, click_col: u16, state: &mut AppStat
 
 /// Handle click in Browse view using Miller column hit-testing.
 fn handle_browse_click(click_row: u16, click_col: u16, state: &mut AppState) -> Vec<Action> {
+    if state
+        .hit_regions
+        .description_save
+        .is_some_and(|r| r.contains((click_col, click_row).into()))
+    {
+        return vec![crate::app::sources::audiomuse::Command::PromptSavePlaylist.into()];
+    }
     // Check category column click first. The leftmost column renders
     // every CategoryRow at its index — the click's y-offset maps
     // directly to a CategoryRow index. Divider rows ignore clicks.
@@ -1925,6 +1968,11 @@ fn handle_browse_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
                     let rows = state.category_rows();
                     return match rows.get(item_idx).copied() {
                         Some(crate::app::state::CategoryRow::NavidromeCollection(kind)) => {
+                            if kind == crate::app::sources::navidrome::commands::CollectionKind::AudioMuse(crate::audiomuse::Feature::Describe)
+                                && state.category_column_index != item_idx {
+                                state.category_column_index = item_idx;
+                                return vec![crate::app::sources::audiomuse::Command::BrowseDescriptions { take_focus: true }.into()];
+                            }
                             state.category_column_focused = false;
                             state.category_column_index = item_idx;
                             vec![kind.action()]
@@ -2003,6 +2051,7 @@ fn handle_browse_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
                     && click_col >= close.x
                     && click_col < close.x + close.width
                 {
+                    state.sonic_details = None;
                     state.track_pane_open = false;
                     state.track_pane_focused = false;
                     state.track_pane_index = 0;
@@ -2031,14 +2080,8 @@ fn handle_browse_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
                 }
             }
             // Sonically Similar rows: first click highlights only;
-            // a second click on the same row (or pressing Enter on
-            // the focused similar row) drills into the track's
-            // album in the Library. Mirrors the click-on-highlighted
-            // = Enter rule used everywhere else, and surfaces the
-            // full palette of context commands (Play Track / Play
-            // Track and Following / Open in Library / Artist Bio /
-            // Search Apple Music…) for users who right-click on a
-            // newly-highlighted similar row.
+            // a second click opens the adjacent track details.
+            // Right-click remains the contextual command palette.
             for (row_rect, sim_idx) in &pane.similar_rows {
                 if click_row == row_rect.y
                     && click_col >= row_rect.x
@@ -2054,14 +2097,7 @@ fn handle_browse_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
                     if !was_selected {
                         return vec![];
                     }
-                    // Already selected → open the command palette so
-                    // the user picks an action (Play Track / Open in
-                    // Library / Artist Bio / Sonic Adventure / external
-                    // search…). The palette's contextual section
-                    // targets the highlighted similar row via
-                    // `palette_target_track()`.
-                    crate::app::command_palette::open(state);
-                    return vec![];
+                    return crate::app::sonic_details::open(state, *sim_idx, false);
                 }
             }
             // Click anywhere else inside the pane just focuses it
@@ -2679,40 +2715,74 @@ fn handle_settings_click(click_row: u16, click_col: u16, state: &mut AppState) -
     use crate::app::state::{SettingsFocus, SettingsSection};
 
     let point = (click_col, click_row).into();
-    if let Some((_, section)) = state
+    if state
+        .hit_regions
+        .settings_back
+        .is_some_and(|r| r.contains(point))
+    {
+        if state.settings_state.focus == SettingsFocus::Sections {
+            return vec![NavigationAction::SetView(View::Browse).into()];
+        }
+        state.settings_state.focus = SettingsFocus::Sections;
+        return vec![];
+    }
+    if state
+        .hit_regions
+        .settings_apply
+        .is_some_and(|r| r.contains(point))
+    {
+        let focused = state.settings_state.focus == SettingsFocus::Content;
+        state.settings_state.focus = SettingsFocus::Content;
+        return if focused {
+            vec![SettingsAction::SettingsSelect.into()]
+        } else {
+            vec![]
+        };
+    }
+    let category = state
         .hit_regions
         .settings_sections
         .iter()
-        .find(|(rect, _)| rect.contains(point))
-    {
-        state.settings_state.section = *section;
-        state.settings_state.focus = SettingsFocus::Sections;
-        state.settings_state.item_index = 0;
-        state.settings_state.scroll = 0;
-        state.scroll.settings_textamp = None;
-        return vec![];
-    }
-    if let Some((_, page)) = state
-        .hit_regions
-        .settings_pages
-        .iter()
-        .find(|(rect, _)| rect.contains(point))
-    {
-        state.settings_state.page = *page;
-        state.settings_state.focus = SettingsFocus::Pages;
-        state.settings_state.item_index = 0;
-        state.scroll.settings_textamp = None;
+        .find(|(r, _)| r.contains(point))
+        .map(|(_, s)| {
+            if *s == SettingsSection::Libraries {
+                0
+            } else {
+                crate::app::state::SettingsState::CATEGORY_COUNT - 1
+            }
+        })
+        .or_else(|| {
+            state
+                .hit_regions
+                .settings_pages
+                .iter()
+                .find(|(r, _)| r.contains(point))
+                .and_then(|(_, p)| {
+                    crate::app::state::SettingsPage::ALL
+                        .iter()
+                        .position(|v| v == p)
+                        .map(|i| i + 1)
+                })
+        });
+    if let Some(index) = category {
+        if index != state.settings_state.category_index() {
+            state.settings_state.select_category(index);
+            state.scroll.settings_textamp = None;
+        }
+        state.settings_state.focus = SettingsFocus::Content;
         return vec![];
     }
     if state.settings_state.section == SettingsSection::Textamp {
         if let Some(region) = &state.hit_regions.settings_textamp {
             if let Some((_, index)) = region.rows.iter().find(|(rect, _)| rect.contains(point)) {
-                let was_selected = state.settings_state.focus == SettingsFocus::Content
-                    && state.settings_state.item_index == *index;
                 state.scroll.settings_textamp = Some(region.scroll_offset);
                 state.settings_state.item_index = *index;
                 state.settings_state.focus = SettingsFocus::Content;
-                if was_selected {
+                // Theme clicks preview first; toggles and chooser controls act once.
+                if !matches!(
+                    state.textamp_settings().get(*index),
+                    Some(crate::app::state::TextampSetting::Theme(_))
+                ) {
                     return vec![SettingsAction::SettingsSelect.into()];
                 }
             }
@@ -2753,6 +2823,12 @@ fn handle_similar_click(click_row: u16, click_col: u16, state: &mut AppState) ->
         return vec![NavigationAction::SetView(state.previous_view.unwrap_or(View::Browse)).into()];
     }
 
+    if regions
+        .retry_hint
+        .is_some_and(|rect| rect.contains((click_col, click_row).into()))
+    {
+        return super::helpers::refresh_current_view(state);
+    }
     // Check [Tab] hint click (footer area)
     if let Some(tab_rect) = &regions.tab_hint {
         if click_row >= tab_rect.y
@@ -2899,6 +2975,36 @@ fn handle_scroll(up: bool, click_row: u16, click_col: u16, state: &mut AppState)
 
     match pointer_view(state, click_col, click_row) {
         View::Settings => {
+            if state
+                .hit_regions
+                .settings_categories
+                .is_some_and(|r| r.contains((click_col, click_row).into()))
+            {
+                let index = state.settings_state.category_index();
+                let next = if up {
+                    index.saturating_sub(1)
+                } else {
+                    (index + 1).min(crate::app::state::SettingsState::CATEGORY_COUNT - 1)
+                };
+                state.settings_state.select_category(next);
+                state.settings_state.focus = crate::app::state::SettingsFocus::Sections;
+                state.scroll.settings_textamp = None;
+                return vec![];
+            }
+
+            if let Some(region) = &state.hit_regions.settings_about {
+                if region.area.contains((click_col, click_row).into()) {
+                    state.settings_state.scroll = if up {
+                        state.settings_state.scroll.saturating_sub(3)
+                    } else {
+                        state
+                            .settings_state
+                            .scroll
+                            .saturating_add(3)
+                            .min(region.max_scroll())
+                    };
+                }
+            }
             if let Some(region) = &state.hit_regions.settings_textamp {
                 if region.inner.contains((click_col, click_row).into()) {
                     let max = region
@@ -3954,7 +4060,7 @@ fn try_similar_scrollbar_click(
     if let Some(thumb) = scrollbar_hit_test_bordered(
         click_col,
         click_row,
-        sr.outer,
+        sr.list_outer,
         total_items,
         visible_items,
         scroll_offset,

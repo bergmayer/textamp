@@ -59,19 +59,21 @@ F3 switches libraries; F2 → Libraries manages sources/accounts. Startup opens 
 saved selection, then another saved source if needed; no source opens normal
 browsing with an add-library prompt. Startup must not start playback.
 
-Settings uses a DOS-style menu bar with Libraries, Textamp and About. F10 focuses
-that menu; Left/Right selects menus/pages, Down enters their contents; Tab moves
-between menus and controls; Esc backs out. The command palette works in settings.
+Settings uses a flat category list (Libraries, Appearance, Artwork, Audio,
+Sidebar, Search, About) and one content pane. Up/Down selects categories;
+Enter/Right enters controls; Tab/Shift+Tab switches panes; Left/Esc returns to
+categories, Esc there closes. F10 focuses categories. Narrow terminals show
+one pane at a time. The command palette works in settings.
 Setup and its dialogs use the active app theme.
 Libraries is grouped by provider/account. Up from its first row focuses the
-Settings menu. Enter opens General / Analysis / Cache pages; Left/Right changes
+category list. Enter opens General / Analysis / Cache pages; Left/Right changes
 pages. The library detail card stays concise. Add opens a type chooser and a single form.
 Saving a connection must not activate a different library. Child forms return to
 the owning setup page. F3 remains switch-only. Cache jobs must not switch the
 active source or playback. Artwork downloads and their clear action are scoped
 to individual libraries, alongside metadata and analysis caches.
 Artwork rendering and default album-column visibility are per library; restore
-both on source switches and show the active library in Display settings. Legacy
+both on source switches and show the active library in Artwork settings. Legacy
 global values are fallback defaults. The downloaded image cache is per library.
 Sidebar visibility belongs in Textamp settings. Theme artwork uses the active
 theme unless a different theme row has content focus. Cache sizes are measured
@@ -81,6 +83,12 @@ Browse uses Miller columns. Ctrl+L opens Library, Ctrl+G genres, Ctrl+O folders,
 Ctrl+F search, Ctrl+U queue, Ctrl+N Now Playing, F1 help. Tab switches Library /
 Now Playing focus, including split mode. `:` is the command palette; `:q` quits.
 Keep the help text authoritative for all other bindings.
+Describe music uses Enter for its prompt and arrow keys for browsing history/results.
+Keep successful description history scoped to the exact library; results use the
+playlist-style two-row layout. Search and Similar Tracks open adjacent details on
+Enter, with explicit Play Track / Play Track++ actions. Queue Enter still plays.
+AirPlay supports macOS and Linux with built-in
+mDNS discovery and a separately installed sender; Windows support is out of scope.
 
 All sources have persistent metadata caches: server catalogs, directory trees and
 visited album listings. Cached startup comes first, weekly refresh plus manual F5.

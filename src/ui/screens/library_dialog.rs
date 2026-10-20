@@ -24,7 +24,7 @@ pub fn render(frame: &mut Frame, state: &RenderState) {
         height,
     );
     let title = if let Dialog::Library(options) = dialog {
-        format!(" {} / Setup ", options.choice.label())
+        format!(" {} / Settings ", options.choice.label())
     } else {
         match dialog {
             Dialog::Library(_) => unreachable!(),
@@ -40,7 +40,7 @@ pub fn render(frame: &mut Frame, state: &RenderState) {
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
-        .border_type(BorderType::Double)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme().colors.fg_accent))
         .style(super::settings::paper());
     let inner = block.inner(area);

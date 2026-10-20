@@ -12,6 +12,8 @@ pub mod event_core;
 pub mod handlers;
 
 pub mod fullscreen;
+pub mod result_details;
+pub mod sonic_details;
 pub mod sound_output;
 pub mod state;
 pub mod theme;

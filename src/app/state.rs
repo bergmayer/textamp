@@ -286,6 +286,10 @@ impl AllTracksScope {
 /// Item type in a browse column.
 #[derive(Debug, Clone)]
 pub enum BrowseItem {
+    /// A saved Describe music query; drilling restores its ranked result list.
+    Description {
+        query: String,
+    },
     Artist {
         key: String,
         title: String,
@@ -357,6 +361,7 @@ pub enum BrowseItem {
 impl BrowseItem {
     pub fn key(&self) -> &str {
         match self {
+            BrowseItem::Description { query } => query,
             BrowseItem::Artist { key, .. } => key,
             BrowseItem::Album { key, .. } => key,
             BrowseItem::Track { key, .. } => key,
@@ -373,6 +378,7 @@ impl BrowseItem {
 
     pub fn title(&self) -> &str {
         match self {
+            BrowseItem::Description { query } => query,
             BrowseItem::Artist { title, .. } => title,
             BrowseItem::Album { title, .. } => title,
             BrowseItem::Track { title, .. } => title,
@@ -1627,6 +1633,11 @@ pub struct DjState {
 /// Similar content view state (server sonic similarity).
 #[derive(Debug, Clone, Default)]
 pub struct SimilarViewState {
+    /// Last requested seed, retained after completion for retry.
+    pub source_key: Option<String>,
+    /// Request failures stay in this view, distinct from successful empty results.
+    pub error: Option<String>,
+    pub details: crate::app::result_details::State,
     pub albums: Vec<Album>,
     pub tracks: Vec<Track>,
     pub artists: Vec<Artist>,
@@ -1751,6 +1762,7 @@ pub struct LibraryData {
 /// Search/filter state.
 #[derive(Debug, Clone, Default)]
 pub struct SearchState {
+    pub details: crate::app::result_details::State,
     pub query: String,
     pub results: Option<SearchResults>,
 
@@ -1918,7 +1930,7 @@ pub struct AppState {
     pub artwork: ArtworkState,
 
     // Radio mode state (legacy)
-    /// Transcode bitrate in kbps. 0 = disabled (direct play), e.g. 256 = transcode to 256kbps MP3.
+    /// Maximum server streaming bitrate in kbps; 0 requests the original file.
     pub transcode_kbps: u32,
 
     /// Whether audio output is available. False when audio init failed/timed out.
@@ -2018,15 +2030,17 @@ pub struct AppState {
     pub select_mode: bool,
 
     /// Track-details pane has keyboard focus. While `true`, Up/Down
-    /// navigates between the Play button (index 0) and the
-    /// Sonically-Similar entries (indices 1..). Right or Left
-    /// returns focus to the focused Miller column. Auto-cleared
+    /// navigates between playback actions (0/1) and the
+    /// Sonically-Similar entries (2..). Enter opens one reusable
+    /// adjacent detail pane; Left returns to the previous column. Auto-cleared
     /// whenever the focused track changes or the user navigates
     /// away from the Browse view.
     pub track_pane_focused: bool,
     /// Index of the highlighted row inside the focused track-details
-    /// pane: 0 = Play button, 1..=N = Sonically-Similar tracks.
+    /// pane: 0/1 = playback, 2.. = Sonically-Similar tracks.
     pub track_pane_index: usize,
+    /// One reusable related-track detail column, anchored to the original track.
+    pub sonic_details: Option<crate::app::sonic_details::State>,
 
     /// Live audio sample tap from the audio backend, drained each
     /// Tick into `vectorscope_buffer` for the vectorscope
@@ -2653,6 +2667,7 @@ impl AppState {
             select_mode: false,
             track_pane_focused: false,
             track_pane_index: 0,
+            sonic_details: None,
             vectorscope_tap: None,
             studio_meters: crate::app::meters::StudioMeters::default(),
             vectorscope_buffer: std::collections::VecDeque::with_capacity(VECTORSCOPE_BUFFER_LEN),
@@ -2882,6 +2897,12 @@ impl AppState {
     /// Visible ordered track list and highlighted row for palette commands.
     /// Never fall back to a retained navigation column from another view.
     pub fn palette_track_list(&self) -> Option<(&[Track], usize)> {
+        if self.popups.search_active || matches!(self.view, View::Search | View::Similar) {
+            return crate::app::result_details::track_list(self);
+        }
+        if let Some(list) = crate::app::sonic_details::palette_tracks(self) {
+            return Some(list);
+        }
         let (tracks, index): (&[Track], usize) = match self.view {
             View::Queue | View::NowPlaying => (self.playback_tracks(), self.list_state.queue_index),
             View::Browse if !self.category_column_focused => {
@@ -2916,6 +2937,11 @@ impl AppState {
     /// Used to gate per-list commands like "Play Track and Following"
     /// that don't make sense on a free-floating similar track.
     pub fn palette_target_is_similar(&self) -> bool {
+        if crate::app::sonic_details::focused(self) {
+            return crate::app::sonic_details::visible(self)
+                .is_some_and(|c| c.details.action_index >= 2)
+                && crate::app::sonic_details::palette_tracks(self).is_some();
+        }
         self.view == View::Browse
             && !self.category_column_focused
             && self.track_pane_focused
@@ -2946,7 +2972,13 @@ impl AppState {
         if self.list_filter.active {
             self.list_filter.deactivate();
         }
-        if !matches!(view, View::Queue | View::NowPlaying) {
+        // Overlay entry owns its return target for every route (palette, mouse,
+        // keyboard and provider actions). Refreshing/cycling an overlay keeps it.
+        if matches!(view, View::Similar | View::Related) {
+            if !matches!(self.view, View::Similar | View::Related) {
+                self.previous_view = Some(self.view);
+            }
+        } else if !matches!(view, View::Queue | View::NowPlaying) {
             self.queue.selected.clear();
         }
         self.select_mode = false;
@@ -3095,6 +3127,16 @@ impl AppState {
             .is_some_and(|item| matches!(item, BrowseItem::Track { .. }));
         if !first_is_track {
             return false;
+        }
+
+        // AudioMuse results mix artists and albums, just like playlist tracks.
+        if self.browse_category == BrowseCategory::Library
+            && matches!(
+                self.sources.nav_collection,
+                Some(crate::app::sources::navidrome::commands::CollectionKind::AudioMuse(_))
+            )
+        {
+            return true;
         }
 
         // Playlist track columns (always special)
@@ -3795,6 +3837,7 @@ pub enum PaletteCommandKind {
     OpenSimilar,
     OpenRelated,
     SaveQueue,
+    SaveDescriptionPlaylist,
     ClearQueue,
     ToggleFilter,
     /// TUI-only: flip the tall-monitor split view (Library on top
@@ -3827,6 +3870,8 @@ pub enum PaletteCommandKind {
     /// Drill into the currently-playing track's album in the Library
     /// view (so the user lands on it as if they'd browsed there).
     OpenInLibrary,
+    JumpToArtist(Box<Track>),
+    JumpToAlbum(Box<Track>),
     /// Open the sort popup for the focused column.
     OpenSort,
     /// Toggle album-art tiles on the focused album column.
@@ -4205,8 +4250,6 @@ pub enum SettingsFocus {
     /// Sections panel (left)
     #[default]
     Sections,
-    /// Textamp page menu.
-    Pages,
     /// Content panel (right)
     Content,
 }
@@ -4230,18 +4273,26 @@ pub enum SettingsPage {
     #[default]
     Themes,
     Display,
+    Audio,
     Sidebar,
     Services,
 }
 
 impl SettingsPage {
-    pub const ALL: [Self; 4] = [Self::Themes, Self::Display, Self::Sidebar, Self::Services];
+    pub const ALL: [Self; 5] = [
+        Self::Themes,
+        Self::Display,
+        Self::Audio,
+        Self::Sidebar,
+        Self::Services,
+    ];
     pub fn name(self) -> &'static str {
         match self {
-            Self::Themes => "Themes",
-            Self::Display => "Display & audio",
+            Self::Themes => "Appearance",
+            Self::Display => "Artwork",
+            Self::Audio => "Audio",
             Self::Sidebar => "Sidebar",
-            Self::Services => "Search services",
+            Self::Services => "Search",
         }
     }
     pub fn step(self, forward: bool) -> Self {
@@ -4274,7 +4325,19 @@ impl AppState {
             .map(ExternalSearch)
             .collect();
         }
-        let mut items: Vec<_> = if self.active_library.is_some() {
+        if self.settings_state.page == SettingsPage::Audio {
+            let mut items = vec![SoundOutput];
+            if self
+                .sources
+                .active
+                .capabilities()
+                .supports(crate::library::capabilities::Feature::Transcoding)
+            {
+                items.push(Transcode);
+            }
+            return items;
+        }
+        if self.active_library.is_some() {
             ArtworkMode::all()
                 .iter()
                 .copied()
@@ -4283,18 +4346,7 @@ impl AppState {
                 .collect()
         } else {
             Vec::new()
-        };
-
-        if self
-            .sources
-            .active
-            .capabilities()
-            .supports(crate::library::capabilities::Feature::Transcoding)
-        {
-            items.push(Transcode);
         }
-        items.push(SoundOutput);
-        items
     }
 }
 
@@ -4327,6 +4379,41 @@ pub struct SettingsState {
     pub scroll: u16,
 }
 
+impl SettingsState {
+    /// One flat category list; app pages and library management share navigation.
+    pub const CATEGORY_COUNT: usize = SettingsPage::ALL.len() + 2;
+
+    pub fn category_index(&self) -> usize {
+        match self.section {
+            SettingsSection::Libraries => 0,
+            SettingsSection::Textamp => {
+                1 + SettingsPage::ALL
+                    .iter()
+                    .position(|p| *p == self.page)
+                    .unwrap_or(0)
+            }
+            SettingsSection::About => Self::CATEGORY_COUNT - 1,
+        }
+    }
+
+    pub fn select_category(&mut self, index: usize) {
+        let index = index.min(Self::CATEGORY_COUNT - 1);
+        if index == self.category_index() {
+            return;
+        }
+        self.section = if index == 0 {
+            SettingsSection::Libraries
+        } else if index == Self::CATEGORY_COUNT - 1 {
+            SettingsSection::About
+        } else {
+            self.page = SettingsPage::ALL[index - 1];
+            SettingsSection::Textamp
+        };
+        self.item_index = 0;
+        self.scroll = 0;
+    }
+}
+
 /// Input dialog for text entry (playlist names, etc.).
 #[derive(Debug, Clone)]
 pub struct InputDialog {
@@ -4342,7 +4429,13 @@ pub struct InputDialog {
 #[derive(Debug, Clone)]
 pub enum InputDialogAction {
     AudioMuseSearch(crate::audiomuse::Feature),
-    NavidromePlaylistName { id: String },
+    SaveDescriptionPlaylist {
+        library_key: String,
+        tracks: Vec<Track>,
+    },
+    NavidromePlaylistName {
+        id: String,
+    },
     NavidromeName(String),
     FolderLocation,
     FolderName(String),

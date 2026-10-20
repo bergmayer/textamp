@@ -138,7 +138,15 @@ impl Recommendations {
                     return native;
                 }
             }
-            let result = async {
+            if self.binding.is_none() && self.direct.get().is_none() {
+                return native;
+            }
+            if let Err(error) = &native {
+                tracing::debug!(
+                    "Navidrome sonic lookup failed; trying direct AudioMuse: {error:#}"
+                );
+            }
+            async {
                 let ids = self.direct().await?.similar(id).await?;
                 let tracks = self
                     .resolve(ids.into_iter().filter(|t| t != id).collect(), false)
@@ -149,13 +157,7 @@ impl Recommendations {
                 );
                 Ok(tracks)
             }
-            .await;
-            result.with_context(|| {
-                native.err().map_or_else(
-                    || "Navidrome returned no analyzed matches".into(),
-                    |e| e.to_string(),
-                )
-            })
+            .await
         })
         .await
         .context("Analysis request timed out")?

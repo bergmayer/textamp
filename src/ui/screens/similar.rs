@@ -11,14 +11,25 @@ use crate::ui::RenderState as AppState;
 use crate::util::{format_duration, truncate_middle};
 
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 
 /// Render the similar content popup overlay.
 pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     let t = theme();
 
     // Centered popup: 65% wide, 80% tall
-    let popup_area = centered_rect(65, 80, area);
+    let details = state
+        .similar
+        .details
+        .open
+        .then(|| crate::app::result_details::track_list(state))
+        .flatten();
+    let popup_area = centered_rect(
+        if details.is_some() { 94 } else { 65 },
+        if details.is_some() { 90 } else { 80 },
+        area,
+    );
+    state.hit_regions.borrow_mut().track_pane = None;
     frame.render_widget(Clear, popup_area);
 
     let mode_label = match state.similar.mode {
@@ -39,14 +50,39 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     let inner = block.inner(popup_area);
     frame.render_widget(block, popup_area);
 
+    let panes =
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(inner);
+    let results_inner = if details.is_some() { panes[0] } else { inner };
+    let list_outer = if details.is_some() {
+        Rect::new(
+            popup_area.x,
+            popup_area.y,
+            results_inner.width + 1,
+            popup_area.height,
+        )
+    } else {
+        popup_area
+    };
+    if let Some((tracks, index)) = details {
+        crate::ui::app::render_track_details_pane(
+            frame,
+            state,
+            panes[1],
+            &tracks[index],
+            Some(&state.similar.details),
+        );
+    }
+
     // Register hit regions for mouse handler (tab_hint set below after footer rendering)
     {
         let mut hr = state.hit_regions.borrow_mut();
         hr.similar_content = Some(crate::app::presentation::SimilarRegions {
             outer: popup_area,
-            inner,
+            list_outer,
+            inner: results_inner,
             rows_per_item: 2,
             tab_hint: None,
+            retry_hint: None,
         });
     }
 
@@ -65,23 +101,70 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
 
     // Split inner: content list + footer
     let content_height = inner.height.saturating_sub(1);
-    let content_area = Rect::new(inner.x, inner.y, inner.width, content_height);
-    let footer_area = Rect::new(inner.x, inner.y + content_height, inner.width, 1);
+    let content_area = Rect::new(
+        results_inner.x,
+        results_inner.y,
+        results_inner.width,
+        content_height,
+    );
+    let footer_area = Rect::new(
+        results_inner.x,
+        inner.y + content_height,
+        results_inner.width,
+        1,
+    );
 
-    match state.similar.mode {
-        SimilarMode::Albums => render_albums(frame, state, content_area, popup_area),
-        SimilarMode::Tracks => render_tracks(frame, state, content_area, popup_area),
-        SimilarMode::Artists => render_artists(frame, state, content_area, popup_area),
+    if let Some(error) = &state.similar.error {
+        frame.render_widget(
+            Paragraph::new(format!("Couldn’t load similar {mode_label}\n\n{error}"))
+                .wrap(Wrap { trim: true })
+                .style(Style::default().fg(t.colors.fg_primary)),
+            content_area,
+        );
+    } else {
+        match state.similar.mode {
+            SimilarMode::Albums => render_albums(frame, state, content_area, popup_area),
+            SimilarMode::Tracks => render_tracks(frame, state, content_area, list_outer),
+            SimilarMode::Artists => render_artists(frame, state, content_area, popup_area),
+        }
     }
 
     // Footer with dynamic Tab hint
     let mut footer_spans = vec![
         Span::styled(" [Esc] ", Style::default().fg(t.colors.shortcut_key)),
-        Span::styled("close", Style::default().fg(t.colors.fg_muted)),
+        Span::styled(
+            if state.similar.details.focused {
+                "results"
+            } else {
+                "close"
+            },
+            Style::default().fg(t.colors.fg_muted),
+        ),
     ];
 
     // Track width before [Tab] to compute click region
-    let esc_width: u16 = " [Esc] close".len() as u16;
+    let mut esc_width: u16 = if state.similar.details.focused {
+        " [Esc] results"
+    } else {
+        " [Esc] close"
+    }
+    .len() as u16;
+    if state.similar.error.is_some() && state.similar.source_key.is_some() {
+        let retry = "  [F5] retry";
+        footer_spans.push(Span::styled(
+            retry,
+            Style::default().fg(t.colors.shortcut_key),
+        ));
+        if let Some(regions) = &mut state.hit_regions.borrow_mut().similar_content {
+            regions.retry_hint = Some(Rect::new(
+                footer_area.x + esc_width.min(footer_area.width),
+                footer_area.y,
+                (retry.len() as u16).min(footer_area.width.saturating_sub(esc_width)),
+                1,
+            ));
+        }
+        esc_width += retry.len() as u16;
+    }
     let mut has_tab_hint = false;
 
     match state.similar.mode {
@@ -297,7 +380,11 @@ fn render_tracks(frame: &mut Frame, state: &AppState, inner: Rect, popup_area: R
                 (
                     Style::default().fg(t.colors.selection_text),
                     Style::default().fg(t.colors.selection_text),
-                    Style::default().bg(t.colors.selection_bar_bg),
+                    Style::default().bg(if state.similar.details.focused {
+                        t.colors.bg_highlight
+                    } else {
+                        t.colors.selection_bar_bg
+                    }),
                 )
             } else {
                 (

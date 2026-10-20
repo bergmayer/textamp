@@ -7,6 +7,7 @@ pub fn reset_selection(state: &mut AppState) {
 }
 
 pub fn initialize(state: &mut AppState, config: &Config) {
+    state.sources.audiomuse.description_history = config.description_history.clone();
     state.sources.audiomuse.connections = config.audiomuse_connections.clone();
     state.sources.sonic_disabled_libraries = config.sonic_disabled_libraries.clone();
     state.sources.folders = config.folder_sources.clone();

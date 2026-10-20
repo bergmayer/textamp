@@ -44,27 +44,18 @@ fn open_settings(state: &mut AppState) {
 }
 
 #[test]
-fn tab_and_arrows_reach_all_three_sections() {
+fn tab_and_arrows_reach_all_categories() {
     let mut state = AppState::new();
     manager::initialize(&mut state, &config());
     open_settings(&mut state);
     press(&mut state, KeyCode::Left);
-    assert_eq!(state.settings_state.focus, SettingsFocus::Sections);
-    assert_eq!(SettingsSection::all().len(), 3);
-    for section in SettingsSection::all() {
-        assert_eq!(state.settings_state.section, *section);
+    for index in 0..textamp::app::state::SettingsState::CATEGORY_COUNT {
+        assert_eq!(state.settings_state.category_index(), index);
         press(&mut state, KeyCode::Tab);
-        if *section == SettingsSection::Textamp {
-            assert_eq!(state.settings_state.focus, SettingsFocus::Pages);
-            press(&mut state, KeyCode::Tab);
-        }
         assert_eq!(state.settings_state.focus, SettingsFocus::Content);
         press(&mut state, KeyCode::BackTab);
-        if *section == SettingsSection::Textamp {
-            press(&mut state, KeyCode::BackTab);
-        }
         assert_eq!(state.settings_state.focus, SettingsFocus::Sections);
-        press(&mut state, KeyCode::Right);
+        press(&mut state, KeyCode::Down);
     }
 }
 
@@ -367,7 +358,7 @@ async fn switching_and_managing_are_separate_and_cancel_preserves_player_state()
             .unwrap();
     }
     assert!(manager::settings_active(&state));
-    assert_eq!(state.settings_state.focus, SettingsFocus::Content);
+    assert_eq!(state.settings_state.focus, SettingsFocus::Sections);
     assert!(!state.popups.library_picker_active);
     dispatch_action(
         SearchAction::OpenLibraryPicker.into(),
@@ -418,9 +409,9 @@ fn up_from_first_saved_library_returns_to_settings_menu() {
     press(&mut state, KeyCode::Up);
     assert_eq!(state.popups.library_picker_index, 0);
     assert_eq!(state.settings_state.focus, SettingsFocus::Sections);
-    press(&mut state, KeyCode::Right);
-    assert_eq!(state.settings_state.section, SettingsSection::Textamp);
     press(&mut state, KeyCode::Down);
-    assert_eq!(state.settings_state.focus, SettingsFocus::Pages);
+    assert_eq!(state.settings_state.section, SettingsSection::Textamp);
+    press(&mut state, KeyCode::Right);
+    assert_eq!(state.settings_state.focus, SettingsFocus::Content);
     assert!(state.popups.library_dialog.is_none());
 }

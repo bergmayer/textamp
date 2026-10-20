@@ -50,6 +50,7 @@ pub async fn dispatch(
 
     match action {
         SearchAction::ExecuteLocalSearch => {
+            state.search.details = Default::default();
             let query = state.search.query.to_lowercase();
             if query.is_empty() {
                 state.search.results = None;
@@ -125,6 +126,9 @@ pub async fn dispatch(
             }
         }
         SearchAction::SelectSearchResult => {
+            if crate::app::result_details::open(state) {
+                return Ok(vec![]);
+            }
             if state.sources.active.folder().is_some() {
                 let track = state
                     .search
@@ -400,6 +404,7 @@ pub async fn dispatch(
         }
         // Search popup actions
         SearchAction::OpenSearchPopup => {
+            state.search.details = Default::default();
             if state.list_filter.active {
                 state.list_filter.deactivate();
             }
@@ -414,6 +419,7 @@ pub async fn dispatch(
             }
         }
         SearchAction::CloseSearchPopup => {
+            state.search.details = Default::default();
             state.popups.search_active = false;
         }
 
@@ -423,7 +429,7 @@ pub async fn dispatch(
             if matches!(action, SearchAction::ManageLibraries) {
                 state.set_view(View::Settings);
                 state.settings_state.section = crate::app::state::SettingsSection::Libraries;
-                state.settings_state.focus = crate::app::state::SettingsFocus::Content;
+                state.settings_state.focus = crate::app::state::SettingsFocus::Sections;
             } else {
                 state.popups.library_picker_active = true;
             }
@@ -897,31 +903,9 @@ fn select_search_result(state: &mut AppState) -> Vec<Action> {
             }
         }
         SearchTab::Tracks => {
-            if let Some(track) = results.tracks.get(local_idx) {
-                // Navigate to the track in Library (artist → album).
-                // Mirrors the right-click "Open in Library" action so
-                // Miller columns end up in the same state the user
-                // would have built by drilling through manually.
-                let artist_key = track.grandparent_rating_key.clone();
-                let album_key = track.parent_rating_key.clone();
-                let artist_name = track.artist_name().to_string();
-                let album_title = track.album_name().to_string();
-                state.search.query.clear();
-                state.popups.search_active = false;
-                if let Some(akey) = artist_key {
-                    return vec![crate::app::action::BrowseAction::OpenInLibrary {
-                        artist_key: akey,
-                        artist_name,
-                        album_key,
-                        album_title: Some(album_title),
-                    }
-                    .into()];
-                }
-                // Track has no artist key — fall back to playing it.
-                return vec![
-                    crate::app::action::QueueAction::PlayTrack(Box::new(track.clone())).into(),
-                ];
-            }
+            // Handled in place before taking the results.
+            state.search.results = Some(results);
+            return vec![];
         }
         SearchTab::Playlists => {
             if let Some(playlist) = results.playlists.get(local_idx) {

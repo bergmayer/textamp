@@ -65,6 +65,10 @@ pub enum DataEvent {
         request_id: u64,
         error: crate::app::action::AsyncError,
     },
+    SimilarLoadFailed {
+        request_key: String,
+        message: String,
+    },
     SimilarAlbumsLoaded {
         request_key: String,
         albums: Vec<Album>,

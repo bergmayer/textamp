@@ -54,6 +54,7 @@ tracing-appender = "0.2"
 thiserror = "1"
 anyhow = "1"
 zeroize = "1"
+mdns-sd = "0.21" # Built-in AirPlay discovery on macOS, Linux and Windows.
 md5 = "0.8" # Subsonic's required salted-password authentication algorithm
 flate2 = "1" # Stream large metadata snapshots into compressed local caches.
 time = { version = "0.3", features = ["local-offset"] } # Calendar-based radio.
@@ -96,7 +97,7 @@ fuzzy-matcher = "0.3"
 name = "textamp"
 path = "src/bin/textamp_tui.rs"
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [profile.release]

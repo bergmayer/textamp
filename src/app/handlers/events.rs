@@ -66,6 +66,7 @@ pub(crate) fn reset_account_scoped_state(state: &mut AppState) {
     state.list_state.reset();
     state.scroll = crate::app::state::ScrollPins::default();
     state.popups.close_all();
+    state.sonic_details = None;
     state.track_pane_open = false;
     state.track_pane_focused = false;
     state.track_pane_index = 0;
@@ -327,11 +328,6 @@ pub fn handle_app_event(
                 state.library.right_panel_loading = false;
                 current = true;
             }
-            if state.similar.request_key.as_deref() == Some(&request_key) {
-                state.similar.request_key = None;
-                state.similar.loading = false;
-                current = true;
-            }
             if state.related.source_key == request_key {
                 state.related.loading = false;
                 current = true;
@@ -376,6 +372,17 @@ pub fn handle_app_event(
             state.set_error(error.message);
             vec![]
         }
+        Event::Data(DataEvent::SimilarLoadFailed {
+            request_key,
+            message,
+        }) => {
+            if state.similar.request_key.as_deref() == Some(&request_key) {
+                state.similar.request_key = None;
+                state.similar.loading = false;
+                state.similar.error = Some(message);
+            }
+            vec![]
+        }
         Event::Data(DataEvent::SimilarAlbumsLoaded {
             request_key,
             albums,
@@ -385,6 +392,7 @@ pub fn handle_app_event(
                 return vec![];
             }
             state.similar.request_key = None;
+            state.similar.error = None;
             state.similar.albums = albums;
             state.similar.mode = crate::app::state::SimilarMode::Albums;
             state.similar.loading = false;
@@ -400,6 +408,7 @@ pub fn handle_app_event(
                 return vec![];
             }
             state.similar.request_key = None;
+            state.similar.error = None;
             state.similar.tracks = tracks;
             state.similar.mode = crate::app::state::SimilarMode::Tracks;
             state.similar.loading = false;
@@ -437,6 +446,7 @@ pub fn handle_app_event(
                 return vec![];
             }
             state.similar.request_key = None;
+            state.similar.error = None;
             state.similar.artists = artists;
             state.similar.mode = crate::app::state::SimilarMode::Artists;
             state.similar.loading = false;
@@ -871,7 +881,10 @@ pub fn handle_app_event(
             // the API call. Idempotent — the dispatcher early-returns
             // when the entry is already loaded or in flight.
             if state.view == crate::app::state::View::Browse {
-                if let Some(track) = state.focused_track() {
+                if let Some(track) = crate::app::sonic_details::visible(state)
+                    .and_then(|d| d.tracks.get(d.index))
+                    .or_else(|| state.focused_track())
+                {
                     let key = track.rating_key.clone();
                     if crate::app::sources::sonic::enabled(state)
                         && !key.is_empty()

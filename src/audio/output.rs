@@ -35,7 +35,7 @@ pub fn local_devices() -> Result<Vec<String>, String> {
 
 pub(crate) enum Backend {
     Local(Box<RodioBackend>),
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     AirPlay(Box<super::airplay::AirplayBackend>),
 }
 
@@ -43,7 +43,7 @@ macro_rules! delegate {
     ($self:ident, $method:ident $(, $arg:expr)*) => {
         match $self {
             Self::Local(backend) => backend.$method($($arg),*),
-            #[cfg(target_os = "linux")]
+            #[cfg(unix)]
             Self::AirPlay(backend) => backend.$method($($arg),*),
         }
     };
@@ -57,16 +57,16 @@ impl Backend {
                 RodioBackend::new_for_device(&name).map(|b| Self::Local(Box::new(b)))
             }
             AudioOutput::AirPlay(destination) => {
-                #[cfg(target_os = "linux")]
+                #[cfg(unix)]
                 {
                     super::airplay::AirplayBackend::new(destination)
                         .map(|b| Self::AirPlay(Box::new(b)))
                 }
-                #[cfg(not(target_os = "linux"))]
+                #[cfg(not(unix))]
                 {
                     let _ = destination;
                     Err(AudioError::PlaybackError(
-                        "AirPlay output is supported on Linux".into(),
+                        "The AirPlay sender requires macOS or Linux; a native Windows sender is not available yet.".into(),
                     ))
                 }
             }
@@ -78,11 +78,11 @@ impl Backend {
         data: BufferedInput,
         position: Duration,
     ) -> Result<(), AudioError> {
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(unix))]
         let _ = id;
         match self {
             Self::Local(b) => b.start_buffered(data, position),
-            #[cfg(target_os = "linux")]
+            #[cfg(unix)]
             Self::AirPlay(b) => b.start_buffered(id, data, position),
         }
     }

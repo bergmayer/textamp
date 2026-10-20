@@ -60,7 +60,7 @@ async fn shortcut_settings_and_palette_share_the_picker() {
     ));
     state.view = View::Settings;
     state.settings_state.section = SettingsSection::Textamp;
-    state.settings_state.page = SettingsPage::Display;
+    state.settings_state.page = SettingsPage::Audio;
     state.settings_state.focus = SettingsFocus::Content;
     state.settings_state.item_index = state
         .textamp_settings()

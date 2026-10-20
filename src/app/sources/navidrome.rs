@@ -637,6 +637,12 @@ pub async fn dispatch(
                 .ui
                 .library_view_settings
                 .retain(|key, _| !key.starts_with(&format!("navidrome:{id}:")));
+            config.description_history.retain(|key, _| {
+                serde_json::from_str::<serde_json::Value>(key)
+                    .ok()
+                    .is_none_or(|value| value[1].as_str() != Some(id.as_str()))
+            });
+            state.sources.audiomuse.description_history = config.description_history.clone();
             for key in analysis_keys {
                 config.audiomuse_connections.remove(&key);
                 state.sources.audiomuse.connections.remove(&key);
@@ -778,19 +784,27 @@ pub async fn dispatch(
             }
             match result {
                 Ok(actions) => return Ok(actions),
-                Err(error)
-                    if slot == super::audiomuse::SYNC_SLOT
-                        && state
-                            .sources
-                            .audiomuse
-                            .snapshot
-                            .as_ref()
-                            .is_some_and(|s| s.updated != 0) =>
-                {
+                // Index maintenance must never interrupt browsing or playback,
+                // including the first import before a complete cache exists.
+                Err(error) if slot == super::audiomuse::SYNC_SLOT => {
                     tracing::warn!("AudioMuse refresh: {error}");
-                    state.set_status(
-                        "AudioMuse refresh failed · cached data kept · F5 retries".into(),
-                    );
+                    let retained = state
+                        .sources
+                        .audiomuse
+                        .snapshot
+                        .as_ref()
+                        .filter(|s| !s.tracks.is_empty())
+                        .map(|s| {
+                            if s.updated == 0 {
+                                "partial results kept"
+                            } else {
+                                "cached data kept"
+                            }
+                        });
+                    state.set_status(match retained {
+                        Some(retained) => format!("AudioMuse sync failed · {retained} · retry in an analysis category (F5)"),
+                        None => "AudioMuse unavailable · retry in an analysis category (F5)".into(),
+                    });
                 }
                 Err(error) => state.set_error(error),
             }

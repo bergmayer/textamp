@@ -563,3 +563,45 @@ async fn auth_and_wrong_track_boundaries_fail_without_exposing_secrets() {
         .validate()
         .is_err());
 }
+
+#[tokio::test]
+async fn missing_similarity_seed_is_not_misreported_as_a_missing_feature() {
+    for (status, body, expected) in [
+        (
+            404,
+            json!({"error":"Target track not found in index or no similar tracks found.","error_code":1004}),
+            "Check this track’s analysis and Navidrome connection in AudioMuse, then retry.",
+        ),
+        (
+            404,
+            json!({"error":"private diagnostic"}),
+            "endpoint or item unavailable",
+        ),
+        (
+            401,
+            json!({"error":"private diagnostic"}),
+            "check credentials",
+        ),
+        (
+            503,
+            json!({"error":"private diagnostic"}),
+            "analysis index not ready",
+        ),
+    ] {
+        let s = server(move |r| {
+            if r.path == "auth" {
+                (200, json!({}))
+            } else {
+                (status, body.clone())
+            }
+        })
+        .await;
+        let api = Client::connect(&connection(&s.url), "fixture-password")
+            .await
+            .unwrap();
+        let error = format!("{:#}", api.similar("missing-seed").await.unwrap_err());
+        assert!(error.contains(expected), "{error}");
+        assert!(!error.contains("feature unavailable"));
+        assert!(!error.contains("private diagnostic"));
+    }
+}

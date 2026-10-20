@@ -159,7 +159,7 @@ pub fn track_context_entries(state: &AppState, track: &Track, floating: bool) ->
     // 3. Similar / related explorers.
     out.push(ContextEntry {
         label: "Show Similar Tracks".to_string(),
-        hint: None,
+        hint: Some("^M".into()),
         kind: ContextKind::ShowSimilarTracks {
             rating_key: track_key.clone(),
             title: track_label.clone(),

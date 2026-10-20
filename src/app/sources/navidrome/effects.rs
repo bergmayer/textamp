@@ -8,6 +8,35 @@ pub(super) mod discovery;
 mod media;
 pub use media::{play, scrobble};
 
+pub fn save_playlist(
+    state: &mut AppState,
+    tx: &mpsc::Sender<Event>,
+    session: Session,
+    name: String,
+    tracks: Vec<Track>,
+) {
+    spawn(state, tx, "playlist-write", async move {
+        let result = async {
+            anyhow::ensure!(!tracks.is_empty(), "No tracks to save");
+            anyhow::ensure!(!name.trim().is_empty(), "Playlist name cannot be empty");
+            let mut params = vec![("name", name.clone())];
+            for track in &tracks {
+                params.push(("songId", session.id(&track.rating_key)?));
+            }
+            session.client.call("createPlaylist", &params).await?;
+            Ok(())
+        }
+        .await
+        .map_err(failure);
+        Ok(vec![QueueAction::QueuePlaylistSaved {
+            name,
+            track_count: tracks.len(),
+            result,
+        }
+        .into()])
+    });
+}
+
 pub fn event(event: impl Into<Event>) -> Action {
     NavAction::Event(Box::new(event.into())).into()
 }
@@ -221,26 +250,7 @@ pub fn intercept(
         }
         Action::Queue(QueueAction::SaveQueueAsPlaylist(name)) => {
             let tracks = state.playback_tracks().to_vec();
-            spawn(state, tx, "playlist-write", async move {
-                let result = async {
-                    anyhow::ensure!(!tracks.is_empty(), "No tracks to save");
-                    anyhow::ensure!(!name.trim().is_empty(), "Playlist name cannot be empty");
-                    let mut params = vec![("name", name.clone())];
-                    for track in &tracks {
-                        params.push(("songId", session.id(&track.rating_key)?));
-                    }
-                    session.client.call("createPlaylist", &params).await?;
-                    Ok(())
-                }
-                .await
-                .map_err(failure);
-                Ok(vec![QueueAction::QueuePlaylistSaved {
-                    name,
-                    track_count: tracks.len(),
-                    result,
-                }
-                .into()])
-            });
+            save_playlist(state, tx, session, name, tracks);
         }
 
         _ => return super::super::routing::navidrome_fallback(action),

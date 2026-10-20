@@ -15,10 +15,13 @@
 //! ├──────────────────────────────────────────────────────────────┤
 //! │ Library / Now Playing │ :  /  ⇥  ,  \  |                   │
 //! └──────────────────────────────────────────────────────────────┘
+//! Footer shortcuts accept mouse clicks without adding keyboard focus stops.
 //! The existing `:` command control and right-click track menu share entries,
 //! including capability-gated Sonic Radio; no additional shortcut is needed.
-//! Sidebar collections (favorites, album history, AudioMuse categories) are not
-//! duplicated as commands. The existing `:` control still opens the action list.
+//! Describe music has history and two-row results with a Save as playlist header.
+//! Enter on a related track opens/replaces one adjacent detail pane; Left returns.
+//! The palette offers Jump to artist/album for the highlighted or now-playing track.
+//! Sidebar collections are not duplicated as commands; `:` opens the action list.
 //! The untitled sidebar starts with Search, followed by lowercase group headings.
 //! Highlighting Search shows a themed logo and Enter prompt.
 
@@ -106,8 +109,14 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     // Now Playing below. View selects keyboard focus; retained selections
     // in the other pane are not focused. Settings / Help replace the upper
     // pane; Auth / Search and modal overlays use the full frame.
+    // Discovery popups retain the underlying view and its split layout.
+    let background_view = if matches!(state.view, View::Similar | View::Related) {
+        state.previous_view.unwrap_or(View::Browse)
+    } else {
+        state.view
+    };
     let tall_eligible = matches!(
-        state.view,
+        background_view,
         View::Browse | View::Queue | View::NowPlaying | View::Settings | View::Help
     );
     // Full-screen viewer replaces both panes; modal overlays still render above it.
@@ -141,7 +150,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         // Top half: whichever view the user is on. Settings / Help
         // get the top half so the Now Playing visualizer stays visible
         // below; Browse / Queue / NowPlaying behave as before.
-        match state.view {
+        match background_view {
             View::Settings => screens::settings::render(frame, state, split[0]),
             View::Help => screens::help::render(frame, state, split[0]),
             _ => render_browse_in(frame, state, split[0], true),
@@ -155,16 +164,22 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         );
         render_queue_and_visualizer_in(frame, state, split[2], false);
     } else {
-        match state.view {
+        match background_view {
             View::Browse => render_browse(frame, state),
             View::Queue => render_queue_and_visualizer(frame, state),
             View::NowPlaying => render_queue_and_visualizer(frame, state),
             View::Search => render_search(frame, state),
-            View::Similar => render_similar(frame, state),
-            View::Related => render_related(frame, state),
+            View::Similar | View::Related => render_browse(frame, state),
             View::Help => render_help(frame, state),
             View::Settings => render_settings(frame, state),
         }
+    }
+
+    match state.view {
+        // Similar owns its inline failure state and clickable F5 retry footer.
+        View::Similar => screens::similar::render(frame, state, frame.area()),
+        View::Related => screens::related::render(frame, state, frame.area()),
+        _ => {}
     }
 
     // Render search popup if active (floating dialog)
@@ -172,7 +187,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         screens::filter::render(frame, state, frame.area());
     }
 
-    // Radio/DJ and Linux AirPlay output selection use the command palette.
+    // Radio/DJ and AirPlay output selection use the command palette.
     // Output selection is stopped-only; discovery never changes playback.
     // Radio/DJ controls use the shared capability-filtered command palette.
     // Shortcut labels and activation use the same presentation rows.
@@ -346,7 +361,8 @@ fn render_browse_in(frame: &mut Frame, state: &AppState, area: Rect, skip_transp
     } else {
         state.pane_track()
     };
-    let n_pane: usize = if pane_track.is_some() { 1 } else { 0 };
+    let child = crate::app::sonic_details::visible(state);
+    let n_pane = usize::from(pane_track.is_some()) + usize::from(child.is_some());
 
     let total_cols_wanted = 1 + n_meaningful_miller + n_pane;
 
@@ -376,7 +392,8 @@ fn render_browse_in(frame: &mut Frame, state: &AppState, area: Rect, skip_transp
     // path (`render_folder_view`) so the ribbon model doesn't
     // apply directly there yet.
     let scrolling_browse = !search_selected
-        && state.miller_layout == crate::app::state::MillerLayoutMode::Scrolling
+        && (state.miller_layout == crate::app::state::MillerLayoutMode::Scrolling
+            || (child.is_some() && full_area.width < 120))
         && (matches!(
             state.browse_category,
             BrowseCategory::Library | BrowseCategory::Playlists
@@ -402,7 +419,11 @@ fn render_browse_in(frame: &mut Frame, state: &AppState, area: Rect, skip_transp
         if state.category_column_focused {
             0
         } else if state.track_pane_focused {
-            ribbon_total.saturating_sub(1)
+            ribbon_total.saturating_sub(if crate::app::sonic_details::focused(state) {
+                1
+            } else {
+                n_pane
+            })
         } else if state.alphabet_strip_focused {
             1
         } else {
@@ -664,16 +685,21 @@ fn render_browse_in(frame: &mut Frame, state: &AppState, area: Rect, skip_transp
     // In scroll mode the pane only "claims" a slot when its ribbon
     // index is actually in the visible window; otherwise it's
     // scrolled off and shouldn't push miller cols out of the layout.
-    let pane_renders = if scrolling_browse {
-        let pane_ribbon_idx = ribbon_total.saturating_sub(1);
-        n_pane > 0 && pane_ribbon_idx >= ribbon_start && pane_ribbon_idx < ribbon_end
-    } else {
-        n_pane > 0
-    };
+    // At most two detail slots: the original track and one reusable related track.
+    let pane_renders = n_pane > 0
+        && (!scrolling_browse || {
+            let idx = ribbon_total - n_pane;
+            idx >= ribbon_start && idx < ribbon_end
+        });
+    let child_renders = child.is_some()
+        && (!scrolling_browse || {
+            let idx = ribbon_total - 1;
+            idx >= ribbon_start && idx < ribbon_end
+        });
     let pane_w = if pane_renders { col_width } else { 0 };
     let n_visible_miller = visible_count
-        .saturating_sub(if cat_col_renders { 1 } else { 0 })
-        .saturating_sub(if pane_renders { 1 } else { 0 });
+        .saturating_sub(usize::from(cat_col_renders))
+        .saturating_sub(usize::from(pane_renders) + usize::from(child_renders));
     let miller_w = (n_visible_miller as u16) * col_width;
 
     // In Niri scroll mode, the Miller area's x position depends on
@@ -722,10 +748,17 @@ fn render_browse_in(frame: &mut Frame, state: &AppState, area: Rect, skip_transp
         category => {
             if let Some(nav) = state.browse_nav() {
                 let title = if category == BrowseCategory::Library {
-                    state
-                        .sources
-                        .nav_collection
-                        .map_or("artists", |kind| kind.label())
+                    state.sources.nav_collection.map_or("artists", |kind| {
+                        if kind
+                            == crate::app::sources::navidrome::commands::CollectionKind::AudioMuse(
+                                crate::audiomuse::Feature::Describe,
+                            )
+                        {
+                            "Description history"
+                        } else {
+                            kind.label()
+                        }
+                    })
                 } else {
                     category.name()
                 };
@@ -744,7 +777,29 @@ fn render_browse_in(frame: &mut Frame, state: &AppState, area: Rect, skip_transp
 
     // Track details pane (when focused row is a Track).
     if let (Some(area), Some(track)) = (pane_area, pane_track) {
-        render_track_details_pane(frame, state, area, track);
+        render_track_details_pane(frame, state, area, track, None);
+    }
+
+    if child_renders {
+        if let Some(child) = child {
+            let area = Rect {
+                x: content_area.x + miller_w + pane_w,
+                y: full_area.y,
+                width: col_width,
+                height: full_area.height,
+            };
+            let parent_regions = state.hit_regions.borrow_mut().track_pane.take();
+            render_track_details_pane(
+                frame,
+                state,
+                area,
+                &child.tracks[child.index],
+                Some(&child.details),
+            );
+            let mut regions = state.hit_regions.borrow_mut();
+            regions.sonic_details = regions.track_pane.take();
+            regions.track_pane = parent_regions;
+        }
     }
 
     // In scrolling mode, the strip overlays the artists col's
@@ -874,34 +929,6 @@ fn render_search(frame: &mut Frame, state: &AppState) {
     // Unified search/filter screen handles all tabs including Global (with 3-column layout)
     screens::filter::render(frame, state, layout.content);
     render_transport(frame, state, layout.transport);
-}
-
-fn render_similar(frame: &mut Frame, state: &AppState) {
-    // Render the previous view behind the popup
-    let prev = state.previous_view.unwrap_or(View::Browse);
-    match prev {
-        View::Queue => render_queue_and_visualizer(frame, state),
-        View::NowPlaying => render_queue_and_visualizer(frame, state),
-        View::Browse => render_browse(frame, state),
-        _ => render_browse(frame, state),
-    }
-
-    // Overlay the similar popup
-    screens::similar::render(frame, state, frame.area());
-}
-
-fn render_related(frame: &mut Frame, state: &AppState) {
-    // Render the previous view behind the popup
-    let prev = state.previous_view.unwrap_or(View::Browse);
-    match prev {
-        View::Queue => render_queue_and_visualizer(frame, state),
-        View::NowPlaying => render_queue_and_visualizer(frame, state),
-        View::Browse => render_browse(frame, state),
-        _ => render_browse(frame, state),
-    }
-
-    // Overlay the related popup
-    screens::related::render(frame, state, frame.area());
 }
 
 fn render_help(frame: &mut Frame, state: &AppState) {
@@ -1639,17 +1666,27 @@ fn render_alphabet_strip(frame: &mut Frame, state: &AppState, area: Rect) {
 /// file basename — and a Sonically-Similar list at the bottom.
 /// Renders focus highlights (Play button or similar row) when the
 /// pane has keyboard focus.
-fn render_track_details_pane(
+pub(crate) fn render_track_details_pane(
     frame: &mut Frame,
     state: &AppState,
     area: Rect,
     track: &crate::library::models::Track,
+    details: Option<&crate::app::result_details::State>,
 ) {
     use crate::util::{format_duration, truncate_middle};
     let t = theme();
 
-    let pane_focused = state.view == View::Browse && state.track_pane_focused;
-    let pane_idx = state.track_pane_index;
+    let pane_focused = details.map_or(
+        state.view == View::Browse
+            && state.track_pane_focused
+            && !crate::app::sonic_details::focused(state),
+        |d| d.focused,
+    );
+    let pane_idx = details.map_or(state.track_pane_index, |d| d.action_index);
+    let child_details =
+        details.is_some() && state.view == View::Browse && !state.popups.search_active;
+    let show_similar =
+        (details.is_none() || child_details) && crate::app::sources::sonic::enabled(state);
 
     let block = Block::default()
         .title(" track ")
@@ -1761,6 +1798,8 @@ fn render_track_details_pane(
         // No room for a body; register hit regions and return.
         let mut hr = state.hit_regions.borrow_mut();
         hr.track_pane = Some(crate::app::presentation::TrackPaneRegions {
+            scroll: 0,
+            max_scroll: 0,
             outer: area,
             play_button: play_area,
             following_button: following_area,
@@ -1782,7 +1821,15 @@ fn render_track_details_pane(
     let art_max_h = art_max_h_by_body.min(art_max_h_cap);
     let art_max_w = body_w;
     let art_w = art_max_w.min(art_max_h.saturating_mul(2)).max(4);
-    let art_h = (art_w / 2).max(2).min(art_max_h);
+    let art_h = if track
+        .parent_rating_key
+        .as_ref()
+        .is_none_or(|key| !state.artwork.grid_cache.contains_key(key))
+    {
+        1 // Keep metadata near the actions when there is no cached cover to show.
+    } else {
+        (art_w / 2).max(2).min(art_max_h)
+    };
 
     // Build the list of content rows. Each entry is `(content_y,
     // render_fn)` where `content_y` is the row offset inside the
@@ -1881,7 +1928,7 @@ fn render_track_details_pane(
     let similar_count: u16 = similar_data
         .map(|v| if v.is_empty() { 1 } else { v.len() as u16 })
         .unwrap_or(1); // "Loading…" placeholder occupies 1 row
-    let content_h: u16 = if crate::app::sources::sonic::enabled(state) {
+    let content_h: u16 = if show_similar {
         list_y + similar_count
     } else {
         info_bot
@@ -1903,6 +1950,15 @@ fn render_track_details_pane(
             want.min(max_scroll)
         }
         _ => 0,
+    };
+
+    let scroll = if child_details {
+        crate::app::sonic_details::visible(state)
+            .and_then(|c| c.scroll_pin)
+            .unwrap_or_else(|| scroll.max(details.map_or(0, |d| d.scroll)))
+            .min(max_scroll)
+    } else {
+        details.map_or(scroll, |d| d.scroll.min(max_scroll))
     };
 
     // Helper: convert content_y → screen_y, returning None if the row
@@ -1994,7 +2050,7 @@ fn render_track_details_pane(
 
     // Sonic-only section disappears when disabled; metadata/play controls remain.
     let mut similar_rows: Vec<(Rect, usize)> = Vec::new();
-    if crate::app::sources::sonic::enabled(state) {
+    if show_similar {
         // "Sonically Similar" header.
         if let Some(sy) = to_screen(header_y) {
             frame.render_widget(
@@ -2124,6 +2180,8 @@ fn render_track_details_pane(
     // Play / drill-into-similar / close-pane.
     let mut hr = state.hit_regions.borrow_mut();
     hr.track_pane = Some(crate::app::presentation::TrackPaneRegions {
+        scroll,
+        max_scroll,
         outer: area,
         play_button: play_area,
         following_button: following_area,
@@ -2362,6 +2420,15 @@ fn render_browse_miller_columns(
         } else {
             String::new()
         };
+        // Description results expose the same save command as the palette at
+        // the top of the column, without consuming a track row or changing hit tests.
+        let save_description =
+            col_idx == 1 && crate::app::sources::audiomuse::description_results(state).is_some();
+        let title = if save_description {
+            " [Save as playlist] ".to_owned()
+        } else {
+            title
+        };
         // In scroll mode the alphabet strip overlays the leftmost
         // 3 cells of the artist root col (Library only). Without
         // padding the title — which ratatui anchors to the top-left
@@ -2421,6 +2488,14 @@ fn render_browse_miller_columns(
 
         let full_inner = block.inner(col_area);
         frame.render_widget(block, col_area);
+        if save_description && col_area.width >= 6 {
+            state.hit_regions.borrow_mut().description_save = Some(Rect::new(
+                col_area.x + 1,
+                col_area.y,
+                20.min(col_area.width.saturating_sub(5)),
+                1,
+            ));
+        }
 
         // Tiny "x" close affordance in the top-right corner of every
         // closeable column (everything past the hidden root prefix).
@@ -3351,62 +3426,58 @@ fn render_library_picker(frame: &mut Frame, state: &AppState) {
 
 /// Settings content, not a startup screen or full-window modal.
 pub(super) fn render_library_manager(frame: &mut Frame, state: &AppState, inner: Rect) {
-    // Saved libraries sit below the setup menu; Up at the first row returns there.
+    // One library list, with the selected source's details below it. The category
+    // pane stays visible; Enter opens the source's General / Analysis / Cache form.
     use screens::settings::{panel, paper};
+    let focused = state.settings_state.focus == crate::app::state::SettingsFocus::Content;
+    let block = panel(" Libraries ")
+        .borders(Borders::TOP)
+        .border_style(paper().fg(if focused {
+            theme().colors.border_focused
+        } else {
+            theme().colors.border
+        }));
+    let content = block.inner(inner);
+    frame.render_widget(block, inner);
     let active = crate::app::sources::library_choices(state)
         .into_iter()
         .find(|entry| entry.active(state))
-        .map(|entry| entry.label())
-        .unwrap_or_else(|| "None".into());
+        .map_or_else(|| "None".into(), |entry| entry.label());
     let rows = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(1),
-        Constraint::Length(1),
+        Constraint::Length(if content.height >= 12 { 3 } else { 0 }),
+        Constraint::Length(u16::from(content.height >= 6)),
     ])
-    .split(inner);
+    .split(content);
     frame.render_widget(
-        Paragraph::new(format!(" Active: {active}")).style(paper()),
+        Paragraph::new(format!("Active: {active}")).style(paper().fg(theme().colors.fg_muted)),
         rows[0],
     );
-    let (list, detail) = if rows[1].width >= 74 {
-        let panes = Layout::horizontal([Constraint::Percentage(46), Constraint::Percentage(54)])
-            .split(rows[1]);
-        (panes[0], Some(panes[1]))
-    } else {
-        (rows[1], None)
+    render_managed_libraries(frame, state, rows[1]);
+    let choice = crate::app::sources::choices(state)
+        .get(state.popups.library_picker_index)
+        .cloned();
+    let detail = match choice {
+        Some(crate::app::sources::LibraryChoice::Add) | None => {
+            "Add a local folder, WebDAV share, or Subsonic / Navidrome server.".to_string()
+        }
+        Some(choice) => format!(
+            "{} · {}\n{}",
+            choice.label(),
+            choice.provider(),
+            choice.location()
+        ),
     };
-    let block = panel(" Saved libraries ");
-    let list_inner = block.inner(list);
-    frame.render_widget(block, list);
-    render_managed_libraries(frame, state, list_inner);
-    if let Some(detail) = detail {
-        let block = panel(" Library information ");
-        let content = block.inner(detail);
-        frame.render_widget(block, detail);
-        let choice = crate::app::sources::choices(state)
-            .get(state.popups.library_picker_index)
-            .cloned();
-        let text = match choice {
-            Some(crate::app::sources::LibraryChoice::Add) | None => {
-                "Local folder\nWebDAV share\nSubsonic / Navidrome".to_string()
-            }
-            Some(choice) => format!(
-                "{}\n{}\n\n{}",
-                choice.label(),
-                choice.provider(),
-                choice.location()
-            ),
-        };
-        frame.render_widget(
-            Paragraph::new(text)
-                .style(paper())
-                .wrap(Wrap { trim: true }),
-            content,
-        );
-    }
     frame.render_widget(
-        Paragraph::new(" ↑ Menu   Enter Open   A Add ").style(paper().fg(theme().colors.fg_accent)),
+        Paragraph::new(detail)
+            .style(paper().fg(theme().colors.fg_muted))
+            .wrap(Wrap { trim: true }),
         rows[2],
+    );
+    frame.render_widget(
+        Paragraph::new("Enter Manage library   A Add").style(paper().fg(theme().colors.fg_accent)),
+        rows[3],
     );
 }
 

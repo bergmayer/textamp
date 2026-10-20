@@ -59,6 +59,8 @@ pub enum Action {
 #[derive(Debug, Clone)]
 pub enum SystemAction {
     Quit,
+    /// Pointer activation of a rendered shortcut; uses the real key route/config.
+    ActivateFooterShortcut(crossterm::event::KeyCode),
 
     ShowError(String),
     ClearError,

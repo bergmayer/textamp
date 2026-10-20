@@ -187,9 +187,9 @@ pub async fn dispatch(
                         config.playback.transcode_kbps = next;
                         save_config_in_background(event_tx, config, "save transcode preference");
                         state.set_status(if next == 0 {
-                            "Streaming: original (direct play)".into()
+                            "Streaming: original file, starting with the next track".into()
                         } else {
-                            format!("Streaming: transcode to {next}kbps")
+                            format!("Streaming: up to {next} kbps, starting with the next track")
                         });
                     }
                     TextampSetting::Sidebar(section) => {

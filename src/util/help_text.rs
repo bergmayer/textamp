@@ -5,7 +5,7 @@ pub const HELP_TEXT: &str = r#"
 ESSENTIAL
   :              Command palette
   F7             Full-screen viewer: 1 artwork, 2–7 visualizers; Esc returns
-  F8             Sound output (local devices / Linux AirPlay)
+  F8             Sound output (local devices / macOS and Linux AirPlay)
   :q Enter       Quit (q or Q selects Quit first)
   /              Filter the focused column (type to narrow, ↑↓ to filtered results, Enter activates)
   Ctrl+F         Search (current-folder files for Local/WebDAV)
@@ -35,6 +35,11 @@ PLAY-ALBUM ROW  (tracks columns)
   first track; ↑ from the first track jumps back to the play row.
   Click the row to play; click an item below to select it.
   Track details: Play Track plays one; Play Track++ plays it and following tracks.
+  Sonically Similar rows: Enter opens adjacent details; further choices replace that pane.
+  Left/Esc returns to the original details; Right re-enters the adjacent pane.
+  Palette: Jump to artist / Jump to album uses the highlighted track, else now playing.
+
+The lower-right shortcut labels are clickable; Tab/arrows never focus them.
 
 VIEWS  (Ctrl+key)
   L  Library     G  Genres        O  Folders
@@ -82,18 +87,20 @@ TOOLS
 
   Startup opens your last library. F3: Enter switches, Esc cancels, F2 manages.
   F2 Settings → Libraries: add libraries, manage accounts and credentials.
-  Settings: ←→ selects menus/pages; ↓ enters contents; Tab / Shift+Tab changes panels.
-  Settings → Textamp: Enter / Space hides or shows sidebar sections for this library type.
-  Playback is local; streaming quality is configurable for server libraries.
+  Settings: ↑↓ chooses a category; Enter / → opens it; Tab / Shift+Tab switches panes.
+  Settings → Sidebar: Enter / Space hides or shows sidebar sections for this library type.
+  Streaming quality sets the next server stream’s bitrate limit; Original requests raw audio.
   Navidrome system lists and connected AudioMuse views are individually configurable.
-  Hidden collections can be restored in Settings → Textamp.
-  Setup: F10 menu; ↑↓ moves through controls; Enter/Space selects; Esc backs out.
-  : / Ctrl+P opens the command palette in settings. Setup uses the active app theme.
-  Textamp -> Display & audio -> Sound output opens the same F8 speaker picker.
+  Hidden collections can be restored in Settings → Sidebar.
+  Settings: F10 categories; 1–7 jumps in the category list; Enter/Space selects.
+  : / Ctrl+P opens commands. Left / Esc returns to categories; Esc there closes settings.
+  Click toggles controls. Click a theme to preview, then Apply theme to save.
+  Narrow terminals show one settings pane at a time. Changes save automatically.
+  Settings -> Audio -> Sound output opens the same F8 speaker picker.
   Sound output: arrows select, Enter applies, F5 finds speakers, Esc cancels.
   Stop playback before changing outputs. AirPlay setup errors appear in the picker.
   Libraries are grouped by type/account. [Active] marks the current library.
-  Up from the first saved library returns to the menu. Enter opens its options.
+  Up from the first saved library returns to categories. Enter opens its options.
   Left/Right selects General, Analysis or Cache.
   General: Make active, rename, connection and removal. Saving does not switch libraries.
   Analysis: Sonic checkbox and AudioMuse connection, where supported.
@@ -104,7 +111,7 @@ TOOLS
   Local folder: path and name in one form. Servers: URL, username, password and name.
   Enter checks/saves; Esc cancels. Blank password keeps the existing sign-in.
   Removing a server account removes its libraries/sign-ins from Textamp, not music.
-  Textamp pages: Themes, Display & audio, Sidebar, Search services.
+  Settings categories: Libraries, Appearance, Artwork, Audio, Sidebar, Search, About.
   Library Cache clears that library's metadata or downloaded artwork separately.
   Folder libraries: filename order, / filter, F5 reload, F4 artist biography.
   Saved catalogs/folder trees open first; weekly refresh plus F5. Album listings load on demand.
@@ -116,19 +123,28 @@ TOOLS
   Navidrome palette (:): favorite/unfavorite selection, ratings, lyrics,
   random mix, saved playback queues and playlist rename/replace/delete.
   Search… sits above browse: highlight for the logo, Enter for the Ctrl+F search popup.
-  Settings → Textamp → Themes: highlight previews the ANSI art; Enter applies.
-  Settings → Textamp → Display: artwork rendering and new-column covers are per library.
+  Settings → Appearance: highlight previews a music list; Enter applies.
+  Settings → Artwork: artwork rendering and new-column covers are per library.
   Local/WebDAV search: current-folder audio filenames; / also filters directory names.
   browse includes Navidrome system lists; audiomuse and playlists have separate headings.
   AudioMuse: AI labels, tempo, energy and key browse analyzed tracks, not file tags.
   AudioMuse: analysis cache updates weekly with library metadata; F5 updates it now.
   AudioMuse: Describe music… needs CLAP; Search lyrics… needs lyrics analysis.
-  Describe music: text wraps and scrolls in the prompt; Enter submits, Esc cancels.
-  Describe / lyrics sidebar: Right returns to current results; Enter starts a new search.
+  Describe music: Enter opens a new prompt; Right browses saved description history.
+  Similar tracks opens over the current view; Esc returns to that view.
+  Similar request failures stay in results; F5 retries (also clickable).
+  Description results: : → Save as playlist, or click the results header button.
+  History keeps 30 searches per library across restarts. Arrows browse; Enter opens track details.
+  AudioMuse background failures keep cached results; F5 in an analysis category retries.
+  Results show title, then artist and album, like playlists.
+  In the prompt, text wraps; Enter submits, Esc cancels.
+  Search and Similar Tracks: Enter/Right opens details beside results. Left returns to results.
+  Details: Play Track plays one; Play Track++ plays the selected track and following results.
+  Page Up/Down or the mouse wheel scrolls details. The play queue keeps Enter-to-play.
   AudioMuse: use the command palette's AudioMuse analysis for the selected track's details.
   Bios: provider first, Wikipedia fallback. ↑↓ scroll, ←→ photos, B source.
   Ctrl+R  Related artists
-  Ctrl+M  Similar
+  Ctrl+M  Show similar tracks / albums / artists for the selection
   Ctrl+J  Open in library                  Ctrl+W  Close column
   Alt+F   Activate filter (same as `/`)
   Alt+R   Random album radio (leaf-folder albums for local / WebDAV)
