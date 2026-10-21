@@ -142,7 +142,7 @@ TOOLS
   Details: Play Track plays one; Play Track++ plays the selected track and following results.
   Page Up/Down or the mouse wheel scrolls details. The play queue keeps Enter-to-play.
   AudioMuse: use the command palette's AudioMuse analysis for the selected track's details.
-  Bios: provider first, Wikipedia fallback. ↑↓ scroll, ←→ photos, B source.
+  Bios: Navidrome first, Wikipedia fallback. ↑↓ scroll, ←→ photos, B source.
   Ctrl+R  Related artists
   Ctrl+M  Show similar tracks / albums / artists for the selection
   Ctrl+J  Open in library                  Ctrl+W  Close column

@@ -176,9 +176,17 @@ already support the Various Artists rule; use **F5** in Library to fetch newly
 supported compilation tags. Missing performer data is not guessed. Local/WebDAV
 keep their normal folder browsing.
 
-Artist biographies use the provider first, then an on-demand English Wikipedia
-lookup. Exact names/aliases must match a musical-artist identity in Wikidata;
-ambiguous matches are not guessed. Articles show clean text and photos. Arrows
+Artist biographies use Navidrome's configured metadata agents first, with an
+eight-second artist-info request limit. Missing biographies, server errors and
+timeouts fall back to an on-demand English Wikipedia lookup. Cached or returned
+MusicBrainz artist IDs, when available, constrain the Wikidata identity;
+MusicBrainz's Wikidata link can resolve an artist whose name has changed.
+Without an ID, exact names/aliases must match one musical artist in Wikidata;
+ambiguous matches are not guessed, including when another match has no English
+article. Conflicting server identities are withheld; Wikipedia retains its strict
+identity checks. An image failure does not discard loaded biography text.
+Navidrome supports biographies through optional external agents, but their
+availability depends on server configuration and coverage. Articles show clean text and photos. Arrows
 scroll/change photos; B opens the source. Down past the text or Tab focuses
 Search Google; Enter activates it. G searches directly in your default browser.
 No custom biography sidecars.

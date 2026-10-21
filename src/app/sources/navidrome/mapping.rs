@@ -10,6 +10,7 @@ fn clean(s: String) -> String {
 impl Session {
     pub fn artist(&self, a: n::Artist) -> Artist {
         Artist {
+            music_brainz_id: a.music_brainz_id,
             rating_key: self.key(&a.id),
             key: self.key(&a.id),
             title: clean(a.name),

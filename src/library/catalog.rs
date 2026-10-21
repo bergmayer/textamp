@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Artist {
+    /// Stable artist identity from OpenSubsonic; absent in older caches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub music_brainz_id: Option<String>,
     #[serde(default)]
     pub rating_key: String,
     #[serde(default)]
