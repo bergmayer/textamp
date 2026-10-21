@@ -126,7 +126,7 @@ TOOLS
   Describe music: text wraps and scrolls in the prompt; Enter submits, Esc cancels.
   Describe / lyrics sidebar: Right returns to current results; Enter starts a new search.
   AudioMuse: use the command palette's AudioMuse analysis for the selected track's details.
-  Bios: provider first, Wikipedia fallback. ↑↓ scroll, ←→ photos, B source.
+  Bios: Navidrome first, Wikipedia fallback. ↑↓ scroll, ←→ photos, B source.
   Ctrl+R  Related artists
   Ctrl+M  Similar
   Ctrl+J  Open in library                  Ctrl+W  Close column

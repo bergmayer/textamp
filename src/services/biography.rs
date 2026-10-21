@@ -34,11 +34,22 @@ pub struct BioImage {
 
 /// One bounded operation; cancellation drops HTTP requests with the popup.
 pub async fn wikipedia(artist: &str) -> Result<Biography> {
+    wikipedia_for_artist(artist, None).await
+}
+
+/// A supplied MusicBrainz ID constrains every match, even if its lookup fails.
+pub async fn wikipedia_for_artist(
+    artist: &str,
+    music_brainz_id: Option<&str>,
+) -> Result<Biography> {
     let client = client()?;
-    let (mut biography, photos) =
-        tokio::time::timeout(Duration::from_secs(30), lookup(&client, artist))
-            .await
-            .context("Wikipedia lookup timed out")??;
+    let music_brainz_id = music_brainz_id.and_then(valid_mbid);
+    let (mut biography, photos) = tokio::time::timeout(
+        Duration::from_secs(30),
+        lookup(&client, artist, music_brainz_id),
+    )
+    .await
+    .context("Wikipedia lookup timed out")??;
     // Separate image budget: an image outage cannot discard loaded prose.
     biography.images = tokio::time::timeout(
         Duration::from_secs(10),
@@ -124,10 +135,7 @@ fn musical_artist(entity: &Value) -> bool {
         return false;
     }
     // MusicBrainz artist ID is an established identity, not a guessed description.
-    if claims(entity, "P434").any(|v| {
-        v.as_str()
-            .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
-    }) {
+    if claims(entity, "P434").any(|v| v.as_str().and_then(valid_mbid).is_some()) {
         return true;
     }
     // Conservative direct types/occupations for artists without a MusicBrainz ID.
@@ -167,53 +175,161 @@ fn exact_name(entity: &Value, artist: &str) -> bool {
     })
 }
 
+pub(crate) fn valid_mbid(value: &str) -> Option<uuid::Uuid> {
+    uuid::Uuid::parse_str(value.trim())
+        .ok()
+        .filter(|id| !id.is_nil())
+}
+
+fn matches_mbid(entity: &Value, expected: uuid::Uuid) -> bool {
+    claims(entity, "P434").any(|value| value.as_str().and_then(valid_mbid) == Some(expected))
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("Several musical artists share this name; no biography selected")]
+pub(crate) struct AmbiguousArtist;
+
+fn wikidata_id(url: &str) -> Option<String> {
+    let url = reqwest::Url::parse(url).ok()?;
+    if !matches!(url.scheme(), "https" | "http")
+        || !matches!(url.host_str(), Some("www.wikidata.org" | "wikidata.org"))
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    let id = url.path().strip_prefix("/wiki/")?;
+    (id.starts_with('Q') && id.len() > 1 && id[1..].bytes().all(|c| c.is_ascii_digit()))
+        .then(|| id.to_owned())
+}
+
+fn linked_wikidata(value: &Value) -> Result<Option<String>> {
+    let ids: std::collections::BTreeSet<_> = value["relations"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|relation| relation["type"] == "wikidata")
+        .filter_map(|relation| relation["url"]["resource"].as_str().and_then(wikidata_id))
+        .collect();
+    anyhow::ensure!(
+        ids.len() <= 1,
+        "MusicBrainz supplies conflicting Wikidata identities"
+    );
+    Ok(ids.into_iter().next())
+}
+
+async fn musicbrainz_wikidata(client: &reqwest::Client, id: uuid::Uuid) -> Result<Option<String>> {
+    // MusicBrainz permits one request per second per application, including canceled lookups.
+    static LAST_REQUEST: tokio::sync::Mutex<Option<tokio::time::Instant>> =
+        tokio::sync::Mutex::const_new(None);
+    let mut last = LAST_REQUEST.lock().await;
+    if let Some(previous) = *last {
+        tokio::time::sleep_until(previous + Duration::from_secs(1)).await;
+    }
+    *last = Some(tokio::time::Instant::now());
+    drop(last);
+    let data = bytes(
+        client
+            .get(format!("https://musicbrainz.org/ws/2/artist/{id}"))
+            .query(&[("inc", "url-rels"), ("fmt", "json")]),
+        1024 * 1024,
+    )
+    .await?;
+    let value: Value = serde_json::from_slice(&data).context("Invalid MusicBrainz response")?;
+    anyhow::ensure!(
+        value["id"].as_str().and_then(valid_mbid) == Some(id),
+        "MusicBrainz response does not match the supplied artist ID"
+    );
+    linked_wikidata(&value)
+}
+
 /// Never choose the first search hit or silently rank two same-name musicians.
 fn select_artist<'a>(entities: &'a Value, artist: &str) -> Result<(&'a str, &'a str)> {
+    select_artist_identity(entities, artist, None, None)
+}
+
+fn select_artist_identity<'a>(
+    entities: &'a Value,
+    artist: &str,
+    mbid: Option<uuid::Uuid>,
+    linked_id: Option<&str>,
+) -> Result<(&'a str, &'a str)> {
     let artist = normalized(artist);
     let entities = entities.as_object().context("Missing Wikidata entities")?;
-    let mut matches = entities
-        .iter()
-        .filter(|(_, entity)| exact_name(entity, &artist) && musical_artist(entity))
-        .filter_map(|(id, entity)| {
-            entity["sitelinks"]["enwiki"]["title"]
-                .as_str()
-                .map(|title| (id.as_str(), title))
-        });
+    let mut matches = entities.iter().filter(|(id, entity)| {
+        musical_artist(entity)
+            && if let Some(linked_id) = linked_id {
+                id.as_str() == linked_id
+                    && mbid.is_none_or(|expected| {
+                        // A verified MusicBrainz relation is sufficient when the reverse claim is absent.
+                        let mut ids = claims(entity, "P434")
+                            .filter_map(|v| v.as_str().and_then(valid_mbid))
+                            .peekable();
+                        ids.peek().is_none() || ids.any(|id| id == expected)
+                    })
+            } else {
+                exact_name(entity, &artist) && mbid.is_none_or(|id| matches_mbid(entity, id))
+            }
+    });
     let first = matches
         .next()
         .context("No confidently matched musical artist on English Wikipedia")?;
     if matches.next().is_some() {
-        bail!("Several musical artists share this name; no biography selected");
+        return Err(AmbiguousArtist.into());
     }
-    Ok(first)
+    let title = first.1["sitelinks"]["enwiki"]["title"]
+        .as_str()
+        .context("Verified musical artist has no English Wikipedia article")?;
+    Ok((first.0.as_str(), title))
 }
 
 async fn lookup(
     client: &reqwest::Client,
     artist: &str,
+    mbid: Option<uuid::Uuid>,
 ) -> Result<(Biography, Vec<(String, String)>)> {
     if artist.trim().is_empty() || artist.len() > 300 {
         bail!("Artist name is missing or too long");
     }
-    let search = api(
-        client,
-        WIKIDATA,
-        &[
-            ("action", "wbsearchentities"),
-            ("search", artist),
-            ("language", "en"),
-            ("limit", "20"),
-            ("type", "item"),
-        ],
-    )
-    .await?;
-    let ids = search["search"]
-        .as_array()
-        .context("Missing Wikidata search results")?
-        .iter()
-        .filter_map(|v| v["id"].as_str())
-        .collect::<Vec<_>>()
-        .join("|");
+    let linked_id = if let Some(id) = mbid {
+        // An unavailable MusicBrainz service still leaves the supplied ID as a hard constraint.
+        tokio::time::timeout(Duration::from_secs(5), musicbrainz_wikidata(client, id))
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .flatten()
+    } else {
+        None
+    };
+    let ids = if let Some(id) = &linked_id {
+        id.clone()
+    } else {
+        let search = api(
+            client,
+            WIKIDATA,
+            &[
+                ("action", "wbsearchentities"),
+                ("search", artist),
+                ("language", "en"),
+                ("limit", "20"),
+                ("type", "item"),
+            ],
+        )
+        .await?;
+        if mbid.is_none() && search.get("search-continue").is_some() {
+            // A truncated name search cannot establish uniqueness among namesakes.
+            return Err(AmbiguousArtist.into());
+        }
+        search["search"]
+            .as_array()
+            .context("Missing Wikidata search results")?
+            .iter()
+            .filter_map(|v| v["id"].as_str())
+            .collect::<Vec<_>>()
+            .join("|")
+    };
     if ids.is_empty() {
         bail!("No matching musical artist on Wikipedia");
     }
@@ -229,7 +345,11 @@ async fn lookup(
         ],
     )
     .await?;
-    let (id, title) = select_artist(&entities["entities"], artist)?;
+    let (id, title) = if mbid.is_none() {
+        select_artist(&entities["entities"], artist)?
+    } else {
+        select_artist_identity(&entities["entities"], artist, mbid, linked_id.as_deref())?
+    };
     let page = api(
         client,
         WIKIPEDIA,
@@ -559,6 +679,56 @@ mod tests {
         assert_ne!(normalized("AC/DC"), normalized("ACDC"));
     }
     #[test]
+    fn stable_identity_resolves_namesakes_and_never_relaxes_to_a_name_match() {
+        let id = valid_mbid("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let mut other = artist("Tool", "Other Tool");
+        other["claims"]["P434"][0]["mainsnak"]["datavalue"]["value"] =
+            json!("1c935e13-c373-4e41-a84e-8e9921f8fe7d");
+        let mut values = json!({"Q1":artist("Tool", "Tool (band)"), "Q2":other});
+        assert_eq!(
+            select_artist_identity(&values, "Tool", Some(id), None).unwrap(),
+            ("Q1", "Tool (band)")
+        );
+        assert!(select_artist_identity(
+            &values,
+            "Tool",
+            valid_mbid("0c1b4ffb-85cb-4ce9-8d1b-c1aee93893cc"),
+            None
+        )
+        .is_err());
+        assert_eq!(
+            select_artist_identity(&values, "Old name", Some(id), Some("Q1"))
+                .unwrap()
+                .0,
+            "Q1"
+        );
+        assert!(select_artist_identity(&values, "Tool", Some(id), Some("Q2")).is_err());
+        values["Q2"]["sitelinks"] = json!({});
+        assert!(select_artist(&values, "Tool")
+            .unwrap_err()
+            .is::<AmbiguousArtist>());
+        assert!(valid_mbid("not an ID").is_none());
+        assert!(valid_mbid("00000000-0000-0000-0000-000000000000").is_none());
+    }
+    #[test]
+    fn musicbrainz_links_require_a_unique_wikidata_item_on_the_real_host() {
+        let relation = |url| json!({"type":"wikidata","url":{"resource":url}});
+        assert_eq!(
+            linked_wikidata(&json!({"relations":[relation("https://www.wikidata.org/wiki/Q123")]}))
+                .unwrap(),
+            Some("Q123".into())
+        );
+        assert!(linked_wikidata(&json!({"relations":[relation("https://www.wikidata.org/wiki/Q123"),relation("https://www.wikidata.org/wiki/Q456")]})).is_err());
+        for url in [
+            "https://wikidata.org.evil.test/wiki/Q123",
+            "https://user:secret@wikidata.org/wiki/Q123",
+            "https://wikidata.org/wiki/Special:Search",
+            "https://wikidata.org/wiki/Q123?x=1",
+        ] {
+            assert!(wikidata_id(url).is_none());
+        }
+    }
+    #[test]
     fn html_conversion_keeps_prose_sections_and_photos_without_chrome() {
         let (text, photos) = article_content(
             r#"<div class="hatnote">Not hand tools</div><table class="infobox"><tr><td>Chrome<img width="200" height="150" src="x"></td></tr></table><p>Tool is a <b>band</b> &amp; musicians.<sup class="reference">[1]</sup><script>bad()</script></p><h2>History<span class="mw-editsection">edit</span></h2><p>First<br>second.</p><figure><a href="/wiki/File:Band_photo.jpg"><img width="220" height="160"></a><figcaption>The band</figcaption></figure><ul><li>One</li><li>Two</li></ul><h2>References</h2><p>Citation noise</p>"#,
@@ -589,7 +759,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "Live Wikimedia requests; run explicitly"]
     async fn live_tool_resolves_band_with_article_and_images() {
-        let bio = wikipedia("Tool").await.unwrap();
+        let bio = wikipedia_for_artist("Tool", Some("66fc5bf8-daa4-4241-b378-9bc9077939d2"))
+            .await
+            .unwrap();
         assert!(
             bio.text.contains("Tool is an American"),
             "{}",

@@ -12,6 +12,27 @@ use textamp::navidrome::{Client, Source};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, Mutex};
 
+#[test]
+fn opensubsonic_artist_identity_survives_mapping_and_older_caches_remain_readable() {
+    let id = "550e8400-e29b-41d4-a716-446655440000";
+    let artist: textamp::navidrome::Artist = serde_json::from_value(json!({
+        "id":"artist", "name":"Artist", "musicBrainzId":id
+    }))
+    .unwrap();
+    let mapped = session("http://example.test".into()).artist(artist);
+    assert_eq!(mapped.music_brainz_id.as_deref(), Some(id));
+    let cached = serde_json::to_value(&mapped).unwrap();
+    assert_eq!(cached["musicBrainzId"], id);
+    let restored: textamp::library::catalog::Artist = serde_json::from_value(cached).unwrap();
+    assert_eq!(restored.music_brainz_id.as_deref(), Some(id));
+    let legacy: textamp::library::catalog::Artist =
+        serde_json::from_value(json!({"ratingKey":"artist", "title":"Artist"})).unwrap();
+    assert!(legacy.music_brainz_id.is_none());
+    let legacy: textamp::navidrome::Artist =
+        serde_json::from_value(json!({"id":"artist", "name":"Artist"})).unwrap();
+    assert!(legacy.music_brainz_id.is_none());
+}
+
 #[tokio::test]
 async fn compilations_browse_from_server_and_offline_cache_and_reset_on_refresh() {
     let (url, requests, task) = server(|method, params| {
@@ -2298,10 +2319,9 @@ async fn provider_biography_and_recommendations_are_scoped() {
     while app.state.popups.artist_bio.as_ref().unwrap().loading {
         app.receive().await;
     }
-    assert_eq!(
-        app.state.popups.artist_bio.as_ref().unwrap().document.text,
-        "An artist biography."
-    );
+    let text = &app.state.popups.artist_bio.as_ref().unwrap().document.text;
+    assert!(text.starts_with("An artist biography."));
+    assert!(text.contains("supplied by Navidrome"));
     app.send(DataAction::LoadSimilarTracks {
         rating_key: session.key("second"),
         title: "Second".into(),

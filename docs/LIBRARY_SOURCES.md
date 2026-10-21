@@ -55,8 +55,11 @@ it does not start or alter server scans. Standard file tags remain separate from
 inferred labels. Missing analysis does not prevent ordinary browsing/playback or
 metadata-only radio. Folder radio uses accessible leaf folders as albums.
 
-Artist biographies use server metadata when available, then strict Wikipedia
-matching on explicit lookup. No custom biography sidecar convention is used.
+Artist biographies prefer Navidrome metadata on explicit lookup, with an
+eight-second artist-info request limit. Missing text, errors and timeouts fall
+back to strict Wikipedia matching, constrained by MusicBrainz IDs where available.
+Conflicting server identities, Wikipedia ambiguity and failures remain explicit.
+No custom biography sidecar convention is used.
 
 ## Verification boundaries
 

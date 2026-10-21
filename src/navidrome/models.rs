@@ -19,6 +19,7 @@ fn string_id<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error>
 pub struct Artist {
     pub id: String,
     pub name: String,
+    pub music_brainz_id: Option<String>,
     pub cover_art: Option<String>,
     #[serde(default)]
     pub album: Vec<Album>,
