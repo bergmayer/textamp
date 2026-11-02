@@ -225,8 +225,13 @@ async fn connect(
 
 async fn discover(session: &mut Session) -> anyhow::Result<()> {
     let client = &session.client;
-    client.call("ping", &[]).await?;
-    session.source.libraries = client.folders().await?;
+    // These account reads are independent. Keep extension discovery optional,
+    // while authentication and folder failures still fail the connection.
+    let (_, libraries, extensions) =
+        tokio::try_join!(client.call("ping", &[]), client.folders(), async {
+            Ok::<_, anyhow::Error>(client.call("getOpenSubsonicExtensions", &[]).await)
+        },)?;
+    session.source.libraries = libraries;
     for library in &mut session.source.libraries {
         library.name = crate::util::sanitize_display_text(&library.name).into_owned();
     }
@@ -239,7 +244,7 @@ async fn discover(session: &mut Session) -> anyhow::Result<()> {
             "This account no longer has access to that library; choose another in Settings → Libraries"
         );
     }
-    session.extensions = match client.call("getOpenSubsonicExtensions", &[]).await {
+    session.extensions = match extensions {
         Ok(response) => response["openSubsonicExtensions"]
             .as_array()
             .into_iter()
@@ -811,4 +816,72 @@ pub async fn dispatch(
         }
     }
     Ok(vec![])
+}
+
+#[cfg(test)]
+mod async_discovery_tests {
+    use super::*;
+    use serde_json::json;
+    use std::{sync::Arc, time::Duration};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn account_reads_overlap_and_optional_extension_errors_still_allow_browsing() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let source = Source {
+            id: "concurrency-fixture".into(),
+            name: "Fixture".into(),
+            url: format!("http://{}", listener.local_addr().unwrap()),
+            username: "fixture".into(),
+            libraries: vec![],
+        };
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let server = tokio::spawn(async move {
+            let mut replies = tokio::task::JoinSet::new();
+            for _ in 0..3 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let barrier = barrier.clone();
+                replies.spawn(async move {
+                    let mut request = Vec::new();
+                    let mut chunk = [0; 4096];
+                    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        let n = socket.read(&mut chunk).await.unwrap();
+                        assert!(n > 0);
+                        request.extend_from_slice(&chunk[..n]);
+                    }
+                    let request = String::from_utf8(request).unwrap();
+                    let payload = if request.contains("/getMusicFolders?") {
+                        json!({"status":"ok", "musicFolders":{"musicFolder":[{"id":"one","name":"Music"}]}})
+                    } else if request.contains("/getOpenSubsonicExtensions?") {
+                        json!({"status":"failed", "error":{"code":70,"message":"Unsupported"}})
+                    } else {
+                        assert!(request.contains("/ping?"));
+                        json!({"status":"ok"})
+                    };
+                    // No response is available until all account reads arrive.
+                    barrier.wait().await;
+                    let body = json!({"subsonic-response":payload}).to_string();
+                    socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                });
+            }
+            while let Some(reply) = replies.join_next().await {
+                reply.unwrap();
+            }
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            connect(source, SecretString::from("fixture-password"), None),
+        )
+        .await;
+        if result.is_err() {
+            server.abort();
+        }
+        let session = result
+            .expect("account reads must run concurrently")
+            .unwrap();
+        assert_eq!(session.source.libraries.len(), 1);
+        assert_eq!(session.client.folder.as_deref(), Some("one"));
+        assert!(session.extensions.is_empty());
+        server.await.unwrap();
+    }
 }

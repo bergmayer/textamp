@@ -596,31 +596,55 @@ async fn load_images(
         text.push_str("\n\nArticle images could not be loaded.");
         return images;
     };
-    for (title, caption) in photos {
-        let info = value["query"]["pages"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find(|p| p["title"] == *title)
-            .map(|p| &p["imageinfo"][0]);
-        let Some(info) = info else {
-            continue;
-        };
-        let url = info["thumburl"].as_str().unwrap_or("");
-        if !image_url(url) {
-            continue;
-        }
-        // Keep only images with usable licensing metadata; no guessing at rights.
-        let metadata = &info["extmetadata"];
-        let license = fragment(metadata["LicenseShortName"]["value"].as_str().unwrap_or(""));
-        let author = fragment(metadata["Artist"]["value"].as_str().unwrap_or(""));
-        if !(license.starts_with("CC") || license == "Public domain" || license.starts_with("GFDL"))
-        {
-            continue;
-        }
-        let license_url = fragment(metadata["LicenseUrl"]["value"].as_str().unwrap_or(""));
-        let credit = fragment(metadata["Credit"]["value"].as_str().unwrap_or(""));
-        match bytes(client.get(url), 4 * 1024 * 1024).await {
+    use futures::{stream, StreamExt};
+    // Validate rights and URLs before downloading; retain article order for
+    // image numbering and attribution even if downloads finish out of order.
+    let downloads: Vec<_> = photos
+        .iter()
+        .filter_map(|(title, caption)| {
+            let info = value["query"]["pages"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|p| p["title"] == *title)
+                .map(|p| &p["imageinfo"][0]);
+            let info = info?;
+            let url = info["thumburl"].as_str().unwrap_or("");
+            if !image_url(url) {
+                return None;
+            }
+            // Keep only images with usable licensing metadata; no guessing at rights.
+            let metadata = &info["extmetadata"];
+            let license = fragment(metadata["LicenseShortName"]["value"].as_str().unwrap_or(""));
+            let author = fragment(metadata["Artist"]["value"].as_str().unwrap_or(""));
+            if !(license.starts_with("CC")
+                || license == "Public domain"
+                || license.starts_with("GFDL"))
+            {
+                return None;
+            }
+            let license_url = fragment(metadata["LicenseUrl"]["value"].as_str().unwrap_or(""));
+            let credit = fragment(metadata["Credit"]["value"].as_str().unwrap_or(""));
+            Some(async move {
+                let data = bytes(client.get(url), 4 * 1024 * 1024).await;
+                (
+                    title,
+                    caption,
+                    url,
+                    author,
+                    license,
+                    license_url,
+                    credit,
+                    data,
+                )
+            })
+        })
+        .collect();
+    let mut downloads = stream::iter(downloads).buffered(4);
+    while let Some((title, caption, url, author, license, license_url, credit, data)) =
+        downloads.next().await
+    {
+        match data {
             Ok(data) => {
                 text.push_str(&format!(
                     "\n\nImage {}: {}\n{} — {}\n{}\n{}\nhttps://en.wikipedia.org/wiki/{}",

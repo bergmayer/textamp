@@ -20,6 +20,13 @@ impl Drop for Server {
     }
 }
 async fn server(reply: impl Fn(Request) -> (u16, Value) + Send + Sync + 'static) -> Server {
+    server_async(move |request| std::future::ready(reply(request))).await
+}
+async fn server_async<F, Fut>(reply: F) -> Server
+where
+    F: Fn(Request) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = (u16, Value)> + Send,
+{
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/prefix", listener.local_addr().unwrap());
     let reply = Arc::new(reply);
@@ -75,7 +82,7 @@ async fn server(reply: impl Fn(Request) -> (u16, Value) + Send + Sync + 'static)
                 if !auth {
                     assert!(headers.contains("audiomuse_jwt=fixture-session"));
                 }
-                let (code, body) = reply(Request { path, query, body });
+                let (code, body) = reply(Request { path, query, body }).await;
                 let body = body.to_string();
                 let cookie = if auth {
                     "Set-Cookie: audiomuse_jwt=fixture-session; HttpOnly; Path=/\r\n"
@@ -301,7 +308,9 @@ async fn sync_batches_fit_the_server_request_line_limit() {
         .await
         .unwrap();
     assert_eq!(result.tracks.len(), 205);
-    assert_eq!(*batches.lock().unwrap(), [100, 100, 5]);
+    let mut sizes = batches.lock().unwrap().clone();
+    sizes.sort_unstable();
+    assert_eq!(sizes, [5, 100, 100]);
 }
 
 #[tokio::test]
@@ -604,4 +613,166 @@ async fn missing_similarity_seed_is_not_misreported_as_a_missing_feature() {
         assert!(!error.contains("feature unavailable"));
         assert!(!error.contains("private diagnostic"));
     }
+}
+
+#[tokio::test]
+async fn changed_batches_overlap_with_a_four_request_bound_and_monotonic_progress() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+    let active = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let barrier = Arc::new(tokio::sync::Barrier::new(4));
+    let catalog: Vec<_> = (0..605).map(|i| format!("{i:032x}")).collect();
+    let ids = catalog.clone();
+    let s = server_async({
+        let active = active.clone();
+        let peak = peak.clone();
+        move |r| {
+            let active = active.clone();
+            let peak = peak.clone();
+            let barrier = barrier.clone();
+            let catalog = catalog.clone();
+            async move {
+                if r.path == "auth" {
+                    return (200, json!({"status":"ok"}));
+                }
+                if r.query.contains_key("fields") {
+                    return (
+                        200,
+                        page(json!(catalog
+                            .iter()
+                            .map(|id| json!({"id":id,"fp":"new"}))
+                            .collect::<Vec<_>>())),
+                    );
+                }
+                let ids: Vec<_> = r.query["ids"].split(',').collect();
+                let count = active.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(count, Ordering::SeqCst);
+                // The first four requests cannot respond until all are in flight.
+                if ids[0] < format!("{:032x}", 400).as_str() {
+                    barrier.wait().await;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                active.fetch_sub(1, Ordering::SeqCst);
+                (
+                    200,
+                    page(json!(ids
+                        .iter()
+                        .map(|id| analysis(id, "new"))
+                        .collect::<Vec<_>>())),
+                )
+            }
+        }
+    })
+    .await;
+    let api = Client::connect(&connection(&s.url), "fixture-password")
+        .await
+        .unwrap();
+    let previous = Snapshot {
+        tracks: [(ids[0].clone(), analysis(&ids[0], "old"))]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    let mut progress = Vec::new();
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        api.refresh_with_progress(&previous, &ids.into_iter().collect(), |event| {
+            if let textamp::audiomuse::SyncProgress::Tracks { loaded, total } = event {
+                progress.push((loaded, total));
+            }
+        }),
+    )
+    .await
+    .expect("independent batches must overlap")
+    .unwrap();
+    assert_eq!(peak.load(Ordering::SeqCst), 4);
+    assert_eq!(result.tracks.len(), 605);
+    assert!(!result.partial);
+    assert!(progress.windows(2).all(|pair| pair[0].0 < pair[1].0));
+    assert_eq!(progress.last(), Some(&(605, 605)));
+}
+
+#[tokio::test]
+async fn verification_reads_overlap_and_still_reject_another_provider() {
+    use std::time::Duration;
+    for provider in ["navidrome", "other"] {
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let s = server_async(move |r| {
+            let barrier = barrier.clone();
+            async move {
+                if r.path == "auth" {
+                    return (200, json!({"status":"ok"}));
+                }
+                barrier.wait().await;
+                match r.path.as_str() {
+                    "api/servers" => (
+                        200,
+                        json!({"servers":[{"name":"My Navidrome","server_type":"navidrome"}]}),
+                    ),
+                    "api/sync" => {
+                        let mut response = page(json!([]));
+                        response["provider_type"] = json!(provider);
+                        (200, response)
+                    }
+                    _ => panic!("Unexpected verification request"),
+                }
+            }
+        })
+        .await;
+        let api = Client::connect(&connection(&s.url), "fixture-password")
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(5), api.verify())
+            .await
+            .expect("verification reads must overlap");
+        assert_eq!(result.is_ok(), provider == "navidrome");
+    }
+}
+
+#[tokio::test]
+async fn failed_changed_batch_rejects_the_refresh_and_keeps_the_previous_snapshot() {
+    let ids: Vec<_> = (0..205).map(|i| format!("{i:032x}")).collect();
+    let catalog = ids.clone();
+    let s = server(move |r| {
+        if r.path == "auth" {
+            return (200, json!({"status":"ok"}));
+        }
+        if r.query.contains_key("fields") {
+            return (
+                200,
+                page(json!(catalog
+                    .iter()
+                    .map(|id| json!({"id":id,"fp":"new"}))
+                    .collect::<Vec<_>>())),
+            );
+        }
+        let ids: Vec<_> = r.query["ids"].split(',').collect();
+        if ids.len() == 5 {
+            return (500, json!({"error":"fixture failure"}));
+        }
+        (
+            200,
+            page(json!(ids
+                .iter()
+                .map(|id| analysis(id, "new"))
+                .collect::<Vec<_>>())),
+        )
+    })
+    .await;
+    let api = Client::connect(&connection(&s.url), "fixture-password")
+        .await
+        .unwrap();
+    let previous = Snapshot {
+        tracks: [(ids[0].clone(), analysis(&ids[0], "old"))]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    let before = serde_json::to_value(&previous).unwrap();
+    assert!(api
+        .refresh(&previous, &ids.into_iter().collect())
+        .await
+        .is_err());
+    assert_eq!(serde_json::to_value(&previous).unwrap(), before);
 }

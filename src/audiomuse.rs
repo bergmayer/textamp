@@ -1,6 +1,7 @@
 //! Optional analysis service. Playback and library identity stay with Navidrome.
 //! Only authentication, read-only export and discovery endpoints are used here.
 use anyhow::{ensure, Context, Result};
+use futures::{stream, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -152,7 +153,20 @@ impl Client {
     }
     /// Verify both provider and explicit server binding before accepting any IDs.
     pub async fn verify(&self) -> Result<()> {
-        let servers = self.request("api/servers", &[], None).await?;
+        let (servers, page) = tokio::try_join!(self.request("api/servers", &[], None), async {
+            let page: Page<Analysis> = serde_json::from_value(
+                self.request(
+                    "api/sync",
+                    &[
+                        ("limit", "1".into()),
+                        ("include_embeddings", "false".into()),
+                    ],
+                    None,
+                )
+                .await?,
+            )?;
+            Ok::<_, anyhow::Error>(page)
+        },)?;
         let server = servers["servers"]
             .as_array()
             .context("Missing AudioMuse server list")?
@@ -166,17 +180,6 @@ impl Client {
             server["server_type"].as_str() == Some("navidrome"),
             "Select a Navidrome music server in AudioMuse"
         );
-        let page: Page<Analysis> = serde_json::from_value(
-            self.request(
-                "api/sync",
-                &[
-                    ("limit", "1".into()),
-                    ("include_embeddings", "false".into()),
-                ],
-                None,
-            )
-            .await?,
-        )?;
         ensure!(
             page.provider_type == "navidrome",
             "AudioMuse returned another provider's IDs"
@@ -339,7 +342,8 @@ impl Client {
             .collect()
     }
     /// Transactional refresh: an incomplete/erroring manifest never replaces the cache.
-    /// Requests are sequential, bounded, and omit embeddings/audio entirely.
+    /// Manifest pages follow server pagination; changed metadata batches run
+    /// with bounded concurrency and omit embeddings/audio entirely.
     pub async fn refresh(
         &self,
         previous: &Snapshot,
@@ -459,18 +463,26 @@ impl Client {
         }
         // Gunicorn's default request-line limit is 4094 bytes. Navidrome IDs
         // plus URL-escaped separators fit comfortably in batches of 100.
-        for (batch, ids) in changed.chunks(100).enumerate() {
-            let response: Page<Analysis> = serde_json::from_value(
-                self.request(
-                    "api/sync",
-                    &[
-                        ("ids", ids.join(",")),
-                        ("include_embeddings", "false".into()),
-                    ],
-                    None,
-                )
-                .await?,
-            )?;
+        let changed_count = changed.len();
+        let mut batches = stream::iter(changed)
+            .chunks(100)
+            .map(|ids| async move {
+                let response: Page<Analysis> = serde_json::from_value(
+                    self.request(
+                        "api/sync",
+                        &[
+                            ("ids", ids.join(",")),
+                            ("include_embeddings", "false".into()),
+                        ],
+                        None,
+                    )
+                    .await?,
+                )?;
+                Ok::<_, anyhow::Error>((ids, response))
+            })
+            .buffer_unordered(4);
+        let mut loaded = 0;
+        while let Some((ids, response)) = batches.try_next().await? {
             ensure!(
                 response.provider_type == "navidrome"
                     && !response.has_more
@@ -500,9 +512,10 @@ impl Client {
                     tracks.insert(id.clone(), old.clone());
                 }
             }
+            loaded += ids.len();
             progress(SyncProgress::Tracks {
-                loaded: (batch * 100 + ids.len()),
-                total: changed.len(),
+                loaded,
+                total: changed_count,
             });
         }
         Ok(Snapshot {

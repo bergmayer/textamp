@@ -250,7 +250,8 @@ hierarchy in the background; album track listings load and cache only when opene
 
 Saved data opens first. Metadata refreshes weekly while a library is in use;
 **F5** refreshes the current view. Server system lists query on opening. AudioMuse
-shares the weekly/manual policy and fetches changed records.
+shares the weekly/manual policy and fetches changed records. Folder scans and
+changed AudioMuse metadata batches use up to four concurrent requests.
 
 **Settings → Libraries → Enter** shows that library's on-disk cache size,
 including AudioMuse. **Re-scan cache** rebuilds its catalog/tree and enabled
