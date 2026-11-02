@@ -1,4 +1,4 @@
-//! Shared playback metadata. Legacy server field names remain serialization-compatible.
+//! Shared playback metadata and server serialization fields.
 use crate::util::serde_helpers::from_str_or_num_opt;
 use serde::{Deserialize, Serialize};
 

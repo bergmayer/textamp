@@ -319,11 +319,6 @@ pub enum BrowseItem {
         key: String,
         title: String,
     },
-    /// Genre category selector in column 0 (All, Artist, Album, Mood, Style).
-    GenreCategory {
-        key: String,
-        title: String,
-    },
     Playlist {
         key: String,
         title: String,
@@ -332,10 +327,7 @@ pub enum BrowseItem {
     /// "All Tracks" entry. The `scope` discriminates which "all"
     /// the row represents — every artist in the library, every
     /// compilation, every compilation by a particular artist, or
-    /// every track by a particular artist. Was previously
-    /// overloaded onto a single `artist_key: String` with sentinel
-    /// prefixes (`__all_library__`, `__all_comp__`, `__comp_tracks:`),
-    /// which silently misrouted on typos.
+    /// every track by a particular artist.
     AllTracks {
         scope: AllTracksScope,
         thumb: Option<String>,
@@ -366,7 +358,6 @@ impl BrowseItem {
             BrowseItem::Album { key, .. } => key,
             BrowseItem::Track { key, .. } => key,
             BrowseItem::Genre { key, .. } => key,
-            BrowseItem::GenreCategory { key, .. } => key,
             BrowseItem::Playlist { key, .. } => key,
             BrowseItem::AllTracks { scope, .. } => scope.key(),
             BrowseItem::AllArtists => "__all_artists__",
@@ -383,7 +374,6 @@ impl BrowseItem {
             BrowseItem::Album { title, .. } => title,
             BrowseItem::Track { title, .. } => title,
             BrowseItem::Genre { title, .. } => title,
-            BrowseItem::GenreCategory { title, .. } => title,
             BrowseItem::Playlist { title, .. } => title,
             BrowseItem::AllTracks { .. } => "All Tracks",
             BrowseItem::AllArtists => "All Artists",
@@ -815,6 +805,14 @@ impl PlayAllRow {
     }
 }
 
+/// Exclusive cursor position within a Miller column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnHeaderSelection {
+    Play,
+    AlbumDetails,
+    Items,
+}
+
 /// A single column in the Miller columns browse view.
 #[derive(Debug, Clone)]
 pub struct BrowseColumn {
@@ -846,13 +844,12 @@ pub struct BrowseColumn {
     /// clicking it) plays the whole list. See `PlayAllRow` for the
     /// per-variant dispatch.
     pub play_all_row: Option<PlayAllRow>,
-    /// True when the cursor is parked on the synthetic Play row
-    /// (rather than one of the real `items`). Newly-pushed tracks
-    /// columns default to this so the user can immediately press
-    /// Enter to play the whole album / playlist. `↓` clears it and
-    /// drops focus to `items[selected_index]`; `↑` from `items[0]`
-    /// sets it again. Ignored when `play_all_row` is `None`.
-    pub on_play_row: bool,
+    /// Cursor position among the pinned actions and track items.
+    pub header_selection: ColumnHeaderSelection,
+    /// Read-only album metadata in an adjacent Miller column.
+    pub album_details: Option<Vec<String>>,
+    /// Album identity used by the shared artwork cache.
+    pub album_details_art_key: Option<String>,
     /// Multi-select set: indices into `items` (and `tracks`) that the
     /// user has shift- or cmd-clicked. Empty means single-selection
     /// mode (the regular `selected_index` cursor). Populated by the
@@ -902,7 +899,9 @@ impl BrowseColumn {
             grouped_by_album: false,
             album_groups: None,
             play_all_row: None,
-            on_play_row: false,
+            header_selection: ColumnHeaderSelection::Items,
+            album_details: None,
+            album_details_art_key: None,
             selected_set: std::collections::BTreeSet::new(),
             selection_anchor: None,
             lazy: None,
@@ -928,7 +927,9 @@ impl BrowseColumn {
             grouped_by_album: false,
             album_groups: None,
             play_all_row: None,
-            on_play_row: false,
+            header_selection: ColumnHeaderSelection::Items,
+            album_details: None,
+            album_details_art_key: None,
             selected_set: std::collections::BTreeSet::new(),
             selection_anchor: None,
             lazy: None,
@@ -937,6 +938,14 @@ impl BrowseColumn {
 
     pub fn selected_item(&self) -> Option<&BrowseItem> {
         self.items.get(self.selected_index)
+    }
+
+    pub fn has_album_details(&self) -> bool {
+        matches!(self.play_all_row, Some(PlayAllRow::Album { .. }))
+    }
+
+    pub fn header_rows(&self) -> u16 {
+        u16::from(self.play_all_row.is_some()) + u16::from(self.has_album_details())
     }
 
     /// Whether this column is currently shuffled.
@@ -1503,39 +1512,224 @@ pub struct ScrollPins {
     pub scrollbar_drag: Option<ScrollbarDrag>,
 }
 
-/// Popup state container.
+/// The active modal, with an explicit suspended parent for confirmations.
+#[derive(Debug, Clone, Default)]
+pub enum Modal {
+    #[default]
+    Closed,
+    Sort(Box<SortPopupState>),
+    AdventureLauncher(Box<AdventureLauncherState>),
+    ArtistRadioPicker(Box<ArtistRadioPickerState>),
+    ArtistBio(Box<ArtistBioPopup>),
+    Text(Box<TextPopup>),
+    Input(Box<InputDialog>),
+    Library(Box<crate::app::sources::dialogs::Dialog>),
+    SoundOutput,
+    LibraryPicker,
+    Search,
+    Confirmation {
+        dialog: Box<ConfirmDialog>,
+        parent: Box<Modal>,
+    },
+}
+
+/// Popup transitions preserve a parent only while a confirmation is open.
 #[derive(Debug, Clone, Default)]
 pub struct Popups {
-    pub sort: Option<SortPopupState>,
-    pub adventure_launcher: Option<AdventureLauncherState>,
-    pub artist_radio_picker: Option<ArtistRadioPickerState>,
-    pub artist_bio: Option<ArtistBioPopup>,
-    pub text: Option<TextPopup>,
-    pub input_dialog: Option<InputDialog>,
-    pub library_dialog: Option<crate::app::sources::dialogs::Dialog>,
-    pub confirm_dialog: Option<ConfirmDialog>,
-    pub sound_output_active: bool,
-    pub library_picker_active: bool,
+    modal: Modal,
     pub library_picker_index: usize,
-    pub search_active: bool,
+}
+
+macro_rules! modal_accessors {
+    ($get:ident, $get_mut:ident, $set:ident, $take:ident, $variant:ident, $ty:ty) => {
+        pub fn $get(&self) -> Option<&$ty> {
+            match self.base() {
+                Modal::$variant(value) => Some(value),
+                _ => None,
+            }
+        }
+        pub fn $get_mut(&mut self) -> Option<&mut $ty> {
+            match self.base_mut() {
+                Modal::$variant(value) => Some(value),
+                _ => None,
+            }
+        }
+        pub fn $set(&mut self, value: Option<$ty>) {
+            if let Some(value) = value {
+                self.modal = Modal::$variant(Box::new(value));
+            } else {
+                self.$take();
+            }
+        }
+        pub fn $take(&mut self) -> Option<$ty> {
+            if !matches!(self.base(), Modal::$variant(_)) {
+                return None;
+            }
+            match std::mem::take(self.base_mut()) {
+                Modal::$variant(value) => Some(*value),
+                _ => unreachable!(),
+            }
+        }
+    };
 }
 
 impl Popups {
-    /// Close all modal popups. Call before opening a new popup so only one
-    /// is ever visible at a time.
-    pub fn close_all(&mut self) {
-        self.text = None;
-        self.sort = None;
-        self.adventure_launcher = None;
-        self.artist_radio_picker = None;
-        self.artist_bio = None;
-        self.input_dialog = None;
-        self.library_dialog = None;
-        self.confirm_dialog = None;
-        self.sound_output_active = false;
-        self.library_picker_active = false;
-        self.search_active = false;
+    pub fn modal(&self) -> &Modal {
+        &self.modal
     }
+    fn base(&self) -> &Modal {
+        match &self.modal {
+            Modal::Confirmation { parent, .. } => parent,
+            modal => modal,
+        }
+    }
+    fn base_mut(&mut self) -> &mut Modal {
+        match &mut self.modal {
+            Modal::Confirmation { parent, .. } => parent,
+            modal => modal,
+        }
+    }
+    pub fn close_all(&mut self) {
+        self.modal = Modal::Closed;
+    }
+    modal_accessors!(sort, sort_mut, set_sort, take_sort, Sort, SortPopupState);
+    modal_accessors!(
+        adventure_launcher,
+        adventure_launcher_mut,
+        set_adventure_launcher,
+        take_adventure_launcher,
+        AdventureLauncher,
+        AdventureLauncherState
+    );
+    modal_accessors!(
+        artist_radio_picker,
+        artist_radio_picker_mut,
+        set_artist_radio_picker,
+        take_artist_radio_picker,
+        ArtistRadioPicker,
+        ArtistRadioPickerState
+    );
+    modal_accessors!(
+        artist_bio,
+        artist_bio_mut,
+        set_artist_bio,
+        take_artist_bio,
+        ArtistBio,
+        ArtistBioPopup
+    );
+    modal_accessors!(text, text_mut, set_text, take_text, Text, TextPopup);
+    modal_accessors!(
+        input_dialog,
+        input_dialog_mut,
+        set_input_dialog,
+        take_input_dialog,
+        Input,
+        InputDialog
+    );
+    modal_accessors!(
+        library_dialog,
+        library_dialog_mut,
+        set_library_dialog,
+        take_library_dialog,
+        Library,
+        crate::app::sources::dialogs::Dialog
+    );
+    pub fn sound_output_active(&self) -> bool {
+        matches!(self.base(), Modal::SoundOutput)
+    }
+    pub fn set_sound_output_active(&mut self, active: bool) {
+        if active {
+            self.modal = Modal::SoundOutput;
+        } else if self.sound_output_active() {
+            *self.base_mut() = Modal::Closed;
+        }
+    }
+    pub fn library_picker_active(&self) -> bool {
+        matches!(self.base(), Modal::LibraryPicker)
+    }
+    pub fn set_library_picker_active(&mut self, active: bool) {
+        if active {
+            self.modal = Modal::LibraryPicker;
+        } else if self.library_picker_active() {
+            *self.base_mut() = Modal::Closed;
+        }
+    }
+    pub fn search_active(&self) -> bool {
+        matches!(self.base(), Modal::Search)
+    }
+    pub fn set_search_active(&mut self, active: bool) {
+        if active {
+            self.modal = Modal::Search;
+        } else if self.search_active() {
+            *self.base_mut() = Modal::Closed;
+        }
+    }
+    pub fn confirm_dialog(&self) -> Option<&ConfirmDialog> {
+        match &self.modal {
+            Modal::Confirmation { dialog, .. } => Some(dialog),
+            _ => None,
+        }
+    }
+    pub fn confirm_dialog_mut(&mut self) -> Option<&mut ConfirmDialog> {
+        match &mut self.modal {
+            Modal::Confirmation { dialog, .. } => Some(dialog),
+            _ => None,
+        }
+    }
+    pub fn take_confirm_dialog(&mut self) -> Option<ConfirmDialog> {
+        if !matches!(self.modal, Modal::Confirmation { .. }) {
+            return None;
+        }
+        match std::mem::take(&mut self.modal) {
+            Modal::Confirmation { dialog, parent } => {
+                self.modal = *parent;
+                Some(*dialog)
+            }
+            _ => unreachable!(),
+        }
+    }
+    pub fn set_confirm_dialog(&mut self, dialog: Option<ConfirmDialog>) {
+        self.take_confirm_dialog();
+        if let Some(dialog) = dialog {
+            self.modal = Modal::Confirmation {
+                dialog: Box::new(dialog),
+                parent: Box::new(match std::mem::take(&mut self.modal) {
+                    parent @ Modal::Library(_) => parent,
+                    _ => Modal::Closed,
+                }),
+            };
+        }
+    }
+}
+
+/// A fetch completion is accepted only for this pending thumbnail and generation.
+#[derive(Debug, Default)]
+pub enum ArtworkFetch {
+    #[default]
+    Idle,
+    Loading {
+        thumb: String,
+    },
+}
+impl ArtworkFetch {
+    pub fn pending_thumb(&self) -> Option<&str> {
+        match self {
+            Self::Loading { thumb } => Some(thumb),
+            Self::Idle => None,
+        }
+    }
+    pub fn is_loading(&self) -> bool {
+        matches!(self, Self::Loading { .. })
+    }
+}
+
+#[derive(Debug, Default)]
+pub enum ArtworkNavigation {
+    #[default]
+    Settled,
+    Moving {
+        last_motion: std::time::Instant,
+    },
 }
 
 /// Artwork state.
@@ -1543,9 +1737,7 @@ impl Popups {
 pub struct ArtworkState {
     pub current_thumb: Option<String>,
     pub current_data: Option<Vec<u8>>,
-    pub loading: bool,
-    /// Exact thumb path whose completion may replace `current_data`.
-    pub pending_thumb: Option<String>,
+    pub fetch: ArtworkFetch,
     pub grid_cache: HashMap<String, Vec<u8>>,
     grid_cache_order: std::collections::VecDeque<String>,
     grid_cache_bytes: usize,
@@ -1554,20 +1746,8 @@ pub struct ArtworkState {
     pub cache_stats: Option<(usize, u64)>,
     pub default_visible: bool,
     pub mode: ArtworkMode,
-    /// When true, `SystemAction::LoadAlbumArt` returns immediately
-    /// without reading the disk cache or starting fetches. Both
-    /// front-ends raise this while the user is rapidly navigating
-    /// (keyboard scroll, mouse wheel, alphabet jumps) so the per-key
-    /// disk I/O doesn't stall the UI. Once motion has been still for
-    /// `ART_LOAD_PAUSE_MS` (1 s), the front-end's tick handler clears
-    /// the flag and re-collects the viewport batch.
-    pub suppress_loads: bool,
-
-    /// Wall-clock instant of the most recent rapid-navigation gesture.
-    /// `suppress_loads` clears once `last_motion_at.elapsed() >=
-    /// ART_LOAD_PAUSE_MS`. `None` until the first motion event so the
-    /// initial render isn't held back.
-    pub last_motion_at: Option<std::time::Instant>,
+    /// Rapid navigation defers fetching until the most recent motion settles.
+    pub navigation: ArtworkNavigation,
 }
 
 impl ArtworkState {
@@ -1716,9 +1896,6 @@ pub struct LibraryData {
     pub album_display_artist: std::collections::HashMap<String, String>,
 
     // Tag-style lists (each is its own top-level section).
-    // The legacy `genres` field has been dropped — Album Genres and
-    // Library Genres hit the same server endpoint, so we only keep
-    // album_genres.
     pub artist_genres: Vec<Genre>,
     pub album_genres: Vec<Genre>,
     pub moods: Vec<Genre>,
@@ -1929,14 +2106,13 @@ pub struct AppState {
     // Artwork state
     pub artwork: ArtworkState,
 
-    // Radio mode state (legacy)
     /// Maximum server streaming bitrate in kbps; 0 requests the original file.
     pub transcode_kbps: u32,
 
     /// Whether audio output is available. False when audio init failed/timed out.
     pub audio_available: bool,
 
-    // NEW: Playback mode (Queue vs Radio)
+    // Playback mode (Queue vs Radio)
     pub playback_mode: PlaybackMode,
     pub radio_generation: u64,
     /// The pending station or refill belongs to the current playback context.
@@ -1945,15 +2121,12 @@ pub struct AppState {
     pub station_starting: Option<StationStart>,
     pub station_navigation_generation: u64,
 
-    // NEW: Radio playback state (continuous)
+    // Radio playback state (continuous)
     pub radio: RadioPlaybackState,
 
-    // NEW: Station navigation (hierarchical)
+    // Station navigation (hierarchical)
     pub station_nav: StationNavigationState,
 
-    // Stations state (continuous radio stations) - legacy, use station_nav instead
-    pub stations: Vec<Station>,
-    pub stations_loading: bool,
     /// Cached station children (mood/style/decade sub-lists, keyed by station key).
     pub station_children_cache: std::collections::HashMap<String, Vec<Station>>,
 
@@ -2065,9 +2238,6 @@ pub struct AppState {
     pub visualizer_tab: VisualizerTab,
     /// Whether the visualizer tab bar is focused (for arrow key navigation)
     pub visualizer_tab_focused: bool,
-
-    // (Genre tab system removed — each tag type is now its own
-    // top-level section in the browse category column.)
 
     // Cache management
     pub cache_mgmt: CacheManagement,
@@ -2516,7 +2686,6 @@ impl AppState {
             .columns
             .iter()
             .flat_map(|column| &column.stations)
-            .chain(&self.stations)
     }
 
     pub fn station_by_key(&self, key: &str) -> Option<&Station> {
@@ -2561,7 +2730,7 @@ impl AppState {
         self.sources.sonic_tasks.clear();
         self.station_starting = None;
         self.radio.refill = RadioRefill::Idle;
-        self.stations_loading = false;
+        self.station_nav.loading = false;
         self.station_nav.loading = false;
         // Results from the old generation will be discarded, so their
         // progress entries must be discarded at the same boundary.
@@ -2575,7 +2744,7 @@ impl AppState {
         self.adventure_request_id = self.adventure_request_id.wrapping_add(1);
         self.adventure_launcher_request_id = self.adventure_launcher_request_id.wrapping_add(1);
         self.artist_bio_request_id = self.artist_bio_request_id.wrapping_add(1);
-        self.popups.artist_bio = None;
+        self.popups.set_artist_bio(None);
     }
 
     /// Create a new application state with defaults.
@@ -2644,8 +2813,6 @@ impl AppState {
             station_navigation_generation: 0,
             radio: RadioPlaybackState::default(),
             station_nav: StationNavigationState::default(),
-            stations: Vec::new(),
-            stations_loading: false,
             station_children_cache: std::collections::HashMap::new(),
             theme: ThemeName::default(),
             tall_mode: false,
@@ -2897,7 +3064,7 @@ impl AppState {
     /// Visible ordered track list and highlighted row for palette commands.
     /// Never fall back to a retained navigation column from another view.
     pub fn palette_track_list(&self) -> Option<(&[Track], usize)> {
-        if self.popups.search_active || matches!(self.view, View::Search | View::Similar) {
+        if self.popups.search_active() || matches!(self.view, View::Search | View::Similar) {
             return crate::app::result_details::track_list(self);
         }
         if let Some(list) = crate::app::sonic_details::palette_tracks(self) {
@@ -3430,7 +3597,6 @@ pub fn column_artwork_key(
         BrowseItem::Album { .. } => Some("albums"),
         BrowseItem::Track { .. } => Some("tracks"),
         BrowseItem::Genre { .. } => Some("genres"),
-        BrowseItem::GenreCategory { .. } => Some("genre-categories"),
         BrowseItem::Playlist { .. } => Some("playlists"),
         BrowseItem::AllTracks { .. } => Some("all-tracks"),
         _ => None,
@@ -4049,6 +4215,14 @@ pub enum SimilarMode {
     Artists,
 }
 
+/// Reporting is independent of transport: pausing does not reset this state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ScrobbleState {
+    #[default]
+    Pending,
+    Queued,
+}
+
 /// Playback state.
 #[derive(Debug, Clone)]
 pub struct PlaybackState {
@@ -4063,9 +4237,9 @@ pub struct PlaybackState {
     pub duration_ms: u64,
     pub volume: f32,
     pub muted: bool,
-    /// True once server has accepted (or we have queued) the played/scrobble
-    /// report for this track. Reset only when a new track starts.
-    pub scrobble_reported: bool,
+    /// Queued once the played/scrobble report is scheduled for this track.
+    /// Reset only when a new track starts.
+    pub scrobble: ScrobbleState,
     /// When the current track transitioned to Playing (for grace period on TrackEnded detection).
     pub playback_started_at: Option<std::time::Instant>,
 }
@@ -4080,7 +4254,7 @@ impl Default for PlaybackState {
             duration_ms: 0,
             volume: 0.8,
             muted: false,
-            scrobble_reported: false,
+            scrobble: ScrobbleState::Pending,
             playback_started_at: None,
         }
     }
@@ -4156,14 +4330,8 @@ pub enum AdventureDrillLevel {
     },
 }
 
-/// Adventure launcher popup state. The original 3-step wizard
-/// (FindStartTrack → EnterTrackCount → FindEndTrack) was replaced in
-/// the GUI with a single-screen form that always shows all three
-/// fields; `step` now indicates which field the user is currently
-/// editing (so the search panel knows whether a chosen result becomes
-/// `start_track` or `end_track`). Both tracks are stored separately
-/// so a "Reverse" button can swap them and a "Generate" button can
-/// fire only when both are set.
+/// Adventure launcher form. `step` selects the field receiving search results.
+/// Start and end tracks are stored separately for reversal and generation.
 #[derive(Debug, Clone)]
 pub struct AdventureLauncherState {
     pub step: AdventureStep,

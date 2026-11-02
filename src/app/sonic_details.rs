@@ -14,7 +14,7 @@ pub struct State {
 }
 
 pub fn visible(app: &AppState) -> Option<&State> {
-    if app.view != View::Browse || app.popups.search_active || app.category_column_focused {
+    if app.view != View::Browse || app.popups.search_active() || app.category_column_focused {
         return None;
     }
     let child = app.sonic_details.as_ref()?;

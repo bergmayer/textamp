@@ -7,13 +7,14 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use unicode_width::UnicodeWidthStr;
 
 pub fn render(frame: &mut Frame, state: &RenderState) {
-    let Some(dialog) = &state.popups.library_dialog else {
+    let Some(dialog) = state.popups.library_dialog() else {
         return;
     };
     let width = frame.area().width.saturating_sub(4).min(78);
     let height = frame.area().height.saturating_sub(2).min(match dialog {
         Dialog::Library(options) => (options.items(state).len() as u16 + 12).min(22),
-        Dialog::Webdav(_) | Dialog::AudioMuse(_) | Dialog::Navidrome(_) => 16,
+        Dialog::Navidrome(_) => 25,
+        Dialog::Webdav(_) | Dialog::AudioMuse(_) => 16,
         Dialog::Local(_) => 11,
         Dialog::Add { .. } => 9,
     });
@@ -192,8 +193,8 @@ pub fn render(frame: &mut Frame, state: &RenderState) {
                 Some(OptionAction::Sonic) => "Show or hide analysis and discovery features for this library. Existing analysis is kept.",
                 Some(OptionAction::AudioMuse) => "Connect an AudioMuse analysis server for this library. Textamp reads existing analysis.",
                 Some(OptionAction::Rescan) if crate::app::sources::cache::running(&options.choice, state) => "Cancel the background refresh. The last usable cached catalog is kept.",
-                Some(OptionAction::Rescan) => "Refresh catalog and available analysis now. Normally runs weekly. Folder scans read directory names; audio files are not downloaded.",
-                Some(OptionAction::Clear) => "Remove this library's cached catalog and analysis. Artwork, music and sign-ins are kept. Use Refresh catalog to rebuild metadata.",
+                Some(OptionAction::Rescan) => "Re-scan this library and refresh available analysis now. Normally runs weekly. Folder scans read directory names; audio files are not downloaded.",
+                Some(OptionAction::Clear) => "Remove this library's cached catalog and analysis. Artwork, music and sign-ins are kept. Use Re-scan library to rebuild metadata.",
                 Some(OptionAction::ClearArtwork) => "Remove downloaded images for this library. Other libraries' artwork, music and display choices are kept.",
                 Some(OptionAction::Remove) if matches!(options.choice, crate::app::sources::LibraryChoice::Navidrome { .. }) => "Remove the entire account and its libraries from Textamp. Server music and playlists are kept.",
                 Some(OptionAction::Remove) => "Remove this library from Textamp. Music files are kept.",
@@ -211,20 +212,33 @@ pub fn render(frame: &mut Frame, state: &RenderState) {
             );
         }
         Dialog::Add { selected } => {
-            for (index, label) in ["Local folder", "WebDAV share", "Subsonic / Navidrome"]
-                .iter()
-                .enumerate()
+            for (index, (label, description)) in [
+                ("Local folder", "Music stored on this computer"),
+                ("WebDAV share", "A remote folder on a WebDAV server"),
+                ("Subsonic / Navidrome", "Connect a music server account"),
+            ]
+            .iter()
+            .enumerate()
             {
-                if index as u16 >= inner.height {
+                let row = index as u16 * 2;
+                if row >= inner.height {
                     break;
                 }
-                let rect = Rect::new(inner.x, inner.y + index as u16, inner.width, 1);
+                let rect = Rect::new(
+                    inner.x,
+                    inner.y + row,
+                    inner.width,
+                    2.min(inner.height - row),
+                );
                 let style = if index == *selected {
                     super::settings::selected()
                 } else {
                     super::settings::paper()
                 };
-                frame.render_widget(Paragraph::new(format!("[ {label} ]")).style(style), rect);
+                frame.render_widget(
+                    Paragraph::new(format!("[ {label} ]\n  {description}")).style(style),
+                    rect,
+                );
                 controls.push(rect);
             }
         }
@@ -249,7 +263,7 @@ pub fn render(frame: &mut Frame, state: &RenderState) {
                     false,
                 ),
                 Dialog::Navidrome(form) => (
-                    &form.fields,
+                    form.fields.as_slice(),
                     &crate::app::sources::dialogs::ServerForm::LABELS,
                     form.focus,
                     form.busy,
@@ -278,36 +292,75 @@ pub fn render(frame: &mut Frame, state: &RenderState) {
                 _ => unreachable!(),
             };
             let field_count = fields.len();
-            let constraints: Vec<_> = std::iter::repeat_n(Constraint::Length(2), field_count)
-                .chain([
-                    Constraint::Min(1),
-                    Constraint::Length(1),
-                    Constraint::Length(1),
-                ])
-                .collect();
-            let rows = Layout::vertical(constraints).split(inner);
-            for (index, field) in fields.iter().enumerate() {
-                let row = rows[index];
+            // Keep actions visible; the focused field scrolls into the input
+            // viewport when a combined music/AudioMuse form is taller than the terminal.
+            let help_height = u16::from(inner.height >= 12);
+            let message_height = if inner.height >= 8 {
+                2
+            } else {
+                u16::from(inner.height >= 4)
+            };
+            let rows = Layout::vertical([
+                Constraint::Min(1),
+                Constraint::Length(message_height),
+                Constraint::Length(1),
+                Constraint::Length(help_height),
+            ])
+            .split(inner);
+            let field_height = if rows[0].height >= field_count as u16 * 2 {
+                2
+            } else {
+                1
+            };
+            let visible = (rows[0].height / field_height) as usize;
+            let offset = focus
+                .min(field_count - 1)
+                .saturating_sub(visible.saturating_sub(1))
+                .min(field_count.saturating_sub(visible));
+            controls.resize(field_count, Rect::default());
+            for (index, field) in fields.iter().enumerate().skip(offset).take(visible) {
+                let row = Rect::new(
+                    rows[0].x,
+                    rows[0].y + (index - offset) as u16 * field_height,
+                    rows[0].width,
+                    field_height,
+                );
+                let (label, input) = if field_height == 1 {
+                    let label_width = 26.min(row.width / 2).min(row.width.saturating_sub(8));
+                    (
+                        Rect::new(row.x, row.y, label_width, row.height),
+                        Rect::new(
+                            row.x + label_width,
+                            row.y,
+                            row.width - label_width,
+                            row.height,
+                        ),
+                    )
+                } else {
+                    (
+                        Rect {
+                            height: row.height.min(1),
+                            ..row
+                        },
+                        Rect::new(
+                            row.x,
+                            row.y.saturating_add(1),
+                            row.width,
+                            row.height.saturating_sub(1),
+                        ),
+                    )
+                };
                 frame.render_widget(
                     Paragraph::new(labels[index])
                         .style(super::settings::paper().fg(theme().colors.fg_accent)),
-                    Rect {
-                        height: row.height.min(1),
-                        ..row
-                    },
+                    label,
                 );
-                let input = Rect::new(
-                    row.x,
-                    row.y.saturating_add(1),
-                    row.width,
-                    row.height.saturating_sub(1),
-                );
-                controls.push(input);
+                controls[index] = input;
                 if input.height == 0 || input.width == 0 {
                     continue;
                 }
                 let focused = focus == index && !busy;
-                let chars: Vec<char> = if index == 2 && !local {
+                let chars: Vec<char> = if (index == 2 || index == 6) && !local {
                     vec!['•'; field.value.chars().count()]
                 } else {
                     field.value.chars().collect()
@@ -331,7 +384,7 @@ pub fn render(frame: &mut Frame, state: &RenderState) {
                     "/path/to/music or ~/Music"
                 } else if index == 0 {
                     "http://server:port/path/ or https://…"
-                } else if index == 2 && editing {
+                } else if (index == 2 || index == 6) && editing {
                     "Leave blank to keep saved password"
                 } else {
                     ""
@@ -360,10 +413,12 @@ pub fn render(frame: &mut Frame, state: &RenderState) {
                 "The folder is checked when you save. Adding a library does not switch playback."
             } else if audiomuse {
                 "Analysis only; music and scanning stay on the server. Blank password keeps saved credentials."
+            } else if matches!(dialog, Dialog::Navidrome(_)) {
+                "AudioMuse is optional: leave its URL blank to skip. Both connections are checked before saving."
             } else if editing {
-                "Check the URL scheme and port. Blank password keeps the saved password."
+                "Blank password keeps the saved password."
             } else {
-                "Use the server's exact URL, including http:// or https://. Credentials are stored privately."
+                "Enter the server address. Credentials are stored privately."
             };
             frame.render_widget(
                 Paragraph::new(message)
@@ -373,12 +428,12 @@ pub fn render(frame: &mut Frame, state: &RenderState) {
                     } else {
                         theme().colors.fg_accent
                     })),
-                rows[field_count],
+                rows[1],
             );
             if audiomuse {
                 buttons(
                     frame,
-                    rows[field_count + 1],
+                    rows[2],
                     ["Save", "Disconnect", "Cancel"],
                     focus.checked_sub(field_count).unwrap_or(3),
                     busy,
@@ -387,7 +442,7 @@ pub fn render(frame: &mut Frame, state: &RenderState) {
             } else {
                 buttons(
                     frame,
-                    rows[field_count + 1],
+                    rows[2],
                     [if editing { "Save" } else { "Add library" }, "Cancel"],
                     focus.checked_sub(field_count).unwrap_or(2),
                     busy,
@@ -397,7 +452,7 @@ pub fn render(frame: &mut Frame, state: &RenderState) {
             frame.render_widget(
                 Paragraph::new("Tab / ↑↓ fields · Enter submit · Esc cancel · Ctrl+A select all")
                     .style(super::settings::paper().fg(theme().colors.fg_accent)),
-                rows[field_count + 2],
+                rows[3],
             );
         }
     }

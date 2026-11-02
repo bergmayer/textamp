@@ -108,7 +108,7 @@ fn sole_navidrome_folder_has_one_named_choice_in_settings_and_switcher() {
     manager::initialize(&mut state, &config);
     state.sources.active = ActiveSource::Navidrome(Box::new(session));
     for popup in [false, true] {
-        state.popups.library_picker_active = popup;
+        state.popups.set_library_picker_active(popup);
         let choices = sources::choices(&state);
         let nav: Vec<_> = choices
             .iter()
@@ -146,7 +146,12 @@ fn manager_owns_navigation_and_refresh_keys_instead_of_the_underlying_view() {
         )
         .is_empty());
     }
-    assert!(press(&mut state, KeyCode::F(5)).is_empty());
+    assert!(matches!(
+        press(&mut state, KeyCode::F(5)).as_slice(),
+        [Action::Settings(
+            textamp::app::action::SettingsAction::RescanSourceCache(_)
+        )]
+    ));
     assert!(matches!(
         press(&mut state, KeyCode::Char('w')).as_slice(),
         [Action::Source(SourceAction::Choose(
@@ -239,7 +244,7 @@ fn manager_rows_skip_headings_and_click_preserves_viewport() {
             ));
         } else {
             assert!(matches!(
-                state.popups.library_dialog,
+                state.popups.library_dialog(),
                 Some(sources::dialogs::Dialog::Library(_))
             ));
             assert!(matches!(
@@ -277,7 +282,7 @@ fn quick_switcher_is_compact_and_does_not_offer_management_commands() {
     let mut state = AppState::new();
     manager::initialize(&mut state, &config());
     state.set_view(View::Browse);
-    state.popups.library_picker_active = true;
+    state.popups.set_library_picker_active(true);
     let mut terminal = Terminal::new(TestBackend::new(140, 42)).unwrap();
     terminal
         .draw(|frame| {
@@ -359,7 +364,7 @@ async fn switching_and_managing_are_separate_and_cancel_preserves_player_state()
     }
     assert!(manager::settings_active(&state));
     assert_eq!(state.settings_state.focus, SettingsFocus::Sections);
-    assert!(!state.popups.library_picker_active);
+    assert!(!state.popups.library_picker_active());
     dispatch_action(
         SearchAction::OpenLibraryPicker.into(),
         &mut state,
@@ -413,5 +418,91 @@ fn up_from_first_saved_library_returns_to_settings_menu() {
     assert_eq!(state.settings_state.section, SettingsSection::Textamp);
     press(&mut state, KeyCode::Right);
     assert_eq!(state.settings_state.focus, SettingsFocus::Content);
-    assert!(state.popups.library_dialog.is_none());
+    assert!(state.popups.library_dialog().is_none());
+}
+
+#[test]
+fn manager_buttons_and_f5_use_the_selected_library_without_switching_playback() {
+    use textamp::app::action::SettingsAction;
+    for (width, height) in [(30, 16), (60, 20), (110, 35)] {
+        let mut state = AppState::new();
+        manager::initialize(&mut state, &config());
+        open_settings(&mut state);
+        state.sources.active = ActiveSource::Folder("keep-playing".into());
+        state.playback.position_ms = 3210;
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|f| state.apply_render_feedback(textamp::ui::render(f, &state)))
+            .unwrap();
+        assert_eq!(state.hit_regions.library_manager_actions.len(), 3);
+        let (rect, _) = state
+            .hit_regions
+            .library_manager_actions
+            .iter()
+            .find(|(_, a)| matches!(a, Action::Settings(SettingsAction::RescanSourceCache(_))))
+            .unwrap();
+        assert!(rect.height > 0 && rect.bottom() <= height && rect.right() <= width);
+        let rect = *rect;
+        let mouse = mouse_input::handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                row: rect.y,
+                column: rect.x,
+                modifiers: KeyModifiers::NONE,
+            },
+            &mut state,
+        );
+        let keyboard = press(&mut state, KeyCode::F(5));
+        assert!(matches!((mouse.as_slice(),keyboard.as_slice()),
+            ([Action::Settings(SettingsAction::RescanSourceCache(a))],
+             [Action::Settings(SettingsAction::RescanSourceCache(b))]) if a.label()==b.label()));
+        assert!(state.popups.library_dialog().is_none());
+        assert_eq!(
+            state.sources.active.folder().map(String::as_str),
+            Some("keep-playing")
+        );
+        assert_eq!(state.playback.position_ms, 3210);
+    }
+}
+
+#[test]
+fn combined_connection_form_keeps_focused_fields_and_buttons_visible_in_short_terminals() {
+    use textamp::app::sources::dialogs::{Dialog, ServerForm};
+    for (width, height) in [(30, 10), (60, 16), (110, 35)] {
+        let mut state = AppState::new();
+        open_settings(&mut state);
+        let mut form = ServerForm::new(None);
+        form.fields[2].value = "music-password-must-not-show".into();
+        form.fields[2].cursor = form.fields[2].value.len();
+        form.fields[6].value = "analysis-password-must-not-show".into();
+        form.fields[6].cursor = form.fields[6].value.len();
+        state
+            .popups
+            .set_library_dialog(Some(Dialog::Navidrome(form)));
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        for focus in 0..10 {
+            terminal
+                .draw(|f| state.apply_render_feedback(textamp::ui::render(f, &state)))
+                .unwrap();
+            let text = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            assert!(!text.contains("music-password") && !text.contains("analysis-password"));
+            let rect = state.hit_regions.library_dialog[focus];
+            assert!(
+                rect.height > 0 && rect.bottom() <= height && rect.right() <= width,
+                "focus {focus}, {width}x{height}"
+            );
+            press(&mut state, KeyCode::Tab);
+        }
+        assert!(
+            matches!(state.popups.library_dialog(),Some(Dialog::Navidrome(form)) if form.focus==0)
+        );
+        press(&mut state, KeyCode::Esc);
+        assert!(state.popups.library_dialog().is_none());
+    }
 }

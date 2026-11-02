@@ -106,12 +106,12 @@ pub async fn dispatch(
                 }
             });
             let should_scrobble = navidrome_track.is_some()
-                && !state.playback.scrobble_reported
+                && state.playback.scrobble == crate::app::state::ScrobbleState::Pending
                 && state.playback.duration_ms > 0
                 && state.playback.position_ms.saturating_mul(10)
                     >= state.playback.duration_ms.saturating_mul(9);
             if should_scrobble {
-                state.playback.scrobble_reported = true;
+                state.playback.scrobble = crate::app::state::ScrobbleState::Queued;
             }
             let flush = async move {
                 let navidrome = async move {
@@ -154,7 +154,7 @@ pub async fn dispatch(
             // during preparation must not fall through to the server client.
             if state.current_track().is_some_and(|t| {
                 matches!(t.origin, crate::library::track::TrackOrigin::Folder { .. })
-            }) && state.sources.prepared.is_none()
+            }) && state.sources.media.file().is_none()
             {
                 return Ok(vec![]);
             }
@@ -201,7 +201,7 @@ pub async fn dispatch(
                     // emit a Failed event so `generating` clears.
                     // Without this, the panel is stuck on "Generating…"
                     // forever and the only fix is a track change.
-                    let prepared_file = state.sources.prepared.clone().filter(|_| true);
+                    let prepared_file = state.sources.media.file().cloned();
                     let navidrome = state.sources.active.navidrome();
                     let stream_url = match if prepared_file.is_some() {
                         Ok(String::new())
@@ -462,7 +462,7 @@ pub async fn dispatch(
         SystemAction::LoadSpectrogram => {
             if state.current_track().is_some_and(|t| {
                 matches!(t.origin, crate::library::track::TrackOrigin::Folder { .. })
-            }) && state.sources.prepared.is_none()
+            }) && state.sources.media.file().is_none()
             {
                 return Ok(vec![]);
             }
@@ -509,7 +509,7 @@ pub async fn dispatch(
                         // MUST emit `SpectrogramFailed`, otherwise
                         // `generating` stays true and the panel is
                         // stuck on "Generating spectrogram…".
-                        let prepared_file = state.sources.prepared.clone().filter(|_| true);
+                        let prepared_file = state.sources.media.file().cloned();
                         let navidrome = state.sources.active.navidrome();
                         let stream_url = match if prepared_file.is_some() {
                             Ok(String::new())

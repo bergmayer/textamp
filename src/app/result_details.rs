@@ -16,7 +16,7 @@ pub struct State {
 }
 
 pub fn state(app: &AppState) -> Option<&State> {
-    if app.popups.search_active || app.view == View::Search {
+    if app.popups.search_active() || app.view == View::Search {
         Some(&app.search.details)
     } else if app.view == View::Similar {
         Some(&app.similar.details)
@@ -25,7 +25,7 @@ pub fn state(app: &AppState) -> Option<&State> {
     }
 }
 fn state_mut(app: &mut AppState) -> Option<&mut State> {
-    if app.popups.search_active || app.view == View::Search {
+    if app.popups.search_active() || app.view == View::Search {
         Some(&mut app.search.details)
     } else if app.view == View::Similar {
         Some(&mut app.similar.details)
@@ -34,7 +34,7 @@ fn state_mut(app: &mut AppState) -> Option<&mut State> {
     }
 }
 pub fn track_list(app: &AppState) -> Option<(&[Track], usize)> {
-    let (tracks, index) = if app.popups.search_active || app.view == View::Search {
+    let (tracks, index) = if app.popups.search_active() || app.view == View::Search {
         let results = app.search.results.as_ref()?;
         let (section, index) = if app.search.tab == SearchTab::Global {
             super::handlers::dispatch_search::resolve_global_index(

@@ -26,7 +26,6 @@ pub async fn dispatch(
             if state.active_library.as_ref() != Some(&library_key) {
                 return Ok(follow_ups);
             }
-            state.stations_loading = false;
             state.station_nav.loading = false;
             match result {
                 Ok(mut stations) => {
@@ -41,7 +40,6 @@ pub async fn dispatch(
                         stations.clone(),
                     ));
                     state.station_nav.focused_column = 0;
-                    state.stations = stations;
                 }
                 Err(error) => {
                     state.set_error(error.message);

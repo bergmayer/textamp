@@ -1,10 +1,9 @@
 //! Mouse input handler functions.
-//!
-//! All mouse event processing extracted from the event loop as free functions.
 
 use super::helpers;
 use crate::app::action::*;
 use crate::app::command_palette;
+use crate::app::presentation::is_two_row_browse_column;
 use crate::app::scrollbar::{calc_thumb, scroll_offset_from_y};
 use crate::app::state::{
     BrowseCategory, BrowseItem, BrowseNavigationState, PlaybackMode, ScrollbarDrag, ScrollbarView,
@@ -13,59 +12,6 @@ use crate::app::state::{
 use crate::app::Action;
 use crate::app::AppState;
 use ratatui::layout::Rect;
-
-/// Check if a browse column uses 2-row display for mouse hit-testing.
-/// Mirrors the logic in `is_two_row_column()` in `src/ui/app.rs`.
-fn is_two_row_browse_column(
-    state: &AppState,
-    col: &crate::app::state::BrowseColumn,
-    col_idx: usize,
-    nav: &BrowseNavigationState,
-) -> bool {
-    let first_is_track = col
-        .items
-        .first()
-        .is_some_and(|item| matches!(item, BrowseItem::Track { .. }));
-    let first_is_album = col
-        .items
-        .first()
-        .is_some_and(|item| matches!(item, BrowseItem::Album { .. }));
-
-    // Special track columns always get two-row display
-    if first_is_track && state.is_special_track_column(nav, col_idx) {
-        return true;
-    }
-
-    // Album columns in "All Artists" mode
-    if first_is_album
-        && (nav
-            .columns
-            .first()
-            .and_then(|c| c.selected_item())
-            .is_some_and(|item| matches!(item, BrowseItem::AllArtists))
-            || (state.browse_category == BrowseCategory::Library
-                && state.library.library_sub_mode != crate::app::state::LibrarySubMode::Normal
-                && col_idx == 0))
-    {
-        return true;
-    }
-
-    // Genre/mood album columns
-    if first_is_album && state.browse_category.is_tag_section() {
-        return true;
-    }
-
-    // Grouped-by-album playlist columns (albums with artist on 2nd row).
-    // Mirrors the renderer's `is_two_row_column` in `src/ui/app.rs`;
-    // without this branch, clicks in playlists like "rephlex and skam"
-    // (which the user grouped by album) misalign because the hit-test
-    // thinks rows are 1 cell tall while the renderer paints 2.
-    if first_is_album && col.grouped_by_album {
-        return true;
-    }
-
-    false
-}
 
 /// Handle a click on a Miller column that has an active filter.
 ///
@@ -126,22 +72,22 @@ fn is_one_row_item(item: &BrowseItem) -> bool {
 
 /// Handle mouse events.
 pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -> Vec<Action> {
-    if state.popups.sound_output_active {
+    if state.popups.sound_output_active() {
         return crate::app::sound_output::mouse(event, state);
     }
     // These overlays have no pointer controls; never let input reach the player.
-    if state.popups.input_dialog.is_some() || state.notifications.last_error.is_some() {
+    if state.popups.input_dialog().is_some() || state.notifications.last_error.is_some() {
         state.seek_drag = None;
         state.volume_drag = false;
         state.scroll.scrollbar_drag = None;
         state.miller_h_drag_grab = None;
         return vec![];
     }
-    if state.popups.library_dialog.is_some() && state.popups.confirm_dialog.is_none() {
+    if state.popups.library_dialog().is_some() && state.popups.confirm_dialog().is_none() {
         return crate::app::sources::dialogs::mouse(event, state);
     }
     use crossterm::event::{MouseButton, MouseEventKind};
-    if let Some(popup) = &mut state.popups.text {
+    if let Some(popup) = state.popups.text_mut() {
         match event.kind {
             MouseEventKind::ScrollDown => popup.scroll = popup.scroll.saturating_add(3),
             MouseEventKind::ScrollUp => popup.scroll = popup.scroll.saturating_sub(3),
@@ -150,7 +96,7 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
         return vec![];
     }
 
-    if state.fullscreen_active && !state.palette.open && state.popups.confirm_dialog.is_none() {
+    if state.fullscreen_active && !state.palette.open && state.popups.confirm_dialog().is_none() {
         return crate::app::fullscreen::mouse(event, state);
     }
     let click_row = event.row;
@@ -189,16 +135,8 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
         state.track_pane_focused = false;
     }
 
-    // Calculate layout regions
-    // Layout: [content] [transport(2)] — the old 3-row command bar
-    // is gone (replaced by the `:` command palette).
     let transport_start = state.terminal_height.saturating_sub(2);
     let tab_strip_row = state.terminal_height.saturating_sub(1);
-    // The command bar no longer exists; keep these named for the
-    // existing branches but pin them past the screen so the
-    // "click in command bar" branches never fire.
-    let commands_start = state.terminal_height;
-    let command_top_row = state.terminal_height;
 
     // Command palette overlay intercepts clicks when open. Click on a
     // row → set selection + execute (same as Enter). Click elsewhere
@@ -240,7 +178,7 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
     }
 
     // Confirm dialog intercepts mouse clicks when active
-    if state.popups.confirm_dialog.is_some() {
+    if state.popups.confirm_dialog().is_some() {
         if let crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) =
             event.kind
         {
@@ -266,10 +204,10 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
                 };
 
                 if let Some(clicked_yes) = clicked_yes {
-                    if let Some(dialog) = state.popups.confirm_dialog.as_ref() {
+                    if let Some(dialog) = state.popups.confirm_dialog() {
                         let already_selected = clicked_yes == dialog.selected_yes;
                         if already_selected {
-                            let dialog = state.popups.confirm_dialog.take().unwrap();
+                            let dialog = state.popups.take_confirm_dialog().unwrap();
                             if clicked_yes {
                                 use crate::app::state::ConfirmAction;
                                 return match dialog.on_confirm {
@@ -298,8 +236,7 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
                             crate::app::sources::dialogs::restore_parent(state);
                             return vec![];
                         } else {
-                            state.popups.confirm_dialog.as_mut().unwrap().selected_yes =
-                                clicked_yes;
+                            state.popups.confirm_dialog_mut().unwrap().selected_yes = clicked_yes;
                             return vec![];
                         }
                     }
@@ -310,8 +247,22 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
     }
 
     // Library picker popup intercepts all mouse events when active
-    if state.popups.library_picker_active {
+    if state.popups.library_picker_active() {
         return handle_library_picker_mouse(event, state);
+    }
+    if crate::app::sources::manager::settings_active(state)
+        && event.kind == MouseEventKind::Down(MouseButton::Left)
+    {
+        if let Some((_, action)) = state
+            .hit_regions
+            .library_manager_actions
+            .iter()
+            .find(|(rect, _)| rect.contains((event.column, event.row).into()))
+        {
+            let action = action.clone();
+            state.settings_state.focus = crate::app::state::SettingsFocus::Content;
+            return vec![action];
+        }
     }
     if crate::app::sources::manager::settings_active(state)
         && state
@@ -337,7 +288,7 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
     }
 
     // Search popup intercepts mouse clicks when active
-    if state.popups.search_active {
+    if state.popups.search_active() {
         if let crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) =
             event.kind
         {
@@ -347,7 +298,7 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
     }
 
     // Artist radio picker popup intercepts mouse clicks when active
-    if state.popups.artist_radio_picker.is_some() {
+    if state.popups.artist_radio_picker().is_some() {
         if let crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) =
             event.kind
         {
@@ -357,7 +308,7 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
     }
 
     // Adventure launcher popup intercepts mouse clicks when active
-    if state.popups.adventure_launcher.is_some() {
+    if state.popups.adventure_launcher().is_some() {
         if let crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) =
             event.kind
         {
@@ -367,7 +318,7 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
     }
 
     // Artist bio popup intercepts all mouse events when active
-    if let Some(popup) = &mut state.popups.artist_bio {
+    if let Some(popup) = state.popups.artist_bio_mut() {
         let max_scroll = state
             .hit_regions
             .biography_text
@@ -400,7 +351,7 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
                     popup.google_focused = false;
                     return vec![];
                 }
-                state.popups.artist_bio = None;
+                state.popups.set_artist_bio(None);
                 // Bio popup overlays the Now Playing artwork when shown
                 // from that view; dropping the protocol forces a fresh
                 // image placement on the next render so the terminal
@@ -412,7 +363,7 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
     }
 
     // Sort popup intercepts mouse clicks when active
-    if state.popups.sort.is_some() {
+    if state.popups.sort().is_some() {
         if let crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) =
             event.kind
         {
@@ -458,7 +409,7 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
             // through (so you can select a filtered result). But if the query is empty,
             // clicking anywhere closes the filter.
             if state.list_filter.active
-                && !(click_row >= transport_start && click_row < commands_start)
+                && !(click_row >= transport_start && click_row < state.terminal_height)
                 && (state.view != View::Browse || state.list_filter.query.is_empty())
             {
                 state.list_filter.deactivate();
@@ -466,23 +417,6 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
             }
             // Browse view with non-empty query: let content-area clicks pass through
             // to normal handlers. Filter stays active until Esc or view change.
-
-            // Check command bar (bottom 3 rows: top row has tabs+F-keys, spacer, bottom has contextual)
-            if click_row >= commands_start {
-                if click_row == command_top_row {
-                    // Top row: check tab bar items first (library label, quit, view tabs),
-                    // then F-key items
-                    let tab_result = handle_tab_bar_click(click_col, state);
-                    if !tab_result.is_empty() {
-                        return tab_result;
-                    }
-                    return handle_command_bar_click(click_col, state, true);
-                } else if click_row == commands_start + 2 {
-                    return handle_command_bar_click(click_col, state, false);
-                }
-                // Middle row is spacer — ignore clicks
-                return vec![];
-            }
 
             // Check transport bar (2 rows). The bottom row is the
             // Library / Now Playing tab strip; clicks there go to
@@ -503,7 +437,7 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
                 }
                 return vec![];
             }
-            if click_row >= transport_start && click_row < commands_start {
+            if click_row >= transport_start && click_row < state.terminal_height {
                 return handle_transport_down(click_col, click_row, transport_start, state);
             }
 
@@ -582,10 +516,10 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
         // then open the command palette. Same end result as
         // left-clicking the row to select + typing `:` to bring up
         // the menu, but in one motion. Chrome rows (transport,
-        // command bar, tab strip) are skipped — right-clicks there
+        // tab strip) are skipped — right-clicks there
         // shouldn't pop the palette.
         MouseEventKind::Down(MouseButton::Right) => {
-            if click_row >= commands_start || click_row >= transport_start {
+            if click_row >= transport_start {
                 return vec![];
             }
             handle_right_click_select(click_row, click_col, state);
@@ -1000,12 +934,12 @@ fn handle_tab_bar_click(click_col: u16, state: &mut AppState) -> Vec<Action> {
         if click_col >= quit_rect.x && click_col < quit_rect.right() {
             use crate::app::state::{ConfirmAction, ConfirmDialog};
             state.popups.close_all();
-            state.popups.confirm_dialog = Some(ConfirmDialog {
+            state.popups.set_confirm_dialog(Some(ConfirmDialog {
                 title: "Quit".to_string(),
                 message: "Are you sure you want to quit?".to_string(),
                 on_confirm: ConfirmAction::Quit,
                 selected_yes: false,
-            });
+            }));
             return vec![];
         }
     }
@@ -1018,127 +952,6 @@ fn handle_tab_bar_click(click_col: u16, state: &mut AppState) -> Vec<Action> {
     }
 
     vec![]
-}
-
-/// Handle click on the always-visible command bar (bottom 2 rows).
-fn handle_command_bar_click(click_col: u16, state: &mut AppState, is_top_row: bool) -> Vec<Action> {
-    use crate::app::handlers::key_input::{available_alt_commands, CommandModifier};
-
-    // Read registered regions (drop borrow before mutating state)
-    let regions = {
-        let hr = &state.hit_regions;
-        hr.command_bar.clone()
-    };
-    let Some(regions) = regions else {
-        return vec![];
-    };
-
-    let items = if is_top_row {
-        &regions.top_row
-    } else {
-        &regions.bottom_row
-    };
-
-    // Find which command button was clicked
-    for (rect, action_key) in items {
-        if click_col >= rect.x && click_col < rect.right() {
-            let parts: Vec<&str> = action_key.splitn(2, ':').collect();
-            if parts.len() != 2 {
-                continue;
-            }
-            let (mod_str, key_str) = (parts[0], parts[1]);
-
-            let alt_cmds = available_alt_commands(state);
-
-            // F-key commands use "fkey:F1" format
-            if mod_str == "fkey" {
-                for cmd in &alt_cmds {
-                    if cmd.display_key == Some(key_str) {
-                        if !cmd.enabled {
-                            return vec![];
-                        }
-                        return alt_bar_item_action(cmd, state);
-                    }
-                }
-                return vec![];
-            }
-
-            // Modifier+key commands use "ctrl:e" format
-            for cmd in &alt_cmds {
-                let cmd_mod_str = match cmd.modifier {
-                    CommandModifier::Ctrl => "ctrl",
-                    CommandModifier::Alt => "alt",
-                    CommandModifier::None => "none",
-                };
-                let cmd_key_str = cmd.key.to_string();
-                if cmd_mod_str == mod_str && cmd_key_str == key_str {
-                    if !cmd.enabled {
-                        return vec![];
-                    }
-                    return alt_bar_item_action(cmd, state);
-                }
-            }
-        }
-    }
-
-    vec![]
-}
-
-/// Map a clicked alt bar command to an action.
-fn alt_bar_item_action(
-    cmd: &crate::app::handlers::key_input::AltCommand,
-    state: &mut AppState,
-) -> Vec<Action> {
-    use crate::app::handlers::key_input::CommandModifier;
-    match (cmd.modifier, cmd.key) {
-        (CommandModifier::Ctrl, 'e') => vec![QueueAction::EnqueueSelection.into()],
-        (CommandModifier::Ctrl, 'm') => super::key_input::get_similar_action(state),
-        (CommandModifier::Ctrl, 'j') => super::key_input::navigate_to_album(state),
-        (CommandModifier::Ctrl, 's') => vec![QueueAction::PromptSavePlaylist.into()],
-        (CommandModifier::Ctrl, 'x') => vec![QueueAction::ClearQueue.into()],
-        (CommandModifier::Alt, 'f') => vec![SearchAction::ActivateListFilter.into()],
-        (CommandModifier::Alt, 'r') => super::key_input::random_album_radio(state),
-        (CommandModifier::Ctrl, 'f') => {
-            if state.popups.search_active {
-                vec![SearchAction::CloseSearchPopup.into()]
-            } else {
-                vec![SearchAction::OpenSearchPopup.into()]
-            }
-        }
-        (CommandModifier::Ctrl, 'q') => {
-            use crate::app::state::{ConfirmAction, ConfirmDialog};
-            state.popups.close_all();
-            state.popups.confirm_dialog = Some(ConfirmDialog {
-                title: "Quit".to_string(),
-                message: "Are you sure you want to quit?".to_string(),
-                on_confirm: ConfirmAction::Quit,
-                selected_yes: false,
-            });
-            vec![]
-        }
-        (CommandModifier::None, _) => {
-            // Function keys
-            match cmd.display_key {
-                Some("F1") => vec![NavigationAction::SetView(View::Help).into()],
-                Some("F2") => vec![SettingsAction::OpenSettings.into()],
-                Some("F3") => vec![SearchAction::OpenLibraryPicker.into()],
-                Some("F4") => {
-                    if let Some((artist_key, artist_name)) = helpers::get_artist_for_bio(state) {
-                        vec![SearchAction::ShowArtistBio {
-                            artist_key,
-                            artist_name,
-                        }
-                        .into()]
-                    } else {
-                        vec![]
-                    }
-                }
-                Some("F5") => helpers::refresh_current_view(state),
-                _ => vec![],
-            }
-        }
-        _ => vec![],
-    }
 }
 
 /// Return the action for clicking a shortcut bar item (with cycling support).
@@ -1466,7 +1279,7 @@ fn play_row_hit_test(
     click_row: u16,
     nav: &BrowseNavigationState,
     state: &AppState,
-) -> Option<usize> {
+) -> Option<(usize, bool)> {
     let regions = state.hit_regions.miller_columns.clone()?;
     for col_region in &regions.columns {
         let col_idx = col_region.col_idx;
@@ -1479,7 +1292,13 @@ fn play_row_hit_test(
         }
         // The play row is the first inner line of the column.
         if click_row == col_region.inner.y {
-            return Some(col_idx);
+            return Some((col_idx, false));
+        }
+        if col.has_album_details()
+            && click_row == col_region.inner.y + 1
+            && click_row < col_region.inner.bottom()
+        {
+            return Some((col_idx, true));
         }
     }
     None
@@ -1530,14 +1349,14 @@ fn miller_hit_test(
             return None;
         }
 
-        // Synthetic "▶ Play …" row pinned at the top of tracks
-        // columns occupies the first inner line. Shift the item
+        // Pinned action rows occupy the first inner lines of tracks
+        // columns. Shift the item
         // area down by one so a click on the play row is *not*
         // mistaken for item 0, and clicks below the play row map
         // to their real positions. The dedicated
         // `play_row_hit_test` runs ahead of this function and
         // catches play-row clicks before we get here.
-        let play_row_shift = col.play_all_row.is_some() as u16;
+        let play_row_shift = col.header_rows();
         let inner_y = col_region.inner.y + play_row_shift;
         let inner_height = col_region.inner.height.saturating_sub(play_row_shift);
 
@@ -2178,7 +1997,7 @@ fn handle_browse_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
             // the album / playlist / track list. Single click acts
             // as a button — there's no two-step "select then drill"
             // here because the row's whole purpose is the action.
-            if let Some(col_idx) = play_row_hit_test(click_col, click_row, nav, state) {
+            if let Some((col_idx, details)) = play_row_hit_test(click_col, click_row, nav, state) {
                 let nav_mut = match state.browse_category {
                     BrowseCategory::Library => &mut state.artist_nav,
                     cat if cat.is_tag_section() => &mut state.tag_nav,
@@ -2189,7 +2008,13 @@ fn handle_browse_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
                 let Some(col) = nav_mut.columns.get_mut(col_idx) else {
                     return vec![];
                 };
-                col.on_play_row = true;
+                if details {
+                    col.header_selection = crate::app::state::ColumnHeaderSelection::AlbumDetails;
+                    state.category_column_focused = false;
+                    state.track_pane_focused = false;
+                    return vec![crate::app::action::MillerAction::OpenAlbumDetails.into()];
+                }
+                col.header_selection = crate::app::state::ColumnHeaderSelection::Play;
                 let Some(row) = col.play_all_row.clone() else {
                     return vec![];
                 };
@@ -2277,7 +2102,7 @@ fn handle_browse_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
                 // is explicitly moving to an item, so the synthetic
                 // play row should release the highlight.
                 if let Some(col) = nav.columns.get_mut(col_idx) {
-                    col.on_play_row = false;
+                    col.header_selection = crate::app::state::ColumnHeaderSelection::Items;
                 }
 
                 let col_sel = nav
@@ -2467,7 +2292,7 @@ fn handle_folder_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
             if let Some(col) = folder_state.columns.get_mut(col_idx) {
                 col.selected_index = item_idx;
             }
-            folder_state.truncate_right_columns();
+            folder_state.truncate_right();
             if state.list_filter.active {
                 state.list_filter.deactivate();
             }
@@ -2507,7 +2332,7 @@ fn handle_folder_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
                 }
                 fs.focused_column = col_idx;
                 let had_child = col_idx + 1 < fs.columns.len();
-                fs.truncate_right_columns();
+                fs.truncate_right();
                 should_drill = had_child || was_selected;
             }
             should_drill
@@ -3108,6 +2933,36 @@ fn handle_browse_scroll(
         });
         return vec![];
     }
+    if let Some(region) = state
+        .hit_regions
+        .miller_columns
+        .as_ref()
+        .and_then(|regions| {
+            regions
+                .columns
+                .iter()
+                .find(|r| r.inner.contains((click_col, click_row).into()))
+        })
+        .cloned()
+    {
+        if let Some(col) = state
+            .browse_nav_mut()
+            .and_then(|nav| nav.columns.get_mut(region.col_idx))
+        {
+            if let Some(lines) = &col.album_details {
+                col.selected_index = if up {
+                    col.selected_index.saturating_sub(1)
+                } else {
+                    (col.selected_index + 1).min(
+                        region
+                            .details_max_scroll
+                            .unwrap_or_else(|| lines.len().saturating_sub(1)),
+                    )
+                };
+                return vec![];
+            }
+        }
+    }
     // If a mouse click recently set the scroll pin, ignore scroll events
     // to prevent trackpad inertia from clearing the pin and re-centering.
     if let Some(click_time) = state.scroll.browse_click_time {
@@ -3162,7 +3017,7 @@ fn handle_browse_scroll(
                 // Selection-only: scroll truncates stale child columns
                 // and waits for explicit Enter/Right.
                 if let Some(folder_state) = &mut state.folder_state {
-                    folder_state.truncate_right_columns();
+                    folder_state.truncate_right();
                 }
             }
         }
@@ -3282,7 +3137,7 @@ fn handle_artist_radio_picker_click(
         return vec![SearchAction::CloseArtistRadioPicker.into()];
     }
 
-    let picker = match &state.popups.artist_radio_picker {
+    let picker = match state.popups.artist_radio_picker() {
         Some(p) => p,
         None => return vec![],
     };
@@ -3318,7 +3173,7 @@ fn handle_artist_radio_picker_click(
     }
 
     // First click — highlight (set scroll pin)
-    if let Some(ref mut picker) = state.popups.artist_radio_picker {
+    if let Some(picker) = state.popups.artist_radio_picker_mut() {
         picker.scroll_pin = Some(scroll_offset);
         picker.item_index = clicked_idx;
         picker.focus = SearchFocus::Results;
@@ -3352,7 +3207,7 @@ fn handle_adventure_launcher_click(
         return vec![SearchAction::CloseAdventureLauncher.into()];
     }
 
-    let launcher = match &state.popups.adventure_launcher {
+    let launcher = match state.popups.adventure_launcher() {
         Some(l) => l,
         None => return vec![],
     };
@@ -3513,7 +3368,7 @@ fn handle_adventure_launcher_click(
     }
 
     // First click — highlight (set scroll pin)
-    if let Some(ref mut launcher) = state.popups.adventure_launcher {
+    if let Some(launcher) = state.popups.adventure_launcher_mut() {
         launcher.scroll_pin = Some(scroll_offset);
         launcher.item_index = item_idx;
         launcher.focus = SearchFocus::Results;
@@ -4164,7 +4019,7 @@ fn try_help_scrollbar_click(
 
 /// Handle mouse click on the sort popup overlay.
 fn handle_sort_popup_click(click_row: u16, click_col: u16, state: &mut AppState) -> Vec<Action> {
-    if state.popups.sort.is_none() {
+    if state.popups.sort().is_none() {
         return vec![];
     }
 
@@ -4193,11 +4048,10 @@ fn handle_sort_popup_click(click_row: u16, click_col: u16, state: &mut AppState)
         if option_idx < regions.option_count {
             let already_selected = state
                 .popups
-                .sort
-                .as_ref()
+                .sort()
                 .map(|p| p.selected_index == option_idx)
                 .unwrap_or(false);
-            if let Some(p) = &mut state.popups.sort {
+            if let Some(p) = state.popups.sort_mut() {
                 p.selected_index = option_idx;
             }
             if already_selected {

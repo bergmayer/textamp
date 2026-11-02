@@ -169,6 +169,94 @@ pub async fn dispatch(
     audio: &mut AudioPlayer,
 ) -> Result<Vec<Action>> {
     match action {
+        MillerAction::OpenAlbumDetails => {
+            let mut artwork = None;
+            if let Some(nav) = state.browse_nav_mut() {
+                let Some(col) = nav.focused() else {
+                    return Ok(vec![]);
+                };
+                let Some(crate::app::state::PlayAllRow::Album { rating_key, title }) =
+                    &col.play_all_row
+                else {
+                    return Ok(vec![]);
+                };
+                let art_key = rating_key.clone();
+                let thumb = col
+                    .tracks
+                    .iter()
+                    .find_map(|track| track.parent_thumb.clone())
+                    .or_else(|| {
+                        nav.columns
+                            .iter()
+                            .flat_map(|column| &column.items)
+                            .find_map(|item| match item {
+                                BrowseItem::Album { key, thumb, .. } if key == &art_key => {
+                                    thumb.clone()
+                                }
+                                _ => None,
+                            })
+                    });
+                artwork = thumb.map(|thumb| (art_key.clone(), thumb));
+                let mut lines = vec![title.clone(), String::new()];
+                let mut artists = Vec::new();
+                let mut genres = Vec::new();
+                let mut years = Vec::new();
+                for track in &col.tracks {
+                    if let Some(artist) = &track.grandparent_title {
+                        if !artists.contains(artist) {
+                            artists.push(artist.clone());
+                        }
+                    }
+                    for genre in &track.genres {
+                        if !genres.contains(genre) {
+                            genres.push(genre.clone());
+                        }
+                    }
+                    if let Some(year) = track.parent_year.or(track.year) {
+                        if !years.contains(&year) {
+                            years.push(year);
+                        }
+                    }
+                }
+                if !artists.is_empty() {
+                    lines.push(format!("Artist: {}", artists.join(", ")));
+                }
+                if !years.is_empty() {
+                    lines.push(format!(
+                        "Year: {}",
+                        years
+                            .iter()
+                            .map(u16::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
+                if !genres.is_empty() {
+                    lines.push(format!("Genres: {}", genres.join(", ")));
+                }
+                lines.push(format!("Tracks: {}", col.tracks.len()));
+                let duration: u64 = col.tracks.iter().filter_map(|t| t.duration).sum();
+                lines.push(format!(
+                    "Duration: {}:{:02}",
+                    duration / 60_000,
+                    duration / 1_000 % 60
+                ));
+                let mut details = BrowseColumn::new("Album Details", vec![]);
+                details.album_details = Some(lines);
+                details.album_details_art_key = Some(art_key);
+                nav.drill_column(details, false);
+            }
+            if let Some((key, thumb)) = artwork {
+                // Opening details is an explicit cover request, even after rapid browsing.
+                state.artwork.navigation = crate::app::state::ArtworkNavigation::Settled;
+                if !state.artwork.grid_cache.contains_key(&key)
+                    && !state.artwork.grid_pending.contains(&key)
+                {
+                    return Ok(vec![SystemAction::LoadAlbumArt(vec![(key, thumb)]).into()]);
+                }
+            }
+        }
+
         // ================================================================
         // Miller Column Actions for Artists View
         // ================================================================
@@ -330,7 +418,7 @@ pub async fn dispatch(
                         rating_key: album_key.clone(),
                         title: album_title,
                     });
-                    col.on_play_row = true;
+                    col.header_selection = crate::app::state::ColumnHeaderSelection::Play;
                     state.artist_nav.drill_column(col, replace_child);
 
                     // Auto-select track if pending from search navigation
@@ -368,7 +456,7 @@ pub async fn dispatch(
                     col.play_all_row = Some(crate::app::state::PlayAllRow::AllTracks {
                         label: "Play all tracks".to_string(),
                     });
-                    col.on_play_row = true;
+                    col.header_selection = crate::app::state::ColumnHeaderSelection::Play;
                     state.artist_nav.drill_column(col, replace_child);
                 }
                 Err(error) => {
@@ -458,7 +546,7 @@ pub async fn dispatch(
                         rating_key: album_key.clone(),
                         title: album_name.clone(),
                     });
-                    col.on_play_row = true;
+                    col.header_selection = crate::app::state::ColumnHeaderSelection::Play;
                     state.tag_nav.drill_column(col, replace_child);
                 }
                 Err(error) => {
@@ -608,7 +696,7 @@ pub async fn dispatch(
                 col.play_all_row = Some(crate::app::state::PlayAllRow::AllTracks {
                     label: "Play compilation tracks".to_string(),
                 });
-                col.on_play_row = true;
+                col.header_selection = crate::app::state::ColumnHeaderSelection::Play;
                 state.artist_nav.drill_column(col, auto_drill);
             }
         }
@@ -640,7 +728,7 @@ pub async fn dispatch(
             col.play_all_row = Some(crate::app::state::PlayAllRow::AllTracks {
                 label: "Play all compilation tracks".to_string(),
             });
-            col.on_play_row = true;
+            col.header_selection = crate::app::state::ColumnHeaderSelection::Play;
             state.artist_nav.drill_column(col, auto_drill);
         }
 

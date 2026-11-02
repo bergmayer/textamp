@@ -95,11 +95,13 @@ pub enum NavAction {
     Password {
         source: Source,
         password: SecretString,
+        analysis: Option<super::dialogs::AnalysisSetup>,
     },
     Connected {
         generation: u64,
         result: Result<Session, String>,
         password: Option<SecretString>,
+        analysis: Option<super::dialogs::AnalysisSetup>,
     },
     Rename {
         id: String,
@@ -142,9 +144,11 @@ pub async fn choose(
 ) -> anyhow::Result<Vec<Action>> {
     match choice {
         LibraryChoice::AddNavidrome => {
-            state.popups.library_dialog = Some(super::dialogs::Dialog::Navidrome(
-                super::dialogs::ServerForm::new(None),
-            ))
+            state
+                .popups
+                .set_library_dialog(Some(super::dialogs::Dialog::Navidrome(
+                    super::dialogs::ServerForm::new(None),
+                )))
         }
         LibraryChoice::Navidrome { source, folder, .. } => {
             let reconnect = state.sources.reconnect_sources.remove(&source.id);
@@ -155,13 +159,13 @@ pub async fn choose(
                     .navidrome()
                     .is_some_and(|s| s.source.id == source.id && s.client.folder == folder)
             {
-                state.popups.library_picker_active = false;
+                state.popups.set_library_picker_active(false);
                 return Ok(vec![]);
             }
             super::reset_source(state, audio, tx).await?;
             state.view = View::Browse;
             state.library_loading = true;
-            state.popups.library_picker_active = false;
+            state.popups.set_library_picker_active(false);
             let generation = state.connection_generation;
             let tx = tx.clone();
             let task = crate::app::tasks::spawn(async move {
@@ -196,6 +200,7 @@ pub async fn choose(
                             generation,
                             result,
                             password: None,
+                            analysis: None,
                         }
                         .into(),
                     ))
@@ -210,10 +215,11 @@ pub async fn choose(
 }
 
 async fn connect(
-    source: Source,
+    mut source: Source,
     password: SecretString,
     folder: Option<String>,
 ) -> anyhow::Result<Session> {
+    source.url = crate::util::server_url::resolve(&source.url, "rest/ping").await?;
     let mut session = Session {
         client: Client::new(&source, password, folder)?,
         source,
@@ -312,8 +318,7 @@ pub async fn dispatch(
         NavAction::Text { request_id, result } => {
             if let Some(popup) = state
                 .popups
-                .text
-                .as_mut()
+                .text_mut()
                 .filter(|p| p.request_id == request_id)
             {
                 popup.text = result.unwrap_or_else(|e| e);
@@ -329,8 +334,7 @@ pub async fn dispatch(
                 return Ok(vec![]);
             }
             audio.stop();
-            state.sources.preparing = None;
-            state.sources.prepared = None;
+            state.sources.media = crate::app::sources::MediaPreparation::Idle;
             state.queue.tracks = tracks;
             state.queue.index = (!state.queue.tracks.is_empty())
                 .then_some(index.min(state.queue.tracks.len().saturating_sub(1)));
@@ -396,7 +400,11 @@ pub async fn dispatch(
                 .into()]);
             }
         }
-        NavAction::Password { source, password } => {
+        NavAction::Password {
+            source,
+            password,
+            analysis,
+        } => {
             if config
                 .navidrome_sources
                 .iter()
@@ -431,13 +439,40 @@ pub async fn dispatch(
                     } else {
                         password
                     };
-                    let session = connect(source, password.clone(), None).await?;
-                    Ok((session, password))
+                    let music = connect(source, password.clone(), None);
+                    let analysis = async {
+                        let Some(mut setup) = analysis else {
+                            return Ok::<_, anyhow::Error>(None);
+                        };
+                        setup.connection.url =
+                            crate::util::server_url::resolve(&setup.connection.url, "api/servers")
+                                .await?;
+                        if setup.password.is_empty() {
+                            let key = setup
+                                .library_key
+                                .clone()
+                                .ok_or_else(|| anyhow::anyhow!("Enter an AudioMuse password"))?;
+                            setup.password = crate::app::tasks::spawn_blocking(move || {
+                                crate::library::credentials::load_source("audiomuse", &key)
+                            })
+                            .await??
+                            .ok_or_else(|| anyhow::anyhow!("Enter an AudioMuse password"))?
+                            .as_str()
+                            .into();
+                        }
+                        crate::audiomuse::Client::connect(&setup.connection, &setup.password)
+                            .await?
+                            .verify()
+                            .await?;
+                        Ok(Some(setup))
+                    };
+                    let (session, analysis) = tokio::try_join!(music, analysis)?;
+                    Ok((session, password, analysis))
                 }
                 .await;
-                let (result, password) = match result {
-                    Ok((session, password)) => (Ok(session), Some(password)),
-                    Err(e) => (Err(format!("{e:#}")), None),
+                let (result, password, analysis) = match result {
+                    Ok((session, password, analysis)) => (Ok(session), Some(password), analysis),
+                    Err(e) => (Err(format!("{e:#}")), None, None),
                 };
                 let _ = tx
                     .send(Event::Effect(
@@ -445,13 +480,14 @@ pub async fn dispatch(
                             generation,
                             result,
                             password,
+                            analysis,
                         }
                         .into(),
                     ))
                     .await;
             });
             state.sources.nav_connection_task = Some(TaskLease::new(&task));
-            if let Some(super::dialogs::Dialog::Navidrome(form)) = &mut state.popups.library_dialog
+            if let Some(super::dialogs::Dialog::Navidrome(form)) = state.popups.library_dialog_mut()
             {
                 form.busy = true;
                 form.error = None;
@@ -462,6 +498,7 @@ pub async fn dispatch(
             generation,
             result,
             password,
+            analysis,
         } => {
             if generation != state.connection_generation {
                 return Ok(vec![]);
@@ -472,14 +509,16 @@ pub async fn dispatch(
                 Ok(s) => s,
                 Err(e) => {
                     if let Some(super::dialogs::Dialog::Navidrome(form)) =
-                        &mut state.popups.library_dialog
+                        state.popups.library_dialog_mut()
                     {
                         form.busy = false;
                         form.error = Some(e);
                         return Ok(vec![]);
                     }
                     state.set_error(e);
-                    state.popups.library_picker_active = !super::manager::settings_active(state);
+                    state
+                        .popups
+                        .set_library_picker_active(!super::manager::settings_active(state));
                     return Ok(vec![]);
                 }
             };
@@ -491,38 +530,78 @@ pub async fn dispatch(
                 state.set_error("That Navidrome account is already added".into());
                 return Ok(vec![]);
             }
-            if let Some(password) = password {
+            if password.is_some() || analysis.is_some() {
                 let id = session.source.id.clone();
-                if let Err(error) = crate::app::tasks::spawn_blocking(move || {
-                    crate::library::credentials::save_source("navidrome", &id, password)
-                })
-                .await?
-                {
-                    if let Some(super::dialogs::Dialog::Navidrome(form)) =
-                        &mut state.popups.library_dialog
-                    {
-                        form.busy = false;
-                        form.error = Some(format!("Save credentials: {error}"));
-                    } else {
-                        state.set_error(format!("Save credentials: {error}"));
+                let analysis = analysis.map(|setup| {
+                    let folder = setup
+                        .library_key
+                        .as_deref()
+                        .and_then(|key| serde_json::from_str::<serde_json::Value>(key).ok())
+                        .and_then(|value| value[4].as_str().map(str::to_owned));
+                    let folder = session.source.canonical_folder(folder);
+                    (super::sonic::nav_key(&session.source, &folder), setup)
+                });
+                // Save both checked connections before changing config. If the
+                // second credential write fails, restore the first account's secret.
+                let saved = crate::app::tasks::spawn_blocking(move || -> anyhow::Result<_> {
+                    let changed_music = password.is_some();
+                    let previous = if changed_music {
+                        crate::library::credentials::load_source("navidrome", &id)?
+                    } else { None };
+                    if let Some(password) = password {
+                        crate::library::credentials::save_source("navidrome", &id, password)?;
                     }
-                    return Ok(vec![]);
+                    if let Some((key, setup)) = analysis {
+                        if let Err(error) = crate::library::credentials::save_source("audiomuse", &key, setup.password) {
+                            if changed_music {
+                                let old = previous.as_deref().map(|value| SecretString::from(value.as_str())).unwrap_or_default();
+                                crate::library::credentials::save_source("navidrome", &id, old)
+                                    .map_err(|restore| anyhow::anyhow!("Save AudioMuse credentials: {error}; restore music-server credentials: {restore}"))?;
+                            }
+                            return Err(error);
+                        }
+                        return Ok(Some((key, setup.connection)));
+                    }
+                    Ok(None)
+                }).await?;
+                match saved {
+                    Ok(Some((key, connection))) => {
+                        config
+                            .audiomuse_connections
+                            .insert(key.clone(), connection.clone());
+                        state.sources.audiomuse.connections.insert(key, connection);
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        if let Some(super::dialogs::Dialog::Navidrome(form)) =
+                            state.popups.library_dialog_mut()
+                        {
+                            form.busy = false;
+                            form.error = Some(format!("Save credentials: {error}"));
+                        } else {
+                            state.set_error(format!("Save credentials: {error}"));
+                        }
+                        return Ok(vec![]);
+                    }
                 }
             }
             // Checking a setup form saves the account. Choosing a library is a
             // separate action, so another source and its playback stay active.
-            if super::manager::settings_active(state)
-                && matches!(
-                    state.popups.library_dialog,
-                    Some(super::dialogs::Dialog::Navidrome(_))
-                )
-            {
+            if matches!(
+                state.popups.library_dialog(),
+                Some(super::dialogs::Dialog::Navidrome(_))
+            ) {
                 let id = session.source.id.clone();
                 config.navidrome_sources.retain(|s| s.id != id);
+                let choice = LibraryChoice::Navidrome {
+                    source: session.source.clone(),
+                    folder: session.client.folder.clone(),
+                    name: String::new(),
+                };
                 config.navidrome_sources.push(session.source);
                 state.sources.navidrome = config.navidrome_sources.clone();
                 state.sources.reconnect_sources.insert(id.clone());
-                state.popups.library_dialog = None;
+                state.popups.set_library_dialog(None);
                 super::manager::reset_selection(state);
                 state.popups.library_picker_index = super::choices(state)
                     .iter()
@@ -535,12 +614,11 @@ pub async fn dispatch(
                     config,
                     "save Navidrome connection",
                 );
-                state.set_status(
-                    "Connection saved. Open this library from General to use it.".into(),
-                );
+                super::cache::start(choice, false, state, tx);
+                state.set_status("Connection saved. Scanning library in the background.".into());
                 return Ok(vec![]);
             }
-            state.popups.library_dialog = None;
+            state.popups.set_library_dialog(None);
             super::reset_source(state, audio, tx).await?;
             config
                 .navidrome_sources
@@ -635,7 +713,7 @@ pub async fn dispatch(
                 } else {
                     View::Browse
                 };
-                state.popups.library_picker_active = !managing;
+                state.popups.set_library_picker_active(!managing);
             }
             config.navidrome_sources.retain(|s| s.id != id);
             config
@@ -868,15 +946,16 @@ mod async_discovery_tests {
                 reply.unwrap();
             }
         });
-        let result = tokio::time::timeout(
-            Duration::from_secs(5),
-            connect(source, SecretString::from("fixture-password"), None),
-        )
-        .await;
+        let mut session = Session {
+            client: Client::new(&source, SecretString::from("fixture-password"), None).unwrap(),
+            source,
+            extensions: Default::default(),
+        };
+        let result = tokio::time::timeout(Duration::from_secs(5), discover(&mut session)).await;
         if result.is_err() {
             server.abort();
         }
-        let session = result
+        result
             .expect("account reads must run concurrently")
             .unwrap();
         assert_eq!(session.source.libraries.len(), 1);

@@ -104,8 +104,7 @@ fn apply_artwork_cache_clear(count: usize, state: &mut AppState) {
     state.artwork.grid_pending.clear();
     state.artwork.current_data = None;
     state.artwork.current_thumb = None;
-    state.artwork.pending_thumb = None;
-    state.artwork.loading = false;
+    state.artwork.fetch = crate::app::state::ArtworkFetch::Idle;
     state.artwork.cache_stats = Some((0, 0));
     state.set_status(format!("Cleared {} artwork cache files", count));
 }
@@ -220,6 +219,9 @@ pub async fn dispatch(
             }
             follow_ups.push(SettingsAction::SaveSettings.into());
         }
+        SettingsAction::ManageLibrary(choice) => {
+            follow_ups.extend(crate::app::sources::options::open(choice, state));
+        }
         SettingsAction::RescanSourceCache(choice) => {
             crate::app::sources::cache::start(choice, true, state, event_tx);
         }
@@ -330,7 +332,7 @@ pub async fn dispatch(
                 state.artwork.grid_pending.clear();
                 state.artwork.current_data = None;
                 state.artwork.current_thumb = None;
-                state.artwork.pending_thumb = None;
+                state.artwork.fetch = crate::app::state::ArtworkFetch::Idle;
             }
             state.set_status(format!("Clearing artwork for {}...", choice.label()));
             let tx = event_tx.clone();
@@ -427,7 +429,7 @@ pub async fn dispatch(
             state.sources.sonic_tasks.remove("adventure");
             state.adventure_request_id = state.adventure_request_id.wrapping_add(1);
             state.adventure = crate::app::state::AdventureState::default();
-            state.popups.input_dialog = None;
+            state.popups.set_input_dialog(None);
             state.clear_status();
         }
         SettingsAction::AdventureComplete(tracks) => {

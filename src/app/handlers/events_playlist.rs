@@ -31,10 +31,8 @@ pub fn handle(event: PlaylistEvent, state: &mut AppState) -> Vec<Action> {
             vec![]
         }
 
-        // First page of a lazy-loaded playlist column. Same as the
-        // legacy "all tracks loaded" handler above, but stamps lazy
-        // state on the column so `LoadMorePlaylistTracks` can fill in
-        // the tail as the user scrolls.
+        // First page of a lazy-loaded playlist column. `LoadMorePlaylistTracks`
+        // fetches subsequent pages as the user scrolls.
         PlaylistEvent::PlaylistFirstPageLoaded {
             library_key,
             request_id,
@@ -95,7 +93,7 @@ pub fn handle(event: PlaylistEvent, state: &mut AppState) -> Vec<Action> {
                 rating_key: playlist_key.clone(),
                 title: playlist_name.clone(),
             });
-            col.on_play_row = true;
+            col.header_selection = crate::app::state::ColumnHeaderSelection::Play;
             // Apply this playlist's saved view toggles, if any. The
             // mirror lives on `state.playlist_views` (sync'd from
             // `config.ui.library_view_settings` at boot and on every

@@ -6,8 +6,8 @@ set -e
 
 PKG_NAME="textamp"
 PKG_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-PKG_DESC="A keyboard-driven Plex Music client (terminal)"
-PKG_LICENSE="MIT"
+PKG_DESC="A terminal music player with built-in AirPlay"
+PKG_LICENSE="GPL-3.0-only"
 PKG_AUTHOR="John Bergmayer"
 PKG_MAINTAINER="John Bergmayer"
 BINARY="target/release/$PKG_NAME"
@@ -107,6 +107,7 @@ class Textamp < Formula
     system "cargo", "build", "--release", "--bin", "textamp"
     bin.install "target/release/$PKG_NAME"
     doc.install "LICENSE"
+    doc.install "vendor/airplay"
     doc.install "config.example.toml"
   end
 
@@ -142,7 +143,7 @@ pkgrel=1
 pkgdesc="$PKG_DESC"
 arch=('x86_64' 'aarch64')
 license=('$PKG_LICENSE')
-depends=('openssl' 'alsa-lib')
+depends=('alsa-lib')
 makedepends=('rust')
 source=("${PKG_NAME}-${PKG_VERSION}.tar.gz")
 sha256sums=('SKIP')
@@ -184,7 +185,7 @@ Version: $PKG_VERSION
 Architecture: $DEB_ARCH
 Maintainer: $PKG_MAINTAINER
 Description: $PKG_DESC
-Depends: libssl3 | libssl1.1, libasound2
+Depends: libasound2
 Section: sound
 Priority: optional
 CONTROL
@@ -220,7 +221,7 @@ Release:        1%{?dist}
 Summary:        $PKG_DESC
 License:        $PKG_LICENSE
 URL:            https://github.com/bergmayer/textamp
-Requires:       openssl-libs, alsa-lib
+Requires:       alsa-lib
 
 %description
 $PKG_DESC

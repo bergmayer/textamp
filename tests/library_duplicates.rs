@@ -73,7 +73,7 @@ async fn duplicate_webdav_add_edit_and_late_result_do_not_start_work_or_change_c
             form.editing = editing;
             let draft = form.draft().unwrap();
             let mut state = AppState::new();
-            state.popups.library_dialog = Some(Dialog::Webdav(form));
+            state.popups.set_library_dialog(Some(Dialog::Webdav(form)));
             let mut config = Config::default();
             config.folder_sources.push(saved.clone());
             if editing {
@@ -94,7 +94,7 @@ async fn duplicate_webdav_add_edit_and_late_result_do_not_start_work_or_change_c
                 SourceAction::CheckWebdav(draft)
             };
             dispatch(action, &mut state, &mut config, &tx).await;
-            let Some(Dialog::Webdav(form)) = &state.popups.library_dialog else {
+            let Some(Dialog::Webdav(form)) = state.popups.library_dialog() else {
                 panic!("lost form")
             };
             assert_eq!(
@@ -119,7 +119,7 @@ async fn editing_the_existing_webdav_connection_is_allowed() {
     let form = WebdavForm::new(Some(&saved));
     let draft = form.draft().unwrap();
     let mut state = AppState::new();
-    state.popups.library_dialog = Some(Dialog::Webdav(form));
+    state.popups.set_library_dialog(Some(Dialog::Webdav(form)));
     let mut config = Config::default();
     config.folder_sources.push(saved);
     let (tx, _rx) = tokio::sync::mpsc::channel(8);
@@ -130,11 +130,11 @@ async fn editing_the_existing_webdav_connection_is_allowed() {
         &tx,
     )
     .await;
-    let Some(Dialog::Webdav(form)) = &state.popups.library_dialog else {
+    let Some(Dialog::Webdav(form)) = state.popups.library_dialog() else {
         panic!("lost form")
     };
     assert!(form.error.is_none() && form.task.is_some());
-    state.popups.library_dialog = None; // Cancel the read-only check.
+    state.popups.set_library_dialog(None); // Cancel the read-only check.
 }
 
 #[tokio::test]
@@ -204,6 +204,7 @@ async fn navidrome_rejects_duplicate_account_before_connecting_and_on_completion
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         let action = if completed {
             NavAction::Connected {
+                analysis: None,
                 password: None,
                 generation: state.connection_generation,
                 result: Ok(Session {
@@ -215,6 +216,7 @@ async fn navidrome_rejects_duplicate_account_before_connecting_and_on_completion
             }
         } else {
             NavAction::Password {
+                analysis: None,
                 source: candidate.clone(),
                 password: "fixture".into(),
             }

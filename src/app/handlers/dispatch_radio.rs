@@ -74,15 +74,10 @@ pub async fn dispatch(
         RadioAction::NavigateStationsBack => {
             state.station_navigation_generation =
                 state.station_navigation_generation.wrapping_add(1);
-            state.stations_loading = false;
             state.station_nav.loading = false;
             // Go back in Miller columns (just move focus left - data already in memory)
             if state.station_nav.can_go_left() {
                 state.station_nav.focus_left();
-                // Update legacy state to match focused column
-                if let Some(col) = state.station_nav.focused() {
-                    state.stations = col.stations.clone();
-                }
             }
             if state.palette.open {
                 crate::app::command_palette::refresh_matches(state);

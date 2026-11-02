@@ -145,7 +145,7 @@ pub fn intercept(
             return None;
         }
         Action::Search(SearchAction::ArtistRadioPickerLaunch) => {
-            if let Some(picker) = state.popups.artist_radio_picker.take() {
+            if let Some(picker) = state.popups.take_artist_radio_picker() {
                 let artists: Vec<_> = picker
                     .selected_artists
                     .iter()
@@ -178,7 +178,7 @@ pub fn intercept(
                 .filter(|a| a.parent_rating_key.as_deref() == Some(&key))
                 .cloned()
                 .collect();
-            if let Some(l) = &mut state.popups.adventure_launcher {
+            if let Some(l) = state.popups.adventure_launcher_mut() {
                 l.drill = AdventureDrillLevel::ArtistAlbums {
                     artist_key: key,
                     artist_name: name,
@@ -194,7 +194,7 @@ pub fn intercept(
             artist_name,
         }) => {
             let tracks = browse::album_tracks(state, &key);
-            if let Some(l) = &mut state.popups.adventure_launcher {
+            if let Some(l) = state.popups.adventure_launcher_mut() {
                 l.drill = AdventureDrillLevel::AlbumTracks {
                     album_key: key,
                     album_title: title,
@@ -206,14 +206,14 @@ pub fn intercept(
             }
         }
         Action::Search(SearchAction::AdventureLauncherGenerate) => {
-            if let Some(l) = &state.popups.adventure_launcher {
+            if let Some(l) = state.popups.adventure_launcher() {
                 if let (Some(start), Some(end)) = (l.start_track.clone(), l.end_track.clone()) {
                     let count = l
                         .track_count_input
                         .parse::<usize>()
                         .unwrap_or(20)
                         .clamp(5, 100);
-                    state.popups.adventure_launcher = None;
+                    state.popups.set_adventure_launcher(None);
                     adventure(state, tx, session, start, end, count);
                 } else {
                     state.set_error("Choose a start and end track".into());

@@ -148,7 +148,7 @@ pub async fn dispatch(
                             column.selected_index = index;
                         }
                     }
-                    state.popups.search_active = false;
+                    state.popups.set_search_active(false);
                     state.category_column_focused = false;
                     state.browse_category = BrowseCategory::Folders;
                     state.set_view(View::Browse);
@@ -207,10 +207,10 @@ pub async fn dispatch(
             let filter_col_idx = state.list_filter.column;
             if let Some(nav) = state.browse_nav_mut() {
                 if let Some(col) = nav.columns.get_mut(filter_col_idx) {
-                    col.on_play_row = false;
+                    col.header_selection = crate::app::state::ColumnHeaderSelection::Items;
                 }
             }
-            // Same reason as on_play_row above — any transient
+            // Same reason as the header selection above — any transient
             // "focus is somewhere other than the nav stack" flag
             // would force the scrolling Miller ribbon to anchor
             // on a fixed slot (sections / artists / pane), hiding
@@ -409,7 +409,7 @@ pub async fn dispatch(
                 state.list_filter.deactivate();
             }
             state.popups.close_all();
-            state.popups.search_active = true;
+            state.popups.set_search_active(true);
             state.search.focus = SearchFocus::Input;
             state.search.query.clear();
             state.search.results = None;
@@ -420,7 +420,7 @@ pub async fn dispatch(
         }
         SearchAction::CloseSearchPopup => {
             state.search.details = Default::default();
-            state.popups.search_active = false;
+            state.popups.set_search_active(false);
         }
 
         // Library picker popup actions
@@ -431,7 +431,7 @@ pub async fn dispatch(
                 state.settings_state.section = crate::app::state::SettingsSection::Libraries;
                 state.settings_state.focus = crate::app::state::SettingsFocus::Sections;
             } else {
-                state.popups.library_picker_active = true;
+                state.popups.set_library_picker_active(true);
             }
             crate::app::sources::manager::reset_selection(state);
             state.sources.picker_scroll_pin = None;
@@ -441,7 +441,7 @@ pub async fn dispatch(
                 .unwrap_or(0);
         }
         SearchAction::CloseLibraryPicker => {
-            state.popups.library_picker_active = false;
+            state.popups.set_library_picker_active(false);
         }
 
         // Sort popup actions
@@ -495,12 +495,12 @@ pub async fn dispatch(
                         is_playlist,
                     );
                     state.popups.close_all();
-                    state.popups.sort = Some(popup);
+                    state.popups.set_sort(Some(popup));
                 }
             }
         }
         SearchAction::CloseSortPopup => {
-            state.popups.sort = None;
+            state.popups.set_sort(None);
         }
         SearchAction::ApplyFocusedSortMode(mode) => {
             let col_idx = match state.browse_nav() {
@@ -545,25 +545,27 @@ pub async fn dispatch(
             state.adventure_launcher_request_id =
                 state.adventure_launcher_request_id.wrapping_add(1);
             state.popups.close_all();
-            state.popups.adventure_launcher = Some(crate::app::state::AdventureLauncherState {
-                step: crate::app::state::AdventureStep::FindStartTrack,
-                query: String::new(),
-                results: None,
-                focus: SearchFocus::Input,
-                item_index: 0,
-                loading: false,
-                drill: crate::app::state::AdventureDrillLevel::Search,
-                start_track: None,
-                end_track: None,
-                track_count_input: "20".to_string(),
-                scroll_pin: None,
-                // Sonic Adventure only ever picks tracks (start /
-                // end), so force the tracks tab — that path makes
-                // `adventure_launcher_select_track` index directly
-                // into `results.tracks` without an artist+album
-                // offset.
-                search_tab: crate::app::state::SearchTab::Tracks,
-            });
+            state
+                .popups
+                .set_adventure_launcher(Some(crate::app::state::AdventureLauncherState {
+                    step: crate::app::state::AdventureStep::FindStartTrack,
+                    query: String::new(),
+                    results: None,
+                    focus: SearchFocus::Input,
+                    item_index: 0,
+                    loading: false,
+                    drill: crate::app::state::AdventureDrillLevel::Search,
+                    start_track: None,
+                    end_track: None,
+                    track_count_input: "20".to_string(),
+                    scroll_pin: None,
+                    // Sonic Adventure only ever picks tracks (start /
+                    // end), so force the tracks tab — that path makes
+                    // `adventure_launcher_select_track` index directly
+                    // into `results.tracks` without an artist+album
+                    // offset.
+                    search_tab: crate::app::state::SearchTab::Tracks,
+                }));
         }
         SearchAction::OpenAdventureLauncherWithStart { start_track } => {
             // Pre-select the start track (e.g. from a right-click on a
@@ -572,30 +574,32 @@ pub async fn dispatch(
             state.adventure_launcher_request_id =
                 state.adventure_launcher_request_id.wrapping_add(1);
             state.popups.close_all();
-            state.popups.adventure_launcher = Some(crate::app::state::AdventureLauncherState {
-                step: crate::app::state::AdventureStep::EnterTrackCount,
-                query: String::new(),
-                results: None,
-                focus: SearchFocus::Input,
-                item_index: 0,
-                loading: false,
-                drill: crate::app::state::AdventureDrillLevel::Search,
-                start_track: Some(*start_track),
-                end_track: None,
-                track_count_input: "20".to_string(),
-                scroll_pin: None,
-                // Sonic Adventure only ever picks tracks (start /
-                // end), so force the tracks tab — that path makes
-                // `adventure_launcher_select_track` index directly
-                // into `results.tracks` without an artist+album
-                // offset.
-                search_tab: crate::app::state::SearchTab::Tracks,
-            });
+            state
+                .popups
+                .set_adventure_launcher(Some(crate::app::state::AdventureLauncherState {
+                    step: crate::app::state::AdventureStep::EnterTrackCount,
+                    query: String::new(),
+                    results: None,
+                    focus: SearchFocus::Input,
+                    item_index: 0,
+                    loading: false,
+                    drill: crate::app::state::AdventureDrillLevel::Search,
+                    start_track: Some(*start_track),
+                    end_track: None,
+                    track_count_input: "20".to_string(),
+                    scroll_pin: None,
+                    // Sonic Adventure only ever picks tracks (start /
+                    // end), so force the tracks tab — that path makes
+                    // `adventure_launcher_select_track` index directly
+                    // into `results.tracks` without an artist+album
+                    // offset.
+                    search_tab: crate::app::state::SearchTab::Tracks,
+                }));
         }
         SearchAction::CloseAdventureLauncher => {
             state.adventure_launcher_request_id =
                 state.adventure_launcher_request_id.wrapping_add(1);
-            state.popups.adventure_launcher = None;
+            state.popups.set_adventure_launcher(None);
         }
         SearchAction::AdventureLauncherSearch => {
             adventure_launcher_search(event_tx, state)?;
@@ -610,7 +614,7 @@ pub async fn dispatch(
         SearchAction::AdventureLauncherSetStep(step) => {
             state.adventure_launcher_request_id =
                 state.adventure_launcher_request_id.wrapping_add(1);
-            if let Some(l) = state.popups.adventure_launcher.as_mut() {
+            if let Some(l) = state.popups.adventure_launcher_mut() {
                 l.step = step;
                 // Reset the search panel so a fresh query targets the
                 // newly-active field.
@@ -622,12 +626,12 @@ pub async fn dispatch(
             }
         }
         SearchAction::AdventureLauncherReverse => {
-            if let Some(l) = state.popups.adventure_launcher.as_mut() {
+            if let Some(l) = state.popups.adventure_launcher_mut() {
                 std::mem::swap(&mut l.start_track, &mut l.end_track);
             }
         }
         SearchAction::AdventureLauncherSetTrackCount(s) => {
-            if let Some(l) = state.popups.adventure_launcher.as_mut() {
+            if let Some(l) = state.popups.adventure_launcher_mut() {
                 // Keep only digits, max 3 characters (so users can't
                 // accidentally type a multi-thousand-track adventure).
                 l.track_count_input = s.chars().filter(|c| c.is_ascii_digit()).take(3).collect();
@@ -636,7 +640,7 @@ pub async fn dispatch(
         SearchAction::AdventureLauncherClearStart => {
             state.adventure_launcher_request_id =
                 state.adventure_launcher_request_id.wrapping_add(1);
-            if let Some(l) = state.popups.adventure_launcher.as_mut() {
+            if let Some(l) = state.popups.adventure_launcher_mut() {
                 l.start_track = None;
                 l.step = crate::app::state::AdventureStep::FindStartTrack;
             }
@@ -644,14 +648,14 @@ pub async fn dispatch(
         SearchAction::AdventureLauncherClearEnd => {
             state.adventure_launcher_request_id =
                 state.adventure_launcher_request_id.wrapping_add(1);
-            if let Some(l) = state.popups.adventure_launcher.as_mut() {
+            if let Some(l) = state.popups.adventure_launcher_mut() {
                 l.end_track = None;
                 l.step = crate::app::state::AdventureStep::FindEndTrack;
             }
         }
 
         SearchAction::AdventureLauncherSetQuery(q) => {
-            if let Some(l) = state.popups.adventure_launcher.as_mut() {
+            if let Some(l) = state.popups.adventure_launcher_mut() {
                 l.query = q;
             }
             // Trigger the search with the new query.
@@ -661,23 +665,25 @@ pub async fn dispatch(
         // Multi-artist radio picker actions
         SearchAction::OpenArtistRadioPicker => {
             state.popups.close_all();
-            state.popups.artist_radio_picker = Some(crate::app::state::ArtistRadioPickerState {
-                step: crate::app::state::ArtistRadioPickerStep::EnterCount,
-                max_artists: 0,
-                count_input: String::new(),
-                query: String::new(),
-                filtered_artists: vec![],
-                selected_artists: vec![],
-                focus: SearchFocus::Input,
-                item_index: 0,
-                scroll_pin: None,
-            });
+            state
+                .popups
+                .set_artist_radio_picker(Some(crate::app::state::ArtistRadioPickerState {
+                    step: crate::app::state::ArtistRadioPickerStep::EnterCount,
+                    max_artists: 0,
+                    count_input: String::new(),
+                    query: String::new(),
+                    filtered_artists: vec![],
+                    selected_artists: vec![],
+                    focus: SearchFocus::Input,
+                    item_index: 0,
+                    scroll_pin: None,
+                }));
         }
         SearchAction::CloseArtistRadioPicker => {
-            state.popups.artist_radio_picker = None;
+            state.popups.set_artist_radio_picker(None);
         }
         SearchAction::ArtistRadioPickerSetCount => {
-            if let Some(ref mut picker) = state.popups.artist_radio_picker {
+            if let Some(picker) = state.popups.artist_radio_picker_mut() {
                 let count = picker
                     .count_input
                     .parse::<usize>()
@@ -693,7 +699,7 @@ pub async fn dispatch(
             }
         }
         SearchAction::ArtistRadioPickerSearch => {
-            if let Some(ref mut picker) = state.popups.artist_radio_picker {
+            if let Some(picker) = state.popups.artist_radio_picker_mut() {
                 if picker.query.is_empty() {
                     picker.filtered_artists = state.library.artists.clone();
                 } else {
@@ -723,7 +729,7 @@ pub async fn dispatch(
             }
         }
         SearchAction::ArtistRadioPickerToggleArtist => {
-            if let Some(ref mut picker) = state.popups.artist_radio_picker {
+            if let Some(picker) = state.popups.artist_radio_picker_mut() {
                 if let Some(artist) = picker.filtered_artists.get(picker.item_index).cloned() {
                     // Toggle: remove if already selected, add if not
                     if let Some(pos) = picker
@@ -758,21 +764,15 @@ pub async fn dispatch(
         }
         // Artist bio popup (F4)
         action @ (SearchAction::OpenBiographySource | SearchAction::SearchBiographyOnGoogle) => {
-            let url = state
-                .popups
-                .artist_bio
-                .as_ref()
-                .and_then(|popup| match action {
-                    SearchAction::SearchBiographyOnGoogle
-                        if !popup.artist_name.trim().is_empty() =>
-                    {
-                        Some(crate::services::biography::google_search_url(
-                            &popup.artist_name,
-                        ))
-                    }
-                    SearchAction::OpenBiographySource => popup.document.source_url.clone(),
-                    _ => None,
-                });
+            let url = state.popups.artist_bio().and_then(|popup| match action {
+                SearchAction::SearchBiographyOnGoogle if !popup.artist_name.trim().is_empty() => {
+                    Some(crate::services::biography::google_search_url(
+                        &popup.artist_name,
+                    ))
+                }
+                SearchAction::OpenBiographySource => popup.document.source_url.clone(),
+                _ => None,
+            });
             if let Some(url) = url {
                 let tx = event_tx.clone();
                 crate::app::tasks::spawn(async move {
@@ -823,7 +823,7 @@ fn select_search_result(state: &mut AppState) -> Vec<Action> {
                 let artist_key = artist.rating_key.clone();
                 state.search.query.clear();
 
-                state.popups.search_active = false;
+                state.popups.set_search_active(false);
                 state.set_browse_category(BrowseCategory::Library, false);
                 state.set_view(View::Browse);
 
@@ -858,7 +858,7 @@ fn select_search_result(state: &mut AppState) -> Vec<Action> {
                 let artist_key = album.parent_rating_key.clone();
                 state.search.query.clear();
 
-                state.popups.search_active = false;
+                state.popups.set_search_active(false);
                 state.set_browse_category(BrowseCategory::Library, false);
                 state.set_view(View::Browse);
                 state.search.pending_album_key = Some(album_key);
@@ -912,7 +912,7 @@ fn select_search_result(state: &mut AppState) -> Vec<Action> {
                 let playlist_key = playlist.rating_key.clone();
                 state.search.query.clear();
 
-                state.popups.search_active = false;
+                state.popups.set_search_active(false);
                 state.set_browse_category(BrowseCategory::Playlists, false);
                 state.set_view(View::Browse);
 
@@ -946,7 +946,7 @@ fn select_search_result(state: &mut AppState) -> Vec<Action> {
                 let genre_title = genre.title.clone();
                 state.search.query.clear();
 
-                state.popups.search_active = false;
+                state.popups.set_search_active(false);
                 // Search results' genre list comes from album_genres, so
                 // open the Album Genres section.
                 state.set_browse_category(BrowseCategory::AlbumGenres, false);
@@ -1200,7 +1200,7 @@ fn run_list_filter(event_tx: &mpsc::Sender<Event>, state: &mut AppState, version
 /// Adventure launcher: search the cached catalog.
 fn adventure_launcher_search(_event_tx: &mpsc::Sender<Event>, state: &mut AppState) -> Result<()> {
     state.adventure_launcher_request_id = state.adventure_launcher_request_id.wrapping_add(1);
-    let launcher = match state.popups.adventure_launcher.as_mut() {
+    let launcher = match state.popups.adventure_launcher_mut() {
         Some(l) => l,
         None => return Ok(()),
     };
@@ -1299,7 +1299,7 @@ fn adventure_launcher_select_track(
     use crate::app::state::{AdventureDrillLevel, AdventureStep};
 
     state.adventure_launcher_request_id = state.adventure_launcher_request_id.wrapping_add(1);
-    let launcher = match state.popups.adventure_launcher.as_mut() {
+    let launcher = match state.popups.adventure_launcher_mut() {
         Some(l) => l,
         None => return Ok(vec![]),
     };
@@ -1385,7 +1385,7 @@ fn adventure_launcher_back(state: &mut AppState) {
     use crate::app::state::{AdventureDrillLevel, AdventureStep};
 
     state.adventure_launcher_request_id = state.adventure_launcher_request_id.wrapping_add(1);
-    let launcher = match state.popups.adventure_launcher.as_mut() {
+    let launcher = match state.popups.adventure_launcher_mut() {
         Some(l) => l,
         None => return,
     };
@@ -1407,7 +1407,7 @@ fn adventure_launcher_back(state: &mut AppState) {
             match launcher.step {
                 AdventureStep::FindStartTrack => {
                     // Close the launcher
-                    state.popups.adventure_launcher = None;
+                    state.popups.set_adventure_launcher(None);
                 }
                 AdventureStep::EnterTrackCount => {
                     // Go back to FindStartTrack
@@ -1419,7 +1419,7 @@ fn adventure_launcher_back(state: &mut AppState) {
                     // Pre-populate with all artists
                     let _ = launcher;
                     let artists = state.library.artists.clone();
-                    if let Some(ref mut l) = state.popups.adventure_launcher {
+                    if let Some(l) = state.popups.adventure_launcher_mut() {
                         l.results = Some(SearchResults {
                             artists,
                             albums: vec![],

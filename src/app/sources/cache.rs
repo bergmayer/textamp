@@ -123,7 +123,7 @@ pub fn start(choice: LibraryChoice, manual: bool, state: &mut AppState, tx: &mps
         ScanState {
             request,
             work: Work::Scan(TaskLease::new(&task)),
-            message: "Scanning metadata… (select Re-scan to cancel)".into(),
+            message: "Scanning library… (F5 cancels)".into(),
             checked: crate::library::cache::now(),
         },
     );
@@ -227,7 +227,7 @@ pub fn completed(
         .as_ref()
         .map_or_else(|_| crate::library::cache::now(), |r| r.updated);
     scan.message = match result {
-        Ok(ScanResult { warning: None, .. }) => "Cache up to date".into(),
+        Ok(ScanResult { warning: None, .. }) => "Library up to date".into(),
         Ok(ScanResult {
             warning: Some(warning),
             ..

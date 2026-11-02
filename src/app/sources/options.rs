@@ -102,7 +102,7 @@ impl Options {
                 if super::cache::running(&self.choice, state) {
                     "Cancel refresh"
                 } else {
-                    "Refresh catalog now"
+                    "Re-scan library now"
                 }
                 .into(),
             ),
@@ -121,7 +121,8 @@ impl Options {
         ]);
         items.retain(|(action, _)| match action {
             Sonic | AudioMuse => self.page == OptionsPage::Analysis,
-            Rescan | Clear | ClearArtwork => self.page == OptionsPage::Cache,
+            Rescan => matches!(self.page, OptionsPage::General | OptionsPage::Cache),
+            Clear | ClearArtwork => self.page == OptionsPage::Cache,
             Close => true,
             _ => self.page == OptionsPage::General,
         });
@@ -130,7 +131,7 @@ impl Options {
 }
 
 pub fn open(choice: LibraryChoice, state: &mut AppState) -> Vec<Action> {
-    if state.popups.library_picker_active
+    if state.popups.library_picker_active()
         || matches!(
             choice,
             LibraryChoice::Add
@@ -141,17 +142,19 @@ pub fn open(choice: LibraryChoice, state: &mut AppState) -> Vec<Action> {
     {
         return vec![choice.action()];
     }
-    state.popups.library_dialog = Some(dialogs::Dialog::Library(Options {
-        choice,
-        selected: 0,
-        page: OptionsPage::General,
-        scroll_pin: None,
-    }));
+    state
+        .popups
+        .set_library_dialog(Some(dialogs::Dialog::Library(Options {
+            choice,
+            selected: 0,
+            page: OptionsPage::General,
+            scroll_pin: None,
+        })));
     vec![SettingsAction::RefreshCacheStats.into()]
 }
 
 pub fn activate(state: &mut AppState) -> Vec<Action> {
-    let Some(dialogs::Dialog::Library(options)) = &state.popups.library_dialog else {
+    let Some(dialogs::Dialog::Library(options)) = state.popups.library_dialog() else {
         return vec![];
     };
     let choice = options.choice.clone();
@@ -169,7 +172,7 @@ pub fn activate(state: &mut AppState) -> Vec<Action> {
         return vec![SettingsAction::RescanSourceCache(choice).into()];
     }
     if !matches!(action, Clear | ClearArtwork) {
-        state.popups.library_dialog = None;
+        state.popups.set_library_dialog(None);
     }
     match action {
         Activate => vec![choice.action()],
@@ -178,7 +181,7 @@ pub fn activate(state: &mut AppState) -> Vec<Action> {
         AudioMuse => shortcut(&choice, KeyCode::Char('m'), state),
         Remove => shortcut(&choice, KeyCode::Delete, state),
         Clear | ClearArtwork => {
-            state.popups.confirm_dialog = Some(ConfirmDialog {
+            state.popups.set_confirm_dialog(Some(ConfirmDialog {
                 title: if action == Clear {
                     "Clear library metadata?"
                 } else {
@@ -186,7 +189,7 @@ pub fn activate(state: &mut AppState) -> Vec<Action> {
                 }
                 .into(),
                 message: if action == Clear {
-                    format!("Clear metadata and analysis for {}? Music and sign-ins are kept. Use Refresh catalog to rebuild.", choice.label())
+                    format!("Clear metadata and analysis for {}? Music and sign-ins are kept. Use Re-scan library to rebuild.", choice.label())
                 } else {
                     format!("Remove downloaded artwork for {}? Other libraries' artwork and display choices are kept.", choice.label())
                 },
@@ -196,7 +199,7 @@ pub fn activate(state: &mut AppState) -> Vec<Action> {
                 } else {
                     ConfirmAction::ClearArtworkCache(choice)
                 },
-            });
+            }));
             vec![]
         }
         _ => vec![],
@@ -227,58 +230,69 @@ pub fn shortcut(choice: &LibraryChoice, key: KeyCode, state: &mut AppState) -> V
                     source.location,
                     crate::library::FolderLocation::Webdav { .. }
                 ) {
-                    state.popups.library_dialog =
-                        Some(crate::app::sources::dialogs::Dialog::Webdav(
+                    state.popups.set_library_dialog(Some(
+                        crate::app::sources::dialogs::Dialog::Webdav(
                             crate::app::sources::dialogs::WebdavForm::new(Some(source)),
-                        ));
+                        ),
+                    ));
                     return vec![];
                 }
             }
             if let Some(LibraryChoice::Navidrome { source, .. }) = Some(choice) {
-                state.popups.library_dialog =
-                    Some(crate::app::sources::dialogs::Dialog::Navidrome(
-                        crate::app::sources::dialogs::ServerForm::new(Some(source)),
-                    ));
+                state.popups.set_library_dialog(Some(
+                    crate::app::sources::dialogs::Dialog::Navidrome(
+                        crate::app::sources::dialogs::ServerForm::new(Some(source))
+                            .with_analysis(choice, state),
+                    ),
+                ));
 
                 return vec![];
             }
         }
         KeyCode::Char('r') => {
             if let Some(LibraryChoice::Navidrome { source, .. }) = Some(choice) {
-                state.popups.input_dialog = Some(crate::app::state::InputDialog {
-                    title: "Account name".into(),
-                    input: source.name.clone().into(),
-                    action_type: crate::app::state::InputDialogAction::NavidromeName(
-                        source.id.clone(),
-                    ),
-                });
+                state
+                    .popups
+                    .set_input_dialog(Some(crate::app::state::InputDialog {
+                        title: "Account name".into(),
+                        input: source.name.clone().into(),
+                        action_type: crate::app::state::InputDialogAction::NavidromeName(
+                            source.id.clone(),
+                        ),
+                    }));
                 return vec![];
             }
             if let Some(LibraryChoice::Folder(source)) = Some(choice) {
-                state.popups.input_dialog = Some(crate::app::state::InputDialog {
-                    title: "Library name".into(),
-                    input: source.name.clone().into(),
-                    action_type: crate::app::state::InputDialogAction::FolderName(
-                        source.id.clone(),
-                    ),
-                });
+                state
+                    .popups
+                    .set_input_dialog(Some(crate::app::state::InputDialog {
+                        title: "Library name".into(),
+                        input: source.name.clone().into(),
+                        action_type: crate::app::state::InputDialogAction::FolderName(
+                            source.id.clone(),
+                        ),
+                    }));
             }
         }
         KeyCode::Delete | KeyCode::Backspace => {
             if let Some(LibraryChoice::Navidrome { source, .. }) = Some(choice) {
-                state.popups.confirm_dialog = Some(crate::app::state::ConfirmDialog { title: "Remove Navidrome account?".into(), message: "Remove this account and its saved password from Textamp? Server files and playlists are not deleted.".into(), selected_yes: false, on_confirm: crate::app::state::ConfirmAction::RemoveNavidrome(source.id.clone()) });
+                state.popups.set_confirm_dialog(Some(crate::app::state::ConfirmDialog { title: "Remove Navidrome account?".into(), message: "Remove this account and its saved password from Textamp? Server files and playlists are not deleted.".into(), selected_yes: false, on_confirm: crate::app::state::ConfirmAction::RemoveNavidrome(source.id.clone()) }));
                 return vec![];
             }
             if let Some(LibraryChoice::Folder(source)) = Some(choice) {
-                state.popups.confirm_dialog = Some(crate::app::state::ConfirmDialog {
-                    title: "Remove library?".into(),
-                    message: format!(
-                        "Remove {} from Textamp? Music files are not deleted.",
-                        source.name
-                    ),
-                    selected_yes: false,
-                    on_confirm: crate::app::state::ConfirmAction::RemoveFolder(source.id.clone()),
-                });
+                state
+                    .popups
+                    .set_confirm_dialog(Some(crate::app::state::ConfirmDialog {
+                        title: "Remove library?".into(),
+                        message: format!(
+                            "Remove {} from Textamp? Music files are not deleted.",
+                            source.name
+                        ),
+                        selected_yes: false,
+                        on_confirm: crate::app::state::ConfirmAction::RemoveFolder(
+                            source.id.clone(),
+                        ),
+                    }));
             }
         }
         _ => {}

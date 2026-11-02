@@ -38,13 +38,10 @@ pub fn load(state: &mut AppState) {
     )];
     state.station_nav.focused_column = 0;
     state.station_nav.loading = false;
-    state.stations_loading = false;
-    state.stations = stations;
 }
 pub fn children(state: &mut AppState, tx: &mpsc::Sender<Event>, key: String, title: String) {
     state.station_navigation_generation = state.station_navigation_generation.wrapping_add(1);
     state.sources.nav_tasks.remove("station-children");
-    state.stations_loading = false;
     state.station_nav.loading = false;
     let kind = key.strip_prefix("nav-radio/").unwrap_or("");
     let values: BTreeSet<String> = match kind {
@@ -88,7 +85,7 @@ pub fn children(state: &mut AppState, tx: &mpsc::Sender<Event>, key: String, tit
         })
         .collect();
     if audio_moods {
-        state.stations_loading = true;
+        state.station_nav.loading = true;
         state.station_nav.loading = true;
         let connection = crate::app::sources::audiomuse::connection(state)
             .unwrap()
@@ -122,7 +119,6 @@ pub fn children(state: &mut AppState, tx: &mpsc::Sender<Event>, key: String, tit
     state
         .station_nav
         .push_column(StationColumn::new(Some(key), title, children.clone()));
-    state.stations = children;
     if state.palette.open {
         crate::app::command_palette::refresh_matches(state);
     }

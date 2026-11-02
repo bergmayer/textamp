@@ -565,11 +565,11 @@ fn search_dialogs_offer_search_and_storage_dialogs_still_offer_save() {
         (InputDialogAction::SavePlaylist, "Enter: Save"),
     ] {
         let mut state = nav_state();
-        state.popups.input_dialog = Some(InputDialog {
+        state.popups.set_input_dialog(Some(InputDialog {
             title: "Test".into(),
             input: "query".into(),
             action_type,
-        });
+        }));
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
         terminal
             .draw(|frame| {
@@ -667,7 +667,7 @@ fn right_reenters_audiomuse_search_results_while_enter_starts_a_new_search() {
                 "result-two"
             );
             assert_eq!(state.sources.nav_collection, Some(kind));
-            assert!(state.popups.input_dialog.is_none());
+            assert!(state.popups.input_dialog().is_none());
 
             state.category_column_focused = true;
             let actions = key_input::handle_key(

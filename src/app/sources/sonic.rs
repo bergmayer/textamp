@@ -69,9 +69,10 @@ fn key_requires_sonic(key: &str) -> bool {
 fn station_blocked(state: &AppState, key: &str) -> bool {
     key_requires_sonic(key)
         || state
-            .stations
+            .station_nav
+            .columns
             .iter()
-            .chain(state.station_nav.columns.iter().flat_map(|c| &c.stations))
+            .flat_map(|c| &c.stations)
             .any(|s| s.key == key && station_requires_sonic(s))
 }
 pub fn action_blocked(state: &AppState, action: &Action) -> bool {
@@ -199,7 +200,6 @@ pub fn reconcile(state: &mut AppState) {
     if state.playback_mode == PlaybackMode::Radio && radio_blocked(state) {
         state.convert_radio_to_queue("Sonic features disabled");
     }
-    state.stations.retain(|s| !station_requires_sonic(s));
     for column in &mut state.station_nav.columns {
         column.stations.retain(|s| !station_requires_sonic(s));
         column.selected_index = column
@@ -216,7 +216,7 @@ pub fn cancel_pending(state: &mut AppState) {
     state.adventure_request_id = state.adventure_request_id.wrapping_add(1);
     state.adventure_launcher_request_id = state.adventure_launcher_request_id.wrapping_add(1);
     state.adventure = Default::default();
-    state.popups.adventure_launcher = None;
+    state.popups.set_adventure_launcher(None);
     state.similar = Default::default();
     if state.view == View::Similar {
         state.set_view(View::Browse);
@@ -245,9 +245,5 @@ pub fn cancel_pending(state: &mut AppState) {
     state.station_nav.columns.truncate(1);
     state.station_nav.focused_column = 0;
     state.station_nav.loading = false;
-    state.stations_loading = false;
-    if let Some(root) = state.station_nav.columns.first() {
-        state.stations = root.stations.clone();
-    }
     reconcile(state);
 }

@@ -365,10 +365,7 @@ impl ThemeColors {
         }
     }
 
-    /// Norton Commander DOS file manager â€” blue background with the
-    /// classic cyan title, yellow accents, white body text. The
-    /// surviving member of the DOS-blue family (the older Borland
-    /// theme has been removed).
+    /// Norton Commander colors: blue background, cyan title, yellow accents.
     pub fn norton() -> Self {
         let bg_blue = Color::Rgb(0, 0, 170); // DOS bright blue
         let cyan = Color::Rgb(85, 255, 255); // DOS bright cyan (titles)
@@ -654,21 +651,6 @@ impl Theme {
     pub fn border_focused_color(&self) -> Color {
         self.colors.border_focused
     }
-
-    // ==================== Legacy Compatibility ====================
-    // These constants provide backward compatibility with existing code.
-    // They use the default (dark) theme colors for places that need compile-time constants.
-
-    pub const BG: Color = Color::Rgb(24, 24, 24);
-    pub const FG: Color = Color::Rgb(220, 220, 220);
-    pub const ACCENT: Color = Color::Rgb(229, 160, 60);
-    pub const ACCENT_DIM: Color = Color::Rgb(180, 120, 40);
-    pub const MUTED: Color = Color::Rgb(128, 128, 128);
-    pub const BORDER: Color = Color::Rgb(60, 60, 60);
-    pub const HIGHLIGHT_BG: Color = Color::Rgb(45, 45, 45);
-    pub const BG_HIGHLIGHT: Color = Color::Rgb(35, 35, 35);
-    pub const ERROR: Color = Color::Rgb(220, 80, 80);
-    pub const SUCCESS: Color = Color::Rgb(80, 200, 120);
 }
 
 // ==================== Global Theme State ====================
@@ -693,7 +675,7 @@ pub fn theme() -> Theme {
 }
 
 // ==================== Static Style Methods ====================
-// These use the global theme state and provide easy migration from old Theme::method() calls.
+// These use the global theme state.
 
 impl Theme {
     /// Title style using global theme.

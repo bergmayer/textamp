@@ -143,7 +143,7 @@ async fn disabled_commands_neither_start_requests_nor_change_the_queue() {
     }
     assert!(state.sources.nav_tasks.is_empty());
     assert!(state.track_pane_similar_loading.is_empty());
-    assert!(state.popups.adventure_launcher.is_none());
+    assert!(state.popups.adventure_launcher().is_none());
     assert!(state.dj.active_mode.is_none());
     assert!(state.queue.tracks.is_empty());
     assert!(rx.try_recv().is_err());
@@ -161,14 +161,20 @@ fn disabled_features_disappear_from_palette_context_and_station_navigation() {
     let (mut state, choice) = nav_state(None);
     state.view = View::Queue;
     load_stations(&mut state);
-    assert!(state.stations.iter().any(|s| s.key == "nav-radio/sonic"));
+    assert!(state.station_nav.columns[0]
+        .stations
+        .iter()
+        .any(|s| s.key == "nav-radio/sonic"));
     disable(&mut state, &choice);
     sonic::reconcile(&mut state);
-    assert!(state
+    assert!(state.station_nav.columns[0]
         .stations
         .iter()
         .any(|s| s.key == "nav-radio/randomAlbum"));
-    assert!(state.stations.iter().any(|s| s.key == "dj:twofer"));
+    assert!(state.station_nav.columns[0]
+        .stations
+        .iter()
+        .any(|s| s.key == "dj:twofer"));
     assert!(!state
         .station_nav
         .columns
@@ -187,7 +193,10 @@ fn disabled_features_disappear_from_palette_context_and_station_navigation() {
         .any(|e| e.label.contains("Similar") || e.label.contains("Sonic")));
     state.sources.sonic_disabled_libraries.clear();
     load_stations(&mut state);
-    assert!(state.stations.iter().any(|s| s.key == "nav-radio/sonic"));
+    assert!(state.station_nav.columns[0]
+        .stations
+        .iter()
+        .any(|s| s.key == "nav-radio/sonic"));
 }
 
 #[test]
@@ -199,11 +208,11 @@ fn settings_checkbox_uses_the_highlighted_library_and_is_not_on_accounts_or_fold
     let choice = textamp::app::sources::choices(&state)[state.popups.library_picker_index].clone();
     textamp::app::sources::options::open(choice, &mut state);
     if let Some(textamp::app::sources::dialogs::Dialog::Library(options)) =
-        &mut state.popups.library_dialog
+        state.popups.library_dialog_mut()
     {
         options.set_page(textamp::app::sources::options::OptionsPage::Analysis);
     }
-    let option_index = match &state.popups.library_dialog {
+    let option_index = match state.popups.library_dialog() {
         Some(textamp::app::sources::dialogs::Dialog::Library(options)) => options
             .items(&state)
             .iter()
@@ -233,7 +242,7 @@ fn settings_checkbox_uses_the_highlighted_library_and_is_not_on_accounts_or_fold
             LibraryChoice::Navidrome { folder: None, .. }
         ))]
     ));
-    state.popups.library_dialog = None;
+    state.popups.set_library_dialog(None);
     let keys = key_input::handle_key(
         KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
         &mut state,

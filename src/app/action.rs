@@ -172,6 +172,7 @@ pub enum DataAction {
 /// `false`.
 #[derive(Debug, Clone)]
 pub enum MillerAction {
+    OpenAlbumDetails,
     LoadArtistAlbumsForMiller {
         artist_key: String,
         replace_child: bool,
@@ -621,6 +622,7 @@ pub enum SettingsAction {
     SaveSettings,
     ClearLibraryCache,
     ClearSourceCache(crate::app::sources::LibraryChoice),
+    ManageLibrary(crate::app::sources::LibraryChoice),
     RescanSourceCache(crate::app::sources::LibraryChoice),
     SourceCacheScanned {
         choice: crate::app::sources::LibraryChoice,

@@ -17,7 +17,7 @@ fn server() -> textamp::navidrome::Source {
 }
 
 #[test]
-fn old_settings_load_without_creating_a_retired_backend() {
+fn unknown_settings_sections_are_ignored_and_saved_sources_round_trip() {
     let mut config: Config = toml::from_str(
         r#"
         [plex]

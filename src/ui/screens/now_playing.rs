@@ -104,10 +104,7 @@ pub fn render_queue_mode(frame: &mut Frame, state: &AppState, area: Rect) {
         ])
         .split(area);
 
-    // Queue takes the full middle column — the old inline Radio
-    // station panel that lived under it is gone (its features are
-    // reachable via the Radio sidebar button → command palette,
-    // mirroring the GUI's "stations live in a popup" pattern).
+    // Queue occupies the middle column. The Radio sidebar opens the station palette.
     let queue_area = chunks[1];
 
     {
@@ -285,7 +282,7 @@ pub(crate) fn render_current_artwork(frame: &mut Frame, state: &AppState, inner:
                 render_artwork_placeholder(frame, inner, "Image load failed");
             }
         });
-    } else if state.artwork.loading {
+    } else if state.artwork.fetch.is_loading() {
         render_artwork_placeholder(frame, inner, "Loading...");
     } else {
         render_artwork_placeholder(frame, inner, "No artwork");
@@ -646,7 +643,7 @@ fn render_artwork_panel(frame: &mut Frame, state: &AppState, area: Rect) {
                 render_artwork_placeholder(frame, inner, "Image load failed");
             }
         });
-    } else if state.artwork.loading {
+    } else if state.artwork.fetch.is_loading() {
         render_artwork_placeholder(frame, inner, "Loading...");
     } else {
         render_artwork_placeholder(frame, inner, "No artwork");

@@ -42,14 +42,18 @@ output, then play normally. Choose **System default** to return to local output.
 Discovery does not interrupt audio;
 output selection never silently falls back to local speakers after an error.
 
-Install the current [Music Assistant airplay-cli](https://github.com/music-assistant/airplay-cli)
-sender separately from its official release and set `TEXTAMP_AIRPLAY_HELPER` to
-the executable path, put the executable named `cliairplay` on PATH, or place it
-at `textamp-airplay/cliairplay` beside the Textamp executable. Textamp does not
-download or link this GPL-3.0 helper. Its licensing and source
-obligations must accompany any separate redistribution. Textamp remains under
-the Unlicense. Textamp installs no persistent network service, firewall rule or
-pairing credential. The sender uses temporary LAN protocol sockets while playing.
+AirPlay 1 and AirPlay 2 transport is built into the Textamp executable from
+[Music Assistant airplay-cli](https://github.com/music-assistant/airplay-cli) source.
+There is no separate helper installation, adjacent folder, PATH requirement or
+runtime download. The sender runs in a child of the same executable, keeping
+its audio transport and shutdown independent of the terminal UI. OpenSSL and
+the ALAC codec are linked statically; macOS uses only system dynamic libraries.
+
+The combined executable is distributed under GPL-3.0. Textamp's original Rust
+source retains the Unlicense. Run `textamp --licenses` for the bundled notices;
+`vendor/airplay` contains the pinned sender sources, notices and build details.
+Textamp installs no persistent network service, firewall rule or pairing credential.
+The sender uses temporary LAN protocol sockets while playing.
 
 Protocol selection uses the full receiver TXT feature/status flags, including
 AirPlay 2 advertised through the RAOP service. It does not infer the protocol
@@ -87,7 +91,7 @@ on a second click. **:** or **Ctrl+P** opens the command palette.
   current library. **Up** from the first row returns to categories.
   Enter opens options for the highlighted library; **Left/Right**
   switches between **General**, **Analysis** (when available), and **Cache**.
-- **General** contains **Make active**, rename, connection and removal. Saving a
+- **General** contains **Make active**, rename, connection, re-scan and removal. Saving a
   connection does not activate another library. Canceling a connection or rename
   form returns to its library setup page. Removal names its scope: a Navidrome
   account includes all its libraries; music and server playlists are kept.
@@ -99,13 +103,14 @@ on a second click. **:** or **Ctrl+P** opens the command palette.
 - **Cache** shows metadata and artwork size for that library. Downloaded
   Navidrome images are stored separately for each library. **Clear downloaded
   artwork** removes only that library's image files.
-  **Refresh catalog now** shows metadata refresh status. **Refresh catalog
-  now** updates metadata and enabled analysis; the same button cancels a running
-  refresh. **Clear library cache** asks for confirmation. These actions do not
+  **Re-scan library now** updates metadata and enabled analysis; F5 or the same
+  button cancels a running scan. Its status is visible below the library list.
+  **Clear library cache** asks for confirmation. These actions do not
   change the active library or download audio.
 - **Add library** (or **A**) opens a source-type chooser. Local folders have one
-  path/name form; servers have one URL/username/password/name form. Add or Save
-  checks the source before storing it. A blank password while editing the same
+  path/name form. Music-server forms also include optional AudioMuse settings.
+  Add or Save checks the connections and starts a metadata scan. A blank password
+  while editing the same
   account keeps the saved password.
 - **Appearance** previews a theme with a sample music list; Enter applies it.
 - **Audio** contains sound output and server streaming quality. **Sidebar** controls
@@ -253,8 +258,17 @@ Saved data opens first. Metadata refreshes weekly while a library is in use;
 shares the weekly/manual policy and fetches changed records. Folder scans and
 changed AudioMuse metadata batches use up to four concurrent requests.
 
+The Subsonic / Navidrome connection form includes optional AudioMuse fields,
+so both connections can be checked and saved together. Leave the AudioMuse URL
+blank to skip it or retain an existing connection.
+New libraries start their metadata scan in the background.
+
+In **Settings → Libraries**, use **A / Add library**, **Enter / Manage**, or
+**F5 / Re-scan** for the selected library. F5 cancels a running scan. Its status
+appears below the list, without changing the active library or playback.
+
 **Settings → Libraries → Enter** shows that library's on-disk cache size,
-including AudioMuse. **Re-scan cache** rebuilds its catalog/tree and enabled
+including AudioMuse. **Re-scan library now** rebuilds its catalog/tree and enabled
 AudioMuse data without switching libraries or interrupting playback. Select it
 again to cancel. Failures preserve the last usable snapshot. **Clear library
 cache** removes only that library's metadata/analysis; reopen or re-scan to rebuild.
@@ -275,9 +289,11 @@ Provider snapshots live in `sources/` beneath the cache directory.
 `src/audio` owns local decoding/output. Async results carry operation/library
 identity so superseded work cannot replace a newer selection.
 
-The retired Plex implementation is preserved only in [archive](archive/README.md),
-not compiled. Non-Plex configuration remains compatible; obsolete Plex settings
-are ignored. Personal Plex credential files are not deleted.
+Modal selection, file preparation, artwork fetching and navigation settling,
+scrobble reporting, and the AirPlay timeline use explicit enum states. Opening
+a modal replaces the previous one; a confirmation can suspend a library dialog
+and restore it on dismissal. Replacing file preparation drops its task lease,
+and playback identities reject late completions.
 
 ```sh
 cargo test
@@ -297,7 +313,9 @@ they modify fixture playlists, favorites, ratings, play history and saved queues
 
 ## License
 
-Unlicense. See [LICENSE](LICENSE).
+Textamp’s original sources use the [Unlicense](LICENSE). The macOS/Linux
+executable includes GPL-3.0 AirPlay components; see [bundled notices](vendor/airplay/THIRD_PARTY_NOTICES.md)
+and run `textamp --licenses`.
 
 Describe music keeps the last 30 successful descriptions and their ranked results
 for each library, including across restarts. **Enter** on **Describe music…**
@@ -325,6 +343,10 @@ In search and Similar Tracks, Enter opens an adjacent track-details pane.
 Choose **Play Track** for one track or **Play Track++** for that track and the
 following results. Left returns to results; Page Up/Down scrolls details.
 The play queue keeps Enter-to-play.
+
+Album track columns have **Album Details** directly below **Play album**.
+Use arrows and Enter/Right, or click it, to open album artwork and metadata in an adjacent
+column. Left returns to the tracks without starting playback.
 
 Describe music results can be saved as a new Navidrome playlist: choose
 **Save as playlist** in the command palette or click the button at the top of

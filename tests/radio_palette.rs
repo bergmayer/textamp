@@ -12,13 +12,17 @@ fn station_state() -> AppState {
     let mut state = AppState::new();
     state.view = View::Queue;
     state.active_library = Some("5".into());
-    state.stations = vec![serde_json::from_value(serde_json::json!({
-        "key": "/library/sections/5/stations/randomAlbum",
-        "title": "Random Album Radio",
-        "type": "station",
-        "identifier": "randomAlbum"
-    }))
-    .unwrap()];
+    state.station_nav.columns = vec![StationColumn::new(
+        None,
+        "stations".into(),
+        vec![serde_json::from_value(serde_json::json!({
+            "key": "/library/sections/5/stations/randomAlbum",
+            "title": "Random Album Radio",
+            "type": "station",
+            "identifier": "randomAlbum"
+        }))
+        .unwrap()],
+    )];
     state
 }
 
@@ -41,7 +45,7 @@ fn palette_and_alt_r_use_the_same_station_action() {
         "folder-radio/randomAlbum",
     ] {
         let mut state = station_state();
-        state.stations[0].key = key.into();
+        state.station_nav.columns[0].stations[0].key = key.into();
         if key.starts_with("nav-radio/") {
             state.active_library = Some("navidrome:account:1".into());
         }
@@ -59,7 +63,7 @@ fn palette_and_alt_r_use_the_same_station_action() {
         for actions in [&palette, &shortcut] {
             assert!(
                 matches!(actions.as_slice(), [Action::Radio(RadioAction::PlayStation(key))]
-            if key == &state.stations[0].key),
+            if key == &state.station_nav.columns[0].stations[0].key),
                 "{actions:?}"
             );
         }
@@ -111,12 +115,11 @@ fn palette_and_alt_r_use_the_same_station_action() {
 
         // A category replaces the current list, but must not hide the root
         // station from the global shortcut.
-        state.station_nav.columns.push(StationColumn::new(
-            None,
-            "stations".into(),
-            state.stations.clone(),
-        ));
-        state.stations.clear();
+        state
+            .station_nav
+            .columns
+            .push(StationColumn::new(None, "stations".into(), Vec::new()));
+        state.station_nav.focused_column = 1;
         let nested = key_input::handle_key(
             KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT),
             &mut state,
@@ -136,7 +139,7 @@ fn random_album_shortcut_is_unavailable_without_a_station_for_every_source() {
     ] {
         let mut state = station_state();
         state.sources.active = source;
-        state.stations.clear();
+        state.station_nav.columns.clear();
         assert!(key_input::handle_key(
             KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT),
             &mut state,

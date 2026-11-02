@@ -12,7 +12,7 @@ pub fn initialize(state: &mut AppState, config: &Config) {
     state.sources.sonic_disabled_libraries = config.sonic_disabled_libraries.clone();
     state.sources.folders = config.folder_sources.clone();
     state.sources.navidrome = config.navidrome_sources.clone();
-    state.popups.library_picker_active = false;
+    state.popups.set_library_picker_active(false);
     reset_selection(state);
 }
 
@@ -63,7 +63,7 @@ pub fn startup_choice(config: &Config) -> Option<LibraryChoice> {
 pub fn settings_active(state: &AppState) -> bool {
     state.view == View::Settings
         && state.settings_state.section == super::super::state::SettingsSection::Libraries
-        && !state.popups.library_picker_active
+        && !state.popups.library_picker_active()
 }
 
 impl LibraryChoice {

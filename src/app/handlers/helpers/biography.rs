@@ -42,7 +42,7 @@ pub fn show(state: &mut AppState, tx: &mpsc::Sender<Event>, key: String, name: S
             )
             .await;
     });
-    state.popups.artist_bio = Some(ArtistBioPopup {
+    state.popups.set_artist_bio(Some(ArtistBioPopup {
         artist_name: name,
         document: Biography::default(),
         scroll: 0,
@@ -50,7 +50,7 @@ pub fn show(state: &mut AppState, tx: &mpsc::Sender<Event>, key: String, name: S
         loading: true,
         image_index: 0,
         task: Some(TaskLease::new(&task)),
-    });
+    }));
 }
 
 async fn load_navidrome(

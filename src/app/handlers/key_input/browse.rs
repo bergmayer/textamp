@@ -798,14 +798,14 @@ pub(super) fn handle_folder_browse_keys(key: event::KeyEvent, state: &mut AppSta
         KeyCode::Up => {
             if let Some(ref mut folder_state) = state.folder_state {
                 folder_state.move_up();
-                folder_state.truncate_right_columns();
+                folder_state.truncate_right();
             }
             vec![]
         }
         KeyCode::Down => {
             if let Some(ref mut folder_state) = state.folder_state {
                 folder_state.move_down();
-                folder_state.truncate_right_columns();
+                folder_state.truncate_right();
             }
             vec![]
         }
@@ -814,7 +814,7 @@ pub(super) fn handle_folder_browse_keys(key: event::KeyEvent, state: &mut AppSta
                 if let Some(col) = folder_state.focused_mut() {
                     col.selected_index = col.selected_index.saturating_sub(10);
                 }
-                folder_state.truncate_right_columns();
+                folder_state.truncate_right();
             }
             vec![]
         }
@@ -824,7 +824,7 @@ pub(super) fn handle_folder_browse_keys(key: event::KeyEvent, state: &mut AppSta
                     let max = col.items.len().saturating_sub(1);
                     col.selected_index = (col.selected_index + 10).min(max);
                 }
-                folder_state.truncate_right_columns();
+                folder_state.truncate_right();
             }
             vec![]
         }
@@ -833,7 +833,7 @@ pub(super) fn handle_folder_browse_keys(key: event::KeyEvent, state: &mut AppSta
                 if let Some(col) = folder_state.focused_mut() {
                     col.selected_index = 0;
                 }
-                folder_state.truncate_right_columns();
+                folder_state.truncate_right();
             }
             vec![]
         }
@@ -842,7 +842,7 @@ pub(super) fn handle_folder_browse_keys(key: event::KeyEvent, state: &mut AppSta
                 if let Some(col) = folder_state.focused_mut() {
                     col.selected_index = col.items.len().saturating_sub(1);
                 }
-                folder_state.truncate_right_columns();
+                folder_state.truncate_right();
             }
             vec![]
         }
@@ -906,7 +906,6 @@ pub(super) fn handle_folder_browse_keys(key: event::KeyEvent, state: &mut AppSta
                 // At root column: truncate child columns, keep placeholder
                 if folder_state.columns.len() > 1 {
                     folder_state.columns.truncate(1);
-                    folder_state.ensure_placeholder();
                     return vec![];
                 }
             }
@@ -957,8 +956,7 @@ pub(super) fn handle_folder_browse_keys(key: event::KeyEvent, state: &mut AppSta
                     }
                 }
                 // Clear columns to the right since selection changed
-                folder_state.truncate_right_columns();
-                folder_state.ensure_placeholder();
+                folder_state.truncate_right();
             }
             vec![]
         }
@@ -972,7 +970,11 @@ pub(super) fn handle_folder_browse_keys(key: event::KeyEvent, state: &mut AppSta
 /// synthetic play row absorbs Enter/Up/Down before they reach the
 /// nav handler. Common to artist, genre, and playlist browse views.
 pub(super) fn handle_artist_browse_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
-    if let Some(actions) = intercept_play_row(key, &mut state.artist_nav) {
+    if let Some(actions) = intercept_play_row(
+        key,
+        &mut state.artist_nav,
+        state.hit_regions.miller_columns.as_ref(),
+    ) {
         return actions;
     }
     // Handle common navigation keys
@@ -1029,8 +1031,9 @@ pub(super) fn handle_artist_browse_keys(key: event::KeyEvent, state: &mut AppSta
 /// for `ART_LOAD_PAUSE_MS`. Both front-ends' settle ticks reopen the
 /// gate and dispatch one batched fetch for the visible viewport.
 fn note_motion_for_lazy_art(state: &mut AppState) {
-    state.artwork.suppress_loads = true;
-    state.artwork.last_motion_at = Some(std::time::Instant::now());
+    state.artwork.navigation = crate::app::state::ArtworkNavigation::Moving {
+        last_motion: std::time::Instant::now(),
+    };
 }
 
 /// Whether a Miller child column is open to the right of the focused
@@ -1187,7 +1190,11 @@ pub(super) fn drill_actions_for_focused_artist_item(
 
 /// Handle Genre browsing with dynamic Miller columns
 pub(super) fn handle_genre_browse_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
-    if let Some(actions) = intercept_play_row(key, &mut state.tag_nav) {
+    if let Some(actions) = intercept_play_row(
+        key,
+        &mut state.tag_nav,
+        state.hit_regions.miller_columns.as_ref(),
+    ) {
         return actions;
     }
     // Left/Backspace at root column → return to category column
@@ -1236,11 +1243,6 @@ pub(super) fn drill_actions_for_focused_genre_item(
         return vec![];
     };
     match item {
-        BrowseItem::GenreCategory { .. } => {
-            // Legacy genre-tab UI is gone; tag sections drill straight
-            // from a Tag/Genre item into albums.
-            vec![]
-        }
         BrowseItem::Genre { key, .. } => {
             vec![MillerAction::LoadGenreAlbumsForMiller {
                 genre_key: key,
@@ -1289,7 +1291,11 @@ pub(super) fn handle_playlist_browse_keys(
     key: event::KeyEvent,
     state: &mut AppState,
 ) -> Vec<Action> {
-    if let Some(actions) = intercept_play_row(key, &mut state.playlist_nav) {
+    if let Some(actions) = intercept_play_row(
+        key,
+        &mut state.playlist_nav,
+        state.hit_regions.miller_columns.as_ref(),
+    ) {
         return actions;
     }
     // Left/Backspace at root column → return to category column
@@ -1381,28 +1387,57 @@ pub(super) fn drill_actions_for_focused_playlist_item(
     }
 }
 
-/// Intercept keys when the focused column is showing a synthetic
-/// "▶ Play …" row. The cursor parks on this row by default after a
-/// fresh drill (`on_play_row = true`); from there:
-///   - Enter / Right plays the album / playlist / tracks list.
-///   - Down drops the cursor to `items[0]` (clears `on_play_row`).
-///   - Up is a no-op (already at the very top of the column).
-///
-/// When the cursor is *on* `items[0]` (not on the play row) and the
-/// user presses Up, we move the cursor *to* the play row instead of
-/// snapping to the previous column's last item — keeps the play row
-/// reachable without round-tripping through Backspace.
-///
-/// Returns `None` when this helper has nothing to do for the current
-/// key + state, so the caller falls through to the normal browse-nav
-/// handling.
+/// Navigate pinned Play / Album Details actions, then the tracks below them.
+/// Album metadata columns scroll independently and never start playback.
+/// Return None for normal column navigation and global shortcuts.
 fn intercept_play_row(
     key: event::KeyEvent,
     nav: &mut crate::app::state::BrowseNavigationState,
+    regions: Option<&crate::app::presentation::MillerRegions>,
 ) -> Option<Vec<Action>> {
+    let max_scroll = regions
+        .and_then(|regions| {
+            regions
+                .columns
+                .iter()
+                .find(|r| r.col_idx == nav.focused_column)
+        })
+        .and_then(|r| r.details_max_scroll);
     let col = nav.focused_mut()?;
+    use crate::app::state::ColumnHeaderSelection as Header;
+    if let Some(lines) = &col.album_details {
+        let max = max_scroll.unwrap_or_else(|| lines.len().saturating_sub(1));
+        match key.code {
+            KeyCode::Down => col.selected_index = (col.selected_index + 1).min(max),
+            KeyCode::Up => col.selected_index = col.selected_index.saturating_sub(1),
+            KeyCode::PageDown => col.selected_index = (col.selected_index + 8).min(max),
+            KeyCode::PageUp => col.selected_index = col.selected_index.saturating_sub(8),
+            KeyCode::Home => col.selected_index = 0,
+            KeyCode::End => col.selected_index = max,
+            KeyCode::Enter | KeyCode::Right => {}
+            _ => return None,
+        }
+        return Some(vec![]);
+    }
+    if col.header_selection == Header::AlbumDetails {
+        match key.code {
+            KeyCode::Enter | KeyCode::Right => {
+                return Some(vec![MillerAction::OpenAlbumDetails.into()])
+            }
+            KeyCode::Up | KeyCode::Home | KeyCode::PageUp => {
+                col.header_selection = Header::Play;
+                return Some(vec![]);
+            }
+            KeyCode::Down => {
+                col.header_selection = Header::Items;
+                col.selected_index = 0;
+                return Some(vec![]);
+            }
+            _ => col.header_selection = Header::Items,
+        }
+    }
     let play_row = col.play_all_row.clone()?;
-    if col.on_play_row {
+    if col.header_selection == crate::app::state::ColumnHeaderSelection::Play {
         match key.code {
             // Direct activation: Enter or Right plays the list.
             KeyCode::Enter | KeyCode::Right => Some(vec![play_row_action(&play_row, col)]),
@@ -1410,7 +1445,11 @@ fn intercept_play_row(
             // `selected_index` is reset to 0 so the cursor lands on
             // the first track regardless of any prior position.
             KeyCode::Down => {
-                col.on_play_row = false;
+                col.header_selection = if col.has_album_details() {
+                    Header::AlbumDetails
+                } else {
+                    Header::Items
+                };
                 col.selected_index = 0;
                 Some(vec![])
             }
@@ -1418,16 +1457,16 @@ fn intercept_play_row(
             // top of the column.
             KeyCode::Up | KeyCode::PageUp | KeyCode::Home => Some(vec![]),
             // PageDown / End / letter jumps all imply "move into
-            // the items" — clear on_play_row and fall through so
+            // the items" — release the action row and fall through so
             // the common nav handler runs the actual jump.
             KeyCode::PageDown | KeyCode::End => {
-                col.on_play_row = false;
+                col.header_selection = crate::app::state::ColumnHeaderSelection::Items;
                 None
             }
             KeyCode::Char(c)
                 if c.is_ascii_alphabetic() && !key.modifiers.contains(KeyModifiers::CONTROL) =>
             {
-                col.on_play_row = false;
+                col.header_selection = crate::app::state::ColumnHeaderSelection::Items;
                 None
             }
             // Left / Backspace / Esc back out of the column —
@@ -1435,13 +1474,17 @@ fn intercept_play_row(
             // back on the play row from stale state) and fall
             // through to the nav handler.
             KeyCode::Left | KeyCode::Backspace | KeyCode::Esc => {
-                col.on_play_row = false;
+                col.header_selection = crate::app::state::ColumnHeaderSelection::Items;
                 None
             }
             _ => None,
         }
     } else if key.code == KeyCode::Up && col.selected_index == 0 {
-        col.on_play_row = true;
+        col.header_selection = if col.has_album_details() {
+            Header::AlbumDetails
+        } else {
+            Header::Play
+        };
         Some(vec![])
     } else {
         None

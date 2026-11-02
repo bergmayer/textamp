@@ -34,7 +34,6 @@ pub(crate) fn reset_account_scoped_state(state: &mut AppState) {
         crate::app::state::BrowseNavigationState::new(),
     );
     let old_station_nav = std::mem::take(&mut state.station_nav);
-    let old_stations = std::mem::take(&mut state.stations);
     let old_station_children = std::mem::take(&mut state.station_children_cache);
     let old_similar = std::mem::take(&mut state.similar);
     let old_related = std::mem::take(&mut state.related);
@@ -56,7 +55,7 @@ pub(crate) fn reset_account_scoped_state(state: &mut AppState) {
     state.active_library = None;
     state.connected_server_url = None;
 
-    state.stations_loading = false;
+    state.station_nav.loading = false;
     state.library_loading = false;
     state.cache_mgmt = crate::app::state::CacheManagement::default();
     state.library_cache_stats = None;
@@ -81,7 +80,6 @@ pub(crate) fn reset_account_scoped_state(state: &mut AppState) {
         drop(old_tag_nav);
         drop(old_playlist_nav);
         drop(old_station_nav);
-        drop(old_stations);
         drop(old_station_children);
         drop(old_similar);
         drop(old_related);
@@ -480,7 +478,7 @@ pub fn handle_app_event(
             {
                 return vec![];
             }
-            if let Some(ref mut launcher) = state.popups.adventure_launcher {
+            if let Some(launcher) = state.popups.adventure_launcher_mut() {
                 launcher.loading = false;
                 match result {
                     Ok(albums) => {
@@ -512,7 +510,7 @@ pub fn handle_app_event(
             {
                 return vec![];
             }
-            if let Some(ref mut launcher) = state.popups.adventure_launcher {
+            if let Some(launcher) = state.popups.adventure_launcher_mut() {
                 launcher.loading = false;
                 match result {
                     Ok(tracks) => {
@@ -576,8 +574,8 @@ pub fn handle_app_event(
             // Report stop to server when track ends naturally
             // continuing=true because we're about to play the next track
             if let Some(track) = state.current_track().cloned() {
-                if !state.playback.scrobble_reported {
-                    state.playback.scrobble_reported = true;
+                if state.playback.scrobble == crate::app::state::ScrobbleState::Pending {
+                    state.playback.scrobble = crate::app::state::ScrobbleState::Queued;
                     crate::app::sources::navidrome::scrobble(state, event_tx, &track);
                 }
                 // Use track duration as position (track finished)
@@ -682,12 +680,14 @@ pub fn handle_app_event(
             state.consecutive_playback_errors = 0;
             if msg.contains("404") || msg.to_lowercase().contains("not found") {
                 state.popups.close_all();
-                state.popups.confirm_dialog = Some(crate::app::state::ConfirmDialog {
-                    title: "Track Not Found".to_string(),
-                    message: "This track may have been removed. Refresh cache?".to_string(),
-                    on_confirm: crate::app::state::ConfirmAction::RefreshCache,
-                    selected_yes: true,
-                });
+                state
+                    .popups
+                    .set_confirm_dialog(Some(crate::app::state::ConfirmDialog {
+                        title: "Track Not Found".to_string(),
+                        message: "This track may have been removed. Refresh cache?".to_string(),
+                        on_confirm: crate::app::state::ConfirmAction::RefreshCache,
+                        selected_yes: true,
+                    }));
             } else {
                 state.set_error("Playback stopped after multiple consecutive errors".to_string());
             }
@@ -731,15 +731,14 @@ pub fn handle_app_event(
             data,
         }) => {
             if generation != state.artwork.grid_generation
-                || state.artwork.pending_thumb.as_deref() != Some(&thumb_path)
+                || state.artwork.fetch.pending_thumb() != Some(&thumb_path)
             {
                 tracing::debug!("Ignoring stale artwork completion: {}", thumb_path);
                 return vec![];
             }
             state.artwork.current_thumb = Some(thumb_path);
             state.artwork.current_data = Some(data);
-            state.artwork.loading = false;
-            state.artwork.pending_thumb = None;
+            state.artwork.fetch = crate::app::state::ArtworkFetch::Idle;
             vec![]
         }
         Event::Artwork(ArtworkEvent::ArtworkFailed {
@@ -747,15 +746,14 @@ pub fn handle_app_event(
             thumb_path,
         }) => {
             if generation != state.artwork.grid_generation
-                || state.artwork.pending_thumb.as_deref() != Some(&thumb_path)
+                || state.artwork.fetch.pending_thumb() != Some(&thumb_path)
             {
                 tracing::debug!("Ignoring stale artwork failure: {}", thumb_path);
                 return vec![];
             }
             state.artwork.current_thumb = None;
             state.artwork.current_data = None;
-            state.artwork.loading = false;
-            state.artwork.pending_thumb = None;
+            state.artwork.fetch = crate::app::state::ArtworkFetch::Idle;
             vec![]
         }
         Event::Artwork(ArtworkEvent::AlbumArtLoaded {
@@ -823,9 +821,11 @@ pub fn handle_app_event(
                 let reached_scrobble_threshold = state.playback.duration_ms > 0
                     && state.playback.position_ms.saturating_mul(10)
                         >= state.playback.duration_ms.saturating_mul(9);
-                if reached_scrobble_threshold && !state.playback.scrobble_reported {
+                if reached_scrobble_threshold
+                    && state.playback.scrobble == crate::app::state::ScrobbleState::Pending
+                {
                     if let Some(track) = state.current_track().cloned() {
-                        state.playback.scrobble_reported = true;
+                        state.playback.scrobble = crate::app::state::ScrobbleState::Queued;
                         crate::app::sources::navidrome::scrobble(state, event_tx, &track);
                     }
                 }
@@ -864,7 +864,7 @@ pub fn handle_app_event(
                 }
             }
 
-            // Lazy-art settle: if `suppress_loads` was raised by a
+            // Lazy-art settle: if navigation entered Moving after a
             // recent rapid-nav gesture and the user has been still for
             // `ART_LOAD_PAUSE_MS`, clear the gate and dispatch one
             // viewport-wide `LoadAlbumArt` batch.
@@ -1184,7 +1184,7 @@ pub fn handle_app_event(
             if generation != state.library_generation || state.artist_bio_request_id != request_id {
                 return vec![];
             }
-            if let Some(popup) = &mut state.popups.artist_bio {
+            if let Some(popup) = state.popups.artist_bio_mut() {
                 popup.loading = false;
                 popup.task = None;
                 popup.document =

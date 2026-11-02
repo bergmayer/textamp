@@ -54,26 +54,26 @@ fn biography_photo_navigation_and_close_preserve_main_view() {
             caption: n.to_string(),
         })
         .collect();
-    state.popups.artist_bio = Some(bio);
+    state.popups.set_artist_bio(Some(bio));
     let config = Config::default();
     key_input::handle_key(
         KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
         &mut state,
         &config,
     );
-    assert_eq!(state.popups.artist_bio.as_ref().unwrap().image_index, 1);
+    assert_eq!(state.popups.artist_bio().unwrap().image_index, 1);
     key_input::handle_key(
         KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
         &mut state,
         &config,
     );
-    assert_eq!(state.popups.artist_bio.as_ref().unwrap().image_index, 0);
+    assert_eq!(state.popups.artist_bio().unwrap().image_index, 0);
     key_input::handle_key(
         KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE),
         &mut state,
         &config,
     );
-    assert!(state.popups.artist_bio.is_none());
+    assert!(state.popups.artist_bio().is_none());
     assert_eq!(state.view, View::NowPlaying);
 }
 
@@ -94,7 +94,7 @@ fn biography_renders_readable_text_photos_and_shortcuts_at_small_sizes() {
             data: png.get_ref().clone(),
             caption: "Band photo".into(),
         });
-        state.popups.artist_bio = Some(bio);
+        state.popups.set_artist_bio(Some(bio));
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
             .draw(|frame| {
@@ -117,9 +117,9 @@ async fn closing_bio_cancels_its_task_and_library_change_closes_popup() {
     let mut bio = popup();
     bio.task = Some(textamp::app::tasks::TaskLease::new(&task));
     let mut state = AppState::new();
-    state.popups.artist_bio = Some(bio);
+    state.popups.set_artist_bio(Some(bio));
     state.advance_library_generation();
-    assert!(state.popups.artist_bio.is_none());
+    assert!(state.popups.artist_bio().is_none());
     assert!(task.await.unwrap_err().is_cancelled());
 }
 
@@ -129,7 +129,7 @@ fn stale_biography_responses_cannot_replace_current_artist() {
     let mut state = AppState::new();
     state.library_generation = 3;
     state.artist_bio_request_id = 4;
-    state.popups.artist_bio = Some(popup());
+    state.popups.set_artist_bio(Some(popup()));
 
     let (tx, _rx) = tokio::sync::mpsc::channel(8);
     for (generation, request_id) in [(2, 4), (3, 3)] {
@@ -145,7 +145,7 @@ fn stale_biography_responses_cannot_replace_current_artist() {
         );
     }
     assert_eq!(
-        state.popups.artist_bio.unwrap().document.text,
+        state.popups.artist_bio().unwrap().document.text,
         "Current bio"
     );
 }
@@ -161,7 +161,7 @@ fn google_button_and_keyboard_use_the_same_action_without_closing_biography() {
             let mut bio = popup();
             bio.loading = loading;
             bio.document.text = "No biography available from Navidrome or Wikipedia.".into();
-            state.popups.artist_bio = Some(bio);
+            state.popups.set_artist_bio(Some(bio));
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal
                 .draw(|frame| {
@@ -201,7 +201,7 @@ fn google_button_and_keyboard_use_the_same_action_without_closing_biography() {
                     actions.as_slice(),
                     [Action::Search(SearchAction::SearchBiographyOnGoogle)]
                 ));
-                assert!(state.popups.artist_bio.is_some());
+                assert!(state.popups.artist_bio().is_some());
             }
             if let Some(button) = state.hit_regions.biography_google {
                 let actions = mouse_input::handle_mouse(
@@ -217,7 +217,7 @@ fn google_button_and_keyboard_use_the_same_action_without_closing_biography() {
                     actions.as_slice(),
                     [Action::Search(SearchAction::SearchBiographyOnGoogle)]
                 ));
-                assert!(state.popups.artist_bio.is_some());
+                assert!(state.popups.artist_bio().is_some());
             }
             key_input::handle_key(
                 KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
@@ -246,7 +246,7 @@ fn biography_arrows_focus_a_visibly_selected_button_and_return_to_text() {
         if long {
             bio.document.text = "Line of biography\n".repeat(100);
         }
-        state.popups.artist_bio = Some(bio);
+        state.popups.set_artist_bio(Some(bio));
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal
             .draw(|f| state.apply_render_feedback(textamp::ui::render(f, &state)))
@@ -267,14 +267,14 @@ fn biography_arrows_focus_a_visibly_selected_button_and_return_to_text() {
                 &Config::default()
             )
             .is_empty());
-            assert!(!state.popups.artist_bio.as_ref().unwrap().google_focused);
+            assert!(!state.popups.artist_bio().unwrap().google_focused);
         }
         key_input::handle_key(
             KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
             &mut state,
             &Config::default(),
         );
-        assert!(state.popups.artist_bio.as_ref().unwrap().google_focused);
+        assert!(state.popups.artist_bio().unwrap().google_focused);
         terminal
             .draw(|f| state.apply_render_feedback(textamp::ui::render(f, &state)))
             .unwrap();
@@ -296,7 +296,7 @@ fn biography_arrows_focus_a_visibly_selected_button_and_return_to_text() {
             &mut state,
             &Config::default(),
         );
-        let bio = state.popups.artist_bio.as_ref().unwrap();
+        let bio = state.popups.artist_bio().unwrap();
         assert!(!bio.google_focused);
         assert_eq!(bio.scroll, max_scroll);
         for key in [KeyCode::Tab, KeyCode::BackTab] {
@@ -306,7 +306,7 @@ fn biography_arrows_focus_a_visibly_selected_button_and_return_to_text() {
                 &Config::default(),
             );
         }
-        assert!(!state.popups.artist_bio.as_ref().unwrap().google_focused);
+        assert!(!state.popups.artist_bio().unwrap().google_focused);
         key_input::handle_key(
             KeyEvent::new(KeyCode::End, KeyModifiers::NONE),
             &mut state,
@@ -323,7 +323,7 @@ fn biography_arrows_focus_a_visibly_selected_button_and_return_to_text() {
             &mut state
         )
         .is_empty());
-        let bio = state.popups.artist_bio.as_ref().unwrap();
+        let bio = state.popups.artist_bio().unwrap();
         assert!(!bio.google_focused);
         assert_eq!(bio.scroll, max_scroll);
     }

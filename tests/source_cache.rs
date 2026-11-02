@@ -47,7 +47,7 @@ fn settings_have_one_library_account_home_and_cache_controls_for_each_provider()
         let text: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
         assert!(!text.contains("Clear downloaded artwork"));
         if let Some(textamp::app::sources::dialogs::Dialog::Library(options)) =
-            &mut state.popups.library_dialog
+            state.popups.library_dialog_mut()
         {
             options.set_page(textamp::app::sources::options::OptionsPage::Cache);
         }
@@ -269,7 +269,7 @@ fn cache_settings_are_available_for_folder_sources_without_plex_login() {
         state.settings_state.cache_entries[0].0.clone(),
         &mut state,
     );
-    if let Some(sources::dialogs::Dialog::Library(options)) = &mut state.popups.library_dialog {
+    if let Some(sources::dialogs::Dialog::Library(options)) = state.popups.library_dialog_mut() {
         options.set_page(sources::options::OptionsPage::Cache);
     }
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
@@ -360,11 +360,13 @@ async fn cache_sizes_are_request_scoped_and_clear_confirmation_names_the_library
         .iter()
         .position(|(action, _)| *action == OptionAction::Clear)
         .unwrap();
-    state.popups.library_dialog = Some(Dialog::Library(options));
+    state
+        .popups
+        .set_library_dialog(Some(Dialog::Library(options)));
     textamp::app::sources::options::activate(&mut state);
-    let dialog = state.popups.confirm_dialog.unwrap();
+    let dialog = state.popups.confirm_dialog().unwrap();
     assert!(!dialog.selected_yes);
     assert!(
-        matches!(dialog.on_confirm, ConfirmAction::ClearSourceCache(textamp::app::sources::LibraryChoice::Folder(s)) if s.id == "fixture-target")
+        matches!(&dialog.on_confirm, ConfirmAction::ClearSourceCache(textamp::app::sources::LibraryChoice::Folder(s)) if s.id == "fixture-target")
     );
 }

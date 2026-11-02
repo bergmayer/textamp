@@ -207,7 +207,7 @@ pub fn drill_grouped_album(
             rating_key: item.key().to_string(),
             title: item.title().to_string(),
         });
-        new_col.on_play_row = true;
+        new_col.header_selection = crate::app::state::ColumnHeaderSelection::Play;
     }
     Some(new_col)
 }

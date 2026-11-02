@@ -18,7 +18,7 @@ fn press(state: &mut AppState, code: KeyCode) -> Vec<Action> {
     )
 }
 fn form(state: &mut AppState) -> &mut WebdavForm {
-    let Some(Dialog::Webdav(form)) = &mut state.popups.library_dialog else {
+    let Some(Dialog::Webdav(form)) = state.popups.library_dialog_mut() else {
         panic!("missing form")
     };
     form
@@ -58,7 +58,7 @@ async fn add_library_chooses_type_without_touching_playback() {
     )
     .await;
     assert!(matches!(
-        state.popups.library_dialog,
+        state.popups.library_dialog(),
         Some(Dialog::Add { .. })
     ));
     press(&mut state, KeyCode::Down);
@@ -77,7 +77,9 @@ async fn add_library_chooses_type_without_touching_playback() {
 fn navidrome_form_shows_all_fields_and_cancels_inflight_sign_in() {
     use textamp::app::sources::dialogs::ServerForm;
     let mut state = AppState::new();
-    state.popups.library_dialog = Some(Dialog::Navidrome(ServerForm::new(None)));
+    state
+        .popups
+        .set_library_dialog(Some(Dialog::Navidrome(ServerForm::new(None))));
     for (i, value) in [
         "http://server:4533",
         "listener",
@@ -96,7 +98,7 @@ fn navidrome_form_shows_all_fields_and_cancels_inflight_sign_in() {
     }
     let actions = press(&mut state, KeyCode::Enter);
     assert!(
-        matches!(actions.as_slice(), [Action::Source(SourceAction::Navidrome(action))] if matches!(action.as_ref(), sources::navidrome::NavAction::Password { source, password } if source.username == "listener" && password.as_str() == "fixture-hidden-password"))
+        matches!(actions.as_slice(), [Action::Source(SourceAction::Navidrome(action))] if matches!(action.as_ref(), sources::navidrome::NavAction::Password { source, password, .. } if source.username == "listener" && password.as_str() == "fixture-hidden-password"))
     );
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
     terminal
@@ -123,18 +125,20 @@ fn navidrome_form_shows_all_fields_and_cancels_inflight_sign_in() {
     }
     assert!(!text.contains("fixture-hidden-password"));
     let generation = state.connection_generation;
-    if let Some(Dialog::Navidrome(form)) = &mut state.popups.library_dialog {
+    if let Some(Dialog::Navidrome(form)) = state.popups.library_dialog_mut() {
         form.busy = true;
     }
     press(&mut state, KeyCode::Esc);
-    assert!(state.popups.library_dialog.is_none());
+    assert!(state.popups.library_dialog().is_none());
     assert_ne!(state.connection_generation, generation);
 }
 
 #[test]
 fn form_edits_unicode_accepts_url_characters_and_keeps_underlying_navigation_closed() {
     let mut state = AppState::new();
-    state.popups.library_dialog = Some(Dialog::Webdav(WebdavForm::new(None)));
+    state
+        .popups
+        .set_library_dialog(Some(Dialog::Webdav(WebdavForm::new(None))));
     for c in "http://server:8081/音楽/".chars() {
         assert!(press(&mut state, KeyCode::Char(c)).is_empty());
     }
@@ -158,16 +162,18 @@ fn form_edits_unicode_accepts_url_characters_and_keeps_underlying_navigation_clo
     press(&mut state, KeyCode::BackTab);
     assert_eq!(form(&mut state).focus, 5);
     press(&mut state, KeyCode::Enter);
-    assert!(state.popups.library_dialog.is_none());
+    assert!(state.popups.library_dialog().is_none());
 }
 
 #[test]
 fn form_is_one_screen_and_never_renders_or_debug_prints_password() {
     for (width, height) in [(40, 12), (80, 24), (140, 40)] {
         let mut state = AppState::new();
-        state.popups.library_dialog = Some(Dialog::Webdav(WebdavForm::new(None)));
+        state
+            .popups
+            .set_library_dialog(Some(Dialog::Webdav(WebdavForm::new(None))));
         fill(form(&mut state), 2, "fixture-password-not-visible");
-        assert!(!format!("{:?}", state.popups.library_dialog).contains("fixture-password"));
+        assert!(!format!("{:?}", state.popups.library_dialog()).contains("fixture-password"));
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
             .draw(|f| {
@@ -204,7 +210,7 @@ async fn cancelling_or_reopening_form_ignores_old_success_without_saving() {
     let mut old = WebdavForm::new(None);
     fill(&mut old, 0, "http://example.test/");
     let draft = old.draft().unwrap();
-    state.popups.library_dialog = Some(Dialog::Webdav(old));
+    state.popups.set_library_dialog(Some(Dialog::Webdav(old)));
     press(&mut state, KeyCode::Esc);
     let mut config = Config::default();
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
@@ -218,7 +224,9 @@ async fn cancelling_or_reopening_form_ignores_old_success_without_saving() {
         &tx,
     )
     .await;
-    state.popups.library_dialog = Some(Dialog::Webdav(WebdavForm::new(None)));
+    state
+        .popups
+        .set_library_dialog(Some(Dialog::Webdav(WebdavForm::new(None))));
     dispatch(
         SourceAction::WebdavChecked {
             instance: draft.instance.clone(),
@@ -284,7 +292,9 @@ async fn webdav_checks_real_listing_and_reports_auth_and_protocol_errors() {
 async fn failed_connection_stays_in_form_and_does_not_create_library() {
     let (url, server) = server("401 Unauthorized", "").await;
     let mut state = AppState::new();
-    state.popups.library_dialog = Some(Dialog::Webdav(WebdavForm::new(None)));
+    state
+        .popups
+        .set_library_dialog(Some(Dialog::Webdav(WebdavForm::new(None))));
     fill(form(&mut state), 0, &url);
     fill(form(&mut state), 1, "listener");
     fill(form(&mut state), 2, "wrong-fixture-password");
@@ -340,7 +350,9 @@ async fn verified_save_worker() {
     }
     let (url, server) = server("207 Multi-Status", r#"<d:multistatus xmlns:d="DAV:"/>"#).await;
     let mut state = AppState::new();
-    state.popups.library_dialog = Some(Dialog::Webdav(WebdavForm::new(None)));
+    state
+        .popups
+        .set_library_dialog(Some(Dialog::Webdav(WebdavForm::new(None))));
     fill(form(&mut state), 0, &url);
     fill(form(&mut state), 1, "listener");
     fill(form(&mut state), 2, "fixture-secret");
@@ -365,7 +377,7 @@ async fn verified_save_worker() {
         panic!("expected checked result")
     };
     dispatch(action, &mut state, &mut config, &tx).await;
-    assert!(state.popups.library_dialog.is_none());
+    assert!(state.popups.library_dialog().is_none());
     assert_eq!(config.folder_sources.len(), 1);
     assert_eq!(config.folder_sources[0].id, id);
     assert_eq!(
@@ -389,7 +401,9 @@ async fn verified_save_worker() {
     fill(&mut failed, 1, "listener");
     fill(&mut failed, 2, "fixture-secret");
     let draft = failed.draft().unwrap();
-    state.popups.library_dialog = Some(Dialog::Webdav(failed));
+    state
+        .popups
+        .set_library_dialog(Some(Dialog::Webdav(failed)));
     dispatch(
         SourceAction::WebdavChecked {
             instance: draft.instance.clone(),
@@ -417,7 +431,9 @@ async fn cancel_aborts_an_in_flight_connection_check() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/", listener.local_addr().unwrap());
     let mut state = AppState::new();
-    state.popups.library_dialog = Some(Dialog::Webdav(WebdavForm::new(None)));
+    state
+        .popups
+        .set_library_dialog(Some(Dialog::Webdav(WebdavForm::new(None))));
     fill(form(&mut state), 0, &url);
     let draft = form(&mut state).draft().unwrap();
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
@@ -456,7 +472,9 @@ fn dialog_mouse_buttons_work_and_clicks_do_not_reach_the_player() {
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
     use textamp::app::handlers::mouse_input;
     let mut state = AppState::new();
-    state.popups.library_dialog = Some(Dialog::Webdav(WebdavForm::new(None)));
+    state
+        .popups
+        .set_library_dialog(Some(Dialog::Webdav(WebdavForm::new(None))));
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
     terminal
         .draw(|f| {
@@ -470,8 +488,8 @@ fn dialog_mouse_buttons_work_and_clicks_do_not_reach_the_player() {
         modifiers: KeyModifiers::NONE,
     };
     assert!(mouse_input::handle_mouse(click(0, 23), &mut state).is_empty());
-    assert!(state.popups.library_dialog.is_some());
+    assert!(state.popups.library_dialog().is_some());
     let cancel = state.hit_regions.library_dialog[5];
     assert!(mouse_input::handle_mouse(click(cancel.x, cancel.y), &mut state).is_empty());
-    assert!(state.popups.library_dialog.is_none());
+    assert!(state.popups.library_dialog().is_none());
 }

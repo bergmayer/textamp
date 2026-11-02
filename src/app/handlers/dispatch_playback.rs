@@ -23,8 +23,7 @@ pub async fn dispatch(
         action,
         PlaybackAction::Stop | PlaybackAction::ResetForAccountChange
     ) {
-        state.sources.preparing = None;
-        state.sources.prepared = None;
+        state.sources.media = crate::app::sources::MediaPreparation::Idle;
         state.playback.preparation_id = state.playback.preparation_id.wrapping_add(1);
     }
     // Discard playback belonging to the previous account before using new credentials.
@@ -35,7 +34,7 @@ pub async fn dispatch(
         state.playback.status = PlayStatus::Stopped;
         state.playback.position_ms = 0;
         state.playback.duration_ms = 0;
-        state.playback.scrobble_reported = false;
+        state.playback.scrobble = crate::app::state::ScrobbleState::Pending;
         state.playback.playback_started_at = None;
         state.set_playback_mode(PlaybackMode::None);
 
@@ -81,7 +80,7 @@ pub async fn dispatch(
         PlaybackAction::OpenOutputPicker => {
             state.popups.close_all();
             state.palette.close();
-            state.popups.sound_output_active = true;
+            state.popups.set_sound_output_active(true);
             state.sound_output.scroll_pin = None;
             state.sound_output.index = state
                 .sound_output
@@ -145,12 +144,12 @@ pub async fn dispatch(
         }
         PlaybackAction::SelectOutput(output) => {
             if output == state.sound_output.current && audio.has_audio() {
-                state.popups.sound_output_active = false;
+                state.popups.set_sound_output_active(false);
                 state.sound_output.error = None;
                 return Ok(vec![]);
             }
             if state.playback.status != PlayStatus::Stopped
-                || state.sources.preparing.is_some()
+                || state.sources.media.is_preparing()
                 || state.station_starting.is_some()
             {
                 state.sound_output.error =
@@ -164,7 +163,7 @@ pub async fn dispatch(
                 Ok(()) => {
                     audio.set_volume(state.playback.volume);
                     state.sound_output.error = None;
-                    state.popups.sound_output_active = false;
+                    state.popups.set_sound_output_active(false);
                     state.set_status(format!("Output: {label}"));
                 }
                 Err(error) => {

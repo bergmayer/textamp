@@ -336,13 +336,11 @@ pub fn folder_stations() -> Vec<Station> {
 }
 
 pub fn load_folder_stations(state: &mut AppState) {
-    state.stations = folder_stations();
     state.station_nav.columns = vec![crate::app::state::StationColumn::new(
         None,
         "stations".into(),
-        state.stations.clone(),
+        folder_stations(),
     )];
     state.station_nav.focused_column = 0;
     state.station_nav.loading = false;
-    state.stations_loading = false;
 }

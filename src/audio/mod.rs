@@ -15,6 +15,8 @@
 //! - The rest of the app interacts only with the trait, not concrete implementations
 
 pub mod airplay;
+#[cfg(unix)]
+pub mod airplay_native;
 mod output;
 pub use output::{local_devices, AudioOutput};
 pub mod player;

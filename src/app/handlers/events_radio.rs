@@ -111,7 +111,6 @@ pub fn handle(event: RadioEvent, state: &mut AppState) -> Vec<Action> {
             vec![]
         }
         RadioEvent::StationChildrenFailed(error) => {
-            state.stations_loading = false;
             state.station_nav.loading = false;
             state.set_error(error.message.clone());
             vec![]
@@ -121,7 +120,6 @@ pub fn handle(event: RadioEvent, state: &mut AppState) -> Vec<Action> {
             station_title,
             children,
         } => {
-            state.stations_loading = false;
             state.station_nav.loading = false;
 
             // Cache children for instant loading next time
@@ -138,8 +136,6 @@ pub fn handle(event: RadioEvent, state: &mut AppState) -> Vec<Action> {
                     station_title,
                     children.clone(),
                 ));
-            // Also update the legacy state for compatibility
-            state.stations = children;
             state.clear_error();
             if state.palette.open {
                 crate::app::command_palette::refresh_matches(state);

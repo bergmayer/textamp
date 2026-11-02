@@ -15,6 +15,22 @@ use textamp::util::{
 };
 
 fn main() -> Result<()> {
+    #[cfg(unix)]
+    {
+        let mut arguments = env::args_os().skip(1);
+        if arguments.next().as_deref()
+            == Some(std::ffi::OsStr::new(
+                textamp::audio::airplay_native::ARGUMENT,
+            ))
+        {
+            std::process::exit(textamp::audio::airplay_native::run(arguments));
+        }
+        if env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--licenses")) {
+            println!("{}", textamp::audio::airplay_native::notices());
+            return Ok(());
+        }
+    }
+
     let verbose = env::args().any(|a| a == "--verbose" || a == "-v");
 
     // Acquire the cross-platform process lock before doing anything else.

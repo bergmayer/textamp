@@ -95,7 +95,7 @@ async fn search_enter_keeps_results_and_opens_explicit_playback_actions_for_miss
     for tab in [SearchTab::Tracks, SearchTab::Global] {
         let mut state = AppState::new();
         state.view = View::Queue;
-        state.popups.search_active = true;
+        state.popups.set_search_active(true);
         state.search.tab = tab;
         state.search.focus = SearchFocus::Results;
         state.search.query = "Search".into();
@@ -118,7 +118,7 @@ async fn search_enter_keeps_results_and_opens_explicit_playback_actions_for_miss
         .await
         .unwrap();
         assert!(follow.is_empty());
-        assert!(state.popups.search_active);
+        assert!(state.popups.search_active());
         assert_eq!(state.view, View::Queue);
         assert!(state.search.details.open && state.search.details.focused);
         for (w, h) in [(100, 32), (80, 24)] {
@@ -332,7 +332,7 @@ fn jump_commands_target_queue_search_related_and_playback_fallback() {
         (View::Help, false, "first"),
     ] {
         state.view = view;
-        state.popups.search_active = search;
+        state.popups.set_search_active(search);
         state.list_state.queue_index = 1;
         state.search.tab = SearchTab::Tracks;
         state.search.results = Some(SearchResults {
@@ -356,7 +356,7 @@ fn jump_commands_target_queue_search_related_and_playback_fallback() {
         }
     }
     state.view = View::Browse;
-    state.popups.search_active = false;
+    state.popups.set_search_active(false);
     state
         .track_pane_similar
         .insert("first".into(), Ok(tracks[1..].to_vec()));

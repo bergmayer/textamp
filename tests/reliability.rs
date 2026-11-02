@@ -31,11 +31,11 @@ async fn search_and_reopened_adventure_use_current_cached_tracks() {
         dispatch_search::dispatch(&tx, SearchAction::OpenAdventureLauncher, &mut state)
             .await
             .unwrap();
-        state.popups.adventure_launcher.as_mut().unwrap().query = query.into();
+        state.popups.adventure_launcher_mut().unwrap().query = query.into();
         dispatch_search::dispatch(&tx, SearchAction::AdventureLauncherSearch, &mut state)
             .await
             .unwrap();
-        let launcher = state.popups.adventure_launcher.as_ref().unwrap();
+        let launcher = state.popups.adventure_launcher().unwrap();
         assert!(!launcher.loading);
         assert_eq!(
             launcher.results.as_ref().unwrap().tracks.len(),

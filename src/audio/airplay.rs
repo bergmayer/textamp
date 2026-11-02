@@ -1,4 +1,4 @@
-//! Built-in mDNS discovery and an external AirPlay sender. No audio-device fallback.
+//! Built-in mDNS discovery and source-built AirPlay transport. No audio-device fallback.
 use std::net::IpAddr;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -355,12 +355,20 @@ mod sender {
         Ok(())
     }
 
+    #[derive(Default, Clone, Copy, PartialEq, Eq)]
+    enum TimelinePhase {
+        #[default]
+        Starting,
+        Playing,
+        Paused,
+        Finished,
+        Failed,
+        Cancelled,
+    }
     #[derive(Default)]
     struct Timeline {
         position: Duration,
-        started: bool,
-        finished: bool,
-        playing: bool,
+        phase: TimelinePhase,
     }
     struct Shared {
         cancelled: Arc<AtomicBool>,
@@ -391,29 +399,19 @@ mod sender {
     }
     impl AirplayBackend {
         pub(crate) fn new(destination: AirplayDestination) -> Result<Self, AudioError> {
-            let adjacent = std::env::current_exe()
-                .ok()
-                .and_then(|path| {
-                    path.parent()
-                        .map(|parent| parent.join("textamp-airplay/cliairplay"))
-                })
-                .filter(|path| path.is_file());
-            let candidate = std::env::var_os("TEXTAMP_AIRPLAY_HELPER")
-                .or_else(|| adjacent.map(|path| path.into_os_string()))
-                .unwrap_or_else(|| "cliairplay".into());
-            let helper = if PathBuf::from(&candidate).is_absolute() {
-                PathBuf::from(candidate)
-            } else {
-                std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-                    .map(|p| p.join(&candidate)).find(|p| p.is_file())
-                    .ok_or_else(|| AudioError::PlaybackError("AirPlay sender not found. Install music-assistant/airplay-cli separately and set TEXTAMP_AIRPLAY_HELPER to its executable.".into()))?
-            };
-            let check = capture(Command::new(&helper).arg("--check"), Duration::from_secs(3))
-                .map_err(AudioError::PlaybackError)?;
+            let helper = std::env::current_exe().map_err(|_| {
+                AudioError::PlaybackError("Could not locate the Textamp executable".into())
+            })?;
+            let check = capture(
+                Command::new(&helper)
+                    .arg(crate::audio::airplay_native::ARGUMENT)
+                    .arg("--check"),
+                Duration::from_secs(3),
+            )
+            .map_err(AudioError::PlaybackError)?;
             if !check.trim().starts_with("cliairplay ") || !check.trim().ends_with(" check") {
                 return Err(AudioError::PlaybackError(
-                    "Incompatible AirPlay sender: expected current music-assistant/airplay-cli"
-                        .into(),
+                    "The built-in AirPlay runtime failed its startup check".into(),
                 ));
             }
             Ok(Self {
@@ -452,6 +450,8 @@ mod sender {
                         });
                         let failed = !matches!(outcome, Ok(Ok(())));
                         if failed {
+                            crate::audio::lock_or_recover(&worker_shared.timeline).phase =
+                                TimelinePhase::Failed;
                             // Sender diagnostics can contain pairing material; report only bounded generic errors.
                             let message = match outcome {
                                 Ok(Err(message)) => message,
@@ -491,6 +491,7 @@ mod sender {
         }
         fn stop_worker(&mut self) {
             if let Some(shared) = self.shared.take() {
+                crate::audio::lock_or_recover(&shared.timeline).phase = TimelinePhase::Cancelled;
                 shared.cancelled.store(true, Ordering::Release);
             }
             if let Some(worker) = self.worker.take() {
@@ -557,21 +558,24 @@ mod sender {
                 .map(|s| crate::audio::lock_or_recover(&s.timeline).position)
         }
         pub(crate) fn is_finished(&self) -> bool {
-            self.shared
-                .as_ref()
-                .is_some_and(|s| crate::audio::lock_or_recover(&s.timeline).finished)
+            self.shared.as_ref().is_some_and(|s| {
+                crate::audio::lock_or_recover(&s.timeline).phase == TimelinePhase::Finished
+            })
         }
         pub(crate) fn is_paused(&self) -> bool {
             self.shared.as_ref().is_some_and(|s| {
                 s.paused.load(Ordering::Acquire)
                     && !s.cancelled.load(Ordering::Acquire)
-                    && crate::audio::lock_or_recover(&s.timeline).started
+                    && matches!(
+                        crate::audio::lock_or_recover(&s.timeline).phase,
+                        TimelinePhase::Playing | TimelinePhase::Paused
+                    )
             })
         }
         pub(crate) fn is_playing(&self) -> bool {
             self.shared.as_ref().is_some_and(|s| {
                 let t = crate::audio::lock_or_recover(&s.timeline);
-                t.playing && !t.finished && !s.cancelled.load(Ordering::Acquire)
+                t.phase == TimelinePhase::Playing && !s.cancelled.load(Ordering::Acquire)
             })
         }
     }
@@ -714,6 +718,7 @@ mod sender {
             .open(&fifo)
             .map_err(|_| "Could not open AirPlay command pipe")?;
         let mut cmd = Command::new(helper);
+        cmd.arg(crate::audio::airplay_native::ARGUMENT);
         cmd.args([
             "--timing",
             "ntp",
@@ -739,7 +744,7 @@ mod sender {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()
-                .map_err(|_| "Could not launch AirPlay sender. Check TEXTAMP_AIRPLAY_HELPER.")?,
+                .map_err(|_| "Could not start the built-in AirPlay runtime.")?,
         );
         let mut stdin = child.0.stdin.take();
         let mut stdout = child.0.stdout.take().ok_or("Missing AirPlay stdout")?;
@@ -838,7 +843,7 @@ mod sender {
                     start = Some(
                         Instant::now() + Duration::from_millis(epoch.saturating_sub(epoch_ms())),
                     );
-                    crate::audio::lock_or_recover(&shared.timeline).started = true;
+                    crate::audio::lock_or_recover(&shared.timeline).phase = TimelinePhase::Playing;
                     events
                         .try_send(PipelineEvent::Ready { playback_id: id })
                         .map_err(|_| "AirPlay event queue unavailable")?;
@@ -888,10 +893,15 @@ mod sender {
             {
                 let mut timeline = crate::audio::lock_or_recover(&shared.timeline);
                 timeline.position = base + elapsed.min(fed);
-                timeline.playing = start.is_some() && !paused;
+                timeline.phase = if start.is_none() {
+                    TimelinePhase::Starting
+                } else if paused {
+                    TimelinePhase::Paused
+                } else {
+                    TimelinePhase::Playing
+                };
                 if ended && eof && start.is_some() && elapsed >= fed {
-                    timeline.finished = true;
-                    timeline.playing = false;
+                    timeline.phase = TimelinePhase::Finished;
                     return Ok(());
                 }
             }
@@ -900,7 +910,7 @@ mod sender {
                     return Err("AirPlay sender disconnected or rejected the receiver. Check receiver access/pairing requirements; Textamp does not pair automatically.".into());
                 }
                 if !paused && start.is_some() && elapsed >= fed {
-                    crate::audio::lock_or_recover(&shared.timeline).finished = true;
+                    crate::audio::lock_or_recover(&shared.timeline).phase = TimelinePhase::Finished;
                     return Ok(());
                 }
             }

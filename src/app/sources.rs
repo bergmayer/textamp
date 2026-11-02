@@ -89,6 +89,26 @@ pub fn route(
     }
 }
 
+/// File preparation owns either a cancellable task or usable media, never both.
+#[derive(Debug, Clone, Default)]
+pub enum MediaPreparation {
+    #[default]
+    Idle,
+    Preparing(TaskLease),
+    Ready(MediaFile),
+}
+impl MediaPreparation {
+    pub fn is_preparing(&self) -> bool {
+        matches!(self, Self::Preparing(_))
+    }
+    pub fn file(&self) -> Option<&MediaFile> {
+        match self {
+            Self::Ready(file) => Some(file),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SourceState {
     /// Saved connection edits take effect on explicit activation, not on Save.
@@ -105,8 +125,7 @@ pub struct SourceState {
     pub nav_collection: Option<navidrome::commands::CollectionKind>,
     pub list_id: u64,
     pub listing: Option<TaskLease>,
-    pub preparing: Option<TaskLease>,
-    pub prepared: Option<MediaFile>,
+    pub media: MediaPreparation,
     pub picker_scroll_pin: Option<usize>,
 }
 
@@ -219,7 +238,7 @@ pub fn picker_offset(state: &AppState, height: usize) -> usize {
 
 pub fn choices(state: &AppState) -> Vec<LibraryChoice> {
     let mut entries = library_choices(state);
-    if !state.popups.library_picker_active {
+    if !state.popups.library_picker_active() {
         entries.push(LibraryChoice::Add);
     }
     entries
@@ -269,8 +288,7 @@ async fn reset_source(
     state.sources.nav_tasks.clear();
     state.sources.nav_collection = None;
     state.sources.listing = None;
-    state.sources.preparing = None;
-    state.sources.prepared = None;
+    state.sources.media = crate::app::sources::MediaPreparation::Idle;
     state.sources.active = ActiveSource::None;
     Ok(())
 }
@@ -342,7 +360,7 @@ pub async fn dispatch(
             if manager::settings_active(state) {
                 state.set_view(View::Browse);
             }
-            state.popups.library_picker_active = false;
+            state.popups.set_library_picker_active(false);
             return Ok(vec![]);
         }
     }
@@ -354,11 +372,16 @@ pub async fn dispatch(
             return dialogs::dispatch(action, state, audio, config, tx).await;
         }
         SourceAction::Choose(LibraryChoice::Add) => {
-            state.popups.library_dialog = Some(dialogs::Dialog::Add { selected: 0 });
+            state
+                .popups
+                .set_library_dialog(Some(dialogs::Dialog::Add { selected: 0 }));
         }
         SourceAction::Choose(LibraryChoice::AddWebdav) => {
-            state.popups.library_dialog =
-                Some(dialogs::Dialog::Webdav(dialogs::WebdavForm::new(None)));
+            state
+                .popups
+                .set_library_dialog(Some(dialogs::Dialog::Webdav(dialogs::WebdavForm::new(
+                    None,
+                ))));
         }
         SourceAction::ToggleSonic(choice) => {
             if let Some(key) = sonic::choice_key(&choice, state) {
@@ -397,7 +420,7 @@ pub async fn dispatch(
             config.default_navidrome = None;
             let reconnect = state.sources.reconnect_sources.remove(&source.id);
             if !reconnect && state.sources.active.folder() == Some(&source.id) {
-                state.popups.library_picker_active = false;
+                state.popups.set_library_picker_active(false);
                 return Ok(vec![]);
             }
             reset_source(state, audio, tx).await?;
@@ -409,17 +432,22 @@ pub async fn dispatch(
             state.browse_category = BrowseCategory::Folders;
             state.category_column_index = state.row_index_for_category(BrowseCategory::Folders);
             state.category_column_focused = false;
-            state.popups.library_picker_active = false;
+            state.popups.set_library_picker_active(false);
             config.default_folder_source = Some(source.id);
             dispatch_settings::save_config_in_background(tx, config, "save library selection");
             files::load(state, tx, String::new(), 0);
         }
 
         SourceAction::Choose(LibraryChoice::AddFolder) => {
-            state.popups.library_dialog = Some(dialogs::Dialog::Local(Default::default()));
+            state
+                .popups
+                .set_library_dialog(Some(dialogs::Dialog::Local(Default::default())));
         }
         SourceAction::SaveLocal { path, name } => {
-            if !matches!(state.popups.library_dialog, Some(dialogs::Dialog::Local(_))) {
+            if !matches!(
+                state.popups.library_dialog(),
+                Some(dialogs::Dialog::Local(_))
+            ) {
                 return Ok(vec![]);
             }
             let saved = config.folder_sources.clone();
@@ -442,19 +470,21 @@ pub async fn dispatch(
             match result {
                 Ok(source) => {
                     let id = source.id.clone();
+                    let choice = LibraryChoice::Folder(source.clone());
                     config.folder_sources.push(source);
                     state.sources.folders = config.folder_sources.clone();
-                    state.popups.library_dialog = None;
+                    state.popups.set_library_dialog(None);
                     manager::reset_selection(state);
                     state.popups.library_picker_index = choices(state)
                         .iter()
                         .position(|c| matches!(c, LibraryChoice::Folder(s) if s.id == id))
                         .unwrap_or(0);
                     dispatch_settings::save_config_in_background(tx, config, "add folder library");
-                    state.set_status("Library added. Use General > Make active to open it.".into());
+                    cache::start(choice, false, state, tx);
+                    state.set_status("Library added. Scanning folders in the background.".into());
                 }
                 Err(error) => {
-                    if let Some(dialogs::Dialog::Local(form)) = &mut state.popups.library_dialog {
+                    if let Some(dialogs::Dialog::Local(form)) = state.popups.library_dialog_mut() {
                         form.error = Some(error.to_string());
                     }
                 }
@@ -463,9 +493,11 @@ pub async fn dispatch(
         SourceAction::AddLocation(location) => match source_from_location(&location) {
             Ok(source) => {
                 if matches!(source.location, FolderLocation::Webdav { .. }) {
-                    state.popups.library_dialog = Some(dialogs::Dialog::Webdav(
-                        dialogs::WebdavForm::from_location(source),
-                    ));
+                    state
+                        .popups
+                        .set_library_dialog(Some(dialogs::Dialog::Webdav(
+                            dialogs::WebdavForm::from_location(source),
+                        )));
                     return Ok(vec![]);
                 }
                 let candidate = source.clone();
@@ -482,11 +514,11 @@ pub async fn dispatch(
                     manager::reset_selection(state);
                     state.popups.library_picker_index = choices(state).iter().position(|choice| matches!(choice, LibraryChoice::Folder(s) if s.id == source.id)).unwrap_or(0);
                     dispatch_settings::save_config_in_background(tx, config, "add folder library");
-                    state.popups.input_dialog = Some(InputDialog {
+                    state.popups.set_input_dialog(Some(InputDialog {
                         title: "Library name".into(),
                         input: source.name.into(),
                         action_type: InputDialogAction::FolderName(source.id),
-                    });
+                    }));
                 }
             }
             Err(error) => state.set_error(error.to_string()),
@@ -533,7 +565,7 @@ pub async fn dispatch(
                 config.default_folder_source = None;
             }
             dispatch_settings::save_config_in_background(tx, config, "remove library");
-            state.popups.library_picker_active = !managing;
+            state.popups.set_library_picker_active(!managing);
             state.popups.library_picker_index = 0;
             let tx = tx.clone();
             super::tasks::spawn_blocking(move || {

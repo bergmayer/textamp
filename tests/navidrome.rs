@@ -284,7 +284,7 @@ async fn radio_playlist_save_uses_active_tracks_and_rejects_blank_names() {
     app.state.set_playback_mode(PlaybackMode::Radio);
     app.send(QueueAction::PromptSavePlaylist).await;
     assert_eq!(
-        app.state.popups.input_dialog.as_ref().unwrap().title,
+        app.state.popups.input_dialog().unwrap().title,
         "Save Station as Playlist"
     );
     app.send(QueueAction::SaveQueueAsPlaylist("Station fixture".into()))
@@ -611,20 +611,24 @@ async fn navidrome_station_list_and_random_album_work_without_sonic_or_plex() {
         server(|method, params| (200, envelope(fixture(method, params)))).await;
     let mut app = App::new(session(url));
     app.catalog().await;
-    assert!(app
-        .state
+    assert!(app.state.station_nav.columns[0]
         .stations
         .iter()
         .any(|s| s.title == "Random Artist Radio"));
-    assert!(app
-        .state
+    assert!(app.state.station_nav.columns[0]
         .stations
         .iter()
         .any(|s| s.title == "Random Album Radio"));
     seen.lock().await.clear();
     // A drilled category replaces the current list; root stations remain in
     // station_nav and must still supply the shortcut's key and title.
-    app.state.stations.clear();
+    app.state
+        .station_nav
+        .push_column(textamp::app::state::StationColumn::new(
+            Some("category".into()),
+            "Category".into(),
+            vec![],
+        ));
     let actions = textamp::app::handlers::key_input::handle_key(
         crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Char('r'),
@@ -1529,7 +1533,7 @@ async fn sidebar_headings_are_skipped_and_search_requires_explicit_activation_fo
         );
         assert!(actions.is_empty());
         assert_eq!(app.state.category_column_index, search);
-        assert!(!app.state.popups.search_active);
+        assert!(!app.state.popups.search_active());
         for action in key_input::handle_key(
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
             &mut app.state,
@@ -1537,7 +1541,7 @@ async fn sidebar_headings_are_skipped_and_search_requires_explicit_activation_fo
         ) {
             app.send(action).await;
         }
-        assert!(app.state.popups.search_active);
+        assert!(app.state.popups.search_active());
         app.send(SearchAction::CloseSearchPopup).await;
         let mut terminal = Terminal::new(TestBackend::new(120, 45)).unwrap();
         terminal
@@ -1558,7 +1562,7 @@ async fn sidebar_headings_are_skipped_and_search_requires_explicit_activation_fo
         for action in actions {
             app.send(action).await;
         }
-        assert!(app.state.popups.search_active);
+        assert!(app.state.popups.search_active());
         app.send(SearchAction::CloseSearchPopup).await;
         app.state.category_column_focused = true;
         key_input::handle_key(
@@ -1614,7 +1618,7 @@ async fn folder_search_popup_searches_files_and_returns_to_the_matching_row() {
     app.send(QueueAction::EnqueueSearchResult).await;
     assert_eq!(app.state.queue.tracks.len(), 1);
     app.send(SearchAction::SelectSearchResult).await;
-    assert!(!app.state.popups.search_active);
+    assert!(!app.state.popups.search_active());
     assert_eq!(app.state.browse_category, BrowseCategory::Folders);
     assert_eq!(
         app.state
@@ -1654,14 +1658,16 @@ fn audiomuse_form_has_masked_fields_buttons_and_cancel_without_saving() {
     use ratatui::{backend::TestBackend, Terminal};
     use textamp::app::sources::{audiomuse, dialogs};
     let mut app = App::new(session("http://example.test".into()));
-    app.state.popups.library_dialog = Some(dialogs::Dialog::AudioMuse(audiomuse::Form {
-        instance: "fixture".into(),
-        library_key: "library".into(),
-        fields: Default::default(),
-        focus: 0,
-        error: None,
-        task: None,
-    }));
+    app.state
+        .popups
+        .set_library_dialog(Some(dialogs::Dialog::AudioMuse(audiomuse::Form {
+            instance: "fixture".into(),
+            library_key: "library".into(),
+            fields: Default::default(),
+            focus: 0,
+            error: None,
+            task: None,
+        })));
     for _ in 0..2 {
         dialogs::key(
             KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
@@ -1694,7 +1700,7 @@ fn audiomuse_form_has_masked_fields_buttons_and_cancel_without_saving() {
         KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
         &mut app.state,
     );
-    assert!(app.state.popups.library_dialog.is_none());
+    assert!(app.state.popups.library_dialog().is_none());
     assert!(app.state.sources.audiomuse.connections.is_empty());
 }
 
@@ -2322,10 +2328,10 @@ async fn provider_biography_and_recommendations_are_scoped() {
         artist_name: "Artist".into(),
     })
     .await;
-    while app.state.popups.artist_bio.as_ref().unwrap().loading {
+    while app.state.popups.artist_bio().unwrap().loading {
         app.receive().await;
     }
-    let text = &app.state.popups.artist_bio.as_ref().unwrap().document.text;
+    let text = &app.state.popups.artist_bio().unwrap().document.text;
     assert!(text.starts_with("An artist biography."));
     assert!(text.contains("supplied by Navidrome"));
     app.send(DataAction::LoadSimilarTracks {
@@ -2599,7 +2605,7 @@ async fn inactive_library_rescan_populates_complete_catalog_without_playback_or_
     while cache::running(&choice, &app.state) {
         app.receive().await;
     }
-    assert_eq!(cache::status(&choice, &app.state), "Cache up to date");
+    assert_eq!(cache::status(&choice, &app.state), "Library up to date");
     let catalog = store
         .ticket("catalog")
         .read::<Value>(textamp::library::cache::REFRESH_INTERVAL)
@@ -2718,13 +2724,7 @@ async fn description_playlist_save_uses_snapshot_order_and_does_not_touch_queue(
         app.send(action).await;
     }
     assert_eq!(
-        app.state
-            .popups
-            .input_dialog
-            .as_ref()
-            .unwrap()
-            .input
-            .as_str(),
+        app.state.popups.input_dialog().unwrap().input.as_str(),
         "Warm acoustic songs"
     );
     // Cancel writes nothing and leaves the results open.
@@ -2758,10 +2758,10 @@ async fn description_playlist_save_uses_snapshot_order_and_does_not_touch_queue(
     for action in actions {
         app.send(action).await;
     }
-    assert!(app.state.popups.input_dialog.is_some());
+    assert!(app.state.popups.input_dialog().is_some());
     // The captured displayed list, not a later selection/list, is saved.
     app.state.artist_nav.columns[1].tracks.reverse();
-    app.state.popups.input_dialog.as_mut().unwrap().input = " Saved description ".into();
+    app.state.popups.input_dialog_mut().unwrap().input = " Saved description ".into();
     for action in key_input::handle_key(
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         &mut app.state,
@@ -2877,7 +2877,7 @@ async fn jump_to_artist_and_album_leave_overlays_and_analysis_for_real_library_c
             textamp::audiomuse::Feature::Describe,
         ));
         app.state.search.pending_album_key = Some("stale-album".into());
-        app.state.popups.search_active = true;
+        app.state.popups.set_search_active(true);
         app.state.view = View::Queue;
         let cmd = if album {
             PaletteCommandKind::JumpToAlbum(Box::new(track.clone()))
@@ -2890,7 +2890,7 @@ async fn jump_to_artist_and_album_leave_overlays_and_analysis_for_real_library_c
         while !app.state.sources.nav_tasks.is_empty() {
             app.receive().await;
         }
-        assert!(!app.state.popups.search_active);
+        assert!(!app.state.popups.search_active());
         assert!(app.state.sources.nav_collection.is_none());
         assert_eq!(app.state.view, View::Browse);
         assert!(app.state.search.pending_album_key.is_none());

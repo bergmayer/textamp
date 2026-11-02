@@ -19,6 +19,7 @@
 //! The existing `:` command control and right-click track menu share entries,
 //! including capability-gated Sonic Radio; no additional shortcut is needed.
 //! Describe music has history and two-row results with a Save as playlist header.
+//! Album columns pin Album Details below Play; Enter/Right opens metadata, Left returns.
 //! Enter on a related track opens/replaces one adjacent detail pane; Left returns.
 //! The palette offers Jump to artist/album for the highlighted or now-playing track.
 //! Sidebar collections are not duplicated as commands; `:` opens the action list.
@@ -77,7 +78,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
             state.fullscreen_artwork,
             state.fullscreen_active
                 && state.fullscreen_artwork
-                && (state.palette.open || state.popups.sound_output_active),
+                && (state.palette.open || state.popups.sound_output_active()),
         );
         if last.replace(signature) != signature {
             super::artwork::clear_grid_cache();
@@ -183,7 +184,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     }
 
     // Render search popup if active (floating dialog)
-    if state.popups.search_active {
+    if state.popups.search_active() {
         screens::filter::render(frame, state, frame.area());
     }
 
@@ -192,22 +193,22 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     // Radio/DJ controls use the shared capability-filtered command palette.
     // Shortcut labels and activation use the same presentation rows.
     // Render adventure launcher popup if active
-    if state.popups.adventure_launcher.is_some() {
+    if state.popups.adventure_launcher().is_some() {
         screens::adventure_launcher::render(frame, state, frame.area());
     }
 
     // Render artist radio picker popup if active
-    if state.popups.artist_radio_picker.is_some() {
+    if state.popups.artist_radio_picker().is_some() {
         screens::artist_radio_picker::render(frame, state, frame.area());
     }
 
     // Render library picker popup if active
-    if state.popups.library_picker_active {
+    if state.popups.library_picker_active() {
         render_library_picker(frame, state);
     }
 
     // Render sort popup if active
-    if state.popups.sort.is_some() {
+    if state.popups.sort().is_some() {
         screens::sort_popup::render(frame, state, frame.area());
     }
 
@@ -217,13 +218,13 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     // write — otherwise the artwork (and the bio text the diff treats
     // as `skip` beneath it) lingers after every non-Esc dismissal
     // path (e.g. `popups.close_all()` when another popup opens).
-    if state.popups.artist_bio.is_some() {
+    if state.popups.artist_bio().is_some() {
         render_artist_bio_popup(frame, state);
     } else if BIO_ARTWORK_RENDERER.with(|r| r.borrow().has_image()) {
         BIO_ARTWORK_RENDERER.with(|r| r.borrow_mut().clear());
     }
 
-    if let Some(popup) = &state.popups.text {
+    if let Some(popup) = state.popups.text() {
         let area = centered_rect(70, 70, frame.area());
         frame.render_widget(Clear, area);
         frame.render_widget(
@@ -247,12 +248,12 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     }
 
     // Render input dialog if present
-    if let Some(ref dialog) = state.popups.input_dialog {
+    if let Some(dialog) = state.popups.input_dialog() {
         render_input_dialog(frame, state, dialog);
     }
 
     // Render confirm dialog if present
-    if let Some(ref dialog) = state.popups.confirm_dialog {
+    if let Some(dialog) = state.popups.confirm_dialog() {
         render_confirm_dialog(frame, state, dialog);
     }
 
@@ -261,7 +262,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         render_toast(frame, toast, frame.area());
     }
 
-    if state.popups.sound_output_active {
+    if state.popups.sound_output_active() {
         crate::ui::sound_output::render(frame, state);
     }
 
@@ -1065,6 +1066,7 @@ fn render_folder_view(
                     col_idx,
                     area: col_area,
                     inner: inner_tmp,
+                    details_max_scroll: None,
                     rows_per_item: 1, // Folder items are always 1-row
                     is_art_mode: false,
                     art_row_height: 0,
@@ -1311,63 +1313,6 @@ fn render_folder_view(
     }
 }
 
-/// Determine if a Miller column should use 2-row display.
-///
-/// Returns true for:
-/// - Special track columns (playlist tracks, all-tracks, compilation tracks, etc.)
-/// - Album-grouped columns (TracksByAlbum / TracksByArtist mode)
-/// - Album columns in "All Artists" mode
-/// - Genre/mood album columns
-fn is_two_row_column(
-    state: &AppState,
-    col: &crate::app::state::BrowseColumn,
-    col_idx: usize,
-    nav: &crate::app::state::BrowseNavigationState,
-    _two_row_tracks: bool,
-) -> bool {
-    use crate::app::state::BrowseItem;
-
-    let first_is_track = col
-        .items
-        .first()
-        .is_some_and(|item| matches!(item, BrowseItem::Track { .. }));
-    let first_is_album = col
-        .items
-        .first()
-        .is_some_and(|item| matches!(item, BrowseItem::Album { .. }));
-
-    // Special track columns always get two-row display
-    if first_is_track && state.is_special_track_column(nav, col_idx) {
-        return true;
-    }
-
-    // Album columns in "All Artists" mode (shows artist on 2nd row)
-    if first_is_album
-        && (nav
-            .columns
-            .first()
-            .and_then(|c| c.selected_item())
-            .is_some_and(|item| matches!(item, BrowseItem::AllArtists))
-            || (state.browse_category == crate::app::state::BrowseCategory::Library
-                && state.library.library_sub_mode != crate::app::state::LibrarySubMode::Normal
-                && col_idx == 0))
-    {
-        return true;
-    }
-
-    // Genre/mood album columns
-    if first_is_album && state.browse_category.is_tag_section() {
-        return true;
-    }
-
-    // Grouped-by-album playlist columns (albums with artist on 2nd row)
-    if first_is_album && col.grouped_by_album {
-        return true;
-    }
-
-    false
-}
-
 /// Single source of truth for the art-grid row height (and matching
 /// art width). Used by `render_album_art_grid` for layout *and* by
 /// the Miller-column hit-region registration so `mouse_input` can
@@ -1445,7 +1390,11 @@ fn count_meaningful_miller_cols(state: &AppState) -> usize {
     }
     let last_meaningful = (column_offset..num_columns)
         .rev()
-        .find(|&i| !nav.columns[i].items.is_empty() || i <= nav.focused_column)
+        .find(|&i| {
+            !nav.columns[i].items.is_empty()
+                || nav.columns[i].album_details.is_some()
+                || i <= nav.focused_column
+        })
         .unwrap_or(column_offset);
     let effective_columns = last_meaningful + 1;
     let n = effective_columns.saturating_sub(column_offset);
@@ -1684,7 +1633,7 @@ pub(crate) fn render_track_details_pane(
     );
     let pane_idx = details.map_or(state.track_pane_index, |d| d.action_index);
     let child_details =
-        details.is_some() && state.view == View::Browse && !state.popups.search_active;
+        details.is_some() && state.view == View::Browse && !state.popups.search_active();
     let show_similar =
         (details.is_none() || child_details) && crate::app::sources::sonic::enabled(state);
 
@@ -2206,7 +2155,6 @@ fn render_browse_miller_columns(
     use crate::app::state::BrowseItem;
     use crate::util::truncate_middle;
     let current_track_key = state.current_track().map(|track| track.rating_key.as_str());
-    let two_row_tracks = state.browse_category == BrowseCategory::Playlists;
     let focus_override = state.category_column_focused.then_some(0);
     let filter_results = state.list_filter.results.as_ref().filter(|_| {
         state.list_filter.active && state.list_filter.category == state.browse_category
@@ -2259,7 +2207,11 @@ fn render_browse_miller_columns(
     // greater), restricted to the visible range [column_offset, len).
     let last_meaningful = (column_offset..num_columns)
         .rev()
-        .find(|&i| !nav.columns[i].items.is_empty() || i <= nav.focused_column)
+        .find(|&i| {
+            !nav.columns[i].items.is_empty()
+                || nav.columns[i].album_details.is_some()
+                || i <= nav.focused_column
+        })
         .unwrap_or(column_offset);
     let effective_columns = last_meaningful + 1;
     // When loading with existing columns, reserve space for a loading indicator column
@@ -2328,7 +2280,8 @@ fn render_browse_miller_columns(
             };
             let block_tmp = Block::default().borders(Borders::ALL);
             let inner_tmp = block_tmp.inner(col_area);
-            let is_two_row = is_two_row_column(state, col, col_idx, nav, two_row_tracks);
+            let is_two_row =
+                crate::app::presentation::is_two_row_browse_column(state, col, col_idx, nav);
             // Top-right "x" close glyph hit area. Skip the root col
             // (which isn't closeable). The glyph lives inside the
             // border, one cell wide, on the top border row.
@@ -2351,6 +2304,13 @@ fn render_browse_miller_columns(
                 col_idx,
                 area: col_area,
                 inner: inner_tmp,
+                details_max_scroll: col.album_details.as_ref().map(|lines| {
+                    let (_, text) = album_details_layout(inner_tmp);
+                    Paragraph::new(lines.join("\n"))
+                        .wrap(Wrap { trim: false })
+                        .line_count(text.width)
+                        .saturating_sub(text.height as usize)
+                }),
                 rows_per_item: if is_two_row { 2 } else { 1 },
                 is_art_mode: col.artwork_visible,
                 art_row_height,
@@ -2520,12 +2480,7 @@ fn render_browse_miller_columns(
             frame.render_widget(Paragraph::new("\u{2715}").style(style), close_x);
         }
 
-        // Synthetic "▶ Play album / playlist" row pinned above the
-        // real items on any tracks column flagged with `play_all_row`.
-        // Eats the top inner line; the remainder of the column
-        // renders into `inner` below as before. The cursor parks on
-        // this row by default (`col.on_play_row`); ↓ drops it to
-        // `items[0]`, ↑ from `items[0]` brings it back.
+        // Pinned actions precede tracks: Play, then Album Details for albums.
         let inner = if col.play_all_row.is_some() && full_inner.height > 0 {
             let play_row_rect = Rect {
                 x: full_inner.x,
@@ -2541,7 +2496,8 @@ fn render_browse_miller_columns(
             // Highlight when the column is focused AND the cursor is
             // on the play row. Otherwise paint as a regular header
             // affordance — still legible, just not selected.
-            let highlighted = is_focused && col.on_play_row;
+            let highlighted = is_focused
+                && col.header_selection == crate::app::state::ColumnHeaderSelection::Play;
             let style = if highlighted {
                 Style::default()
                     .bg(t.colors.bg_selection)
@@ -2570,6 +2526,59 @@ fn render_browse_miller_columns(
         } else {
             full_inner
         };
+
+        let inner = if col.has_album_details() && inner.height > 0 {
+            let selected = is_focused
+                && col.header_selection == crate::app::state::ColumnHeaderSelection::AlbumDetails;
+            let style = if selected {
+                Style::default()
+                    .bg(t.colors.bg_selection)
+                    .fg(t.colors.selection_text)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(t.colors.fg_accent)
+            };
+            frame.render_widget(
+                Paragraph::new("  Album Details").style(style),
+                Rect::new(inner.x, inner.y, inner.width, 1),
+            );
+            Rect::new(inner.x, inner.y + 1, inner.width, inner.height - 1)
+        } else {
+            inner
+        };
+
+        if let Some(lines) = &col.album_details {
+            let (art, inner) = album_details_layout(inner);
+            if art.width > 0 && art.height > 0 {
+                let rendered = col.album_details_art_key.as_ref().is_some_and(|key| {
+                    state.artwork.grid_cache.get(key).is_some_and(|data| {
+                        super::artwork::render_grid_image(frame, art, key, data)
+                    })
+                });
+                if !rendered {
+                    frame.render_widget(
+                        Paragraph::new("(no cover)")
+                            .alignment(Alignment::Center)
+                            .style(Style::default().fg(t.colors.fg_muted)),
+                        Rect::new(art.x, art.y + art.height / 2, art.width, 1),
+                    );
+                }
+            }
+            let paragraph = Paragraph::new(lines.join("\n"))
+                .style(Style::default().fg(t.colors.fg_primary))
+                .wrap(Wrap { trim: false });
+            let max_scroll = paragraph
+                .line_count(inner.width)
+                .saturating_sub(inner.height as usize);
+            frame.render_widget(
+                paragraph.scroll((
+                    col.selected_index.min(max_scroll).min(u16::MAX as usize) as u16,
+                    0,
+                )),
+                inner,
+            );
+            continue;
+        }
 
         if col.items.is_empty() {
             let text = if nav.loading { "Loading…" } else { "(empty)" };
@@ -2622,7 +2631,8 @@ fn render_browse_miller_columns(
             // Calculate max width for text (minus prefix and padding)
             let max_text_width = inner.width.saturating_sub(4) as usize;
 
-            let is_two_row = is_two_row_column(state, col, col_idx, nav, two_row_tracks);
+            let is_two_row =
+                crate::app::presentation::is_two_row_browse_column(state, col, col_idx, nav);
             let rows_per_item = if is_two_row { 2 } else { 1 };
             let visible_item_count = visible_height / rows_per_item;
 
@@ -2682,7 +2692,7 @@ fn render_browse_miller_columns(
                         // "selected" — the play row owns the
                         // highlight until ↓ pulls the cursor down
                         // into the items.
-                        let is_selected = orig_idx == selected_idx && !col.on_play_row;
+                        let is_selected = orig_idx == selected_idx && col.header_selection == crate::app::state::ColumnHeaderSelection::Items;
                         // Multi-select: row is in `col.selected_set`.
                         // Drives a visual "●" prefix and an accent
                         // tint, mirroring the queue track-list style.
@@ -3055,6 +3065,28 @@ fn render_loading_column(frame: &mut Frame, area: Rect, loading_tick: u32) {
 
 /// Render album art list for a column in cover art view mode.
 /// Each row: artwork thumbnail on the left, title/artist text on the right.
+/// Keep the album cover above metadata, leaving space for text on short terminals.
+fn album_details_layout(inner: Rect) -> (Rect, Rect) {
+    let art_height = (inner.width / 2)
+        .min(inner.height.saturating_sub(5) / 2)
+        .min(12);
+    let art_width = (art_height * 2).min(inner.width);
+    let art = Rect::new(
+        inner.x + inner.width.saturating_sub(art_width) / 2,
+        inner.y,
+        art_width,
+        art_height,
+    );
+    let reserved = if art_height > 0 { art_height + 1 } else { 0 };
+    let text = Rect::new(
+        inner.x,
+        inner.y + reserved,
+        inner.width,
+        inner.height.saturating_sub(reserved),
+    );
+    (art, text)
+}
+
 fn render_album_art_grid(
     frame: &mut Frame,
     state: &AppState,
@@ -3391,6 +3423,11 @@ fn render_transport(frame: &mut Frame, state: &AppState, area: Rect) {
 fn render_library_picker(frame: &mut Frame, state: &AppState) {
     // Underlying Settings may have registered tabs; none belong to this modal.
     state.hit_regions.borrow_mut().library_manager_rows = None;
+    state
+        .hit_regions
+        .borrow_mut()
+        .library_manager_actions
+        .clear();
     // A quick switcher overlays, but never replaces, the normal app.
     // ┌ Switch library ─────────────────────────────┐
     // │ > Music · server       Beatles · WebDAV       │
@@ -3427,7 +3464,7 @@ fn render_library_picker(frame: &mut Frame, state: &AppState) {
 /// Settings content, not a startup screen or full-window modal.
 pub(super) fn render_library_manager(frame: &mut Frame, state: &AppState, inner: Rect) {
     // One library list, with the selected source's details below it. The category
-    // pane stays visible; Enter opens the source's General / Analysis / Cache form.
+    // pane stays visible. Add, manage and re-scan are directly accessible here.
     use screens::settings::{panel, paper};
     let focused = state.settings_state.focus == crate::app::state::SettingsFocus::Content;
     let block = panel(" Libraries ")
@@ -3446,8 +3483,16 @@ pub(super) fn render_library_manager(frame: &mut Frame, state: &AppState, inner:
     let rows = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(1),
-        Constraint::Length(if content.height >= 12 { 3 } else { 0 }),
-        Constraint::Length(u16::from(content.height >= 6)),
+        Constraint::Length(if content.height >= 12 { 4 } else { 0 }),
+        Constraint::Length(if content.height < 6 {
+            0
+        } else if content.width < 29 {
+            3
+        } else if content.width < 48 {
+            2
+        } else {
+            1
+        }),
     ])
     .split(content);
     frame.render_widget(
@@ -3458,15 +3503,16 @@ pub(super) fn render_library_manager(frame: &mut Frame, state: &AppState, inner:
     let choice = crate::app::sources::choices(state)
         .get(state.popups.library_picker_index)
         .cloned();
-    let detail = match choice {
+    let detail = match &choice {
         Some(crate::app::sources::LibraryChoice::Add) | None => {
             "Add a local folder, WebDAV share, or Subsonic / Navidrome server.".to_string()
         }
         Some(choice) => format!(
-            "{} · {}\n{}",
+            "{} · {}\n{}\n{}",
             choice.label(),
             choice.provider(),
-            choice.location()
+            choice.location(),
+            crate::app::sources::cache::status(choice, state)
         ),
     };
     frame.render_widget(
@@ -3475,10 +3521,45 @@ pub(super) fn render_library_manager(frame: &mut Frame, state: &AppState, inner:
             .wrap(Wrap { trim: true }),
         rows[2],
     );
-    frame.render_widget(
-        Paragraph::new("Enter Manage library   A Add").style(paper().fg(theme().colors.fg_accent)),
-        rows[3],
-    );
+    // The same actions are available by keyboard and as labelled buttons.
+    let mut buttons = vec![("A Add", crate::app::sources::LibraryChoice::Add.action())];
+    if let Some(choice) = choice.filter(|choice| choice.cache_store().is_ok()) {
+        buttons.push((
+            "Enter Manage",
+            crate::app::action::SettingsAction::ManageLibrary(choice.clone()).into(),
+        ));
+        buttons.push((
+            if crate::app::sources::cache::running(&choice, state) {
+                "F5 Cancel scan"
+            } else {
+                "F5 Re-scan"
+            },
+            crate::app::action::SettingsAction::RescanSourceCache(choice).into(),
+        ));
+    }
+    let mut x = rows[3].x;
+    let mut y = rows[3].y;
+    for (label, action) in buttons {
+        let wanted = label.len() as u16 + 4;
+        if x != rows[3].x && x + wanted > rows[3].right() {
+            x = rows[3].x;
+            y += 1;
+        }
+        let width = wanted.min(rows[3].right().saturating_sub(x));
+        let rect = Rect::new(x, y, width, u16::from(y < rows[3].bottom()));
+        if !rect.is_empty() {
+            frame.render_widget(
+                Paragraph::new(format!("[ {label} ]")).style(paper().fg(theme().colors.fg_accent)),
+                rect,
+            );
+            state
+                .hit_regions
+                .borrow_mut()
+                .library_manager_actions
+                .push((rect, action));
+        }
+        x = x.saturating_add(width + 1);
+    }
 }
 
 fn render_managed_libraries(frame: &mut Frame, state: &AppState, area: Rect) {
@@ -3570,7 +3651,7 @@ fn render_library_choices(frame: &mut Frame, state: &AppState, outer: Rect, list
         .take(list_area.height as usize)
         .map(|(i, entry)| {
             let selected = i == state.popups.library_picker_index
-                && (state.popups.library_picker_active
+                && (state.popups.library_picker_active()
                     || state.settings_state.focus == crate::app::state::SettingsFocus::Content);
             let style = if selected {
                 Style::default()
@@ -3591,7 +3672,7 @@ fn render_library_choices(frame: &mut Frame, state: &AppState, outer: Rect, list
         .collect();
     frame.render_widget(List::new(items), list_area);
     if entries.is_empty() {
-        let message = if state.popups.library_picker_active {
+        let message = if state.popups.library_picker_active() {
             "No saved libraries. F2 to add or reconnect."
         } else {
             "No libraries found.\nUse Add library to connect a source."
@@ -3609,7 +3690,7 @@ fn render_library_choices(frame: &mut Frame, state: &AppState, outer: Rect, list
 /// full-width prose below it; left/right selects another article photo.
 /// Down past the prose focuses the Google button; Up returns, Tab switches directly.
 fn render_artist_bio_popup(frame: &mut Frame, state: &AppState) {
-    let popup = match &state.popups.artist_bio {
+    let popup = match state.popups.artist_bio() {
         Some(p) => p,
         None => return,
     };

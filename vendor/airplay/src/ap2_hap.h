@@ -1,0 +1,140 @@
+/*
+ * AirPlay 2 HAP - Header
+ *
+ * Copyright (C) 2024-2026 Music Assistant Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef __AP2_HAP_H_
+#define __AP2_HAP_H_
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+/*
+ * Sender identification sent on every request to the receiver. AirTunes 980.77.2
+ * (tvOS/HomePod OS 26) answers 403 Forbidden to a pair-setup POST that carries no
+ * User-Agent, so this belongs on the pairing endpoints as much as on the RTSP
+ * control channel.
+ */
+#define AP2_USER_AGENT "AirPlay/670.6.2"
+
+/*
+ * HAP pairing context.
+ *
+ * Credentials format (192 hex chars = 96 bytes):
+ *   bytes 0-63:  Client Ed25519 private key (64 bytes)
+ *   bytes 64-95: Server Ed25519 public key (32 bytes)
+ */
+
+struct ap2_hap_ctx;
+
+/*
+ * Why a pairing exchange failed. The caller needs to tell a rejected secret
+ * (another pairing mode may still work) from a dead connection (nothing left
+ * to try) and from a receiver speaking an unexpected dialect.
+ */
+typedef enum {
+    AP2_HAP_OK = 0,
+    AP2_HAP_ERR_TRANSPORT,  /* request not sent, or no complete response read */
+    AP2_HAP_ERR_AUTH,       /* non-200 on a pairing POST, or a TLV error tag */
+    AP2_HAP_ERR_PROTOCOL,   /* malformed or unexpected message content */
+} ap2_hap_result_t;
+
+/* Failure detail; only meaningful when the pairing call returned false. */
+typedef struct {
+    ap2_hap_result_t result;
+    int http_status;   /* HTTP failure status; 0 when none was read or the
+                        * reply was 200 and the rejection is TLV-level */
+    int tlv_error;     /* TLV error tag from M2/M4 (0 = none) */
+} ap2_hap_error_t;
+
+/*
+ * Create HAP context from hex credentials string (192 chars).
+ * Pass NULL to create a bare context without long-term keys, usable only
+ * with ap2_hap_pair_setup_transient().
+ */
+struct ap2_hap_ctx *ap2_hap_create(const char *credentials_hex);
+
+/* Set the client identifier used during pair-verify (e.g. DACP ID as raw bytes). */
+void ap2_hap_set_client_id(struct ap2_hap_ctx *ctx, const uint8_t *id, int id_len);
+
+/* Destroy HAP context. */
+void ap2_hap_destroy(struct ap2_hap_ctx *ctx);
+
+/*
+ * Perform pair-verify over an established TCP connection.
+ *
+ * :param ctx: HAP context with credentials.
+ * :param sock_fd: Connected TCP socket to the device.
+ * :param err: receives the failure cause, or NULL.
+ * :returns: true on success, false on failure.
+ *
+ * On success, the context holds encryption keys for the session.
+ */
+bool ap2_hap_pair_verify(struct ap2_hap_ctx *ctx, int sock_fd,
+                         ap2_hap_error_t *err);
+
+/*
+ * Perform HomeKit transient pair-setup (X-Apple-HKP: 4) over an established
+ * TCP connection. Used for devices without stored credentials (Sonos, WiiM
+ * and most third-party AirPlay 2 receivers): SRP-6a, messages M1-M4 only, no
+ * long-term keys are created or stored.
+ *
+ * :param ctx: HAP context (no credentials required).
+ * :param sock_fd: Connected TCP socket to the device.
+ * :param srp_secret: SRP secret to authenticate with; NULL or empty selects
+ *                    the fixed transient PIN. Receivers that gate playback on
+ *                    a device password expect that password here instead.
+ * :param err: receives the failure cause, or NULL.
+ * :returns: true on success, false on failure.
+ *
+ * On success, the context holds encryption keys for the session and
+ * ap2_hap_get_shared_secret() returns the audio key.
+ */
+bool ap2_hap_pair_setup_transient(struct ap2_hap_ctx *ctx, int sock_fd,
+                                  const char *srp_secret,
+                                  ap2_hap_error_t *err);
+
+/* Callback that supplies the PIN the device is currently displaying. */
+typedef const char *(*ap2_hap_pin_cb)(void *arg);
+
+/*
+ * Full HomeKit pair-setup (X-Apple-HKP: 3) for devices that reject transient
+ * pairing (Apple TV, HomePod). The device displays a PIN after M1; pin_cb is
+ * invoked to collect it. On success the long-term keys are stored in the
+ * context (ready for pair-verify) and serialized into creds_hex_out in the
+ * same 192-hex format ap2_hap_create() accepts.
+ *
+ * :param ctx: HAP context created without credentials.
+ * :param sock_fd: connected TCP socket to the device's RTSP port.
+ * :param pin_cb: callback returning the on-screen PIN (NULL aborts).
+ * :param pin_arg: opaque argument passed to pin_cb.
+ * :param creds_hex_out: receives the credentials (192 hex chars + NUL).
+ */
+bool ap2_hap_pair_setup_pin(struct ap2_hap_ctx *ctx, int sock_fd,
+                            ap2_hap_pin_cb pin_cb, void *pin_arg,
+                            char creds_hex_out[193]);
+
+/* Encrypt data for sending to the device. Caller must free output. */
+int ap2_hap_encrypt(struct ap2_hap_ctx *ctx, const uint8_t *in, int in_len,
+                    uint8_t **out);
+
+/* Decrypt data received from the device. Caller must free output. */
+int ap2_hap_decrypt(struct ap2_hap_ctx *ctx, const uint8_t *in, int in_len,
+                    uint8_t **out);
+
+/* Save/restore read nonce counter (for retry-safe decryption). */
+uint64_t ap2_hap_save_read_counter(struct ap2_hap_ctx *ctx);
+void ap2_hap_restore_read_counter(struct ap2_hap_ctx *ctx, uint64_t counter);
+
+/* Get the X25519 shared secret (32 bytes) - used as audio encryption key. */
+const uint8_t *ap2_hap_get_shared_secret(struct ap2_hap_ctx *ctx);
+
+/* HKDF input for the derived event/DataStream channels: the X25519 secret
+ * (32 bytes) after pair-verify, the full SRP session key (64 bytes) after
+ * transient pair-setup. NULL with *len = 0 before pairing completes. */
+const uint8_t *ap2_hap_get_kdf_secret(struct ap2_hap_ctx *ctx, size_t *len);
+
+#endif /* __AP2_HAP_H_ */

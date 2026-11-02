@@ -174,11 +174,11 @@ fn library_manager_is_available_without_plex_and_path_entry_keeps_slashes() {
         [Action::Search(SearchAction::OpenLibraryPicker)]
     ));
     state.view = textamp::app::state::View::Browse;
-    state.popups.input_dialog = Some(InputDialog {
+    state.popups.set_input_dialog(Some(InputDialog {
         title: "Location".into(),
         input: "https:".into(),
         action_type: InputDialogAction::FolderLocation,
-    });
+    }));
     for c in "/music.test/folder".chars() {
         assert!(key_input::handle_key(
             KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
@@ -188,7 +188,7 @@ fn library_manager_is_available_without_plex_and_path_entry_keeps_slashes() {
         .is_empty());
     }
     assert_eq!(
-        state.popups.input_dialog.as_ref().unwrap().input.as_str(),
+        state.popups.input_dialog().unwrap().input.as_str(),
         "https:/music.test/folder"
     );
     assert!(!state.list_filter.active);
@@ -206,14 +206,16 @@ async fn cancelling_password_entry_does_not_change_library_credentials() {
     let mut form = sources::dialogs::WebdavForm::new(Some(&source));
     form.fields[1].value = "replacement".into();
     form.fields[1].cursor = form.fields[1].value.len();
-    state.popups.library_dialog = Some(sources::dialogs::Dialog::Webdav(form));
+    state
+        .popups
+        .set_library_dialog(Some(sources::dialogs::Dialog::Webdav(form)));
     assert!(key_input::handle_key(
         KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
         &mut state,
         &config
     )
     .is_empty());
-    assert!(state.popups.library_dialog.is_none());
+    assert!(state.popups.library_dialog().is_none());
     assert_eq!(config.folder_sources[0].location, source.location);
     assert_eq!(state.sources.folders[0].location, source.location);
 }
@@ -364,7 +366,7 @@ async fn folder_refresh_preserves_selection_and_mixed_directory_play_index() {
     )
     .await
     .unwrap();
-    assert!(state.sources.preparing.is_none());
+    assert!(!state.sources.media.is_preparing());
     assert_eq!(state.playback.status, PlayStatus::Stopped);
 }
 

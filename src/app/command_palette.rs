@@ -721,7 +721,12 @@ pub fn materialize_entries(state: &AppState) -> Vec<PaletteEntry> {
             aliases: vec!["parent stations".into()],
         });
     }
-    for s in &state.stations {
+    for s in state
+        .station_nav
+        .focused()
+        .into_iter()
+        .flat_map(|column| &column.stations)
+    {
         if s.is_separator() || s.is_dj_mode() || s.is_remix() || s.is_action() {
             continue;
         }
@@ -747,8 +752,7 @@ pub fn materialize_entries(state: &AppState) -> Vec<PaletteEntry> {
     out
 }
 
-/// Translate a palette command into the same `Action`s the shortcut
-/// bar used to dispatch.
+/// Translate a palette command into application actions.
 pub fn run(cmd: PaletteCommandKind, state: &mut AppState) -> Vec<Action> {
     match cmd {
         PaletteCommandKind::Navidrome(command) => {

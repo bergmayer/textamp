@@ -64,14 +64,14 @@ pub fn handle_key(
         state.popups.close_all();
         return vec![SystemAction::Quit.into()];
     }
-    if state.popups.sound_output_active {
+    if state.popups.sound_output_active() {
         return crate::app::sound_output::key(key, state);
     }
     if key.code == KeyCode::F(8)
         && key.modifiers.is_empty()
-        && state.popups.input_dialog.is_none()
-        && state.popups.library_dialog.is_none()
-        && state.popups.confirm_dialog.is_none()
+        && state.popups.input_dialog().is_none()
+        && state.popups.library_dialog().is_none()
+        && state.popups.confirm_dialog().is_none()
     {
         return vec![PlaybackAction::OpenOutputPicker.into()];
     }
@@ -89,10 +89,10 @@ pub fn handle_key(
             }
         };
     }
-    if state.popups.input_dialog.is_none()
-        && state.popups.library_dialog.is_none()
-        && state.popups.confirm_dialog.is_none()
-        && state.popups.text.is_none()
+    if state.popups.input_dialog().is_none()
+        && state.popups.library_dialog().is_none()
+        && state.popups.confirm_dialog().is_none()
+        && state.popups.text().is_none()
     {
         if key.code == KeyCode::F(7) && key.modifiers.is_empty() {
             return vec![NavigationAction::ToggleFullscreen.into()];
@@ -101,10 +101,10 @@ pub fn handle_key(
             return crate::app::fullscreen::key(key, state);
         }
     }
-    if let Some(popup) = &mut state.popups.text {
+    if let Some(popup) = state.popups.text_mut() {
         match key.code {
             KeyCode::Esc => {
-                state.popups.text = None;
+                state.popups.set_text(None);
                 state.sources.nav_tasks.remove("lyrics");
             }
             KeyCode::Up => popup.scroll = popup.scroll.saturating_sub(1),
@@ -164,10 +164,10 @@ pub fn handle_key(
     }
 
     // Handle confirm dialog if active
-    if state.popups.library_dialog.is_some() && state.popups.confirm_dialog.is_none() {
+    if state.popups.library_dialog().is_some() && state.popups.confirm_dialog().is_none() {
         return crate::app::sources::dialogs::key(key, state);
     }
-    if let Some(mut dialog) = state.popups.confirm_dialog.take() {
+    if let Some(mut dialog) = state.popups.take_confirm_dialog() {
         // Pressing any quit shortcut a second time confirms immediately.
         let repeat_quit = matches!(dialog.on_confirm, crate::app::state::ConfirmAction::Quit)
             && matches!(
@@ -271,18 +271,18 @@ pub fn handle_key(
             }
             KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::BackTab => {
                 dialog.selected_yes = !dialog.selected_yes;
-                state.popups.confirm_dialog = Some(dialog);
+                state.popups.set_confirm_dialog(Some(dialog));
                 return vec![];
             }
             _ => {
-                state.popups.confirm_dialog = Some(dialog);
+                state.popups.set_confirm_dialog(Some(dialog));
                 return vec![];
             }
         }
     }
 
     // Handle input dialog if active
-    if let Some(ref mut dialog) = state.popups.input_dialog {
+    if let Some(dialog) = state.popups.input_dialog_mut() {
         match key.code {
             KeyCode::Esc => {
                 // Cancel dialog and adventure if it was for adventure length
@@ -290,7 +290,7 @@ pub fn handle_key(
                     dialog.action_type,
                     crate::app::state::InputDialogAction::AdventureLength
                 );
-                state.popups.input_dialog = None;
+                state.popups.set_input_dialog(None);
                 crate::app::sources::dialogs::restore_parent(state);
                 if was_adventure {
                     return vec![SettingsAction::CancelAdventure.into()];
@@ -300,7 +300,7 @@ pub fn handle_key(
                 // Confirm dialog
                 let input = dialog.input.clone();
                 let action_type = dialog.action_type.clone();
-                state.popups.input_dialog = None;
+                state.popups.set_input_dialog(None);
                 let input = input.to_string();
                 match action_type {
                     crate::app::state::InputDialogAction::AudioMuseSearch(feature) => {
@@ -387,31 +387,31 @@ pub fn handle_key(
     }
 
     // Sort popup handling (takes priority over view-specific handling)
-    if state.popups.sort.is_some() {
+    if state.popups.sort().is_some() {
         return sort_popup::handle_sort_popup_keys(key, state);
     }
 
     // Adventure launcher popup handling (takes priority over view-specific handling)
-    if state.popups.adventure_launcher.is_some() {
+    if state.popups.adventure_launcher().is_some() {
         return adventure_launcher::handle_adventure_launcher_keys(key, state);
     }
 
     // Artist radio picker popup handling
-    if state.popups.artist_radio_picker.is_some() {
+    if state.popups.artist_radio_picker().is_some() {
         return artist_radio_picker::handle_artist_radio_picker_keys(key, state);
     }
 
     // Search popup handling (takes priority over view-specific handling)
-    if state.popups.search_active {
+    if state.popups.search_active() {
         return search::handle_search_keys(key, state);
     }
 
     // Artist bio popup handling
-    if state.popups.artist_bio.is_some() {
+    if state.popups.artist_bio().is_some() {
         return handle_artist_bio_popup_keys(key, state);
     }
 
-    if state.popups.library_picker_active {
+    if state.popups.library_picker_active() {
         if key.code == KeyCode::F(2) {
             return vec![SearchAction::ManageLibraries.into()];
         }
@@ -516,7 +516,7 @@ pub fn handle_key(
         // Global navigation shortcuts
         (KeyModifiers::CONTROL, KeyCode::Char('f')) => {
             // Ctrl+F = Search/Filter popup (floating dialog)
-            if state.popups.search_active {
+            if state.popups.search_active() {
                 return vec![SearchAction::CloseSearchPopup.into()];
             } else {
                 return vec![SearchAction::OpenSearchPopup.into()];
@@ -651,7 +651,7 @@ pub fn handle_key(
             return vec![SearchAction::OpenLibraryPicker.into()];
         }
         (_, KeyCode::F(4)) => {
-            if state.popups.artist_bio.is_some() {
+            if state.popups.artist_bio().is_some() {
                 return handle_artist_bio_popup_keys(key, state);
             }
             // F4 = Artist bio popup
@@ -834,9 +834,6 @@ pub fn handle_key(
             return vec![SearchAction::OpenSortPopup.into()];
         }
 
-        // External-search keyboard shortcuts have all been retired —
-        // Apple Music / Spotify / YouTube search are palette- and
-        // menu-driven only.
         _ => {}
     }
 
@@ -1026,7 +1023,7 @@ pub(super) fn handle_library_picker_keys(
     let entries = choices(state);
     let count = entries.len();
     state.sources.picker_scroll_pin = None;
-    if state.popups.library_picker_active
+    if state.popups.library_picker_active()
         && !matches!(
             key.code,
             KeyCode::Esc
@@ -1066,6 +1063,13 @@ pub(super) fn handle_library_picker_keys(
                 .map(|entry| crate::app::sources::options::open(entry.clone(), state))
                 .unwrap_or_default()
         }
+        KeyCode::F(5) if !state.popups.library_picker_active() => {
+            if let Some(choice) = entries.get(state.popups.library_picker_index) {
+                if choice.cache_store().is_ok() {
+                    return vec![SettingsAction::RescanSourceCache(choice.clone()).into()];
+                }
+            }
+        }
         KeyCode::Char('a') => return vec![LibraryChoice::Add.action()],
         KeyCode::Char('n') => return vec![LibraryChoice::AddNavidrome.action()],
         KeyCode::Char('w') => return vec![LibraryChoice::AddWebdav.action()],
@@ -1085,7 +1089,7 @@ fn handle_artist_bio_popup_keys(key: event::KeyEvent, state: &mut AppState) -> V
         .biography_text
         .as_ref()
         .map_or(0, |r| r.max_scroll());
-    let Some(popup) = &mut state.popups.artist_bio else {
+    let Some(popup) = state.popups.artist_bio_mut() else {
         return vec![];
     };
     match key.code {
@@ -1115,7 +1119,7 @@ fn handle_artist_bio_popup_keys(key: event::KeyEvent, state: &mut AppState) -> V
             return vec![SearchAction::OpenBiographySource.into()]
         }
         KeyCode::Esc | KeyCode::F(4) => {
-            state.popups.artist_bio = None;
+            state.popups.set_artist_bio(None);
             // Bio popup overlays the Now Playing artwork when shown
             // from that view; dropping the protocol forces a fresh
             // image placement on the next render so the terminal
@@ -1529,7 +1533,7 @@ fn get_selected_track(state: &AppState) -> Option<Track> {
                     }
                 }
             }
-            // Legacy right panel tracks
+            // Right-panel tracks
             match state.library.right_panel_mode {
                 RightPanelMode::AlbumTracks | RightPanelMode::CategoryTracks => state
                     .library
@@ -1573,7 +1577,7 @@ fn get_selected_album(state: &AppState) -> Option<(String, String)> {
                     return Some((key.clone(), format!("{} - {}", artist, title)));
                 }
             }
-            // Legacy right panel: ArtistAlbums (index > 0) or CategoryAlbums
+            // Right panel: ArtistAlbums (index > 0) or CategoryAlbums
             match state.library.right_panel_mode {
                 RightPanelMode::ArtistAlbums if state.list_state.right_albums_index > 0 => {
                     let album_idx = state.list_state.right_albums_index.saturating_sub(1);
@@ -1669,7 +1673,7 @@ pub fn close_focused_browse_column(state: &mut AppState) {
             .map(|fs| {
                 if fs.can_go_left() {
                     fs.focus_left();
-                    fs.truncate_right_columns();
+                    fs.truncate_right();
                     false
                 } else {
                     true

@@ -121,7 +121,8 @@ async fn folder_visualizers_wait_for_preparation_then_analyze_all_folder_provide
         .unwrap();
         assert!(!state.waveform.generating);
         assert!(state.waveform.error.is_none());
-        state.sources.prepared = Some(MediaFile::local(path.clone()));
+        state.sources.media =
+            textamp::app::sources::MediaPreparation::Ready(MediaFile::local(path.clone()));
         analyze(&mut state).await;
     }
 }

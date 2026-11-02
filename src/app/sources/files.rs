@@ -161,7 +161,7 @@ pub(super) async fn dispatch(
             {
                 return Ok(vec![]);
             }
-            state.sources.preparing = None;
+            state.sources.media = crate::app::sources::MediaPreparation::Idle;
             match result {
                 Err(error) => {
                     state.playback.status = PlayStatus::Stopped;
@@ -179,7 +179,7 @@ pub(super) async fn dispatch(
                         state.playback.status = PlayStatus::Stopped;
                         state.set_error(format!("Play file: {error}"));
                     } else {
-                        state.sources.prepared = Some(file);
+                        state.sources.media = crate::app::sources::MediaPreparation::Ready(file);
                         state.playback.request_id = audio.playback_id();
                         state.playback.status = if paused {
                             audio.pause();
@@ -400,8 +400,7 @@ pub fn play(
         state.set_error("Library has been removed".into());
         return;
     };
-    state.sources.preparing = None;
-    state.sources.prepared = None;
+    state.sources.media = crate::app::sources::MediaPreparation::Idle;
     audio.stop();
     state.playback.request_id = audio.playback_id();
     state.playback.preparation_id = state.playback.preparation_id.wrapping_add(1);
@@ -443,5 +442,5 @@ pub fn play(
             })))
             .await;
     });
-    state.sources.preparing = Some(TaskLease::new(&task));
+    state.sources.media = crate::app::sources::MediaPreparation::Preparing(TaskLease::new(&task));
 }

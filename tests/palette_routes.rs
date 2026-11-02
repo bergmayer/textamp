@@ -221,12 +221,16 @@ fn utility_rows_are_native_commands_not_station_urls_in_both_playback_views() {
     for view in [View::Queue, View::NowPlaying] {
         let mut state = common::navidrome_state();
         state.view = view;
-        state.stations.push(station(
-            "nav-radio/randomAlbum",
-            "Random Album Radio",
-            "station",
-        ));
-        helpers::append_station_action_items(&mut state.stations, false);
+        state.station_nav.columns = vec![textamp::app::state::StationColumn::new(
+            None,
+            "stations".into(),
+            vec![station(
+                "nav-radio/randomAlbum",
+                "Random Album Radio",
+                "station",
+            )],
+        )];
+        helpers::append_station_action_items(&mut state.station_nav.columns[0].stations, false);
         let entries = command_palette::materialize_entries(&state);
         assert_eq!(
             entries
@@ -315,7 +319,11 @@ fn filtered_station_choices_are_leaves_regardless_of_their_identifiers() {
         choice.identifier = Some(kind.into());
         assert!(!choice.is_category());
         let mut state = AppState::new();
-        state.stations = vec![choice];
+        state.station_nav.columns = vec![textamp::app::state::StationColumn::new(
+            None,
+            "stations".into(),
+            vec![choice],
+        )];
         assert!(matches!(
             run_label(&mut state, "Radio: Choice").as_slice(),
             [Action::Radio(RadioAction::PlayStation(_))]

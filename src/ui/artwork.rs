@@ -300,12 +300,8 @@ fn build_braille_render(
         return None;
     }
 
-    // Match the other renderers (Resize::Scale, halfblocks): preserve the
-    // source image's aspect ratio and center the result inside `area`. The
-    // miller-column art slot is ≥ 2:1 in cells (≈ square or wider in
-    // pixels, since braille is 2 dots wide × 4 dots tall per cell), so
-    // resize_exact'ing the whole slot used to horizontally stretch any
-    // square cover into a wide rectangle.
+    // Preserve the source aspect ratio and center the result inside `area`.
+    // Braille cells contain 2 × 4 pixels.
     let (src_w, src_h) = img.dimensions();
     if src_w == 0 || src_h == 0 {
         return None;
@@ -607,11 +603,7 @@ pub fn render_grid_image(frame: &mut Frame, area: Rect, key: &str, data: &[u8]) 
     GRID_PROTOCOLS.with(|protos| {
         let mut map = protos.borrow_mut();
         if let Some(protocol) = map.get_mut(&image_id) {
-            // `Resize::Scale` upscales when the source thumbnail is
-            // smaller than the render area; `Resize::Crop`/`Resize::Fit`
-            // both cap at the source image size in ratatui-image 9, which
-            // is why the cached 300 px server thumbs used to render as a
-            // tiny square in the upper-left of a much larger row.
+            // Scale thumbnails to fit the render area.
             let image = StatefulImage::new().resize(Resize::Scale(None));
             frame.render_stateful_widget(image, area, protocol);
             true

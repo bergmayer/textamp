@@ -1,6 +1,6 @@
 //! Cross-platform process lock.
 //!
-//! Used to guarantee that only one textamp instance (TUI or GUI) is running
+//! Ensures that only one Textamp instance is running
 //! against the shared on-disk caches / auth / config at a time. The lock file
 //! lives in the platform state directory (e.g. `~/.local/state/textamp/textamp.lock`).
 //!

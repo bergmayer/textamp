@@ -24,8 +24,7 @@ support both mouse and arrows; opening it must not switch libraries or play.
 ## Architecture
 
 Textamp is a pure terminal app. Supported sources are Subsonic/Navidrome,
-local folders and WebDAV, with optional AudioMuse analysis. Plex is retired;
-its source archive is not a runtime dependency. Do not restore Plex fallbacks.
+local folders and WebDAV, with optional AudioMuse analysis.
 
 ```text
 UI: src/ui (pure render-from-state)
@@ -88,7 +87,7 @@ Keep successful description history scoped to the exact library; results use the
 playlist-style two-row layout. Search and Similar Tracks open adjacent details on
 Enter, with explicit Play Track / Play Track++ actions. Queue Enter still plays.
 AirPlay supports macOS and Linux with built-in
-mDNS discovery and a separately installed sender; Windows support is out of scope.
+mDNS discovery and source-built transport in the Textamp executable; Windows support is out of scope.
 
 All sources have persistent metadata caches: server catalogs, directory trees and
 visited album listings. Cached startup comes first, weekly refresh plus manual F5.

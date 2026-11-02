@@ -146,7 +146,7 @@ pub async fn dispatch(
             let follow_up = enqueue_search_result(state);
             follow_ups.extend(follow_up);
             // Close search popup and navigate to queue
-            state.popups.search_active = false;
+            state.popups.set_search_active(false);
             state.set_view(View::Queue);
         }
         QueueAction::EnqueueSearchResultNext => {
@@ -154,7 +154,7 @@ pub async fn dispatch(
             let follow_up = enqueue_search_result_next(state);
             follow_ups.extend(follow_up);
             // Close search popup and navigate to queue
-            state.popups.search_active = false;
+            state.popups.set_search_active(false);
             state.set_view(View::Queue);
         }
 
@@ -251,8 +251,7 @@ pub async fn dispatch(
             // Clear artwork so stale cover art doesn't linger
             state.artwork.current_thumb = None;
             state.artwork.current_data = None;
-            state.artwork.loading = false;
-            state.artwork.pending_thumb = None;
+            state.artwork.fetch = crate::app::state::ArtworkFetch::Idle;
         }
         QueueAction::ToggleQueueShuffle => {
             use crate::services::shuffle_queue;
@@ -676,11 +675,13 @@ pub async fn dispatch(
                     "Save Queue as Playlist"
                 };
                 state.popups.close_all();
-                state.popups.input_dialog = Some(crate::app::state::InputDialog {
-                    title: title.to_string(),
-                    input: Default::default(),
-                    action_type: crate::app::state::InputDialogAction::SavePlaylist,
-                });
+                state
+                    .popups
+                    .set_input_dialog(Some(crate::app::state::InputDialog {
+                        title: title.to_string(),
+                        input: Default::default(),
+                        action_type: crate::app::state::InputDialogAction::SavePlaylist,
+                    }));
             }
         }
 

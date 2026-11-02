@@ -110,7 +110,7 @@ fn library_connection_cancel_returns_to_setup_and_cache_is_separate() {
         .find(|c| matches!(c, LibraryChoice::Navidrome { .. }))
         .unwrap();
     options::open(choice, &mut state);
-    let index = match &state.popups.library_dialog {
+    let index = match state.popups.library_dialog() {
         Some(Dialog::Library(o)) => o
             .items(&state)
             .iter()
@@ -118,23 +118,23 @@ fn library_connection_cancel_returns_to_setup_and_cache_is_separate() {
             .unwrap(),
         _ => unreachable!(),
     };
-    if let Some(Dialog::Library(o)) = &mut state.popups.library_dialog {
+    if let Some(Dialog::Library(o)) = state.popups.library_dialog_mut() {
         o.selected = index;
     }
     press(&mut state, KeyCode::Enter);
     assert!(matches!(
-        state.popups.library_dialog,
+        state.popups.library_dialog(),
         Some(Dialog::Navidrome(_))
     ));
     draw(&mut state, 100, 32, "connection");
     press(&mut state, KeyCode::Esc);
     assert!(matches!(
-        state.popups.library_dialog,
+        state.popups.library_dialog(),
         Some(Dialog::Library(_))
     ));
     press(&mut state, KeyCode::Right);
     press(&mut state, KeyCode::Right);
-    if let Some(Dialog::Library(o)) = &state.popups.library_dialog {
+    if let Some(Dialog::Library(o)) = state.popups.library_dialog() {
         assert_eq!(o.page, OptionsPage::Cache);
         assert!(!o
             .items(&state)
@@ -146,7 +146,7 @@ fn library_connection_cancel_returns_to_setup_and_cache_is_separate() {
     for (w, h) in [(100, 32), (80, 24), (40, 12)] {
         draw(&mut state, w, h, "library-cache");
     }
-    let index = match &state.popups.library_dialog {
+    let index = match state.popups.library_dialog() {
         Some(Dialog::Library(options)) => options
             .items(&state)
             .iter()
@@ -154,12 +154,12 @@ fn library_connection_cancel_returns_to_setup_and_cache_is_separate() {
             .unwrap(),
         _ => unreachable!(),
     };
-    if let Some(Dialog::Library(options)) = &mut state.popups.library_dialog {
+    if let Some(Dialog::Library(options)) = state.popups.library_dialog_mut() {
         options.selected = index;
     }
     press(&mut state, KeyCode::Enter);
     assert!(
-        matches!(state.popups.confirm_dialog.as_ref().map(|dialog| &dialog.on_confirm),
+        matches!(state.popups.confirm_dialog().map(|dialog| &dialog.on_confirm),
         Some(textamp::app::state::ConfirmAction::ClearArtworkCache(LibraryChoice::Navidrome { source, .. })) if source.id == "server")
     );
 }
@@ -167,7 +167,9 @@ fn library_connection_cancel_returns_to_setup_and_cache_is_separate() {
 async fn saving_a_server_connection_does_not_activate_it() {
     let mut state = fixture();
     let source = state.sources.navidrome[0].clone();
-    state.popups.library_dialog = Some(Dialog::Navidrome(ServerForm::new(Some(&source))));
+    state
+        .popups
+        .set_library_dialog(Some(Dialog::Navidrome(ServerForm::new(Some(&source)))));
     state.playback.position_ms = 9876;
     let session = sources::navidrome::Session {
         client: textamp::navidrome::Client::new(&source, "fixture".into(), None).unwrap(),
@@ -182,6 +184,7 @@ async fn saving_a_server_connection_does_not_activate_it() {
     let generation = state.connection_generation;
     textamp::app::dispatch::dispatch_action(
         sources::navidrome::NavAction::Connected {
+            analysis: None,
             generation,
             result: Ok(session),
             password: None,
@@ -217,7 +220,7 @@ async fn local_form_saves_path_and_name_together_and_cancel_discards_draft() {
     .await
     .unwrap();
     assert!(matches!(
-        state.popups.library_dialog,
+        state.popups.library_dialog(),
         Some(Dialog::Local(_))
     ));
     press(&mut state, KeyCode::Esc);
@@ -247,7 +250,7 @@ async fn local_form_saves_path_and_name_together_and_cancel_discards_draft() {
     .unwrap();
     assert_eq!(config.folder_sources[0].name, "New folder");
     assert_eq!(state.sources.active.folder().unwrap(), "music");
-    assert!(state.popups.library_dialog.is_none() && state.popups.input_dialog.is_none());
+    assert!(state.popups.library_dialog().is_none() && state.popups.input_dialog().is_none());
 }
 
 #[tokio::test]
@@ -269,7 +272,7 @@ async fn editing_active_webdav_returns_to_setup_without_interrupting_playback() 
         ..Default::default()
     };
     options::open(LibraryChoice::Folder(source), &mut state);
-    let index = match &state.popups.library_dialog {
+    let index = match state.popups.library_dialog() {
         Some(Dialog::Library(o)) => o
             .items(&state)
             .iter()
@@ -277,11 +280,11 @@ async fn editing_active_webdav_returns_to_setup_without_interrupting_playback() 
             .unwrap(),
         _ => unreachable!(),
     };
-    if let Some(Dialog::Library(o)) = &mut state.popups.library_dialog {
+    if let Some(Dialog::Library(o)) = state.popups.library_dialog_mut() {
         o.selected = index;
     }
     press(&mut state, KeyCode::Enter);
-    let Some(Dialog::Webdav(form)) = &mut state.popups.library_dialog else {
+    let Some(Dialog::Webdav(form)) = state.popups.library_dialog_mut() else {
         panic!("connection form")
     };
     form.fields[0].value = "http://new.example/music/".into();
@@ -304,7 +307,7 @@ async fn editing_active_webdav_returns_to_setup_without_interrupting_playback() 
     assert_eq!(state.playback.position_ms, 9876);
     assert!(state.sources.reconnect_sources.contains("music"));
     assert!(
-        matches!(&state.popups.library_dialog,Some(Dialog::Library(o)) if o.choice.location().contains("new.example"))
+        matches!(state.popups.library_dialog(),Some(Dialog::Library(o)) if o.choice.location().contains("new.example"))
     );
 }
 
@@ -331,7 +334,7 @@ fn categories_and_controls_are_reachable_with_two_focus_targets() {
         }
         press(&mut state, KeyCode::Right);
         assert_eq!(state.settings_state.focus, SettingsFocus::Content);
-        assert!(state.popups.library_dialog.is_none());
+        assert!(state.popups.library_dialog().is_none());
         press(&mut state, KeyCode::BackTab);
         assert_eq!(state.settings_state.focus, SettingsFocus::Sections);
         press(&mut state, KeyCode::Tab);

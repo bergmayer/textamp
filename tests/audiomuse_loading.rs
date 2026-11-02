@@ -601,13 +601,13 @@ async fn description_history_survives_restart_is_library_scoped_and_arrows_never
     state.category_column_focused = true;
     press(&mut state, &mut config, KeyCode::Right).await;
     assert!(!state.category_column_focused);
-    assert!(state.popups.input_dialog.is_none());
+    assert!(state.popups.input_dialog().is_none());
     assert_eq!(state.artist_nav.focused_column, 0);
     assert_eq!(state.artist_nav.columns[0].items[0].title(), "Quiet piano");
     assert_eq!(state.artist_nav.columns[1].tracks[0].title, "One");
     press(&mut state, &mut config, KeyCode::Down).await;
     assert_eq!(state.artist_nav.columns[1].title, "Bright strings");
-    assert!(state.popups.input_dialog.is_none());
+    assert!(state.popups.input_dialog().is_none());
     press(&mut state, &mut config, KeyCode::Right).await;
     assert_eq!(state.artist_nav.focused_column, 1);
     assert!(matches!(
@@ -618,7 +618,7 @@ async fn description_history_survives_restart_is_library_scoped_and_arrows_never
     press(&mut state, &mut config, KeyCode::Left).await;
     assert!(state.category_column_focused);
     press(&mut state, &mut config, KeyCode::Enter).await;
-    assert!(state.popups.input_dialog.is_some());
+    assert!(state.popups.input_dialog().is_some());
     press(&mut state, &mut config, KeyCode::Esc).await;
     assert_eq!(state.artist_nav.columns[0].items.len(), 2);
     assert!(state.queue.tracks.is_empty());
@@ -714,7 +714,7 @@ async fn description_results_use_playlist_rows_and_both_rows_click_the_same_trac
         }
         assert_eq!(state.artist_nav.columns[1].selected_index, 1);
         assert_eq!(state.scroll.browse, Some((1, 0)));
-        assert!(state.popups.input_dialog.is_none());
+        assert!(state.popups.input_dialog().is_none());
     }
 }
 
@@ -773,7 +773,7 @@ async fn background_sync_failure_never_interrupts_biography_or_playback_even_wit
         state.playback.position_ms = 38000;
         state.queue.tracks = state.library.all_tracks.clone();
         state.queue.index = Some(0);
-        state.popups.artist_bio = Some(ArtistBioPopup {
+        state.popups.set_artist_bio(Some(ArtistBioPopup {
             artist_name: "Fixture artist".into(),
             document: Default::default(),
             scroll: 3,
@@ -781,7 +781,7 @@ async fn background_sync_failure_never_interrupts_biography_or_playback_even_wit
             loading: false,
             image_index: 0,
             task: None,
-        });
+        }));
         if preview {
             state.sources.audiomuse.snapshot = Some(snapshot());
         }
@@ -812,7 +812,7 @@ async fn background_sync_failure_never_interrupts_biography_or_playback_even_wit
         assert_eq!(state.playback.status, PlayStatus::Playing);
         assert_eq!(state.playback.position_ms, 38000);
         assert_eq!(state.queue.index, Some(0));
-        let bio = state.popups.artist_bio.as_ref().unwrap();
+        let bio = state.popups.artist_bio().unwrap();
         assert_eq!(bio.artist_name, "Fixture artist");
         assert_eq!(bio.scroll, 3);
         assert!(bio.google_focused);

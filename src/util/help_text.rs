@@ -31,8 +31,10 @@ NAVIGATE
 PLAY-ALBUM ROW  (tracks columns)
   After drilling into an album or playlist the cursor parks on a
   pinned "▶ Play album / Play playlist" row at the top of the
-  column. Enter plays the whole album / playlist; ↓ drops to the
-  first track; ↑ from the first track jumps back to the play row.
+  column. Enter plays the whole album / playlist. Album columns
+  have an Album Details row directly below Play: Enter/Right or
+  click opens artwork and metadata in an adjacent column. Left returns.
+  ↓ moves through these actions to tracks; ↑ returns to actions.
   Click the row to play; click an item below to select it.
   Track details: Play Track plays one; Play Track++ plays it and following tracks.
   Sonically Similar rows: Enter opens adjacent details; further choices replace that pane.
@@ -86,7 +88,7 @@ TOOLS
   Biography: ↓ past text or Tab focuses Search Google; Enter selects. G searches, B opens source.
 
   Startup opens your last library. F3: Enter switches, Esc cancels, F2 manages.
-  F2 Settings → Libraries: add libraries, manage accounts and credentials.
+  F2 Settings → Libraries: A adds, Enter manages, F5 re-scans the selected library.
   Settings: ↑↓ chooses a category; Enter / → opens it; Tab / Shift+Tab switches panes.
   Settings → Sidebar: Enter / Space hides or shows sidebar sections for this library type.
   Streaming quality sets the next server stream’s bitrate limit; Original requests raw audio.
@@ -98,17 +100,18 @@ TOOLS
   Narrow terminals show one settings pane at a time. Changes save automatically.
   Settings -> Audio -> Sound output opens the same F8 speaker picker.
   Sound output: arrows select, Enter applies, F5 finds speakers, Esc cancels.
-  Stop playback before changing outputs. AirPlay setup errors appear in the picker.
+  Stop playback before changing outputs. AirPlay is built in; no separate sender installation.
   Libraries are grouped by type/account. [Active] marks the current library.
   Up from the first saved library returns to categories. Enter opens its options.
   Left/Right selects General, Analysis or Cache.
-  General: Make active, rename, connection and removal. Saving does not switch libraries.
+  General: Make active, rename, connection, re-scan and removal. Saving does not switch libraries.
   Analysis: Sonic checkbox and AudioMuse connection, where supported.
   Cache: measured metadata and artwork size; refresh metadata or clear either cache
   for the selected library. Other libraries' artwork stays in place.
-  Refresh again cancels the job. Clear asks first. Music and sign-ins are kept.
+  F5 again cancels a running scan. Status appears below the library list. Clear asks first.
   Add library / A: choose Local, WebDAV, or Subsonic / Navidrome.
-  Local folder: path and name in one form. Servers: URL, username, password and name.
+  Server setup includes optional AudioMuse fields; blank AudioMuse URL skips it.
+  Saving a new library starts its metadata scan without switching playback.
   Enter checks/saves; Esc cancels. Blank password keeps the existing sign-in.
   Removing a server account removes its libraries/sign-ins from Textamp, not music.
   Settings categories: Libraries, Appearance, Artwork, Audio, Sidebar, Search, About.

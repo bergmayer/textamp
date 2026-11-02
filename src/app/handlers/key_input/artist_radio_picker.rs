@@ -12,7 +12,7 @@ pub(super) fn handle_artist_radio_picker_keys(
     key: event::KeyEvent,
     state: &mut AppState,
 ) -> Vec<Action> {
-    let picker = match state.popups.artist_radio_picker.as_mut() {
+    let picker = match state.popups.artist_radio_picker_mut() {
         Some(p) => p,
         None => return vec![],
     };

@@ -1,0 +1,98 @@
+/*
+ * C wrapper for bplist (binary plist) reader/writer
+ *
+ * Copyright (C) 2024-2026 Music Assistant Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef __AP2_BPLIST_H_
+#define __AP2_BPLIST_H_
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#include <stdint.h>
+#include <stddef.h>
+
+struct ap2_bplist;
+
+/* Create empty bplist for writing */
+struct ap2_bplist *ap2_bplist_create(void);
+
+/* Parse a binary plist from raw bytes */
+struct ap2_bplist *ap2_bplist_parse(const uint8_t *data, size_t len);
+
+/* Free a bplist */
+void ap2_bplist_free(struct ap2_bplist *bp);
+
+/* Add a string key-value pair */
+void ap2_bplist_add_string(struct ap2_bplist *bp, const char *key, const char *value);
+
+/* Add an integer key-value pair */
+void ap2_bplist_add_int(struct ap2_bplist *bp, const char *key, uint64_t value);
+
+/* Add a data (byte array) key-value pair */
+void ap2_bplist_add_data(struct ap2_bplist *bp, const char *key,
+                          const uint8_t *data, size_t len);
+
+/* Serialize to binary plist bytes. Caller must free *out. Returns length. */
+int ap2_bplist_serialize(struct ap2_bplist *bp, uint8_t **out);
+
+/* Get a string value by key. Returns NULL if not found. Do not free. */
+const char *ap2_bplist_get_string(struct ap2_bplist *bp, const char *key);
+
+/* Get an integer value by key. Returns 0 if not found. */
+uint64_t ap2_bplist_get_int(struct ap2_bplist *bp, const char *key);
+
+/* Get a data value by key. Returns NULL if not found. Sets *len. Do not free. */
+const uint8_t *ap2_bplist_get_data(struct ap2_bplist *bp, const char *key, size_t *len);
+
+/*
+ * Find an integer value by key anywhere in a raw binary plist (including
+ * nested dictionaries, e.g. streams[0].dataPort) using full offset-table
+ * traversal.
+ *
+ * :param data: raw binary plist bytes.
+ * :param len: length of data.
+ * :param key: ASCII dictionary key to look up.
+ * :param out: receives the value on success.
+ * :returns: 1 when the key was found with an integer value, else 0.
+ */
+int ap2_bplist_find_uint(const uint8_t *data, size_t len, const char *key, uint64_t *out);
+
+/*
+ * Find an integer child inside a named dictionary, e.g.
+ * supportedFormats.bufferStream.
+ */
+int ap2_bplist_find_dict_uint(const uint8_t *data, size_t len,
+                              const char *dict_key, const char *key,
+                              uint64_t *out);
+
+/*
+ * Read an array of integer bit indices inside a named dictionary into a
+ * 64-bit mask, e.g. supportedAudioFormatsExtended.bufferStream.
+ * Indices above 63 are ignored.
+ */
+int ap2_bplist_find_dict_uint_array_mask(const uint8_t *data, size_t len,
+                                         const char *dict_key, const char *key,
+                                         uint64_t *out);
+
+/*
+ * Count the entries of an array value found by key anywhere in a raw binary
+ * plist, e.g. the /feedback body's "streams". An empty array reports 0 and
+ * still returns 1, so "the receiver listed no streams" stays distinguishable
+ * from "the receiver never reported the key".
+ */
+int ap2_bplist_find_array_count(const uint8_t *data, size_t len,
+                                const char *key, size_t *out);
+
+/* Find a string value by key in the root dictionary only. */
+int ap2_bplist_get_root_string(const uint8_t *data, size_t len, const char *key,
+                               char *out, size_t out_size);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* __AP2_BPLIST_H_ */

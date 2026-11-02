@@ -34,6 +34,7 @@ pub struct HitRegions {
     /// Library picker (F3 popup).
     pub library_picker: Option<PopupListRegions>,
     pub library_manager_rows: Option<SettingsContentRegion>,
+    pub library_manager_actions: Vec<(Rect, crate::app::Action)>,
 
     /// Search/filter popup (Ctrl+F overlay).
     pub search_popup: Option<SearchPopupRegions>,
@@ -57,8 +58,6 @@ pub struct HitRegions {
     /// Transport bar (playback controls, seek bar).
     pub transport: Option<TransportRegions>,
 
-    /// Command/shortcut bar (bottom rows).
-    pub command_bar: Option<CommandBarRegions>,
     /// Pointer-only footer controls; never part of keyboard focus traversal.
     pub footer_shortcuts: Vec<(Rect, crossterm::event::KeyCode)>,
 
@@ -275,15 +274,6 @@ pub struct TransportRegions {
     pub volume_slider: Option<Rect>,
 }
 
-/// Command/shortcut bar regions.
-#[derive(Debug, Clone)]
-pub struct CommandBarRegions {
-    /// Top row items: (rect, action_key).
-    pub top_row: Vec<(Rect, String)>,
-    /// Bottom row items: (rect, action_key).
-    pub bottom_row: Vec<(Rect, String)>,
-}
-
 /// Browse alphabet jump strip — one rect per visible letter, in
 /// `ALPHABET_STRIP_LETTERS` order (or reversed for descending sort).
 #[derive(Debug, Clone)]
@@ -328,6 +318,8 @@ pub struct CategoryColumnRegion {
 /// A single Miller column's registered geometry.
 #[derive(Debug, Clone)]
 pub struct MillerColumnRegion {
+    /// Wrapped album metadata scroll limit, absent for item columns.
+    pub details_max_scroll: Option<usize>,
     /// Which column index in the navigation this represents.
     pub col_idx: usize,
     /// Outer area (including border).
@@ -340,9 +332,7 @@ pub struct MillerColumnRegion {
     pub is_art_mode: bool,
     /// Cell-row height the art-grid renderer used for art-height items
     /// in this column. Only meaningful when `is_art_mode` is true. The
-    /// mouse hit-test reads this so it can never drift from the renderer
-    /// (a previous mismatched formula was making clicks land on the
-    /// album below the one the user clicked on).
+    /// mouse hit-test uses the same dimensions.
     pub art_row_height: u16,
     /// Hit rect for the small "x" close glyph in the top-right
     /// corner. `None` for the root column (which isn't closeable).
@@ -452,4 +442,52 @@ impl super::AppState {
         self.marquee = feedback.marquee;
         self.marquee_subtitle = feedback.marquee_subtitle;
     }
+}
+
+use crate::app::state::{AppState, BrowseCategory, BrowseItem, BrowseNavigationState};
+
+pub fn is_two_row_browse_column(
+    state: &AppState,
+    col: &crate::app::state::BrowseColumn,
+    col_idx: usize,
+    nav: &BrowseNavigationState,
+) -> bool {
+    let first_is_track = col
+        .items
+        .first()
+        .is_some_and(|item| matches!(item, BrowseItem::Track { .. }));
+    let first_is_album = col
+        .items
+        .first()
+        .is_some_and(|item| matches!(item, BrowseItem::Album { .. }));
+
+    // Special track columns always get two-row display
+    if first_is_track && state.is_special_track_column(nav, col_idx) {
+        return true;
+    }
+
+    // Album columns in "All Artists" mode
+    if first_is_album
+        && (nav
+            .columns
+            .first()
+            .and_then(|c| c.selected_item())
+            .is_some_and(|item| matches!(item, BrowseItem::AllArtists))
+            || (state.browse_category == BrowseCategory::Library
+                && state.library.library_sub_mode != crate::app::state::LibrarySubMode::Normal
+                && col_idx == 0))
+    {
+        return true;
+    }
+
+    // Genre/mood album columns
+    if first_is_album && state.browse_category.is_tag_section() {
+        return true;
+    }
+
+    if first_is_album && col.grouped_by_album {
+        return true;
+    }
+
+    false
 }

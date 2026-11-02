@@ -16,12 +16,11 @@ pub fn play(state: &mut AppState, audio: &mut AudioPlayer, tx: &mpsc::Sender<Eve
             source_id == &session.source.id,
             "Track belongs to a different account"
         );
-        state.sources.preparing = None;
-        state.sources.prepared = None;
+        state.sources.media = crate::app::sources::MediaPreparation::Idle;
         state.playback.preparation_id = state.playback.preparation_id.wrapping_add(1);
         state.playback.position_ms = 0;
         state.playback.duration_ms = track.duration_ms();
-        state.playback.scrobble_reported = false;
+        state.playback.scrobble = crate::app::state::ScrobbleState::Pending;
         state.playback.status = PlayStatus::Buffering;
         state.waveform = crate::app::state::WaveformState {
             track_key: Some(track.rating_key.clone()),
@@ -101,17 +100,19 @@ pub fn artwork(state: &mut AppState, tx: &mpsc::Sender<Event>, session: &Session
         .and_then(|t| t.best_thumb())
         .map(str::to_owned);
     let Some(thumb_path) = thumb else {
+        state.artwork.fetch = crate::app::state::ArtworkFetch::Idle;
         state.artwork.current_thumb = None;
         state.artwork.current_data = None;
         return;
     };
     if state.artwork.current_thumb.as_ref() == Some(&thumb_path)
-        || state.artwork.pending_thumb.as_ref() == Some(&thumb_path)
+        || state.artwork.fetch.pending_thumb() == Some(thumb_path.as_str())
     {
         return;
     }
-    state.artwork.loading = true;
-    state.artwork.pending_thumb = Some(thumb_path.clone());
+    state.artwork.fetch = crate::app::state::ArtworkFetch::Loading {
+        thumb: thumb_path.clone(),
+    };
     state.artwork.current_data = None;
     let generation = state.artwork.grid_generation;
     let library_key = state.active_library.clone().unwrap_or_else(|| {
@@ -165,7 +166,10 @@ pub fn art_batch(
     session: &Session,
     batch: Vec<(String, String)>,
 ) {
-    if state.artwork.suppress_loads {
+    if matches!(
+        state.artwork.navigation,
+        crate::app::state::ArtworkNavigation::Moving { .. }
+    ) {
         return;
     }
     // One viewport batch at a time; abandoned batches must not leave pending marks.

@@ -194,7 +194,7 @@ fn question_mark_is_not_a_shortcut_and_ctrl_f_still_opens_search() {
             );
             assert!(actions.is_empty(), "? in {view:?}: {actions:?}");
             assert_eq!(state.view, view);
-            assert!(!state.popups.search_active);
+            assert!(!state.popups.search_active());
             let actions = key_input::handle_key(
                 KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL),
                 &mut state,

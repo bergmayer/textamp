@@ -428,7 +428,8 @@ fn render_about(frame: &mut Frame, state: &AppState, area: Rect) {
         Line::from("Music in your terminal."),
         Line::from("Subsonic · Navidrome · Local folders · WebDAV"),
         Line::from(""),
-        Line::from("John Bergmayer · Unlicense"),
+        Line::from("John Bergmayer · Textamp source: Unlicense"),
+        Line::from("Built-in AirPlay: GPL-3.0 · textamp --licenses"),
         Line::from("github.com/bergmayer/textamp"),
         Line::from(""),
         Line::from(format!(

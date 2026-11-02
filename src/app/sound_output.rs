@@ -4,7 +4,7 @@ use crate::app::AppState;
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 
 fn cancel(state: &mut AppState) {
-    state.popups.sound_output_active = false;
+    state.popups.set_sound_output_active(false);
     state.sound_output.request_id = state.sound_output.request_id.wrapping_add(1);
     state.sound_output.loading = false;
 }

@@ -9,7 +9,7 @@ use crate::app::AppState;
 
 /// Handle keys when sort popup is active.
 pub(super) fn handle_sort_popup_keys(key: KeyEvent, state: &mut AppState) -> Vec<Action> {
-    let popup = match &mut state.popups.sort {
+    let popup = match state.popups.sort_mut() {
         Some(p) => p,
         None => return vec![],
     };
@@ -37,7 +37,7 @@ pub(super) fn handle_sort_popup_keys(key: KeyEvent, state: &mut AppState) -> Vec
 /// Apply the currently selected sort popup option.
 /// Used by both keyboard (Enter/Space) and mouse click handlers.
 pub fn apply_selected_option(state: &mut AppState) -> Vec<Action> {
-    let (option, col_idx) = match &state.popups.sort {
+    let (option, col_idx) = match state.popups.sort() {
         Some(p) => (p.options[p.selected_index], p.column_idx),
         None => return vec![],
     };
@@ -89,7 +89,7 @@ pub fn apply_sort_mode(state: &mut AppState, col_idx: usize, mode: ColumnSortMod
     }
 
     // Rebuild popup options with the actual active mode
-    if let Some(popup) = &mut state.popups.sort {
+    if let Some(popup) = state.popups.sort_mut() {
         popup.rebuild_options(mode);
     }
 
@@ -186,7 +186,7 @@ pub fn toggle_group_by_album(state: &mut AppState, col_idx: usize) -> Vec<Action
     }
 
     // Rebuild popup options: column is now album-type or all-tracks-type
-    if let Some(popup) = &mut state.popups.sort {
+    if let Some(popup) = state.popups.sort_mut() {
         popup.column_type = if now_grouped {
             SortColumnType::Album
         } else {

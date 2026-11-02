@@ -255,7 +255,7 @@ pub fn dispatch(command: Command, state: &mut AppState, tx: &mpsc::Sender<Event>
                 .find(|p| p.rating_key == id)
                 .map(|p| p.title.as_str())
                 .unwrap_or("playlist");
-            state.popups.confirm_dialog = Some(ConfirmDialog {
+            state.popups.set_confirm_dialog(Some(ConfirmDialog {
                 title: if delete {
                     "Delete server playlist?"
                 } else {
@@ -276,7 +276,7 @@ pub fn dispatch(command: Command, state: &mut AppState, tx: &mpsc::Sender<Event>
                 } else {
                     ConfirmAction::NavidromeReplacePlaylist(id)
                 },
-            });
+            }));
         }
         Command::RenamePlaylist(id) => {
             let name = state
@@ -286,11 +286,11 @@ pub fn dispatch(command: Command, state: &mut AppState, tx: &mpsc::Sender<Event>
                 .find(|p| p.rating_key == id)
                 .map(|p| p.title.clone())
                 .unwrap_or_default();
-            state.popups.input_dialog = Some(InputDialog {
+            state.popups.set_input_dialog(Some(InputDialog {
                 title: "Playlist name".into(),
                 input: name.into(),
                 action_type: InputDialogAction::NavidromePlaylistName { id },
-            });
+            }));
         }
         Command::Lyrics => {
             let Some(track) = state.palette_target_track() else {
@@ -299,12 +299,12 @@ pub fn dispatch(command: Command, state: &mut AppState, tx: &mpsc::Sender<Event>
             state.sources.nav_request_id = state.sources.nav_request_id.wrapping_add(1);
             let request_id = state.sources.nav_request_id;
             state.popups.close_all();
-            state.popups.text = Some(crate::app::state::TextPopup {
+            state.popups.set_text(Some(crate::app::state::TextPopup {
                 title: format!("Lyrics · {}", track.title),
                 text: "Loading…".into(),
                 scroll: 0,
                 request_id,
-            });
+            }));
             effects::spawn(state, tx, "lyrics", async move {
                 let result = lyrics(&session, &track)
                     .await

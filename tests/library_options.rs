@@ -40,7 +40,7 @@ fn press(state: &mut AppState, key: KeyCode) -> Vec<Action> {
     )
 }
 fn select(state: &mut AppState, action: OptionAction) {
-    if let Some(Dialog::Library(options)) = &mut state.popups.library_dialog {
+    if let Some(Dialog::Library(options)) = state.popups.library_dialog_mut() {
         options.set_page(match action {
             OptionAction::Clear | OptionAction::Rescan => OptionsPage::Cache,
             OptionAction::Sonic | OptionAction::AudioMuse => OptionsPage::Analysis,
@@ -48,7 +48,7 @@ fn select(state: &mut AppState, action: OptionAction) {
             _ => OptionsPage::General,
         });
     }
-    let Some(Dialog::Library(options)) = &state.popups.library_dialog else {
+    let Some(Dialog::Library(options)) = state.popups.library_dialog() else {
         panic!("No library options")
     };
     let index = options
@@ -56,7 +56,7 @@ fn select(state: &mut AppState, action: OptionAction) {
         .iter()
         .position(|(a, _)| *a == action)
         .unwrap();
-    if let Some(Dialog::Library(options)) = &mut state.popups.library_dialog {
+    if let Some(Dialog::Library(options)) = state.popups.library_dialog_mut() {
         options.selected = index;
     }
 }
@@ -100,7 +100,7 @@ fn enter_manages_and_only_make_active_switches_mouse_and_keyboard_agree() {
     press(&mut state, KeyCode::Right);
     let text = draw(&mut state, 110, 35);
     assert!(text.contains("Clear library cache"));
-    assert!(text.contains("Refresh catalog now"));
+    assert!(text.contains("Re-scan library now"));
     press(&mut state, KeyCode::Left);
     draw(&mut state, 110, 35);
     assert_eq!(
@@ -140,28 +140,28 @@ fn clear_confirmation_captures_input_and_returns_to_library_options() {
     );
     select(&mut state, OptionAction::Clear);
     press(&mut state, KeyCode::Enter);
-    assert!(state.popups.confirm_dialog.is_some());
+    assert!(state.popups.confirm_dialog().is_some());
     assert!(matches!(
-        state.popups.library_dialog,
+        state.popups.library_dialog(),
         Some(Dialog::Library(_))
     ));
     press(&mut state, KeyCode::Esc);
-    assert!(state.popups.confirm_dialog.is_none());
+    assert!(state.popups.confirm_dialog().is_none());
     assert!(matches!(
-        state.popups.library_dialog,
+        state.popups.library_dialog(),
         Some(Dialog::Library(_))
     ));
     for (width, height) in [(30, 10), (60, 16), (110, 35)] {
         select(&mut state, OptionAction::Close);
         draw(&mut state, width, height);
-        let Some(Dialog::Library(options)) = &state.popups.library_dialog else {
+        let Some(Dialog::Library(options)) = state.popups.library_dialog() else {
             unreachable!()
         };
         let rect = state.hit_regions.library_dialog[options.selected];
         assert!(rect.height > 0 && rect.bottom() <= height);
     }
     press(&mut state, KeyCode::Esc);
-    assert!(state.popups.library_dialog.is_none());
+    assert!(state.popups.library_dialog().is_none());
 }
 
 async fn receive(
@@ -337,7 +337,7 @@ async fn webdav_scan_uses_only_propfind_and_branch_cache_survives_offline() {
     state.settings_state.cache_scans.clear();
     cache::start(choice.clone(), false, &mut state, &tx);
     settle(&choice, &mut state, &mut audio, &tx, &mut rx).await;
-    assert_eq!(cache::status(&choice, &state), "Cache up to date");
+    assert_eq!(cache::status(&choice, &state), "Library up to date");
 }
 
 #[tokio::test]

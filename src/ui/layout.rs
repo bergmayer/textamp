@@ -25,10 +25,7 @@ pub fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 
 /// Main application layout.
 ///
-/// The old two-row keybind footer is gone — every command it advertised
-/// now lives in the `:` command palette (see `ui::command_palette`).
-/// Reclaiming those rows means the library / queue panels each get
-/// three more rows of usable height. Layout:
+/// Commands are available through the `:` palette. Layout:
 /// ```text
 /// ┌─────────────────────────────────────────────────┐
 /// │  Category list  │  Track list                   │  ← main content

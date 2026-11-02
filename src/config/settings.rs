@@ -185,11 +185,11 @@ pub struct UiConfig {
     #[serde(default = "default_theme")]
     pub theme: String,
 
-    /// Legacy default for libraries without their own visibility choice.
+    /// Default for libraries without their own visibility choice.
     #[serde(default = "default_cover_art_view")]
     pub cover_art_view: bool,
 
-    /// Legacy default for libraries without their own rendering choice.
+    /// Default for libraries without their own rendering choice.
     #[serde(default = "default_artwork_mode")]
     pub artwork_mode: String,
 

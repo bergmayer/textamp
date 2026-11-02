@@ -42,7 +42,8 @@ pub(super) fn requires_provider(action: &Action) -> bool {
             | MillerAction::LoadMorePlaylistTracks { .. }
             | MillerAction::RefreshAlbumTracks { .. }
             | MillerAction::LoadAllLibraryTracksForMiller { .. } => true,
-            MillerAction::ArtistAlbumsForMillerLoaded { .. }
+            MillerAction::OpenAlbumDetails
+            | MillerAction::ArtistAlbumsForMillerLoaded { .. }
             | MillerAction::AlbumTracksForMillerLoaded { .. }
             | MillerAction::ArtistAllTracksForMillerLoaded { .. }
             | MillerAction::GenreAlbumsForMillerLoaded { .. }

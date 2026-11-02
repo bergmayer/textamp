@@ -164,10 +164,10 @@ pub fn available_alt_commands(state: &AppState) -> Vec<AltCommand> {
     // Alt global commands
     let filter_enabled = state.view == View::Browse
         && !state.list_filter.active
-        && !state.popups.search_active
-        && state.popups.sort.is_none()
-        && state.popups.adventure_launcher.is_none()
-        && state.popups.artist_radio_picker.is_none();
+        && !state.popups.search_active()
+        && state.popups.sort().is_none()
+        && state.popups.adventure_launcher().is_none()
+        && state.popups.artist_radio_picker().is_none();
     cmds.push(AltCommand {
         modifier: CommandModifier::Alt,
         key: 'f',
@@ -237,7 +237,7 @@ fn has_track_context(state: &AppState) -> bool {
                     }
                 }
             }
-            // Legacy right panel tracks
+            // Right-panel tracks
             matches!(
                 state.library.right_panel_mode,
                 RightPanelMode::AlbumTracks | RightPanelMode::CategoryTracks
@@ -276,7 +276,7 @@ fn has_album_context(state: &AppState) -> bool {
             {
                 return true;
             }
-            // Fall back to legacy right panel mode
+            // Use the right-panel selection.
             match state.library.right_panel_mode {
                 RightPanelMode::ArtistAlbums => {
                     // Index 0 is "All Tracks", 1+ are albums
@@ -356,7 +356,7 @@ fn has_track_with_album(state: &AppState) -> bool {
                     }
                 }
             }
-            // Legacy right panel tracks
+            // Right-panel tracks
             match state.library.right_panel_mode {
                 RightPanelMode::AlbumTracks | RightPanelMode::CategoryTracks => state
                     .library

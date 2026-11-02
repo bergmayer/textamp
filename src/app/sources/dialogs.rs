@@ -198,18 +198,23 @@ pub struct WebdavDraft {
 #[derive(Debug, Clone)]
 pub struct ServerForm {
     pub source: crate::navidrome::Source,
-    pub fields: [Field; 4],
+    pub fields: Box<[Field; 8]>,
+    pub analysis_key: Option<String>,
     pub focus: usize,
     pub error: Option<String>,
     pub busy: bool,
     pub editing: bool,
 }
 impl ServerForm {
-    pub const LABELS: [&'static str; 4] = [
+    pub const LABELS: [&'static str; 8] = [
         "Server URL",
         "Username",
         "Password",
         "Account name (optional)",
+        "AudioMuse URL (optional)",
+        "AudioMuse username",
+        "AudioMuse password",
+        "Music-server name in AudioMuse",
     ];
     pub fn new(source: Option<&crate::navidrome::Source>) -> Self {
         let editing = source.is_some();
@@ -225,19 +230,59 @@ impl ServerForm {
             Field::new(source.username.as_str()),
             Field::default(),
             Field::new(source.name.as_str()),
+            Field::default(),
+            Field::default(),
+            Field::default(),
+            Field::new("Navidrome"),
         ];
         Self {
             source,
-            fields,
+            fields: Box::new(fields),
+            analysis_key: None,
             focus: 0,
             error: None,
             busy: false,
             editing,
         }
     }
+    pub fn with_analysis(mut self, choice: &LibraryChoice, state: &AppState) -> Self {
+        self.analysis_key = super::sonic::choice_key(choice, state);
+        if let Some(saved) = self
+            .analysis_key
+            .as_ref()
+            .and_then(|key| state.sources.audiomuse.connections.get(key))
+        {
+            self.fields[4] = Field::new(saved.url.as_str());
+            self.fields[5] = Field::new(saved.username.as_str());
+            self.fields[7] = Field::new(saved.server.as_str());
+        }
+        self
+    }
+    fn analysis_draft(&self) -> anyhow::Result<Option<AnalysisSetup>> {
+        if self.fields[4].value.trim().is_empty() {
+            return Ok(None);
+        }
+        let connection = crate::audiomuse::Connection {
+            url: crate::util::server_url::normalize(&self.fields[4].value)?
+                .as_str()
+                .trim_end_matches('/')
+                .to_owned(),
+            username: self.fields[5].value.trim().to_owned(),
+            server: self.fields[7].value.trim().to_owned(),
+        };
+        connection.validate()?;
+        Ok(Some(AnalysisSetup {
+            connection,
+            password: self.fields[6].value.clone(),
+            library_key: self.analysis_key.clone(),
+        }))
+    }
     fn submit(&self) -> anyhow::Result<Action> {
         let mut source = self.source.clone();
-        source.url = self.fields[0].value.trim().trim_end_matches('/').to_owned();
+        source.url = crate::util::server_url::normalize(&self.fields[0].value)?
+            .as_str()
+            .trim_end_matches('/')
+            .to_owned();
         source.username = self.fields[1].value.trim().to_owned();
         source.name = self.fields[3].value.trim().to_owned();
         if source.name.is_empty() {
@@ -247,24 +292,32 @@ impl ServerForm {
         Ok(navidrome::NavAction::Password {
             source,
             password: self.fields[2].value.clone(),
+            analysis: self.analysis_draft()?,
         }
         .into())
     }
 }
+#[derive(Debug, Clone)]
+pub struct AnalysisSetup {
+    pub connection: crate::audiomuse::Connection,
+    pub password: SecretString,
+    pub library_key: Option<String>,
+}
+
 fn close(state: &mut AppState) {
-    if matches!(&state.popups.library_dialog, Some(Dialog::Navidrome(form)) if form.busy) {
+    if matches!(state.popups.library_dialog(), Some(Dialog::Navidrome(form)) if form.busy) {
         state.sources.nav_connection_task = None;
         state.advance_connection_generation();
     }
-    state.popups.library_dialog = None;
+    state.popups.set_library_dialog(None);
     restore_parent(state);
 }
 
 /// Reopen the owning library setup after a child form closes or saves.
 pub fn restore_parent(state: &mut AppState) {
-    if state.popups.library_dialog.is_some()
-        || state.popups.input_dialog.is_some()
-        || state.popups.confirm_dialog.is_some()
+    if state.popups.library_dialog().is_some()
+        || state.popups.input_dialog().is_some()
+        || state.popups.confirm_dialog().is_some()
     {
         return;
     }
@@ -297,7 +350,9 @@ pub fn restore_parent(state: &mut AppState) {
         } else {
             return;
         }
-        state.popups.library_dialog = Some(Dialog::Library(parent));
+        state
+            .popups
+            .set_library_dialog(Some(Dialog::Library(parent)));
     }
 }
 
@@ -318,12 +373,12 @@ fn key_inner(key: KeyEvent, state: &mut AppState) -> Vec<Action> {
     {
         return vec![super::super::action::SystemAction::Quit.into()];
     }
-    let option_count = match &state.popups.library_dialog {
+    let option_count = match state.popups.library_dialog() {
         Some(Dialog::Library(options)) => options.items(state).len(),
         _ => 0,
     };
     if matches!(key.code, KeyCode::Left | KeyCode::Right) {
-        if let Some(Dialog::Library(options)) = &state.popups.library_dialog {
+        if let Some(Dialog::Library(options)) = state.popups.library_dialog() {
             let pages = options.pages(state);
             let index = pages.iter().position(|p| *p == options.page).unwrap_or(0);
             let page = pages[(index
@@ -333,13 +388,13 @@ fn key_inner(key: KeyEvent, state: &mut AppState) -> Vec<Action> {
                     pages.len() - 1
                 })
                 % pages.len()];
-            if let Some(Dialog::Library(options)) = &mut state.popups.library_dialog {
+            if let Some(Dialog::Library(options)) = state.popups.library_dialog_mut() {
                 options.set_page(page);
             }
             return vec![];
         }
     }
-    let Some(dialog) = &mut state.popups.library_dialog else {
+    let Some(dialog) = state.popups.library_dialog_mut() else {
         return vec![];
     };
     match dialog {
@@ -377,11 +432,11 @@ fn key_inner(key: KeyEvent, state: &mut AppState) -> Vec<Action> {
                 return vec![];
             }
             match key.code {
-                KeyCode::Tab | KeyCode::Down => form.focus = (form.focus + 1) % 6,
-                KeyCode::BackTab | KeyCode::Up => form.focus = (form.focus + 5) % 6,
-                KeyCode::Left | KeyCode::Right if form.focus >= 4 => form.focus = 9 - form.focus,
+                KeyCode::Tab | KeyCode::Down => form.focus = (form.focus + 1) % 10,
+                KeyCode::BackTab | KeyCode::Up => form.focus = (form.focus + 9) % 10,
+                KeyCode::Left | KeyCode::Right if form.focus >= 8 => form.focus = 17 - form.focus,
                 KeyCode::Enter => return activate(state),
-                _ if form.focus < 4 => form.fields[form.focus].edit(key),
+                _ if form.focus < 8 => form.fields[form.focus].edit(key),
                 _ => {}
             }
         }
@@ -412,7 +467,7 @@ fn key_inner(key: KeyEvent, state: &mut AppState) -> Vec<Action> {
         Dialog::Webdav(form) => {
             if form.task.is_some() {
                 if key.code == KeyCode::Enter {
-                    state.popups.library_dialog = None;
+                    state.popups.set_library_dialog(None);
                 }
                 return vec![];
             }
@@ -444,7 +499,7 @@ fn mouse_inner(event: MouseEvent, state: &mut AppState) -> Vec<Action> {
         .iter()
         .find(|(rect, _)| rect.contains((event.column, event.row).into()))
     {
-        if let Some(Dialog::Library(options)) = &mut state.popups.library_dialog {
+        if let Some(Dialog::Library(options)) = state.popups.library_dialog_mut() {
             options.set_page(*page);
         }
         return vec![];
@@ -457,7 +512,7 @@ fn mouse_inner(event: MouseEvent, state: &mut AppState) -> Vec<Action> {
     else {
         return vec![];
     };
-    match &mut state.popups.library_dialog {
+    match state.popups.library_dialog_mut() {
         Some(Dialog::Local(form)) => {
             form.focus = index;
             if index < 2 {
@@ -473,7 +528,7 @@ fn mouse_inner(event: MouseEvent, state: &mut AppState) -> Vec<Action> {
             super::options::activate(state)
         }
         Some(Dialog::Navidrome(form)) => {
-            if index == 5 {
+            if index == 9 {
                 close(state);
                 return vec![];
             }
@@ -481,7 +536,7 @@ fn mouse_inner(event: MouseEvent, state: &mut AppState) -> Vec<Action> {
                 return vec![];
             }
             form.focus = index;
-            if index < 4 {
+            if index < 8 {
                 form.fields[index].cursor = form.fields[index].value.len();
                 vec![]
             } else {
@@ -495,7 +550,7 @@ fn mouse_inner(event: MouseEvent, state: &mut AppState) -> Vec<Action> {
         Some(Dialog::AudioMuse(form)) => {
             if form.task.is_some() {
                 if index == 6 {
-                    state.popups.library_dialog = None;
+                    state.popups.set_library_dialog(None);
                 }
                 return vec![];
             }
@@ -510,7 +565,7 @@ fn mouse_inner(event: MouseEvent, state: &mut AppState) -> Vec<Action> {
         Some(Dialog::Webdav(form)) => {
             if form.task.is_some() {
                 if index == 5 {
-                    state.popups.library_dialog = None;
+                    state.popups.set_library_dialog(None);
                 }
                 return vec![];
             }
@@ -527,7 +582,7 @@ fn mouse_inner(event: MouseEvent, state: &mut AppState) -> Vec<Action> {
 }
 
 fn activate(state: &mut AppState) -> Vec<Action> {
-    match state.popups.library_dialog.as_mut() {
+    match state.popups.library_dialog_mut() {
         Some(Dialog::Local(form)) => {
             if form.focus == 3 {
                 close(state);
@@ -540,7 +595,7 @@ fn activate(state: &mut AppState) -> Vec<Action> {
             .into()]
         }
         Some(Dialog::Navidrome(form)) => {
-            if form.focus == 5 {
+            if form.focus == 9 {
                 close(state);
                 return vec![];
             }
@@ -560,19 +615,19 @@ fn activate(state: &mut AppState) -> Vec<Action> {
             ]
             .get(*selected)
             .cloned();
-            state.popups.library_dialog = None;
+            state.popups.set_library_dialog(None);
             entry.map(|e| vec![e.action()]).unwrap_or_default()
         }
         Some(Dialog::AudioMuse(form)) => match form.focus {
             6 => {
-                state.popups.library_dialog = None;
+                state.popups.set_library_dialog(None);
                 vec![]
             }
             5 => vec![super::audiomuse::Command::Disconnect.into()],
             _ => vec![super::audiomuse::Command::Submit.into()],
         },
         Some(Dialog::Webdav(form)) if form.focus == 5 => {
-            state.popups.library_dialog = None;
+            state.popups.set_library_dialog(None);
             vec![]
         }
         Some(Dialog::Webdav(form)) if form.task.is_none() => match form.draft() {
@@ -596,7 +651,7 @@ pub async fn dispatch(
 ) -> anyhow::Result<Vec<Action>> {
     match action {
         SourceAction::CheckWebdav(mut draft) => {
-            let Some(Dialog::Webdav(form)) = &mut state.popups.library_dialog else {
+            let Some(Dialog::Webdav(form)) = state.popups.library_dialog_mut() else {
                 return Ok(vec![]);
             };
             if form.instance != draft.instance || form.task.is_some() {
@@ -653,7 +708,7 @@ pub async fn dispatch(
             form.task = Some(TaskLease::new(&task));
         }
         SourceAction::WebdavChecked { instance, result } => {
-            let Some(Dialog::Webdav(form)) = &mut state.popups.library_dialog else {
+            let Some(Dialog::Webdav(form)) = state.popups.library_dialog_mut() else {
                 return Ok(vec![]);
             };
             if form.instance != instance {
@@ -704,14 +759,20 @@ pub async fn dispatch(
             config.folder_sources.retain(|s| s.id != draft.source.id);
             config.folder_sources.push(draft.source.clone());
             state.sources.folders = config.folder_sources.clone();
-            state.popups.library_dialog = None;
+            state.popups.set_library_dialog(None);
             manager::reset_selection(state);
             state.popups.library_picker_index = choices(state)
                 .iter()
                 .position(|c| matches!(c, LibraryChoice::Folder(s) if s.id == draft.source.id))
                 .unwrap_or(0);
             dispatch_settings::save_config_in_background(tx, config, "save WebDAV library");
-            state.set_status("WebDAV library saved".into());
+            super::cache::start(
+                LibraryChoice::Folder(draft.source.clone()),
+                false,
+                state,
+                tx,
+            );
+            state.set_status("WebDAV library saved. Scanning folders in the background.".into());
             if reload && manager::settings_active(state) {
                 state
                     .sources

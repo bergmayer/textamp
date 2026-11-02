@@ -174,7 +174,7 @@ fn wheel_over_queue_works_with_either_half_focused_without_stealing_focus() {
 #[test]
 fn search_owns_punctuation_and_function_keys_instead_of_global_commands() {
     let mut state = queue_state(View::Browse, true);
-    state.popups.search_active = true;
+    state.popups.set_search_active(true);
     for c in [':', '/', '|', '\\', ',', '?', '<', '>'] {
         let actions = key(&mut state, KeyCode::Char(c));
         assert!(
@@ -193,11 +193,11 @@ fn search_owns_punctuation_and_function_keys_instead_of_global_commands() {
 #[test]
 fn text_dialog_blocks_clicks_drags_wheels_and_right_clicks_on_underlying_player() {
     let mut state = queue_state(View::Queue, true);
-    state.popups.input_dialog = Some(InputDialog {
+    state.popups.set_input_dialog(Some(InputDialog {
         title: "Rename".into(),
         input: "name".into(),
         action_type: InputDialogAction::FolderName("folder".into()),
-    });
+    }));
     render(&mut state);
     let rect = state
         .hit_regions
@@ -310,13 +310,65 @@ fn right_click_uses_two_row_queue_geometry_and_preserves_viewport() {
 }
 
 #[test]
+fn browse_album_row_boundaries_match_mouse_targets() {
+    use textamp::app::state::{BrowseColumn, BrowseItem};
+    for tall in [false, true] {
+        for grouped in [false, true] {
+            for category in [BrowseCategory::Library, BrowseCategory::AlbumGenres] {
+                for row in 0..4 {
+                    let mut state = AppState::new();
+                    state.view = View::Browse;
+                    state.tall_mode = tall;
+                    state.browse_category = category;
+                    let mut column = BrowseColumn::new(
+                        "Albums",
+                        (0..8)
+                            .map(|i| BrowseItem::Album {
+                                key: i.to_string(),
+                                title: format!("Album {i}"),
+                                artist: "Artist".into(),
+                                year: None,
+                                thumb: None,
+                                is_placeholder: false,
+                            })
+                            .collect(),
+                    );
+                    column.grouped_by_album = grouped;
+                    state.browse_nav_mut().unwrap().columns = vec![column];
+                    render(&mut state);
+                    let region =
+                        state.hit_regions.miller_columns.as_ref().unwrap().columns[0].clone();
+                    let height = if grouped || category == BrowseCategory::AlbumGenres {
+                        2
+                    } else {
+                        1
+                    };
+                    assert_eq!(region.rows_per_item, height);
+                    mouse(
+                        &mut state,
+                        MouseEventKind::Down(MouseButton::Left),
+                        region.inner.x,
+                        region.inner.y + row,
+                    );
+                    assert_eq!(
+                        state.browse_nav().unwrap().columns[0].selected_index,
+                        (row / height) as usize,
+                        "tall={tall}, grouped={grouped}, category={category:?}, row={row}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn library_switcher_remains_usable_from_authentication_screen() {
     let mut state = AppState::new();
     assert!(matches!(
         key(&mut state, KeyCode::F(3)).as_slice(),
         [Action::Search(SearchAction::OpenLibraryPicker)]
     ));
-    state.popups.library_picker_active = true;
+    state.popups.set_library_picker_active(true);
     state
         .sources
         .folders
@@ -345,22 +397,20 @@ fn quit_is_available_while_any_input_owner_is_active() {
     for owner in 0..6 {
         let mut state = AppState::new();
         match owner {
-            0 => state.popups.search_active = true,
+            0 => state.popups.set_search_active(true),
             1 => textamp::app::command_palette::open(&mut state),
-            2 => {
-                state.popups.library_dialog = Some(textamp::app::sources::dialogs::Dialog::Webdav(
+            2 => state.popups.set_library_dialog(Some(
+                textamp::app::sources::dialogs::Dialog::Webdav(
                     textamp::app::sources::dialogs::WebdavForm::new(None),
-                ))
-            }
-            3 => {
-                state.popups.input_dialog = Some(InputDialog {
-                    title: "Input".into(),
-                    input: "".into(),
-                    action_type: InputDialogAction::SavePlaylist,
-                })
-            }
+                ),
+            )),
+            3 => state.popups.set_input_dialog(Some(InputDialog {
+                title: "Input".into(),
+                input: "".into(),
+                action_type: InputDialogAction::SavePlaylist,
+            })),
             4 => state.notifications.last_error = Some("fixture error".into()),
-            _ => state.popups.library_picker_active = true,
+            _ => state.popups.set_library_picker_active(true),
         }
         let actions = key_input::handle_key(
             KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL),

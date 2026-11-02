@@ -3,11 +3,11 @@ name = "textamp"
 version = "1.0.0"
 edition = "2021"
 description = "A terminal music player for Subsonic, Navidrome, WebDAV and local files"
-license = "Unlicense"
+license = "Unlicense AND GPL-3.0-only"
 authors = ["John Bergmayer"]
 keywords = ["subsonic", "navidrome", "music", "tui", "webdav"]
 categories = ["command-line-utilities", "multimedia::audio"]
-exclude = ["archive/**", "**/.DS_Store"]
+exclude = ["**/.DS_Store"]
 
 [dependencies]
 
@@ -97,8 +97,12 @@ fuzzy-matcher = "0.3"
 name = "textamp"
 path = "src/bin/textamp_tui.rs"
 
+[build-dependencies]
+cc = "1"
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+openssl-sys = { version = "0.9", features = ["vendored"] }
 
 [profile.release]
 lto = true

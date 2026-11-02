@@ -96,9 +96,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     //                        ^3  ^5  1  ^20            1 ^5  1^1 2^1  ^5
     {
         let right_start_x = area.x + left_width as u16 + padding;
-        // The right side is now just the `/ filter` affordance — the
-        // volume widget and its slider hit region are gone, so the
-        // search-icon area covers the entire right_text width.
+        // The `/ filter` affordance occupies the full right-text region.
         let search_x = right_start_x;
         let search_w = right_width;
 

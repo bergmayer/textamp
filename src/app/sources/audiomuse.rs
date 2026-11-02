@@ -115,7 +115,10 @@ impl Form {
     ];
     pub fn draft(&self) -> anyhow::Result<Connection> {
         let connection = Connection {
-            url: self.fields[0].value.trim().trim_end_matches('/').into(),
+            url: crate::util::server_url::normalize(&self.fields[0].value)?
+                .as_str()
+                .trim_end_matches('/')
+                .into(),
             username: self.fields[1].value.trim().into(),
             server: self.fields[3].value.trim().into(),
         };
@@ -259,11 +262,11 @@ pub fn open(feature: Feature, refresh: bool, state: &mut AppState, tx: &mpsc::Se
         return;
     }
     if feature.is_search() {
-        state.popups.input_dialog = Some(InputDialog {
+        state.popups.set_input_dialog(Some(InputDialog {
             title: feature.label().into(),
             input: "".into(),
             action_type: InputDialogAction::AudioMuseSearch(feature),
-        });
+        }));
         return;
     }
     begin(feature, state);
@@ -600,12 +603,12 @@ pub fn track_info(state: &mut AppState, tx: &mpsc::Sender<Event>) {
     };
     state.sources.nav_request_id = state.sources.nav_request_id.wrapping_add(1);
     let request_id = state.sources.nav_request_id;
-    state.popups.text = Some(TextPopup {
+    state.popups.set_text(Some(TextPopup {
         title: format!("AudioMuse · {}", track.title),
         text: "Loading…".into(),
         scroll: 0,
         request_id,
-    });
+    }));
     if let Some(analysis) = state
         .sources
         .audiomuse
@@ -613,7 +616,7 @@ pub fn track_info(state: &mut AppState, tx: &mpsc::Sender<Event>) {
         .as_ref()
         .and_then(|s| s.tracks.get(&id))
     {
-        state.popups.text.as_mut().unwrap().text = analysis.summary();
+        state.popups.text_mut().unwrap().text = analysis.summary();
         return;
     }
     navidrome::effects::spawn(state, tx, "audiomuse-info", async move {
@@ -653,11 +656,11 @@ pub async fn dispatch(
                 };
                 let name: String = column.title.chars().take(120).collect();
                 state.popups.close_all();
-                state.popups.input_dialog = Some(InputDialog {
+                state.popups.set_input_dialog(Some(InputDialog {
                     title: "Save as playlist".into(),
                     input: name.into(),
                     action_type,
-                });
+                }));
             }
         }
         Command::SavePlaylist {
@@ -813,28 +816,30 @@ pub async fn dispatch(
             };
             let library_key = super::sonic::nav_key(&source, &folder);
             let saved = state.sources.audiomuse.connections.get(&library_key);
-            state.popups.library_dialog = Some(dialogs::Dialog::AudioMuse(Form {
-                instance: uuid::Uuid::new_v4().to_string(),
-                library_key,
-                fields: [
-                    dialogs::Field::new(saved.map_or("", |c| c.url.as_str())),
-                    dialogs::Field::new(saved.map_or("", |c| c.username.as_str())),
-                    dialogs::Field::default(),
-                    dialogs::Field::new(saved.map_or("Navidrome", |c| c.server.as_str())),
-                ],
-                focus: 0,
-                error: None,
-                task: None,
-            }));
+            state
+                .popups
+                .set_library_dialog(Some(dialogs::Dialog::AudioMuse(Form {
+                    instance: uuid::Uuid::new_v4().to_string(),
+                    library_key,
+                    fields: [
+                        dialogs::Field::new(saved.map_or("", |c| c.url.as_str())),
+                        dialogs::Field::new(saved.map_or("", |c| c.username.as_str())),
+                        dialogs::Field::default(),
+                        dialogs::Field::new(saved.map_or("Navidrome", |c| c.server.as_str())),
+                    ],
+                    focus: 0,
+                    error: None,
+                    task: None,
+                })));
         }
         Command::Submit => {
-            let Some(dialogs::Dialog::AudioMuse(form)) = &mut state.popups.library_dialog else {
+            let Some(dialogs::Dialog::AudioMuse(form)) = state.popups.library_dialog_mut() else {
                 return Ok(vec![]);
             };
             if form.task.is_some() {
                 return Ok(vec![]);
             }
-            let connection = match form.draft() {
+            let mut connection = match form.draft() {
                 Ok(c) => c,
                 Err(e) => {
                     form.error = Some(e.to_string());
@@ -847,6 +852,8 @@ pub async fn dispatch(
             let tx = tx.clone();
             let task = crate::app::tasks::spawn(async move {
                 let result = async {
+                    connection.url =
+                        crate::util::server_url::resolve(&connection.url, "api/servers").await?;
                     let password = if password.is_empty() {
                         crate::app::tasks::spawn_blocking(move || {
                             crate::library::credentials::load_source("audiomuse", &library_key)
@@ -873,7 +880,7 @@ pub async fn dispatch(
             form.task = Some(TaskLease::new(&task));
         }
         Command::Checked { instance, result } => {
-            let Some(dialogs::Dialog::AudioMuse(form)) = &mut state.popups.library_dialog else {
+            let Some(dialogs::Dialog::AudioMuse(form)) = state.popups.library_dialog_mut() else {
                 return Ok(vec![]);
             };
             if form.instance != instance {
@@ -905,7 +912,7 @@ pub async fn dispatch(
             save(state, config, tx);
         }
         Command::Disconnect => {
-            let Some(dialogs::Dialog::AudioMuse(form)) = &state.popups.library_dialog else {
+            let Some(dialogs::Dialog::AudioMuse(form)) = state.popups.library_dialog() else {
                 return Ok(vec![]);
             };
             let library_key = form.library_key.clone();
@@ -926,7 +933,7 @@ pub async fn dispatch(
 }
 fn save(state: &mut AppState, config: &mut Config, tx: &mpsc::Sender<Event>) {
     let changes_active = match (
-        &state.popups.library_dialog,
+        state.popups.library_dialog(),
         state.sources.active.navidrome(),
     ) {
         (Some(dialogs::Dialog::AudioMuse(form)), Some(session)) => form.library_key == key(session),
@@ -942,7 +949,7 @@ fn save(state: &mut AppState, config: &mut Config, tx: &mpsc::Sender<Event>) {
     state.sources.nav_tasks.remove("audiomuse");
     state.sources.nav_tasks.remove("audiomuse-info");
     state.sources.nav_tasks.remove(SYNC_SLOT);
-    state.popups.library_dialog = None;
+    state.popups.set_library_dialog(None);
     if matches!(
         state.sources.nav_collection,
         Some(CollectionKind::AudioMuse(_))

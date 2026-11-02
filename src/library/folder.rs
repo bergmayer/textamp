@@ -239,21 +239,8 @@ impl FolderNavigationState {
         self.focused().and_then(|c| c.key.as_deref())
     }
 
-    /// Backward-compatible alias for `truncate_right()`.
-    pub fn truncate_right_columns(&mut self) {
-        self.truncate_right();
-    }
-
     /// Get the number of visible columns (for layout).
     pub fn visible_columns(&self) -> usize {
         self.columns.len()
     }
-
-    /// No-op kept for backward compatibility. Previously this padded
-    /// the folder nav with a synthetic empty column so the view
-    /// always rendered two cols, but the cat col now fills that
-    /// "second slot" naturally. Adding the padding column made the
-    /// browse view render three panes (cat + root + empty) on first
-    /// click into Folders.
-    pub fn ensure_placeholder(&mut self) {}
 }

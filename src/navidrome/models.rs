@@ -47,7 +47,7 @@ pub struct Album {
     pub cover_art: Option<String>,
     pub year: Option<u16>,
     pub genre: Option<String>,
-    /// OpenSubsonic's complete genre list; the legacy field holds only one tag.
+    /// OpenSubsonic's complete genre list; `genre` contains one tag.
     #[serde(default)]
     pub genres: Vec<Genre>,
     pub song_count: Option<u32>,

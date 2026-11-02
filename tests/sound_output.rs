@@ -88,7 +88,7 @@ async fn shortcut_settings_and_palette_share_the_picker() {
     )
     .await
     .unwrap();
-    assert!(state.popups.sound_output_active);
+    assert!(state.popups.sound_output_active());
     assert!(matches!(
         actions.as_slice(),
         [Action::Playback(PlaybackAction::DiscoverAirplay)]
@@ -102,7 +102,7 @@ async fn cancelled_discovery_cannot_reopen_or_change_output() {
     let config = Config::default();
     let mut audio = AudioPlayer::new_without_audio();
     let (tx, _rx) = tokio::sync::mpsc::channel(8);
-    state.popups.sound_output_active = true;
+    state.popups.set_sound_output_active(true);
     state.sound_output.loading = true;
     state.sound_output.request_id = 9;
     state.sound_output.current = AudioOutput::AirPlay(speaker());
@@ -121,7 +121,7 @@ async fn cancelled_discovery_cannot_reopen_or_change_output() {
     )
     .await
     .unwrap();
-    assert!(!state.popups.sound_output_active && !state.sound_output.loading);
+    assert!(!state.popups.sound_output_active() && !state.sound_output.loading);
     assert!(state.sound_output.local_devices.is_empty());
     assert_eq!(state.sound_output.current, AudioOutput::AirPlay(speaker()));
 }
@@ -131,7 +131,7 @@ async fn discovery_preserves_focus_and_errors_stay_in_popup() {
     let mut state = AppState::new();
     let mut audio = AudioPlayer::new_without_audio();
     let (tx, _rx) = tokio::sync::mpsc::channel(8);
-    state.popups.sound_output_active = true;
+    state.popups.set_sound_output_active(true);
     state.sound_output.request_id = 3;
     state.sound_output.destinations.push(speaker());
     state.sound_output.index = 1;
@@ -164,7 +164,7 @@ async fn selection_during_playback_does_not_stop_or_switch_audio() {
     let mut audio = AudioPlayer::new_without_audio();
     let (tx, _rx) = tokio::sync::mpsc::channel(8);
     state.playback.status = PlayStatus::Playing;
-    state.popups.sound_output_active = true;
+    state.popups.set_sound_output_active(true);
     let generation = audio.playback_id();
     dispatch_playback::dispatch(
         &tx,
@@ -189,7 +189,7 @@ async fn selection_during_playback_does_not_stop_or_switch_audio() {
 fn mouse_highlights_only_and_select_and_cancel_match_keyboard() {
     let mut state = AppState::new();
     let config = Config::default();
-    state.popups.sound_output_active = true;
+    state.popups.set_sound_output_active(true);
     state.sound_output.destinations.push(speaker());
     draw(&mut state, 80, 24);
     let (area, _) = state.hit_regions.sound_output_rows[1];
@@ -211,7 +211,7 @@ fn mouse_highlights_only_and_select_and_cancel_match_keyboard() {
     ));
     let (area, _) = state.hit_regions.sound_output_buttons[2];
     mouse_input::handle_mouse(click(area), &mut state);
-    assert!(!state.popups.sound_output_active);
+    assert!(!state.popups.sound_output_active());
     assert_eq!(state.sound_output.current, AudioOutput::Local);
 }
 
@@ -233,7 +233,7 @@ fn output_action_has_a_single_palette_entry() {
 fn mouse_highlight_keeps_the_output_viewport() {
     let mut state = AppState::new();
     let config = Config::default();
-    state.popups.sound_output_active = true;
+    state.popups.set_sound_output_active(true);
     state.sound_output.local_devices = (0..30).map(|i| format!("Device {i}")).collect();
     state.sound_output.index = 25;
     draw(&mut state, 80, 24);

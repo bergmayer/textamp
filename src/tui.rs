@@ -134,20 +134,15 @@ fn tick_requires_render(state: &AppState) -> bool {
         library.formats_loading,
         library.studios_loading,
         library.right_panel_loading,
-        state.stations_loading,
+        state.station_nav.loading,
         false,
     ]
     .contains(&true);
     let popup_loading = [
+        state.popups.artist_bio().is_some_and(|popup| popup.loading),
         state
             .popups
-            .artist_bio
-            .as_ref()
-            .is_some_and(|popup| popup.loading),
-        state
-            .popups
-            .adventure_launcher
-            .as_ref()
+            .adventure_launcher()
             .is_some_and(|popup| popup.loading),
     ]
     .contains(&true);
@@ -162,7 +157,7 @@ fn tick_requires_render(state: &AppState) -> bool {
         popup_loading,
         state.similar.loading,
         state.related.loading,
-        state.artwork.loading,
+        state.artwork.fetch.is_loading(),
         !state.artwork.grid_pending.is_empty(),
         state.waveform.generating,
         state.spectrogram.generating,

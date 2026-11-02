@@ -292,11 +292,6 @@ pub fn plan_drill(state: &mut AppState, ctx: ClickContext) -> DrillPlan {
             }
             .into()]
         }
-        BrowseItem::GenreCategory { .. } => {
-            // Tag-style drilling no longer goes through a category
-            // column — clicking a category row is a no-op.
-            Vec::new()
-        }
     };
 
     DrillPlan {
