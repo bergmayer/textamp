@@ -3,9 +3,9 @@
 use crate::app::action::*;
 use crossterm::event::{KeyCode, KeyEvent};
 
-use crate::app::state::{ColumnSortMode, SortPopupOption};
 use crate::app::Action;
 use crate::app::AppState;
+use crate::app::state::{ColumnSortMode, SortPopupOption};
 
 /// Handle keys when sort popup is active.
 pub(super) fn handle_sort_popup_keys(key: KeyEvent, state: &mut AppState) -> Vec<Action> {
@@ -46,12 +46,22 @@ pub fn apply_selected_option(state: &mut AppState) -> Vec<Action> {
         SortPopupOption::SortMode(mode) => apply_sort_mode(state, col_idx, mode),
         SortPopupOption::Direction => toggle_sort_direction(state, col_idx),
         SortPopupOption::Artwork => toggle_artwork(state, col_idx),
+        SortPopupOption::LargeArtwork => {
+            vec![SettingsAction::SetLargeArtwork(!state.large_artwork).into()]
+        }
         SortPopupOption::GroupByAlbum => toggle_group_by_album(state, col_idx),
+        SortPopupOption::CompilationOnlyArtists => {
+            vec![
+                SettingsAction::SetShowCompilationOnlyArtists(!state.show_compilation_only_artists)
+                    .into(),
+            ]
+        }
     }
 }
 
 /// Apply a sort mode to the column and update the popup.
 pub fn apply_sort_mode(state: &mut AppState, col_idx: usize, mode: ColumnSortMode) -> Vec<Action> {
+    let downloads = crate::app::downloads::is_root_column(state, col_idx);
     let nav = match state.browse_nav_mut() {
         Some(n) => n,
         None => return vec![],
@@ -61,6 +71,15 @@ pub fn apply_sort_mode(state: &mut AppState, col_idx: usize, mode: ColumnSortMod
         Some(c) => c,
         None => return vec![],
     };
+
+    if mode == ColumnSortMode::ByDateAdded && col.date_added_order.is_none() {
+        return vec![];
+    }
+
+    col.end_playlist_editing();
+    if downloads && col.grouped_by_album {
+        col.ungroup_by_album();
+    }
 
     // First restore to original if we have originals and switching to non-shuffle mode
     if col.has_originals() && mode != ColumnSortMode::Shuffled {
@@ -88,6 +107,14 @@ pub fn apply_sort_mode(state: &mut AppState, col_idx: usize, mode: ColumnSortMod
         }
     }
 
+    if downloads
+        && state.downloads.group_by_album
+        && let Some(col) = state.artist_nav.columns.get_mut(col_idx)
+    {
+        col.clear_originals();
+        col.group_by_album();
+    }
+
     // Rebuild popup options with the actual active mode
     if let Some(popup) = state.popups.sort_mut() {
         popup.rebuild_options(mode);
@@ -102,12 +129,18 @@ pub fn apply_sort_mode(state: &mut AppState, col_idx: usize, mode: ColumnSortMod
 /// Toggle sort direction for the current column.
 /// Reverses the non-pinned items/tracks and flips the ascending flag.
 pub fn toggle_sort_direction(state: &mut AppState, col_idx: usize) -> Vec<Action> {
+    let downloads = crate::app::downloads::is_root_column(state, col_idx);
     let nav = match state.browse_nav_mut() {
         Some(n) => n,
         None => return vec![],
     };
 
     if let Some(col) = nav.columns.get_mut(col_idx) {
+        col.end_playlist_editing();
+        let regroup = downloads && col.grouped_by_album;
+        if regroup {
+            col.ungroup_by_album();
+        }
         col.sort_ascending = !col.sort_ascending;
         // Actually reverse the items (skip pinned items at the start)
         let start = col.pinned_count();
@@ -116,6 +149,10 @@ pub fn toggle_sort_direction(state: &mut AppState, col_idx: usize) -> Vec<Action
             col.tracks[start..].reverse();
         }
         col.selected_index = start; // reset selection to top of sortable items
+        if regroup {
+            col.clear_originals();
+            col.group_by_album();
+        }
 
         // Truncate child columns since order changed
         nav.columns.truncate(col_idx + 1);
@@ -139,6 +176,10 @@ pub fn toggle_sort_direction(state: &mut AppState, col_idx: usize) -> Vec<Action
 pub fn toggle_group_by_album(state: &mut AppState, col_idx: usize) -> Vec<Action> {
     use crate::app::state::SortColumnType;
 
+    if crate::app::downloads::is_root_column(state, col_idx) {
+        return crate::app::downloads::toggle_grouping(state);
+    }
+
     let nav = match state.browse_nav_mut() {
         Some(n) => n,
         None => return vec![],
@@ -146,6 +187,7 @@ pub fn toggle_group_by_album(state: &mut AppState, col_idx: usize) -> Vec<Action
 
     let (now_grouped, sort_mode, pending_page, persist_state) =
         if let Some(col) = nav.columns.get_mut(col_idx) {
+            col.end_playlist_editing();
             if col.grouped_by_album {
                 col.ungroup_by_album();
             } else {
@@ -174,7 +216,7 @@ pub fn toggle_group_by_album(state: &mut AppState, col_idx: usize) -> Vec<Action
             let persist = col
                 .lazy
                 .as_ref()
-                .map(|lazy| (lazy.key.clone(), now_grouped, col.artwork_visible));
+                .map(|lazy| (lazy.key.clone(), now_grouped));
             (now_grouped, sort_mode, pending, persist)
         } else {
             return vec![];
@@ -205,35 +247,31 @@ pub fn toggle_group_by_album(state: &mut AppState, col_idx: usize) -> Vec<Action
             .into(),
         );
     }
-    if let Some((playlist_key, group, art)) = persist_state {
-        if let Some(library_key) = state.active_library.clone() {
-            actions.push(
-                crate::app::action::SettingsAction::SavePlaylistView {
-                    library_key,
-                    playlist_key,
-                    view: crate::config::settings::PlaylistView {
-                        group_by_album: group,
-                        show_artwork: art,
-                    },
-                }
-                .into(),
-            );
-        }
+    if let Some((playlist_key, group)) = persist_state
+        && let Some(library_key) = state.active_library.clone()
+    {
+        actions.push(
+            crate::app::action::SettingsAction::SavePlaylistView {
+                library_key,
+                playlist_key,
+                view: crate::config::settings::PlaylistView {
+                    group_by_album: group,
+                },
+            }
+            .into(),
+        );
     }
     actions
 }
 
 /// Toggle artwork visibility for an album column.
-/// Updates the current column and this library's default for new album columns.
+/// Retain visibility for this column type in the active library.
 ///
-/// When turning artwork ON, the dispatcher also queues a load of
-/// EVERY row's art (not just the viewport) so a long playlist's
-/// album-grouping fills in art across the whole list — the previous
-/// behaviour would only fetch ~30 thumbnails near the cursor and
-/// leave the rest blank.
+/// Enabling artwork requests every row so grouped playlist artwork is
+/// available beyond the current viewport.
 pub fn toggle_artwork(state: &mut AppState, col_idx: usize) -> Vec<Action> {
     let column_key = state.column_artwork_key(col_idx);
-    let (new_visible, persist_state) = {
+    let new_visible = {
         let nav = match state.browse_nav_mut() {
             Some(n) => n,
             None => return vec![],
@@ -241,22 +279,11 @@ pub fn toggle_artwork(state: &mut AppState, col_idx: usize) -> Vec<Action> {
 
         if let Some(col) = nav.columns.get_mut(col_idx) {
             col.artwork_visible = !col.artwork_visible;
-            // Playlist tracks columns: snapshot the playlist key
-            // (lives on `lazy`) along with the new toggle states so
-            // the caller can dispatch a persist action.
-            let persist = col
-                .lazy
-                .as_ref()
-                .map(|lazy| (lazy.key.clone(), col.grouped_by_album, col.artwork_visible));
-            (col.artwork_visible, persist)
+            col.artwork_visible
         } else {
             return vec![];
         }
     };
-
-    // Keep this library's default for newly opened columns in sync; the
-    // context-specific value below takes precedence when that column returns.
-    state.artwork.default_visible = new_visible;
 
     let mut actions: Vec<Action> = Vec::new();
     if let Some(library_key) = state.active_library.clone() {
@@ -274,34 +301,14 @@ pub fn toggle_artwork(state: &mut AppState, col_idx: usize) -> Vec<Action> {
     // ON. The viewport-window loader runs on scroll for cheap, but a
     // user explicitly enabling art expects the whole list to show
     // covers (especially for grouped-by-album playlists).
-    if new_visible {
-        if let Some(nav) = state.browse_nav() {
-            let batch = super::super::dispatch_miller::collect_all_art_to_load(
-                nav.columns.get(col_idx),
-                &state.artwork.grid_cache,
-                &state.artwork.grid_pending,
-            );
-            if !batch.is_empty() {
-                actions.push(crate::app::action::SystemAction::LoadAlbumArt(batch).into());
-            }
-        }
-    }
-
-    // Persist the per-playlist toggle to config when this is a
-    // playlist tracks column (identified by `col.lazy.key`).
-    if let Some((playlist_key, group, art)) = persist_state {
-        if let Some(library_key) = state.active_library.clone() {
-            actions.push(
-                crate::app::action::SettingsAction::SavePlaylistView {
-                    library_key,
-                    playlist_key,
-                    view: crate::config::settings::PlaylistView {
-                        group_by_album: group,
-                        show_artwork: art,
-                    },
-                }
-                .into(),
-            );
+    if new_visible && let Some(nav) = state.browse_nav() {
+        let batch = super::super::dispatch_miller::collect_all_art_to_load(
+            nav.columns.get(col_idx),
+            &state.artwork.grid_cache,
+            &state.artwork.grid_pending,
+        );
+        if !batch.is_empty() {
+            actions.push(crate::app::action::SystemAction::LoadAlbumArt(batch).into());
         }
     }
 

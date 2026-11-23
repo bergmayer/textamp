@@ -38,24 +38,35 @@ fn run_label(state: &mut AppState, label: &str) -> Vec<Action> {
 #[test]
 fn track_context_and_palette_start_sonic_radio_from_the_focused_track() {
     let mut state = common::navidrome_state();
+    state.sources.audiomuse.connections.insert(
+        textamp::app::sources::audiomuse::key(state.sources.active.navidrome().unwrap()),
+        textamp::audiomuse::Connection {
+            url: "http://127.0.0.1:1".into(),
+            username: "fixture".into(),
+            server: "Music".into(),
+        },
+    );
     state.view = View::Queue;
     state.queue.tracks = vec![track("playing"), track("selected")];
     state.queue.index = Some(0);
     state.list_state.queue_index = 1;
     let entries =
-        textamp::services::track_context::track_context_entries(&state, &track("selected"), false);
-    assert!(entries.iter().any(|e| matches!(
-        e.kind,
-        textamp::services::track_context::ContextKind::SonicRadio
-    )));
-    let actions = run_label(&mut state, "Start Sonic Radio based on track");
+        textamp::app::track_context::track_context_entries(&state, &track("selected"), false);
+    assert!(
+        entries
+            .iter()
+            .any(|e| matches!(e.kind, textamp::app::track_context::ContextKind::SonicRadio))
+    );
+    let actions = run_label(&mut state, "Start Sonic Mix based on track");
     assert!(
         matches!(actions.as_slice(), [Action::Radio(RadioAction::StartSonicRadio(track))] if track.rating_key == "selected")
     );
     state.sources.active = textamp::app::sources::ActiveSource::Folder("local".into());
-    assert!(!command_palette::materialize_entries(&state)
-        .iter()
-        .any(|e| e.label == "Start Sonic Radio based on track"));
+    assert!(
+        !command_palette::materialize_entries(&state)
+            .iter()
+            .any(|entry| entry.label == "Start Sonic Mix based on track")
+    );
 }
 
 fn keys(tracks: &[Track]) -> Vec<&str> {
@@ -73,12 +84,14 @@ fn colon_q_enter_quits_from_browse_and_playback_views() {
             state.view = view;
             let config = Config::default();
             for code in [KeyCode::Char(':'), KeyCode::Char(query)] {
-                assert!(key_input::handle_key(
-                    KeyEvent::new(code, KeyModifiers::NONE),
-                    &mut state,
-                    &config,
-                )
-                .is_empty());
+                assert!(
+                    key_input::handle_key(
+                        KeyEvent::new(code, KeyModifiers::NONE),
+                        &mut state,
+                        &config,
+                    )
+                    .is_empty()
+                );
             }
             assert!(state.palette.open);
             let first = state.palette.matches[0];
@@ -93,7 +106,10 @@ fn colon_q_enter_quits_from_browse_and_playback_views() {
             );
             assert!(matches!(
                 actions.as_slice(),
-                [Action::System(textamp::app::action::SystemAction::Quit)]
+                [
+                    Action::Settings(textamp::app::action::SettingsAction::PersistCommandHistory),
+                    Action::System(textamp::app::action::SystemAction::Quit)
+                ]
             ));
             assert!(!state.palette.open);
         }
@@ -106,7 +122,7 @@ fn queue_query_still_ranks_queue_first() {
     for query in ["queue", "Queue"] {
         command_palette::open_with_query(&mut state, query);
         let first = state.palette.matches[0];
-        assert_eq!(state.palette.entries[first].label, "Queue");
+        assert_eq!(state.palette.entries[first].label, "Play Queue");
     }
 }
 
@@ -148,6 +164,10 @@ fn queue_and_radio_contexts_ignore_retained_browse_and_similar_selections() {
                 .insert("hidden-library".into(), Ok(vec![track("hidden-similar")]));
             state.queue.tracks = vec![track("queue-0"), track("queue-1"), track("queue-2")];
             state.radio.tracks = vec![track("radio-0"), track("radio-1"), track("radio-2")];
+            for track in state.queue.tracks.iter_mut().chain(&mut state.radio.tracks) {
+                track.parent_rating_key = Some("album".into());
+                track.grandparent_rating_key = Some("artist".into());
+            }
             state.list_state.queue_index = 1;
             let expected = if mode == PlaybackMode::Radio {
                 ["radio-1", "radio-2"]
@@ -159,11 +179,31 @@ fn queue_and_radio_contexts_ignore_retained_browse_and_similar_selections() {
                 state.palette_target_track().unwrap().rating_key,
                 expected[0]
             );
-            let actions = run_label(&mut state, "Play track and following");
-            assert!(
-                matches!(actions.as_slice(), [Action::Queue(QueueAction::PlayTracksNow(tracks))]
-                if keys(tracks) == expected)
+            let entries = command_palette::materialize_entries(&state);
+            assert_eq!(
+                entries
+                    .iter()
+                    .filter(|entry| entry.label == "Open in Library")
+                    .count(),
+                1
             );
+            let open = run_label(&mut state, "Open in Library");
+            assert!(
+                matches!(open.as_slice(), [Action::Browse(textamp::app::action::BrowseAction::OpenDetailsInLibrary {
+                track, destination: textamp::app::library_details::Destination::Track
+            })] if track.rating_key == expected[0])
+            );
+            if view == View::NowPlaying {
+                assert!(!entries.iter().any(|entry| matches!(
+                    entry.label.as_str(),
+                    "Play track" | "Play track and following" | "Show Similar Tracks"
+                )));
+                continue;
+            }
+            assert!(!entries.iter().any(|entry| matches!(
+                entry.label.as_str(),
+                "Play track and following" | "Play next in queue" | "Add to end of queue"
+            )));
             let actions = run_label(&mut state, "Play track");
             assert!(
                 matches!(actions.as_slice(), [Action::Queue(QueueAction::PlayTrack(track))]
@@ -186,9 +226,11 @@ fn unrelated_views_and_invalid_rows_do_not_offer_hidden_track_or_album_commands(
     ] {
         state.view = view;
         assert!(state.palette_target_track().is_none());
-        assert!(!command_palette::materialize_entries(&state)
-            .iter()
-            .any(|e| e.label == "Play track"));
+        assert!(
+            !command_palette::materialize_entries(&state)
+                .iter()
+                .any(|e| e.label == "Play track")
+        );
     }
     state.view = View::Queue;
     state.queue.tracks = vec![track("only")];
@@ -203,7 +245,8 @@ fn unrelated_views_and_invalid_rows_do_not_offer_hidden_track_or_album_commands(
 #[test]
 fn refresh_palette_matches_f5_in_every_category() {
     for &category in BrowseCategory::all() {
-        let mut state = AppState::new();
+        let mut state = common::navidrome_state();
+        state.active_library = Some("navidrome:fixture:all".into());
         state.view = View::Browse;
         state.browse_category = category;
         let palette = command_palette::run(PaletteCommandKind::Refresh, &mut state);
@@ -220,13 +263,14 @@ fn refresh_palette_matches_f5_in_every_category() {
 fn utility_rows_are_native_commands_not_station_urls_in_both_playback_views() {
     for view in [View::Queue, View::NowPlaying] {
         let mut state = common::navidrome_state();
+        state.active_library = Some("navidrome:fixture:all".into());
         state.view = view;
         state.station_nav.columns = vec![textamp::app::state::StationColumn::new(
             None,
             "stations".into(),
             vec![station(
                 "nav-radio/randomAlbum",
-                "Random Album Radio",
+                "Play Random Albums",
                 "station",
             )],
         )];
@@ -235,9 +279,9 @@ fn utility_rows_are_native_commands_not_station_urls_in_both_playback_views() {
         assert_eq!(
             entries
                 .iter()
-                .filter(|e| matches!(e.command, PaletteCommandKind::ToggleDj(_)))
+                .filter(|e| e.label.starts_with("DJ "))
                 .count(),
-            6
+            0
         );
         for entry in entries {
             if let PaletteCommandKind::PlayStation(key) = entry.command {
@@ -245,15 +289,19 @@ fn utility_rows_are_native_commands_not_station_urls_in_both_playback_views() {
             }
         }
         assert!(matches!(
-            run_label(&mut state, "Artist Radio").as_slice(),
+            run_label(&mut state, "Artist Mix").as_slice(),
             [Action::Search(SearchAction::OpenArtistRadioPicker)]
         ));
-        assert!(command_palette::materialize_entries(&state)
-            .iter()
-            .any(|e| matches!(e.command, PaletteCommandKind::RemixGemini)));
-        assert!(!command_palette::materialize_entries(&state)
-            .iter()
-            .any(|e| e.label.contains("Friendg")));
+        assert!(
+            command_palette::materialize_entries(&state)
+                .iter()
+                .any(|e| matches!(e.command, PaletteCommandKind::RemixGemini))
+        );
+        assert!(
+            !command_palette::materialize_entries(&state)
+                .iter()
+                .any(|e| e.label.contains("Friendg"))
+        );
     }
 }
 
@@ -279,7 +327,8 @@ async fn radio_removal_uses_the_active_list_even_when_the_old_queue_is_empty() {
             .await
             .unwrap();
     }
-    assert_eq!(keys(&state.queue.tracks), ["keep"]);
+    assert_eq!(state.playback_mode, PlaybackMode::Radio);
+    assert_eq!(keys(&state.radio.tracks), ["keep"]);
     assert_eq!(state.current_track().unwrap().rating_key, "keep");
     assert!(state.queue.undo_snapshot.is_some());
 }
@@ -294,7 +343,7 @@ fn closing_the_palette_before_station_choices_arrive_does_not_reopen_it() {
     handle_core_event(
         textamp::app::event::RadioEvent::StationChildrenLoaded {
             station_key: "/library/sections/5/mood".into(),
-            station_title: "Mood Radio".into(),
+            station_title: "Mood Mix".into(),
             children: vec![station(
                 "/library/sections/5/stations/mood?id=42",
                 "Happy",
@@ -331,147 +380,233 @@ fn filtered_station_choices_are_leaves_regardless_of_their_identifiers() {
     }
 }
 
-#[tokio::test]
-async fn context_similar_popup_stays_over_queue_and_restores_selection_and_split_layout() {
-    use ratatui::{backend::TestBackend, Terminal};
-    for view in [View::Queue, View::NowPlaying] {
-        for tall_mode in [false, true] {
-            let mut state = common::navidrome_state();
-            state.view = view;
-            state.tall_mode = tall_mode;
-            state.queue.tracks = vec![
-                track("navidrome:fixture:first"),
-                track("navidrome:fixture:selected"),
-            ];
-            state.list_state.queue_index = 1;
-            state.queue.selected.insert(1);
-            state.scroll.queue = Some(0);
-            let mut config = Config::default();
-            let mut audio = AudioPlayer::new_without_audio();
-            let (tx, _rx) = mpsc::channel(16);
-            let mut terminal = Terminal::new(TestBackend::new(100, 36)).unwrap();
-            terminal
-                .draw(|frame| state.apply_render_feedback(textamp::ui::render(frame, &state)))
-                .unwrap();
-            let before = terminal.backend().buffer().clone();
-            let actions = run_label(&mut state, "Show Similar Tracks");
-            for action in actions {
-                dispatch_action(action, &mut state, &mut audio, &mut config, &tx)
-                    .await
-                    .unwrap();
-            }
-            // No personal server: cancel the fixture request after synchronous popup entry.
-            state.sources.nav_tasks.clear();
-            assert_eq!(state.view, View::Similar);
-            assert_eq!(state.previous_view, Some(view));
-            assert_eq!(state.list_state.queue_index, 1);
-            assert!(state.queue.selected.contains(&1));
-            terminal
-                .draw(|frame| state.apply_render_feedback(textamp::ui::render(frame, &state)))
-                .unwrap();
-            let popup = state.hit_regions.similar_content.as_ref().unwrap().outer;
-            assert_eq!(state.hit_regions.tall_mode_split.is_some(), tall_mode);
-            // The visible title/queue rows outside the overlay stay in place.
-            for y in 0..30 {
-                for x in 0..100 {
-                    if x < popup.x || x >= popup.right() || y < popup.y || y >= popup.bottom() {
-                        assert_eq!(
-                            terminal.backend().buffer()[(x, y)].symbol(),
-                            before[(x, y)].symbol(),
-                            "background changed at {x},{y}, view {view:?}, split {tall_mode}"
-                        );
-                    }
-                }
-            }
-            // Re-entering or changing the similar mode does not replace its return view.
-            state.set_view(View::Similar);
-            assert_eq!(state.previous_view, Some(view));
-            let actions = key_input::handle_key(
-                KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-                &mut state,
-                &config,
-            );
-            for action in actions {
-                dispatch_action(action, &mut state, &mut audio, &mut config, &tx)
-                    .await
-                    .unwrap();
-            }
-            assert_eq!(state.view, view);
-            assert_eq!(state.list_state.queue_index, 1);
-            assert_eq!(state.scroll.queue, Some(0));
-            assert!(state.queue.selected.contains(&1));
-            // Outside-click dismissal follows the same return path.
-            state.set_view(View::Similar);
-            terminal
-                .draw(|frame| state.apply_render_feedback(textamp::ui::render(frame, &state)))
-                .unwrap();
-            let actions = textamp::app::handlers::mouse_input::handle_mouse(
-                crossterm::event::MouseEvent {
-                    kind: crossterm::event::MouseEventKind::Down(
-                        crossterm::event::MouseButton::Left,
-                    ),
-                    column: 0,
-                    row: 0,
-                    modifiers: KeyModifiers::NONE,
-                },
-                &mut state,
-            );
-            for action in actions {
-                dispatch_action(action, &mut state, &mut audio, &mut config, &tx)
-                    .await
-                    .unwrap();
-            }
-            assert_eq!(state.view, view);
-        }
+#[test]
+fn similar_and_related_remain_detail_pane_destinations() {
+    let mut state = common::navidrome_state();
+    state.queue.tracks = vec![track("playing"), track("selected")];
+    state.queue.index = Some(0);
+    for view in [View::Queue, View::Settings, View::Browse] {
+        state.view = view;
+        assert!(
+            !command_palette::materialize_entries(&state)
+                .iter()
+                .any(|entry| entry.label.starts_with("Show Similar")
+                    || matches!(
+                        entry.label.as_str(),
+                        "Similar" | "Related" | "Related Artists"
+                    ))
+        );
     }
 }
 
 #[test]
-fn similar_palette_is_unique_and_matches_the_keyboard_target() {
-    use textamp::app::action::DataAction;
+fn palette_submenus_preserve_context_and_global_fuzzy_search() {
+    let mut state = AppState::new();
+    command_palette::open(&mut state);
+    state.palette.player_context = true;
+    let labels = |state: &AppState| {
+        state
+            .palette
+            .matches
+            .iter()
+            .map(|&index| state.palette.entries[index].label.clone())
+            .collect::<Vec<_>>()
+    };
+    assert!(labels(&state).contains(&"View".into()));
+    assert!(!labels(&state).contains(&"By Title".into()));
+    command_palette::run(
+        PaletteCommandKind::OpenCommandGroup(vec!["View".into(), "Sort".into()]),
+        &mut state,
+    );
+    assert!(state.palette.open && state.palette.player_context);
+    assert!(labels(&state).contains(&"By Title".into()));
+    assert!(labels(&state).contains(&"Back".into()));
+    command_palette::handle_key(&mut state, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    assert_eq!(state.palette.path, ["View"]);
+    command_palette::open_with_query(&mut state, "view sort title");
+    let entry = &state.palette.entries[state.palette.matches[0]];
+    assert!(matches!(
+        entry.command,
+        PaletteCommandKind::ApplySort(textamp::app::state::ColumnSortMode::ByTitle)
+    ));
+    assert!(!state.palette.matches.iter().any(|&index| matches!(
+        state.palette.entries[index].command,
+        PaletteCommandKind::OpenCommandGroup(_)
+    )));
+}
+
+#[test]
+fn palette_puts_selection_actions_before_menu_groups_and_browses_queue_destination() {
     let mut state = common::navidrome_state();
     state.view = View::Queue;
-    state.queue.tracks = vec![track("playing"), track("selected")];
-    state.queue.index = Some(0);
-    state.list_state.queue_index = 1;
-    let entries = command_palette::materialize_entries(&state);
-    assert_eq!(
-        entries
+    state.queue.tracks = vec![track("selected")];
+    command_palette::open(&mut state);
+    let commands = state
+        .palette
+        .matches
+        .iter()
+        .map(|&i| &state.palette.entries[i].command)
+        .collect::<Vec<_>>();
+    let first_group = commands
+        .iter()
+        .position(|command| matches!(command, PaletteCommandKind::OpenCommandGroup(_)))
+        .unwrap();
+    assert!(first_group > 1);
+    assert!(
+        commands[..first_group]
             .iter()
-            .filter(|e| e.label == "Show Similar Tracks")
-            .count(),
-        1
+            .all(|command| textamp::app::command_catalog::contextual(command))
     );
-    assert!(!entries.iter().any(|e| e.label == "Similar"));
-    let palette_actions = run_label(&mut state, "Show Similar Tracks");
-    let keyboard_actions = key_input::handle_key(
-        KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL),
-        &mut state,
-        &Config::default(),
+    assert!(
+        !commands
+            .iter()
+            .any(|command| matches!(command, PaletteCommandKind::GotoQueue))
     );
-    for actions in [palette_actions, keyboard_actions] {
+
+    let shortcuts: Vec<_> = state.palette.matches[..first_group]
+        .iter()
+        .map(|&index| {
+            let entry = &state.palette.entries[index];
+            (
+                entry.label.clone(),
+                textamp::app::command_catalog::path(&entry.command),
+            )
+        })
+        .collect();
+    for (label, home) in shortcuts {
+        assert!(!home.is_empty(), "{label} needs a menu home");
+        command_palette::run(PaletteCommandKind::OpenCommandGroup(home), &mut state);
         assert!(
-            matches!(actions.first(), Some(Action::Data(DataAction::LoadSimilarTracks {rating_key, ..})) if rating_key == "selected")
+            state
+                .palette
+                .matches
+                .iter()
+                .any(|&i| state.palette.entries[i].label == label)
         );
     }
-    assert_eq!(state.similar.tab_track_key.as_deref(), Some("selected"));
+    command_palette::open(&mut state);
+    for path in [
+        vec![String::from("View")],
+        vec!["View".into(), "Browse".into()],
+    ] {
+        let index = state.palette.matches.iter().position(|&index| matches!(&state.palette.entries[index].command, PaletteCommandKind::OpenCommandGroup(target) if *target == path)).unwrap();
+        state.palette.selected = index;
+        assert!(matches!(
+            command_palette::handle_key(
+                &mut state,
+                KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)
+            ),
+            command_palette::PaletteOutcome::Continue
+        ));
+        assert_eq!(state.palette.path, path);
+    }
+    assert!(state.palette.matches.iter().any(|&index| matches!(
+        state.palette.entries[index].command,
+        PaletteCommandKind::GotoQueue
+    )));
+    command_palette::handle_key(&mut state, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    assert_eq!(state.palette.path, ["View"]);
+    state.palette.query = "play queue".into();
+    command_palette::refresh_matches(&mut state);
+    assert!(matches!(
+        state.palette.entries[state.palette.matches[0]].command,
+        PaletteCommandKind::GotoQueue
+    ));
+}
 
-    state.view = View::Settings;
-    let entries = command_palette::materialize_entries(&state);
-    assert_eq!(
-        entries
-            .iter()
-            .filter(|e| e.label == "Show Similar Tracks")
-            .count(),
-        1
-    );
-    let actions = run_label(&mut state, "Show Similar Tracks");
-    assert!(
-        matches!(actions.first(), Some(Action::Data(DataAction::LoadSimilarTracks {rating_key, ..})) if rating_key == "playing")
-    );
-    state.queue.tracks.clear();
-    state.queue.index = None;
-    assert!(!command_palette::materialize_entries(&state)
+#[test]
+fn palette_root_promotes_available_music_searches_with_canonical_routes() {
+    let mut state = common::navidrome_state();
+    command_palette::open(&mut state);
+    let commands: Vec<_> = state
+        .palette
+        .matches
         .iter()
-        .any(|e| matches!(e.command, PaletteCommandKind::OpenSimilar)));
+        .map(|&i| &state.palette.entries[i].command)
+        .collect();
+    assert!(!commands.iter().any(|c| matches!(
+        c,
+        PaletteCommandKind::SearchAppleMusic | PaletteCommandKind::OpenSettings
+    )));
+    command_palette::run(
+        PaletteCommandKind::OpenCommandGroup(vec!["Textamp".into()]),
+        &mut state,
+    );
+    assert!(state.palette.matches.iter().any(|&i| matches!(
+        state.palette.entries[i].command,
+        PaletteCommandKind::OpenSettings
+    )));
+
+    state.view = View::Queue;
+    state.queue.tracks = vec![track("selected")];
+    command_palette::open(&mut state);
+    let commands: Vec<_> = state
+        .palette
+        .matches
+        .iter()
+        .map(|&i| &state.palette.entries[i].command)
+        .collect();
+    let group = commands
+        .iter()
+        .position(|c| matches!(c, PaletteCommandKind::OpenCommandGroup(_)))
+        .unwrap();
+    let search = commands
+        .iter()
+        .position(|c| matches!(c, PaletteCommandKind::SearchAppleMusic))
+        .unwrap();
+    assert!(search < group);
+    let context =
+        textamp::app::track_context::track_context_entries(&state, &track("selected"), false);
+    for entry in context {
+        if matches!(
+            entry.kind,
+            textamp::app::track_context::ContextKind::Separator
+                | textamp::app::track_context::ContextKind::SearchExternal(_)
+        ) {
+            continue;
+        }
+        let command = PaletteCommandKind::FromTrackContext {
+            kind: entry.kind,
+            track: Box::new(track("selected")),
+        };
+        if textamp::app::command_catalog::disabled_reason(&state, &command).is_some() {
+            continue;
+        }
+        let index = state
+            .palette
+            .matches
+            .iter()
+            .position(|&i| state.palette.entries[i].label == entry.label)
+            .unwrap_or_else(|| panic!("Missing selected-track action: {}", entry.label));
+        assert!(
+            index < group,
+            "{} belongs with the selected track",
+            entry.label
+        );
+    }
+}
+
+#[test]
+fn palette_music_search_uses_selected_queue_track_before_the_playing_track() {
+    let mut state = common::navidrome_state();
+    state.view = View::Queue;
+    state.queue.tracks = ["playing", "selected"]
+        .map(|key| {
+            let mut track = track(key);
+            track.grandparent_title = Some("Artist".into());
+            track
+        })
+        .to_vec();
+    state.queue.index = Some(0);
+    state.list_state.queue_index = 1;
+    assert_eq!(
+        textamp::app::external_search::query(&state).as_deref(),
+        Some("Artist - selected")
+    );
+    state.view = View::Browse;
+    state.category_column_focused = true;
+    assert_eq!(
+        textamp::app::external_search::query(&state).as_deref(),
+        Some("Artist - playing")
+    );
 }

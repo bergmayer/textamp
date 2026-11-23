@@ -6,12 +6,84 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 use image::DynamicImage;
 use ratatui::prelude::*;
-use ratatui_image::{picker::Picker, protocol::StatefulProtocol, Resize, StatefulImage};
+use ratatui_image::{Resize, StatefulImage, picker::Picker, protocol::StatefulProtocol};
 
 use crate::app::state::ArtworkMode;
+
+/// Placeholder identity matching the graphical frontend's artwork icons.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Placeholder {
+    Track,
+    Album,
+    Artist,
+}
+
+impl Placeholder {
+    fn mask(self) -> &'static [u8] {
+        match self {
+            Self::Track => include_bytes!("../../assets/artwork/track.png"),
+            Self::Album => include_bytes!("../../assets/artwork/album.png"),
+            Self::Artist => include_bytes!("../../assets/artwork/artist.png"),
+        }
+    }
+}
+
+/// Render missing artwork through the selected image, half-block or braille encoder.
+pub fn render_placeholder(frame: &mut Frame, area: Rect, kind: Placeholder) -> bool {
+    let colors = crate::ui::theme::theme().colors;
+    let key = format!(
+        "placeholder:{kind:?}:{:?}:{:?}",
+        colors.fg_muted, colors.bg_secondary
+    );
+    let data = PLACEHOLDERS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(data) = cache.get(&key) {
+            return Some(data.clone());
+        }
+        let data = match placeholder_png(kind, colors.fg_muted, colors.bg_secondary) {
+            Ok(data) => Arc::new(data),
+            Err(error) => {
+                tracing::warn!(%error, "Could not prepare artwork placeholder");
+                return None;
+            }
+        };
+        cache.insert(key.clone(), data.clone());
+        Some(data)
+    });
+    data.is_some_and(|data| render_grid_image(frame, area, &key, &data))
+}
+
+fn placeholder_png(
+    kind: Placeholder,
+    foreground: Color,
+    background: Color,
+) -> image::ImageResult<Vec<u8>> {
+    let rgb = |color| match color {
+        Color::Rgb(r, g, b) => [r, g, b],
+        Color::White => [255; 3],
+        Color::Reset => [128; 3],
+        _ => [0; 3],
+    };
+    let foreground = rgb(foreground);
+    let background = rgb(background);
+    let mut pixels = image::load_from_memory(kind.mask())?.to_rgba8();
+    for pixel in pixels.pixels_mut() {
+        let alpha = u32::from(pixel[3]);
+        for channel in 0..3 {
+            pixel[channel] = ((u32::from(foreground[channel]) * alpha
+                + u32::from(background[channel]) * (255 - alpha))
+                / 255) as u8;
+        }
+        pixel[3] = 255;
+    }
+    let mut output = std::io::Cursor::new(Vec::new());
+    pixels.write_to(&mut output, image::ImageFormat::Png)?;
+    Ok(output.into_inner())
+}
 
 /// Artwork renderer using ratatui-image.
 ///
@@ -22,7 +94,7 @@ pub struct ArtworkRenderer {
     protocol: Option<StatefulProtocol>,
     current_thumb: Option<String>,
     current_image_id: Option<u64>,
-    braille_image: Option<DynamicImage>,
+    braille_image: Option<Arc<DynamicImage>>,
     mode: ArtworkMode,
     /// The protocol type detected at startup (for restoring after Halfblocks override).
     native_protocol: Option<ratatui_image::picker::ProtocolType>,
@@ -63,11 +135,6 @@ impl ArtworkRenderer {
         }
     }
 
-    /// Check if graphics are supported.
-    pub fn is_supported(&self) -> bool {
-        self.picker.is_some()
-    }
-
     /// Get the detected protocol type name (for display in settings).
     pub fn protocol_name(&self) -> &'static str {
         match &self.picker {
@@ -84,8 +151,8 @@ impl ArtworkRenderer {
     /// Load and prepare an image for rendering.
     /// Returns true if the image was loaded successfully.
     pub fn load_image(&mut self, image_data: &[u8], thumb_path: &str) -> bool {
-        // Skip if same image already loaded
-        if self.current_thumb.as_deref() == Some(thumb_path) {
+        let image_id = artwork_id(thumb_path, image_data);
+        if self.current_image_id == Some(image_id) {
             if self.mode == ArtworkMode::Braille && self.braille_image.is_some() {
                 return true;
             }
@@ -94,28 +161,19 @@ impl ArtworkRenderer {
             }
         }
 
-        // Load image from bytes
-        let Ok(img) = image::load_from_memory(image_data) else {
+        let Some(img) = decoded_image(image_id, image_data) else {
             return false;
         };
-
-        if self.mode == ArtworkMode::Braille {
-            self.braille_image = Some(img);
-            self.protocol = None;
-            self.current_thumb = Some(thumb_path.to_string());
-            self.current_image_id = Some(artwork_id(thumb_path, image_data));
-            return true;
+        self.protocol = None;
+        self.braille_image = Some(img.clone());
+        if self.mode != ArtworkMode::Braille {
+            let Some(picker) = self.picker.as_mut() else {
+                return false;
+            };
+            self.protocol = Some(picker.new_resize_protocol((*img).clone()));
         }
-
-        let Some(ref mut picker) = self.picker else {
-            return false;
-        };
-
-        // Create protocol for rendering (this handles resizing automatically)
-        self.protocol = Some(picker.new_resize_protocol(img));
-        self.braille_image = None;
-        self.current_thumb = Some(thumb_path.to_string());
-        self.current_image_id = Some(artwork_id(thumb_path, image_data));
+        self.current_thumb = Some(thumb_path.into());
+        self.current_image_id = Some(image_id);
         true
     }
 
@@ -134,11 +192,11 @@ impl ArtworkRenderer {
         // Cache key includes crop amount to avoid re-creating protocol unnecessarily
         let crop_key = format!("{}:c{}", thumb_path, (crop_fraction * 100.0) as u32);
         let image_id = artwork_id(&crop_key, image_data);
-        if self.current_thumb.as_deref() == Some(&crop_key) {
-            return self.has_image();
+        if self.current_image_id == Some(image_id) && self.has_image() {
+            return true;
         }
 
-        let Ok(img) = image::load_from_memory(image_data) else {
+        let Some(img) = decoded_image(artwork_id(thumb_path, image_data), image_data) else {
             return false;
         };
 
@@ -147,11 +205,11 @@ impl ArtworkRenderer {
         let cropped = if crop_pixels > 0 && crop_pixels < img.height() {
             img.crop_imm(0, crop_pixels, img.width(), img.height() - crop_pixels)
         } else {
-            img
+            (*img).clone()
         };
 
         if self.mode == ArtworkMode::Braille {
-            self.braille_image = Some(cropped);
+            self.braille_image = Some(Arc::new(cropped));
             self.protocol = None;
             self.current_thumb = Some(crop_key);
             self.current_image_id = Some(image_id);
@@ -212,34 +270,24 @@ impl ArtworkRenderer {
         self.current_thumb.as_deref()
     }
 
-    /// Change the graphics protocol and clear cached images.
+    /// Change protocol only when the terminal encoder changes.
     pub fn set_protocol_type(&mut self, protocol_type: ratatui_image::picker::ProtocolType) {
-        if let Some(ref mut picker) = self.picker {
+        if let Some(picker) = self.picker.as_mut()
+            && picker.protocol_type() != protocol_type
+        {
             picker.set_protocol_type(protocol_type);
-            // Clear cached image so it's re-created with the new protocol
             self.protocol = None;
-            self.current_thumb = None;
-            self.current_image_id = None;
         }
     }
-
-    /// Restore the native protocol detected at startup and clear cached images.
+    /// Restore the terminal's native graphics encoder.
     pub fn restore_native_protocol(&mut self) {
-        if let (Some(ref mut picker), Some(native)) = (&mut self.picker, self.native_protocol) {
-            picker.set_protocol_type(native);
-            self.protocol = None;
-            self.current_thumb = None;
-            self.current_image_id = None;
+        if let Some(native) = self.native_protocol {
+            self.set_protocol_type(native);
         }
     }
-
-    /// Set the artwork rendering mode and clear all caches.
+    /// Select character or pixel artwork without discarding decoded pixels.
     pub fn set_mode(&mut self, mode: ArtworkMode) {
         self.mode = mode;
-        self.protocol = None;
-        self.braille_image = None;
-        self.current_thumb = None;
-        self.current_image_id = None;
     }
 }
 
@@ -280,12 +328,7 @@ struct BrailleRenderKey {
 fn artwork_id(key: &str, data: &[u8]) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     key.hash(&mut hasher);
-    data.len().hash(&mut hasher);
-    let prefix_len = data.len().min(64);
-    data[..prefix_len].hash(&mut hasher);
-    if data.len() > prefix_len {
-        data[data.len().saturating_sub(64)..].hash(&mut hasher);
-    }
+    data.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -551,9 +594,10 @@ impl<K: Clone + Eq + Hash, V> BoundedCache<K, V> {
 }
 
 thread_local! {
+    static PLACEHOLDERS: RefCell<BoundedCache<String, Arc<Vec<u8>>>> = RefCell::new(BoundedCache::new(12));
     static GRID_PICKER: RefCell<Option<Picker>> = const { RefCell::new(None) };
-    static GRID_PROTOCOLS: RefCell<BoundedCache<u64, StatefulProtocol>> = RefCell::new(BoundedCache::new(MAX_RENDERED_ARTWORK_ENTRIES));
-    static GRID_BRAILLE_IMAGES: RefCell<BoundedCache<u64, DynamicImage>> = RefCell::new(BoundedCache::new(MAX_RENDERED_ARTWORK_ENTRIES));
+    static GRID_PROTOCOLS: RefCell<BoundedCache<(u64, Rect), StatefulProtocol>> = RefCell::new(BoundedCache::new(MAX_RENDERED_ARTWORK_ENTRIES));
+    static DECODED_IMAGES: RefCell<BoundedCache<u64, Arc<DynamicImage>>> = RefCell::new(BoundedCache::new(MAX_RENDERED_ARTWORK_ENTRIES));
     static BRAILLE_RENDERS: RefCell<BoundedCache<BrailleRenderKey, BrailleRender>> = RefCell::new(BoundedCache::new(MAX_RENDERED_ARTWORK_ENTRIES));
     static GRID_ARTWORK_MODE: RefCell<ArtworkMode> = const { RefCell::new(ArtworkMode::Auto) };
     static GRID_NATIVE_PROTOCOL: RefCell<Option<ratatui_image::picker::ProtocolType>> = const { RefCell::new(None) };
@@ -562,12 +606,13 @@ thread_local! {
 /// Initialize the grid renderer with a Picker clone.
 /// Call once at startup alongside the main artwork renderer init.
 pub fn init_grid_renderer(picker: Picker) {
+    reset_grid_placements();
     GRID_NATIVE_PROTOCOL.with(|p| *p.borrow_mut() = Some(picker.protocol_type()));
     GRID_PICKER.with(|p| *p.borrow_mut() = Some(picker));
 }
 
 /// Render an album cover image to the given area.
-/// Uses a thread-local protocol cache keyed by album rating_key.
+/// Decoded pixels are shared; each on-screen placement owns its resize protocol.
 /// Returns true if an image was rendered.
 pub fn render_grid_image(frame: &mut Frame, area: Rect, key: &str, data: &[u8]) -> bool {
     let mode = GRID_ARTWORK_MODE.with(|m| *m.borrow());
@@ -578,7 +623,8 @@ pub fn render_grid_image(frame: &mut Frame, area: Rect, key: &str, data: &[u8]) 
 
     // Protocol-based rendering (Auto/Halfblocks)
     let image_id = artwork_id(key, data);
-    let has_protocol = GRID_PROTOCOLS.with(|protos| protos.borrow().contains_key(&image_id));
+    let placement = (image_id, area);
+    let has_protocol = GRID_PROTOCOLS.with(|protos| protos.borrow().contains_key(&placement));
 
     if !has_protocol {
         let created = GRID_PICKER.with(|picker_cell| {
@@ -586,12 +632,12 @@ pub fn render_grid_image(frame: &mut Frame, area: Rect, key: &str, data: &[u8]) 
             let Some(picker) = picker_ref.as_mut() else {
                 return false;
             };
-            let Ok(img) = image::load_from_memory(data) else {
+            let Some(img) = decoded_image(image_id, data) else {
                 return false;
             };
-            let protocol = picker.new_resize_protocol(img);
+            let protocol = picker.new_resize_protocol((*img).clone());
             GRID_PROTOCOLS.with(|protos| {
-                protos.borrow_mut().insert(image_id, protocol);
+                protos.borrow_mut().insert(placement, protocol);
             });
             true
         });
@@ -602,7 +648,7 @@ pub fn render_grid_image(frame: &mut Frame, area: Rect, key: &str, data: &[u8]) 
 
     GRID_PROTOCOLS.with(|protos| {
         let mut map = protos.borrow_mut();
-        if let Some(protocol) = map.get_mut(&image_id) {
+        if let Some(protocol) = map.get_mut(&placement) {
             // Scale thumbnails to fit the render area.
             let image = StatefulImage::new().resize(Resize::Scale(None));
             frame.render_stateful_widget(image, area, protocol);
@@ -613,58 +659,287 @@ pub fn render_grid_image(frame: &mut Frame, area: Rect, key: &str, data: &[u8]) 
     })
 }
 
+fn decoded_image(image_id: u64, data: &[u8]) -> Option<Arc<DynamicImage>> {
+    if let Some(image) = DECODED_IMAGES.with(|images| images.borrow_mut().get(&image_id).cloned()) {
+        return Some(image);
+    }
+    let image = Arc::new(image::load_from_memory(data).ok()?);
+    DECODED_IMAGES.with(|images| images.borrow_mut().insert(image_id, image.clone()));
+    Some(image)
+}
+
 /// Render a grid album cover using braille characters.
 fn render_grid_braille(frame: &mut Frame, area: Rect, key: &str, data: &[u8]) -> bool {
     let image_id = artwork_id(key, data);
-    let has_image = GRID_BRAILLE_IMAGES.with(|imgs| imgs.borrow().contains_key(&image_id));
-
-    if !has_image {
-        let Ok(img) = image::load_from_memory(data) else {
-            return false;
-        };
-        GRID_BRAILLE_IMAGES.with(|imgs| {
-            imgs.borrow_mut().insert(image_id, img);
-        });
-    }
-
-    GRID_BRAILLE_IMAGES.with(|imgs| {
-        let mut map = imgs.borrow_mut();
-        if let Some(img) = map.get(&image_id) {
-            render_braille_image(frame, img, area, image_id);
-            true
-        } else {
-            false
-        }
-    })
+    let Some(image) = decoded_image(image_id, data) else {
+        return false;
+    };
+    render_braille_image(frame, &image, area, image_id);
+    true
 }
 
-/// Clear the grid protocol cache (e.g. on library switch).
+/// Recreate terminal placements while retaining decoded images and character artwork.
+pub fn reset_grid_placements() {
+    GRID_PROTOCOLS.with(|protocols| protocols.borrow_mut().clear());
+}
+
+/// Clear every presentation and decoded grid image on a library change.
 pub fn clear_grid_cache() {
     GRID_PROTOCOLS.with(|protos| protos.borrow_mut().clear());
-    GRID_BRAILLE_IMAGES.with(|imgs| imgs.borrow_mut().clear());
+    DECODED_IMAGES.with(|images| images.borrow_mut().clear());
     BRAILLE_RENDERS.with(|renders| renders.borrow_mut().clear());
 }
 
-/// Change the grid renderer's graphics protocol and clear cached images.
+/// Change the graphics encoder while retaining mode-independent decoded artwork.
 pub fn set_grid_protocol_type(protocol_type: ratatui_image::picker::ProtocolType) {
-    GRID_PICKER.with(|p| {
-        if let Some(ref mut picker) = *p.borrow_mut() {
+    let changed = GRID_PICKER.with(|cell| {
+        let mut picker = cell.borrow_mut();
+        if let Some(picker) = picker.as_mut()
+            && picker.protocol_type() != protocol_type
+        {
             picker.set_protocol_type(protocol_type);
+            return true;
         }
+        false
     });
-    clear_grid_cache();
+    if changed {
+        reset_grid_placements();
+    }
+}
+/// Whether the external terminal's detected protocol can display image placements.
+pub(crate) fn native_images_available() -> bool {
+    GRID_NATIVE_PROTOCOL.with(|native| {
+        native
+            .borrow()
+            .is_some_and(|protocol| protocol != ratatui_image::picker::ProtocolType::Halfblocks)
+    })
 }
 
-/// Restore the grid renderer's native protocol detected at startup.
+#[cfg(any(feature = "desktop", feature = "mobile"))]
+fn character_render(data: &[u8], mode: ArtworkMode) -> Option<(u16, u16, Vec<BrailleCell>)> {
+    let image = image::load_from_memory(data).ok()?;
+    let result = match mode {
+        ArtworkMode::Braille => {
+            let render = build_braille_render(&image, 48, 24)?;
+            (render.width, render.height, render.cells)
+        }
+        ArtworkMode::Halfblocks => {
+            let scaled = image.thumbnail(48, 48).to_rgb8();
+            let width = scaled.width() as u16;
+            let height = scaled.height().div_ceil(2) as u16;
+            let cells = (0..height)
+                .flat_map(|y| (0..width).map(move |x| (x, y)))
+                .map(|(x, y)| {
+                    let top = scaled.get_pixel(u32::from(x), u32::from(y) * 2).0;
+                    let bottom = scaled
+                        .get_pixel(
+                            u32::from(x),
+                            (u32::from(y) * 2 + 1).min(scaled.height() - 1),
+                        )
+                        .0;
+                    BrailleCell {
+                        symbol: '▀',
+                        foreground: Color::Rgb(top[0], top[1], top[2]),
+                        background: Color::Rgb(bottom[0], bottom[1], bottom[2]),
+                    }
+                })
+                .collect();
+            (width, height, cells)
+        }
+        ArtworkMode::Auto => return None,
+    };
+    Some(result)
+}
+
+/// Colored character cells for hosts that draw ANSI artwork without a terminal emulator.
+#[cfg(feature = "mobile")]
+pub(crate) type RgbCharacterCell = (char, [u8; 3], [u8; 3]);
+
+/// Encode a character grid with explicit RGB foreground and background colors.
+#[cfg(feature = "mobile")]
+pub(crate) fn character_cells(
+    data: &[u8],
+    mode: ArtworkMode,
+) -> Option<(u16, u16, Vec<RgbCharacterCell>)> {
+    let (width, height, cells) = character_render(data, mode)?;
+    let cells = cells
+        .into_iter()
+        .map(|cell| {
+            let Color::Rgb(r, g, b) = cell.foreground else {
+                return None;
+            };
+            let Color::Rgb(br, bg, bb) = cell.background else {
+                return None;
+            };
+            Some((cell.symbol, [r, g, b], [br, bg, bb]))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some((width, height, cells))
+}
+
+/// Encode the character artwork as SVG for a graphical image widget. Braille
+/// shares the terminal encoder; half blocks use the same two-color cell geometry.
+#[cfg(feature = "desktop")]
+pub(crate) fn character_svg(data: &[u8], mode: ArtworkMode) -> Option<Vec<u8>> {
+    use std::fmt::Write;
+    let (width, height, cells) = character_render(data, mode)?;
+    let mut svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}" viewBox="0 0 {} {}">"#,
+        width * 10,
+        height * 20,
+        width * 10,
+        height * 20
+    );
+    for (index, cell) in cells.iter().enumerate() {
+        let x = index % usize::from(width) * 10;
+        let y = index / usize::from(width) * 20;
+        let Color::Rgb(br, bg, bb) = cell.background else {
+            return None;
+        };
+        let Color::Rgb(fr, fg, fb) = cell.foreground else {
+            return None;
+        };
+        write!(
+            svg,
+            r#"<rect x="{x}" y="{y}" width="10" height="20" fill="rgb({br},{bg},{bb})"/>"#
+        )
+        .ok()?;
+        if mode == ArtworkMode::Halfblocks {
+            write!(
+                svg,
+                r#"<rect x="{x}" y="{y}" width="10" height="10" fill="rgb({fr},{fg},{fb})"/>"#
+            )
+            .ok()?;
+        } else {
+            write!(svg, r#"<text x="{x}" y="{}" font-family="monospace" font-size="20" fill="rgb({fr},{fg},{fb})">{}</text>"#, y+17,cell.symbol).ok()?;
+        }
+    }
+    svg.push_str("</svg>");
+    Some(svg.into_bytes())
+}
+
+/// Restore the detected terminal graphics encoder.
 pub fn restore_grid_native_protocol() {
-    let native = GRID_NATIVE_PROTOCOL.with(|p| *p.borrow());
-    if let Some(protocol_type) = native {
-        set_grid_protocol_type(protocol_type);
+    if let Some(native) = GRID_NATIVE_PROTOCOL.with(|native| *native.borrow()) {
+        set_grid_protocol_type(native);
+    }
+}
+/// Choose pixel or character artwork, preserving reusable image and resize caches.
+pub fn set_grid_artwork_mode(mode: ArtworkMode) {
+    GRID_ARTWORK_MODE.with(|current| *current.borrow_mut() = mode);
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    #[test]
+    #[allow(deprecated)]
+    fn placeholders_use_the_selected_character_encoder() {
+        crate::ui::theme::set_theme(crate::app::theme::ThemeName::SolarizedDark);
+        let mut picker = Picker::from_fontsize((8, 16));
+        picker.set_protocol_type(ratatui_image::picker::ProtocolType::Halfblocks);
+        init_grid_renderer(picker);
+        for mode in [ArtworkMode::Halfblocks, ArtworkMode::Braille] {
+            set_grid_artwork_mode(mode);
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 20)).unwrap();
+            terminal
+                .draw(|frame| {
+                    for (index, kind) in
+                        [Placeholder::Track, Placeholder::Album, Placeholder::Artist]
+                            .into_iter()
+                            .enumerate()
+                    {
+                        assert!(render_placeholder(
+                            frame,
+                            Rect::new(index as u16 * 20, 0, 20, 10),
+                            kind
+                        ));
+                    }
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            for column in 0..3 {
+                assert!((column * 20..column * 20 + 20).any(|x| (0..10).any(|y| {
+                    buffer[(x, y)].symbol().chars().any(|symbol| match mode {
+                        ArtworkMode::Halfblocks => matches!(symbol, '▀' | '▄'),
+                        ArtworkMode::Braille => ('\u{2801}'..='\u{28ff}').contains(&symbol),
+                        ArtworkMode::Auto => false,
+                    })
+                })));
+            }
+        }
+    }
+    #[test]
+    fn artwork_presentation_changes_reuse_decoded_pixels_and_character_renders() {
+        let image = DynamicImage::new_rgb8(128, 128);
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        let bytes = bytes.into_inner();
+        let id = artwork_id("cover", &bytes);
+        let decoded = decoded_image(id, &bytes).unwrap();
+        for mode in [
+            ArtworkMode::Braille,
+            ArtworkMode::Auto,
+            ArtworkMode::Braille,
+        ] {
+            set_grid_artwork_mode(mode);
+            let cached = decoded_image(id, &bytes).unwrap();
+            assert!(Arc::ptr_eq(&decoded, &cached));
+        }
+        clear_grid_cache();
+        assert!(!Arc::ptr_eq(&decoded, &decoded_image(id, &bytes).unwrap()));
     }
 }
 
-/// Set the grid renderer's artwork mode and clear caches.
-pub fn set_grid_artwork_mode(mode: ArtworkMode) {
-    GRID_ARTWORK_MODE.with(|m| *m.borrow_mut() = mode);
-    clear_grid_cache();
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn graphical_character_art_uses_the_braille_encoder_and_preserves_aspect_ratio() {
+        let image = DynamicImage::ImageRgb8(image::RgbImage::from_fn(16, 16, |x, y| {
+            image::Rgb([(x * 16) as u8, (y * 16) as u8, 128])
+        }));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        let braille =
+            String::from_utf8(character_svg(bytes.get_ref(), ArtworkMode::Braille).unwrap())
+                .unwrap();
+        assert!(
+            braille
+                .chars()
+                .any(|symbol| ('\u{2801}'..='\u{28ff}').contains(&symbol))
+        );
+        let blocks =
+            String::from_utf8(character_svg(bytes.get_ref(), ArtworkMode::Halfblocks).unwrap())
+                .unwrap();
+        assert!(blocks.contains("width=\"480\" height=\"480\""));
+        assert!(blocks.contains("height=\"10\""));
+    }
+    #[test]
+    fn changing_pixels_at_the_same_artwork_path_replaces_the_cached_image() {
+        use image::GenericImageView;
+        let mut pixels = image::RgbaImage::from_pixel(32, 32, image::Rgba([0, 0, 0, 255]));
+        let encode = |pixels| {
+            let mut output = std::io::Cursor::new(Vec::new());
+            DynamicImage::ImageRgba8(pixels)
+                .write_to(&mut output, image::ImageFormat::Bmp)
+                .unwrap();
+            output.into_inner()
+        };
+        let first = encode(pixels.clone());
+        pixels.put_pixel(16, 16, image::Rgba([255, 255, 255, 255]));
+        let second = encode(pixels);
+        assert_eq!(&first[..64], &second[..64]);
+        assert_eq!(&first[first.len() - 64..], &second[second.len() - 64..]);
+        let mut renderer = ArtworkRenderer::new();
+        renderer.set_mode(ArtworkMode::Braille);
+        assert!(renderer.load_image(&first, "same-path"));
+        assert!(renderer.load_image(&second, "same-path"));
+        assert_eq!(
+            renderer.braille_image.as_ref().unwrap().get_pixel(16, 16).0,
+            [255, 255, 255, 255]
+        );
+    }
 }

@@ -1,11 +1,11 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::{backend::TestBackend, Terminal};
+use ratatui::{Terminal, backend::TestBackend};
 use textamp::app::action::{DataAction, QueueAction, RadioAction, SearchAction};
 use textamp::app::handlers::{key_input, mouse_input};
 use textamp::app::sources::{
-    self, manager, navidrome::Session, sonic, ActiveSource, LibraryChoice, SourceAction,
+    self, ActiveSource, LibraryChoice, SourceAction, manager, navidrome::Session, sonic,
 };
-use textamp::app::state::{DjMode, SettingsFocus, SettingsSection, View};
+use textamp::app::state::{SettingsFocus, SettingsSection, View};
 use textamp::app::{Action, AppState};
 use textamp::config::Config;
 use textamp::navidrome::{Client, Source};
@@ -67,10 +67,12 @@ fn single_folder_migration_preserves_disabled_sonic_and_default_selection() {
     let (mut restored, choice) = nav_state(Some("one".into()));
     manager::initialize(&mut restored, &config);
     assert!(!sonic::enabled(&restored));
-    assert!(restored
-        .sources
-        .sonic_disabled_libraries
-        .contains(&sonic::choice_key(&choice, &restored).unwrap()));
+    assert!(
+        restored
+            .sources
+            .sonic_disabled_libraries
+            .contains(&sonic::choice_key(&choice, &restored).unwrap())
+    );
 }
 
 fn load_stations(state: &mut AppState) {
@@ -102,10 +104,12 @@ fn preferences_survive_config_round_trip_and_are_library_scoped() {
     other.sources.active = ActiveSource::None;
     manager::initialize(&mut other, &restored);
     assert!(!sonic::enabled(&other));
-    assert!(toml::from_str::<Config>("")
-        .unwrap()
-        .sonic_disabled_libraries
-        .is_empty());
+    assert!(
+        toml::from_str::<Config>("")
+            .unwrap()
+            .sonic_disabled_libraries
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -126,7 +130,7 @@ async fn disabled_commands_neither_start_requests_nor_change_the_queue() {
         }
         .into(),
         SearchAction::OpenAdventureLauncher.into(),
-        RadioAction::ToggleDjMode(DjMode::Gemini).into(),
+        RadioAction::PlayStation("nav-radio/stayClose".into()).into(),
         RadioAction::PlayStation("nav-radio/sonic".into()).into(),
         RadioAction::StartSonicRadio(Box::default()).into(),
         QueueAction::RemixStretch.into(),
@@ -144,11 +148,9 @@ async fn disabled_commands_neither_start_requests_nor_change_the_queue() {
     assert!(state.sources.nav_tasks.is_empty());
     assert!(state.track_pane_similar_loading.is_empty());
     assert!(state.popups.adventure_launcher().is_none());
-    assert!(state.dj.active_mode.is_none());
     assert!(state.queue.tracks.is_empty());
     assert!(rx.try_recv().is_err());
     for action in [
-        RadioAction::ToggleDjMode(DjMode::Twofer).into(),
         RadioAction::PlayStation("nav-radio/randomAlbum".into()).into(),
         QueueAction::RemixShuffle.into(),
     ] {
@@ -161,42 +163,54 @@ fn disabled_features_disappear_from_palette_context_and_station_navigation() {
     let (mut state, choice) = nav_state(None);
     state.view = View::Queue;
     load_stations(&mut state);
-    assert!(state.station_nav.columns[0]
-        .stations
-        .iter()
-        .any(|s| s.key == "nav-radio/sonic"));
+    assert!(
+        state.station_nav.columns[0]
+            .stations
+            .iter()
+            .any(|s| s.key == "nav-radio/sonic")
+    );
     disable(&mut state, &choice);
     sonic::reconcile(&mut state);
-    assert!(state.station_nav.columns[0]
-        .stations
-        .iter()
-        .any(|s| s.key == "nav-radio/randomAlbum"));
-    assert!(state.station_nav.columns[0]
-        .stations
-        .iter()
-        .any(|s| s.key == "dj:twofer"));
-    assert!(!state
-        .station_nav
-        .columns
-        .iter()
-        .flat_map(|c| &c.stations)
-        .any(sonic::station_requires_sonic));
+    assert!(
+        state.station_nav.columns[0]
+            .stations
+            .iter()
+            .any(|s| s.key == "nav-radio/randomAlbum")
+    );
+    assert!(
+        state.station_nav.columns[0]
+            .stations
+            .iter()
+            .any(|s| s.key == "nav-radio/randomArtist")
+    );
+    assert!(
+        !state
+            .station_nav
+            .columns
+            .iter()
+            .flat_map(|c| &c.stations)
+            .any(sonic::station_requires_sonic)
+    );
     let entries = textamp::app::command_palette::materialize_entries(&state);
     assert!(!entries.iter().any(|e| e.label.contains("Sonic")
-        || e.label.contains("Gemini")
+        || e.label.contains("Twins")
         || e.label.contains("Stretch")
         || e.label.contains("Freeze")));
     let contexts =
-        textamp::services::track_context::track_context_entries(&state, &Default::default(), false);
-    assert!(!contexts
-        .iter()
-        .any(|e| e.label.contains("Similar") || e.label.contains("Sonic")));
+        textamp::app::track_context::track_context_entries(&state, &Default::default(), false);
+    assert!(
+        !contexts
+            .iter()
+            .any(|e| e.label.contains("Similar") || e.label.contains("Sonic"))
+    );
     state.sources.sonic_disabled_libraries.clear();
     load_stations(&mut state);
-    assert!(state.station_nav.columns[0]
-        .stations
-        .iter()
-        .any(|s| s.key == "nav-radio/sonic"));
+    assert!(
+        state.station_nav.columns[0]
+            .stations
+            .iter()
+            .any(|s| s.key == "nav-radio/sonic")
+    );
 }
 
 #[test]
@@ -255,10 +269,12 @@ fn settings_checkbox_uses_the_highlighted_library_and_is_not_on_accounts_or_fold
     state.popups.library_picker_index = textamp::app::sources::choices(&state).len() - 1;
     terminal
         .draw(|f| {
-            assert!(textamp::ui::render(f, &state)
-                .hit_regions
-                .library_dialog
-                .is_empty())
+            assert!(
+                textamp::ui::render(f, &state)
+                    .hit_regions
+                    .library_dialog
+                    .is_empty()
+            )
         })
         .unwrap();
     let folder = LibraryChoice::Folder(textamp::library::FolderSource {
@@ -282,7 +298,6 @@ async fn disabling_cancels_work_without_stopping_current_music() {
     };
     state.queue.tracks = vec![track];
     state.queue.index = Some(0);
-    state.dj.active_mode = Some(DjMode::Gemini);
     let task = tokio::spawn(std::future::pending::<()>());
     state
         .sources
@@ -293,19 +308,13 @@ async fn disabling_cancels_work_without_stopping_current_music() {
     sonic::cancel_pending(&mut state);
     assert!(task.await.unwrap_err().is_cancelled());
     assert_ne!(state.radio_generation, epoch);
-    assert!(state.dj.active_mode.is_none());
     assert_eq!(state.current_track().unwrap().rating_key, "current");
-    state.dj.active_mode = Some(DjMode::Twofer);
-    state.dj.inserting = true;
-    sonic::cancel_pending(&mut state);
-    assert_eq!(state.dj.active_mode, Some(DjMode::Twofer));
-    assert!(!state.dj.inserting);
     // A queue undo may restore an old sonic station after the preference changed.
     state.radio.tracks = state.queue.tracks.clone();
     state.radio.track_index = Some(0);
     state.radio.active_station = Some(textamp::app::state::ActiveStation {
         source: textamp::library::models::RadioSource::Station("nav-radio/sonic".into()),
-        title: "Sonic Radio".into(),
+        title: "Sonic Mix".into(),
     });
     state.playback_mode = textamp::app::state::PlaybackMode::Radio;
     assert!(sonic::radio_blocked(&state));
@@ -315,4 +324,253 @@ async fn disabling_cancels_work_without_stopping_current_music() {
         textamp::app::state::PlaybackMode::Queue
     );
     assert_eq!(state.current_track().unwrap().rating_key, "current");
+}
+
+#[tokio::test]
+async fn journey_preview_preserves_queue_until_play_and_cancel_rejects_completion() {
+    use textamp::app::{action::SettingsAction, dispatch::dispatch_action, state::JourneyStage};
+    use textamp::library::models::Track;
+    for desktop in [false, true] {
+        let (mut state, _) = nav_state(None);
+        state.desktop_frontend = desktop;
+        let mut audio = textamp::audio::AudioPlayer::new_without_audio();
+        let mut config = Config::default();
+        let (tx, _rx) = tokio::sync::mpsc::channel(32);
+        let original = Track {
+            rating_key: "original".into(),
+            ..Default::default()
+        };
+        state.queue.tracks = vec![original.clone()];
+        dispatch_action(
+            SearchAction::OpenAdventureLauncher.into(),
+            &mut state,
+            &mut audio,
+            &mut config,
+            &tx,
+        )
+        .await
+        .unwrap();
+        state.adventure.generating = true;
+        state.adventure_request_id = 10;
+        state.popups.adventure_launcher_mut().unwrap().stage = JourneyStage::Generating;
+        let tracks: Vec<_> = ["A", "B", "C"]
+            .into_iter()
+            .map(|artist| Track {
+                rating_key: artist.into(),
+                title: artist.into(),
+                grandparent_title: Some(artist.into()),
+                ..Default::default()
+            })
+            .collect();
+        dispatch_action(
+            SettingsAction::AdventureGenerated {
+                request_id: 9,
+                result: Ok(tracks.clone()),
+            }
+            .into(),
+            &mut state,
+            &mut audio,
+            &mut config,
+            &tx,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            state.popups.adventure_launcher().unwrap().stage,
+            JourneyStage::Generating
+        ));
+        dispatch_action(
+            SettingsAction::AdventureGenerated {
+                request_id: 10,
+                result: Ok(tracks.clone()),
+            }
+            .into(),
+            &mut state,
+            &mut audio,
+            &mut config,
+            &tx,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            state.popups.adventure_launcher().unwrap().stage,
+            JourneyStage::Ready(_)
+        ));
+        assert_eq!(state.queue.tracks[0].rating_key, "original");
+        dispatch_action(
+            SearchAction::AdventureLauncherPlay.into(),
+            &mut state,
+            &mut audio,
+            &mut config,
+            &tx,
+        )
+        .await
+        .unwrap();
+        assert!(state.popups.adventure_launcher().is_none());
+        assert_eq!(state.queue.tracks.len(), 3);
+        assert_eq!(state.queue.tracks[0].rating_key, "A");
+        dispatch_action(
+            SearchAction::OpenAdventureLauncher.into(),
+            &mut state,
+            &mut audio,
+            &mut config,
+            &tx,
+        )
+        .await
+        .unwrap();
+        state.adventure.generating = true;
+        let request_id = state.adventure_request_id;
+        dispatch_action(
+            SearchAction::CloseAdventureLauncher.into(),
+            &mut state,
+            &mut audio,
+            &mut config,
+            &tx,
+        )
+        .await
+        .unwrap();
+        dispatch_action(
+            SettingsAction::AdventureGenerated {
+                request_id,
+                result: Ok(vec![original]),
+            }
+            .into(),
+            &mut state,
+            &mut audio,
+            &mut config,
+            &tx,
+        )
+        .await
+        .unwrap();
+        assert!(state.popups.adventure_launcher().is_none());
+        assert_eq!(state.queue.tracks.len(), 3);
+    }
+}
+
+#[tokio::test]
+async fn artist_radio_is_one_explicit_chooser_without_automatic_playback() {
+    let (mut state, _) = nav_state(None);
+    state.library.artists = std::sync::Arc::new(
+        (0..75)
+            .map(|index| textamp::library::models::Artist {
+                rating_key: format!("artist-{index}"),
+                title: format!("Artist {index}"),
+                ..Default::default()
+            })
+            .collect(),
+    );
+    let mut audio = textamp::audio::AudioPlayer::new_without_audio();
+    let mut config = Config::default();
+    let (tx, _rx) = tokio::sync::mpsc::channel(32);
+    textamp::app::dispatch::dispatch_action(
+        SearchAction::OpenArtistRadioPicker.into(),
+        &mut state,
+        &mut audio,
+        &mut config,
+        &tx,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        state
+            .popups
+            .artist_radio_picker()
+            .unwrap()
+            .filtered_artists
+            .len(),
+        50
+    );
+    for index in 0..12 {
+        state.popups.artist_radio_picker_mut().unwrap().item_index = index;
+        textamp::app::dispatch::dispatch_action(
+            SearchAction::ArtistRadioPickerToggleArtist.into(),
+            &mut state,
+            &mut audio,
+            &mut config,
+            &tx,
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(
+        state
+            .popups
+            .artist_radio_picker()
+            .unwrap()
+            .selected_artists
+            .len(),
+        12
+    );
+    assert!(state.station_starting.is_none());
+    assert!(state.radio_task.is_none());
+    assert!(state.queue.tracks.is_empty());
+    state.popups.artist_radio_picker_mut().unwrap().item_index = 0;
+    textamp::app::dispatch::dispatch_action(
+        SearchAction::ArtistRadioPickerToggleArtist.into(),
+        &mut state,
+        &mut audio,
+        &mut config,
+        &tx,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        state
+            .popups
+            .artist_radio_picker()
+            .unwrap()
+            .selected_artists
+            .len(),
+        11
+    );
+}
+
+#[tokio::test]
+async fn endpoint_search_edits_invalidate_only_the_edited_selection_without_playing() {
+    use textamp::app::state::AdventureStep;
+    let (mut state, _) = nav_state(None);
+    let mut config = Config::default();
+    let mut audio = textamp::audio::AudioPlayer::new_without_audio();
+    let (tx, _rx) = tokio::sync::mpsc::channel(32);
+    textamp::app::dispatch::dispatch_action(
+        SearchAction::OpenAdventureLauncher.into(),
+        &mut state,
+        &mut audio,
+        &mut config,
+        &tx,
+    )
+    .await
+    .unwrap();
+    let start = textamp::library::models::Track {
+        rating_key: "start".into(),
+        title: "Start".into(),
+        ..Default::default()
+    };
+    let end = textamp::library::models::Track {
+        rating_key: "end".into(),
+        title: "End".into(),
+        ..Default::default()
+    };
+    let launcher = state.popups.adventure_launcher_mut().unwrap();
+    launcher.start_track = Some(start);
+    launcher.end_track = Some(end);
+    textamp::app::dispatch::dispatch_action(
+        SearchAction::AdventureLauncherSetEndpointQuery {
+            step: AdventureStep::FindEndTrack,
+            query: "New endpoint".into(),
+        }
+        .into(),
+        &mut state,
+        &mut audio,
+        &mut config,
+        &tx,
+    )
+    .await
+    .unwrap();
+    let launcher = state.popups.adventure_launcher().unwrap();
+    assert!(launcher.start_track.is_some());
+    assert!(launcher.end_track.is_none());
+    assert_eq!(launcher.query, "New endpoint");
+    assert!(!state.adventure.generating);
+    assert!(state.queue.tracks.is_empty());
 }

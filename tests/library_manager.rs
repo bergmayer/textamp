@@ -1,8 +1,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::{backend::TestBackend, Terminal};
+use ratatui::{Terminal, backend::TestBackend};
 use textamp::app::action::SearchAction;
 use textamp::app::handlers::{key_input, mouse_input};
-use textamp::app::sources::{self, manager, ActiveSource, LibraryChoice, SourceAction};
+use textamp::app::sources::{self, ActiveSource, LibraryChoice, SourceAction, manager};
 use textamp::app::state::{SettingsFocus, SettingsSection, View};
 use textamp::app::{Action, AppState};
 use textamp::config::Config;
@@ -139,12 +139,14 @@ fn manager_owns_navigation_and_refresh_keys_instead_of_the_underlying_view() {
     manager::initialize(&mut state, &config());
     open_settings(&mut state);
     for key in ['a', 's', 'n'] {
-        assert!(key_input::handle_key(
-            KeyEvent::new(KeyCode::Char(key), KeyModifiers::CONTROL),
-            &mut state,
-            &config()
-        )
-        .is_empty());
+        assert!(
+            key_input::handle_key(
+                KeyEvent::new(KeyCode::Char(key), KeyModifiers::CONTROL),
+                &mut state,
+                &config()
+            )
+            .is_empty()
+        );
     }
     assert!(matches!(
         press(&mut state, KeyCode::F(5)).as_slice(),

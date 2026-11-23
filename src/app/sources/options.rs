@@ -42,6 +42,24 @@ pub enum OptionAction {
     Remove,
     Close,
 }
+/// Cache controls retain library ownership and use shared confirmation actions.
+pub fn cache_controls(
+    choice: &LibraryChoice,
+    state: &AppState,
+) -> [(OptionAction, &'static str); 3] {
+    [
+        (
+            OptionAction::Rescan,
+            if super::cache::running(choice, state) {
+                "Cancel scan"
+            } else {
+                "Re-scan library now"
+            },
+        ),
+        (OptionAction::Clear, "Clear metadata cache…"),
+        (OptionAction::ClearArtwork, "Clear downloaded artwork…"),
+    ]
+}
 impl Options {
     pub fn pages(&self, state: &AppState) -> Vec<OptionsPage> {
         let mut pages = vec![OptionsPage::General];
@@ -96,18 +114,10 @@ impl Options {
             ));
             items.push((AudioMuse, "AudioMuse connection…".into()));
         }
+        items.extend(
+            cache_controls(&self.choice, state).map(|(action, label)| (action, label.into())),
+        );
         items.extend([
-            (
-                Rescan,
-                if super::cache::running(&self.choice, state) {
-                    "Cancel refresh"
-                } else {
-                    "Re-scan library now"
-                }
-                .into(),
-            ),
-            (Clear, "Clear library cache…".into()),
-            (ClearArtwork, "Clear downloaded artwork…".into()),
             (
                 Remove,
                 if matches!(self.choice, LibraryChoice::Navidrome { .. }) {
@@ -165,6 +175,12 @@ pub fn activate(state: &mut AppState) -> Vec<Action> {
     if matches!(action, Rename | Connection | AudioMuse | Remove) {
         state.settings_state.library_return = Some(options.clone());
     }
+    apply(choice, action, state)
+}
+
+/// Execute a named option independently of the terminal options selection.
+pub fn apply(choice: LibraryChoice, action: OptionAction, state: &mut AppState) -> Vec<Action> {
+    use OptionAction::*;
     if action == Sonic {
         return vec![SourceAction::ToggleSonic(choice).into()];
     }
@@ -225,18 +241,18 @@ pub fn shortcut(choice: &LibraryChoice, key: KeyCode, state: &mut AppState) -> V
         }
 
         KeyCode::Char('c') => {
-            if let Some(LibraryChoice::Folder(source)) = Some(choice) {
-                if matches!(
+            if let Some(LibraryChoice::Folder(source)) = Some(choice)
+                && matches!(
                     source.location,
                     crate::library::FolderLocation::Webdav { .. }
-                ) {
-                    state.popups.set_library_dialog(Some(
-                        crate::app::sources::dialogs::Dialog::Webdav(
-                            crate::app::sources::dialogs::WebdavForm::new(Some(source)),
-                        ),
-                    ));
-                    return vec![];
-                }
+                )
+            {
+                state.popups.set_library_dialog(Some(
+                    crate::app::sources::dialogs::Dialog::Webdav(
+                        crate::app::sources::dialogs::WebdavForm::new(Some(source)),
+                    ),
+                ));
+                return vec![];
             }
             if let Some(LibraryChoice::Navidrome { source, .. }) = Some(choice) {
                 state.popups.set_library_dialog(Some(

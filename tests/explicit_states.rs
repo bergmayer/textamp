@@ -3,10 +3,10 @@ use textamp::app::action::PlaybackAction;
 use textamp::app::dispatch::{dispatch_action, handle_core_event};
 use textamp::app::event::ArtworkEvent;
 use textamp::app::handlers::{key_input, lazy_art};
-use textamp::app::sources::{dialogs::Dialog, FileAction, MediaPreparation};
+use textamp::app::sources::{FileAction, MediaPreparation, dialogs::Dialog};
 use textamp::app::state::{
-    ArtworkFetch, ArtworkNavigation, ConfirmAction, ConfirmDialog, Modal, PlayStatus, PlaybackMode,
-    ART_LOAD_PAUSE_MS,
+    ART_LOAD_PAUSE_MS, ArtworkFetch, ArtworkNavigation, ConfirmAction, ConfirmDialog, Modal,
+    PlayStatus, PlaybackMode,
 };
 use textamp::app::{AppState, Event};
 use textamp::config::Config;
@@ -39,15 +39,6 @@ fn modal_replacement_and_confirmation_dismissal_preserve_only_library_parent() {
         state.popups.library_dialog(),
         Some(Dialog::Add { selected: 2 })
     ));
-    state.popups.set_sound_output_active(true);
-    state.popups.set_confirm_dialog(Some(confirm()));
-    assert!(!state.popups.sound_output_active());
-    key_input::handle_key(
-        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-        &mut state,
-        &Config::default(),
-    );
-    assert!(matches!(state.popups.modal(), Modal::Closed));
 }
 
 #[test]

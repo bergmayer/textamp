@@ -2,7 +2,7 @@ use super::super::recommendations::{self, Recommendations};
 use super::*;
 use crate::app::event::DataEvent;
 use crate::app::state::{AdventureDrillLevel, RelatedArtistGroup, RelatedSource, SimilarMode};
-use crate::navidrome::{array, object, Song};
+use crate::navidrome::{Song, array, object};
 use std::collections::HashSet;
 
 pub(in crate::app::sources::navidrome) async fn similar(
@@ -10,7 +10,10 @@ pub(in crate::app::sources::navidrome) async fn similar(
     id: &str,
     sonic: bool,
 ) -> anyhow::Result<Vec<Track>> {
-    anyhow::ensure!(!sonic || session.extensions.contains("sonicSimilarity"), "Sonic analysis unavailable: enable the AudioMuse sonicSimilarity plugin in Navidrome, then refresh with F5");
+    anyhow::ensure!(
+        !sonic || session.extensions.contains("sonicSimilarity"),
+        "Sonic analysis unavailable: enable the AudioMuse sonicSimilarity plugin in Navidrome, then choose Refresh Library"
+    );
     let params = [("id", id.into()), ("count", "50".into())];
     let songs: Vec<Song> = if sonic {
         let response = session
@@ -120,13 +123,30 @@ pub fn intercept(
             let api = Recommendations::new(state, session);
             let sonic = recommendations::available(state);
             let session = session.clone();
+            let seed = state
+                .library
+                .all_tracks
+                .iter()
+                .chain(
+                    state
+                        .browse_nav()
+                        .into_iter()
+                        .flat_map(|nav| nav.columns.iter().flat_map(|col| col.tracks.iter())),
+                )
+                .find(|track| track.rating_key == rating_key)
+                .cloned();
             spawn(state, tx, "similar-pane", async move {
                 let result = async {
                     Ok(api
                         .similar(&session.id(&rating_key)?, sonic)
                         .await?
                         .into_iter()
-                        .filter(|t| t.rating_key != rating_key)
+                        .filter(|t| {
+                            t.rating_key != rating_key
+                                && !seed.as_ref().is_some_and(|seed| {
+                                    crate::app::track_context::same_artist(seed, t)
+                                })
+                        })
                         .collect())
                 }
                 .await
@@ -139,12 +159,18 @@ pub fn intercept(
             });
         }
         Action::Playback(PlaybackAction::Stop) => {
-            for slot in ["dj", "remix"] {
-                state.sources.nav_tasks.remove(slot);
-            }
+            state.sources.nav_tasks.remove("remix");
             return None;
         }
         Action::Search(SearchAction::ArtistRadioPickerLaunch) => {
+            if !state
+                .popups
+                .artist_radio_picker()
+                .is_some_and(|picker| (1..=12).contains(&picker.selected_artists.len()))
+            {
+                state.set_error("Choose one to twelve artists".into());
+                return Some(vec![]);
+            }
             if let Some(picker) = state.popups.take_artist_radio_picker() {
                 let artists: Vec<_> = picker
                     .selected_artists
@@ -152,22 +178,22 @@ pub fn intercept(
                     .map(|a| &a.rating_key)
                     .collect();
                 let encoded = serde_json::to_string(&artists).expect("string array");
-                return Some(vec![RadioAction::StartStation(
-                    crate::app::state::ActiveStation {
+                return Some(vec![
+                    RadioAction::StartStation(crate::app::state::ActiveStation {
                         source: crate::library::models::RadioSource::Station(format!(
                             "nav-radio/artists?id={}",
                             urlencoding::encode(&encoded)
                         )),
-                        title: "Artist Radio".into(),
-                    },
-                )
-                .into()]);
+                        title: "Artist Mix".into(),
+                    })
+                    .into(),
+                ]);
             }
         }
         Action::Search(
             SearchAction::OpenAdventureLauncher
             | SearchAction::OpenAdventureLauncherWithStart { .. },
-        ) if !recommendations::available(state) => {
+        ) if !state.desktop_frontend && !recommendations::available(state) => {
             state.set_status("This server does not provide sonic paths".into())
         }
         Action::Search(SearchAction::AdventureLauncherDrillArtist { key, name }) => {
@@ -208,12 +234,22 @@ pub fn intercept(
         Action::Search(SearchAction::AdventureLauncherGenerate) => {
             if let Some(l) = state.popups.adventure_launcher() {
                 if let (Some(start), Some(end)) = (l.start_track.clone(), l.end_track.clone()) {
-                    let count = l
-                        .track_count_input
-                        .parse::<usize>()
-                        .unwrap_or(20)
-                        .clamp(5, 100);
-                    state.popups.set_adventure_launcher(None);
+                    if let Err(error) =
+                        crate::services::sonic_adventure::validate_endpoints(&start, &end)
+                    {
+                        state.set_error(error.to_string());
+                        return Some(vec![]);
+                    }
+                    let count = match crate::app::journey::track_count(&l.track_count_input) {
+                        Ok(count) => count,
+                        Err(error) => {
+                            state.set_error(error.to_string());
+                            return Some(vec![]);
+                        }
+                    };
+                    if let Some(launcher) = state.popups.adventure_launcher_mut() {
+                        launcher.stage = crate::app::state::JourneyStage::Generating;
+                    }
                     adventure(state, tx, session, start, end, count);
                 } else {
                     state.set_error("Choose a start and end track".into());
@@ -241,13 +277,10 @@ fn load_similar(
     title: String,
     mode: SimilarMode,
 ) {
-    state.similar.details = Default::default();
     state.similar.source_title = title;
     state.similar.mode = mode;
     state.similar.source_key = Some(key.clone());
-    state.similar.error = None;
-    state.similar.request_key = Some(key.clone());
-    state.similar.loading = true;
+    state.similar.request = crate::app::state::SimilarRequest::Loading { key: key.clone() };
     state.similar.tracks.clear();
     state.similar.artists.clear();
     state.similar.albums.clear();
@@ -343,6 +376,10 @@ fn adventure(
         state.set_status("This server does not provide sonic paths".into());
         return;
     }
+    if let Err(error) = crate::services::sonic_adventure::validate_endpoints(&start, &end) {
+        state.set_error(error.to_string());
+        return;
+    }
     state.adventure.generating = true;
     state.adventure_request_id = state.adventure_request_id.wrapping_add(1);
     let request_id = state.adventure_request_id;
@@ -356,10 +393,8 @@ fn adventure(
         }
         .await
         .map_err(failure);
-        Ok(vec![SettingsAction::AdventureGenerated {
-            request_id,
-            result,
-        }
-        .into()])
+        Ok(vec![
+            SettingsAction::AdventureGenerated { request_id, result }.into(),
+        ])
     });
 }

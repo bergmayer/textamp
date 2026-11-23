@@ -4,7 +4,7 @@
 use super::*;
 use crate::app::action::SystemAction;
 use crate::app::state::{ConfirmAction, ConfirmDialog, PaletteCommandKind, PaletteEntry};
-use crate::navidrome::{array, Song};
+use crate::navidrome::{Song, array};
 
 #[derive(Debug, Clone)]
 pub enum Command {
@@ -15,8 +15,28 @@ pub enum Command {
     Lyrics,
     SaveQueue,
     RestoreQueue,
+    ChoosePlaylist(playlist_edit::Addition),
+    PromptNewPlaylist(Option<playlist_edit::Addition>),
+    CreatePlaylist {
+        generation: u64,
+        name: String,
+        addition: Option<playlist_edit::Addition>,
+    },
+    Append {
+        playlist: String,
+        addition: playlist_edit::Addition,
+    },
+    EditEntry {
+        playlist: String,
+        index: usize,
+        entries: Vec<(usize, String)>,
+        edit: playlist_edit::Edit,
+    },
     RenamePlaylist(String),
-    SetPlaylistName { id: String, name: String },
+    SetPlaylistName {
+        id: String,
+        name: String,
+    },
     ConfirmDeletePlaylist(String),
     DeletePlaylist(String),
     ConfirmReplacePlaylist(String),
@@ -35,6 +55,8 @@ pub enum CollectionKind {
     FavoriteAlbums,
     FavoriteArtists,
     RandomMix,
+    RandomAlbums,
+    TopRatedAlbums,
 }
 impl CollectionKind {
     pub const SIDEBAR: [Self; 6] = [
@@ -56,6 +78,8 @@ impl CollectionKind {
             Self::FavoriteAlbums => "Favorite albums",
             Self::FavoriteArtists => "Favorite artists",
             Self::RandomMix => "Random song mix",
+            Self::RandomAlbums => "Random albums",
+            Self::TopRatedAlbums => "Top rated albums",
         }
     }
     pub fn action(self) -> Action {
@@ -63,7 +87,7 @@ impl CollectionKind {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Collection {
     Artists(Vec<crate::library::models::Artist>),
     Albums(Vec<crate::library::models::Album>),
@@ -88,8 +112,9 @@ pub async fn load_collection(
     kind: CollectionKind,
 ) -> anyhow::Result<Collection> {
     use CollectionKind::*;
+    let ticket = collection_ticket(session, kind);
     let mut params = session.client.scope();
-    Ok(match kind {
+    let collection = match kind {
         AudioMuse(_) => anyhow::bail!("AudioMuse collections use the analysis service"),
         FavoriteSongs | FavoriteAlbums | FavoriteArtists => {
             let response = session.client.call("getStarred2", &params).await?;
@@ -125,10 +150,12 @@ pub async fn load_collection(
                     .collect(),
             )
         }
-        RecentlyPlayed | RecentlyAdded | MostPlayed => {
+        RecentlyPlayed | RecentlyAdded | MostPlayed | RandomAlbums | TopRatedAlbums => {
             let kind = match kind {
                 RecentlyPlayed => "recent",
                 MostPlayed => "frequent",
+                RandomAlbums => "random",
+                TopRatedAlbums => "highest",
                 _ => "newest",
             };
             params.extend([("type", kind.into()), ("size", "100".into())]);
@@ -140,7 +167,42 @@ pub async fn load_collection(
                     .collect(),
             )
         }
-    })
+    };
+    if let Some(ticket) = ticket {
+        let saved = collection.clone();
+        if let Err(error) = crate::app::tasks::spawn_blocking(move || ticket.write(&saved)).await? {
+            tracing::warn!("Save album destination cache: {error}");
+        }
+    }
+    Ok(collection)
+}
+
+fn collection_ticket(
+    session: &Session,
+    kind: CollectionKind,
+) -> Option<crate::library::cache::Ticket> {
+    use CollectionKind::*;
+    let key = match kind {
+        RecentlyPlayed => "albums-recently-played",
+        RecentlyAdded => "albums-recently-added",
+        MostPlayed => "albums-most-played",
+        FavoriteAlbums => "albums-favorites",
+        RandomAlbums => "albums-random",
+        TopRatedAlbums => "albums-top-rated",
+        _ => return None,
+    };
+    Some(session.cache_store().ok()?.ticket(key))
+}
+pub(super) async fn cached_collection(
+    session: &Session,
+    kind: CollectionKind,
+) -> Option<crate::library::cache::Hit<Collection>> {
+    let ticket = collection_ticket(session, kind)?;
+    crate::app::tasks::spawn_blocking(move || ticket.read(crate::library::cache::REFRESH_INTERVAL))
+        .await
+        .ok()?
+        .ok()
+        .flatten()
 }
 
 pub fn entries(state: &AppState) -> Vec<PaletteEntry> {
@@ -151,19 +213,12 @@ pub fn entries(state: &AppState) -> Vec<PaletteEntry> {
         CollectionKind::RandomMix.label(),
         Command::Collection(CollectionKind::RandomMix),
     )];
-    if super::super::sonic::enabled(state) && super::super::audiomuse::connection(state).is_some() {
-        commands.extend(
-            crate::audiomuse::Feature::ALL
-                .into_iter()
-                .filter(|feature| feature.is_search())
-                .map(|feature| {
-                    (
-                        feature.label(),
-                        Command::Collection(CollectionKind::AudioMuse(feature)),
-                    )
-                }),
-        );
-    }
+    commands.extend(crate::audiomuse::Feature::ALL.into_iter().map(|feature| {
+        (
+            feature.label(),
+            Command::Collection(CollectionKind::AudioMuse(feature)),
+        )
+    }));
     commands.extend([
         ("Save playback queue to Navidrome", Command::SaveQueue),
         (
@@ -171,6 +226,39 @@ pub fn entries(state: &AppState) -> Vec<PaletteEntry> {
             Command::RestoreQueue,
         ),
     ]);
+    if state.view == View::Browse && !state.category_column_focused && !state.palette.player_context
+    {
+        if let Some((key, _)) = state.focused_album().filter(|(key, _)| {
+            state
+                .sources
+                .active
+                .navidrome()
+                .is_some_and(|s| s.id(key).is_ok())
+        }) {
+            commands.push((
+                "Add Album to Playlist…",
+                Command::ChoosePlaylist(playlist_edit::Addition::Album(key)),
+            ));
+        }
+        if state.browse_category == BrowseCategory::Playlists
+            && let Some(col) = state.playlist_nav.focused()
+            && col.header_selection == crate::app::state::ColumnHeaderSelection::Items
+        {
+            let cursor = if col.selected_set.contains(&col.selected_index) {
+                col.selected_index
+            } else {
+                col.selected_set
+                    .first()
+                    .copied()
+                    .unwrap_or(col.selected_index)
+            };
+            for edit in playlist_edit::Edit::ALL {
+                if let Some(command) = playlist_edit::row_command(state, col, cursor, edit) {
+                    commands.push((edit.label(), command));
+                }
+            }
+        }
+    }
     if favorite_target(state).is_some() {
         commands.extend([
             ("Favorite selection", Command::Star(true)),
@@ -178,12 +266,8 @@ pub fn entries(state: &AppState) -> Vec<PaletteEntry> {
         ]);
     }
     if state.palette_target_track().is_some() {
-        if super::super::sonic::enabled(state)
-            && super::super::audiomuse::connection(state).is_some()
-        {
-            commands.push(("AudioMuse analysis", Command::Analysis));
-        }
-        commands.push(("Lyrics", Command::Lyrics));
+        commands.push(("AudioMuse analysis", Command::Analysis));
+        commands.push(("Server Lyrics", Command::Lyrics));
         for (label, rating) in [
             ("Clear song rating", 0),
             ("Rate song 1 star", 1),
@@ -195,25 +279,24 @@ pub fn entries(state: &AppState) -> Vec<PaletteEntry> {
             commands.push((label, Command::Rating(rating)));
         }
     }
-    if state.browse_category == BrowseCategory::Playlists {
-        if let Some(crate::app::state::BrowseItem::Playlist { key, .. }) = state
+    if state.browse_category == BrowseCategory::Playlists
+        && let Some(crate::app::state::BrowseItem::Playlist { key, .. }) = state
             .playlist_nav
             .columns
             .first()
             .and_then(|c| c.items.get(c.selected_index))
-        {
-            commands.extend([
-                ("Rename playlist", Command::RenamePlaylist(key.clone())),
-                (
-                    "Delete playlist",
-                    Command::ConfirmDeletePlaylist(key.clone()),
-                ),
-                (
-                    "Replace playlist with queue",
-                    Command::ConfirmReplacePlaylist(key.clone()),
-                ),
-            ]);
-        }
+    {
+        commands.extend([
+            ("Rename playlist", Command::RenamePlaylist(key.clone())),
+            (
+                "Delete playlist",
+                Command::ConfirmDeletePlaylist(key.clone()),
+            ),
+            (
+                "Replace playlist with queue",
+                Command::ConfirmReplacePlaylist(key.clone()),
+            ),
+        ]);
     }
     commands
         .into_iter()
@@ -240,6 +323,88 @@ pub fn dispatch(command: Command, state: &mut AppState, tx: &mpsc::Sender<Event>
         return;
     };
     match command.clone() {
+        Command::ChoosePlaylist(addition) => playlist_edit::choose(state, &session, addition),
+        Command::PromptNewPlaylist(addition) => {
+            if state.downloads.is_offline()
+                || addition.as_ref().is_some_and(|a| !a.belongs_to(&session))
+            {
+                return;
+            }
+            state.popups.set_input_dialog(Some(InputDialog {
+                title: "New Playlist".into(),
+                input: String::new().into(),
+                action_type: InputDialogAction::CreatePlaylist {
+                    generation: state.library_generation,
+                    addition,
+                },
+            }));
+        }
+        Command::CreatePlaylist {
+            generation,
+            name,
+            addition,
+        } => {
+            if generation == state.library_generation
+                && !state.downloads.is_offline()
+                && addition.as_ref().is_none_or(|a| a.belongs_to(&session))
+            {
+                effects::save_playlist(state, tx, session, name, addition);
+            }
+        }
+        Command::Append { playlist, addition } => {
+            if state.downloads.is_offline()
+                || !state
+                    .library
+                    .playlists
+                    .iter()
+                    .any(|p| p.rating_key == playlist && !p.smart)
+            {
+                return;
+            }
+            effects::spawn(
+                state,
+                tx,
+                "playlist-write",
+                playlist_edit::save(session, playlist, playlist_edit::Change::Append(addition)),
+            );
+        }
+        Command::EditEntry {
+            playlist,
+            index,
+            entries,
+            edit,
+        } => {
+            let Some(col) = state
+                .playlist_nav
+                .columns
+                .iter()
+                .find(|c| playlist_edit::editable(state, c) == Some(playlist.as_str()))
+            else {
+                return;
+            };
+            if !entries
+                .iter()
+                .all(|(i, key)| col.tracks.get(*i).is_some_and(|t| &t.rating_key == key))
+            {
+                return;
+            }
+            let expected = col.tracks.iter().map(|t| t.rating_key.clone()).collect();
+            effects::spawn(
+                state,
+                tx,
+                "playlist-write",
+                playlist_edit::save(
+                    session,
+                    playlist,
+                    playlist_edit::Change::Edit {
+                        expected,
+                        indices: entries.into_iter().map(|(i, _)| i).collect(),
+                        index,
+                        edit,
+                    },
+                ),
+            );
+        }
         Command::Analysis => {
             super::super::audiomuse::track_info(state, tx);
         }
@@ -293,24 +458,9 @@ pub fn dispatch(command: Command, state: &mut AppState, tx: &mpsc::Sender<Event>
             }));
         }
         Command::Lyrics => {
-            let Some(track) = state.palette_target_track() else {
-                return;
-            };
-            state.sources.nav_request_id = state.sources.nav_request_id.wrapping_add(1);
-            let request_id = state.sources.nav_request_id;
-            state.popups.close_all();
-            state.popups.set_text(Some(crate::app::state::TextPopup {
-                title: format!("Lyrics · {}", track.title),
-                text: "Loading…".into(),
-                scroll: 0,
-                request_id,
-            }));
-            effects::spawn(state, tx, "lyrics", async move {
-                let result = lyrics(&session, &track)
-                    .await
-                    .map_err(|e| format!("Lyrics: {e:#}"));
-                Ok(vec![NavAction::Text { request_id, result }.into()])
-            });
+            if let Some(track) = state.palette_target_track() {
+                crate::app::lyrics::open(state, tx, track, false);
+            }
         }
         Command::Star(starred) => {
             let Some((parameter, key)) = favorite_target(state) else {
@@ -324,15 +474,17 @@ pub fn dispatch(command: Command, state: &mut AppState, tx: &mpsc::Sender<Event>
                         &[(parameter, session.id(&key)?)],
                     )
                     .await?;
-                Ok(vec![SystemAction::SetStatus(
-                    if starred {
-                        "Favorite saved"
-                    } else {
-                        "Favorite removed"
-                    }
+                Ok(vec![
+                    SystemAction::SetStatus(
+                        if starred {
+                            "Favorite saved"
+                        } else {
+                            "Favorite removed"
+                        }
+                        .into(),
+                    )
                     .into(),
-                )
-                .into()])
+                ])
             });
         }
         Command::Rating(rating) => {
@@ -359,6 +511,14 @@ pub fn dispatch(command: Command, state: &mut AppState, tx: &mpsc::Sender<Event>
             state.set_view(View::Browse);
             state.browse_category = BrowseCategory::Library;
             state.sources.nav_collection = Some(kind);
+            state.category_column_focused = false;
+            state.desktop_library_root = match kind {
+                CollectionKind::FavoriteArtists => crate::app::state::LibraryRoot::Artists,
+                CollectionKind::FavoriteSongs | CollectionKind::RandomMix => {
+                    crate::app::state::LibraryRoot::Tracks
+                }
+                _ => crate::app::state::LibraryRoot::Albums,
+            };
             state.artist_nav_request_id = state.artist_nav_request_id.wrapping_add(1);
             let request_id = state.artist_nav_request_id;
             state.artist_nav =
@@ -373,15 +533,41 @@ pub fn dispatch(command: Command, state: &mut AppState, tx: &mpsc::Sender<Event>
             state.category_column_index = state.category_rows().iter().position(|row|
                 matches!(row, crate::app::state::CategoryRow::NavidromeCollection(k) if *k == kind))
                 .unwrap_or(0);
-            effects::spawn(state, tx, "collection", async move {
-                let items = load_collection(&session, kind).await?;
-                Ok(vec![NavAction::List {
-                    request_id,
-                    kind,
-                    items,
-                }
-                .into()])
-            });
+            if kind == CollectionKind::RandomAlbums {
+                super::random_albums::open(state, tx);
+                return;
+            }
+            let events = tx.clone();
+            effects::spawn_scoped(
+                state,
+                tx,
+                "collection",
+                move |generation, operation_id| async move {
+                    if let Some(hit) = cached_collection(&session, kind).await {
+                        let _ = events
+                            .send(Event::Effect(
+                                NavAction::CollectionPreview {
+                                    generation,
+                                    operation_id,
+                                    request_id,
+                                    kind,
+                                    items: hit.value,
+                                }
+                                .into(),
+                            ))
+                            .await;
+                    }
+                    let items = load_collection(&session, kind).await?;
+                    Ok(vec![
+                        NavAction::List {
+                            request_id,
+                            kind,
+                            items,
+                        }
+                        .into(),
+                    ])
+                },
+            );
         }
         Command::SaveQueue => {
             let tracks = state.queue.tracks.clone();
@@ -398,7 +584,7 @@ pub fn dispatch(command: Command, state: &mut AppState, tx: &mpsc::Sender<Event>
                 }
                 session.client.call("savePlayQueue", &params).await?;
                 Ok(vec![
-                    SystemAction::SetStatus("Playback queue saved".into()).into()
+                    SystemAction::SetStatus("Playback queue saved".into()).into(),
                 ])
             });
         }
@@ -419,13 +605,15 @@ pub fn dispatch(command: Command, state: &mut AppState, tx: &mpsc::Sender<Event>
                     .position(|t| Some(t.id.as_str()) == queue["current"].as_str())
                     .unwrap_or(0);
                 let position = queue["position"].as_u64().unwrap_or(0);
-                Ok(vec![NavAction::RestoreQueue {
-                    request_id,
-                    tracks: songs.into_iter().map(|s| session.track(s)).collect(),
-                    index,
-                    position,
-                }
-                .into()])
+                Ok(vec![
+                    NavAction::RestoreQueue {
+                        request_id,
+                        tracks: songs.into_iter().map(|s| session.track(s)).collect(),
+                        index,
+                        position,
+                    }
+                    .into(),
+                ])
             });
         }
         Command::DeletePlaylist(id)
@@ -465,48 +653,4 @@ pub fn dispatch(command: Command, state: &mut AppState, tx: &mpsc::Sender<Event>
             });
         }
     }
-}
-
-async fn lyrics(session: &Session, track: &Track) -> anyhow::Result<String> {
-    let text = if session.extensions.contains("songLyrics") {
-        let response = session
-            .client
-            .call(
-                "getLyricsBySongId",
-                &[("id", session.id(&track.rating_key)?)],
-            )
-            .await?;
-        let lyrics: Vec<serde_json::Value> = array(&response["lyricsList"], "structuredLyrics")?;
-        let mut text = String::new();
-        for lyric in lyrics {
-            for line in array::<serde_json::Value>(&lyric, "line")? {
-                if let Some(value) = line["value"].as_str() {
-                    text.push_str(value);
-                    text.push('\n');
-                }
-            }
-            text.push('\n');
-        }
-        text
-    } else {
-        let response = session
-            .client
-            .call(
-                "getLyrics",
-                &[
-                    ("artist", track.track_artist().into()),
-                    ("title", track.title.clone()),
-                ],
-            )
-            .await?;
-        response["lyrics"]["value"]
-            .as_str()
-            .unwrap_or_default()
-            .into()
-    };
-    anyhow::ensure!(
-        !text.trim().is_empty(),
-        "No lyrics are available for this song"
-    );
-    Ok(crate::util::sanitize_display_text(&text).into_owned())
 }

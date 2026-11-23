@@ -57,7 +57,8 @@ pub fn handle(event: PlaylistEvent, state: &mut AppState) -> Vec<Action> {
             if selected_key.as_deref() != Some(playlist_key.as_str()) {
                 tracing::debug!(
                     "Playlist first-page reply for {} arrived after user navigated to {:?} — discarding",
-                    playlist_key, selected_key,
+                    playlist_key,
+                    selected_key,
                 );
                 return vec![];
             }
@@ -94,26 +95,16 @@ pub fn handle(event: PlaylistEvent, state: &mut AppState) -> Vec<Action> {
                 title: playlist_name.clone(),
             });
             col.header_selection = crate::app::state::ColumnHeaderSelection::Play;
-            // Apply this playlist's saved view toggles, if any. The
-            // mirror lives on `state.playlist_views` (sync'd from
-            // `config.ui.library_view_settings` at boot and on every
-            // SavePlaylistView). Defaults are no-grouping +
-            // no-artwork — same as a fresh column.
+            // Grouping belongs to the playlist; artwork visibility belongs to the column type.
             let saved_view = state
                 .active_library
                 .as_ref()
-                .and_then(|lib| {
-                    state
-                        .playlist_views
-                        .get(lib)
-                        .or_else(|| state.playlist_views.get(lib))
-                })
+                .and_then(|lib| state.playlist_views.get(lib))
                 .and_then(|m| m.get(&playlist_key))
                 .copied()
                 .unwrap_or_default();
-            if saved_view.show_artwork {
-                col.artwork_visible = true;
-            }
+            state.initialize_column_artwork(&mut col);
+            let artwork_visible = col.artwork_visible;
             // Mark the column as lazy so the GUI scroll handler knows
             // to ask for more pages as the user scrolls down.
             col.lazy = Some(crate::app::state::LazyPlaylist {
@@ -134,7 +125,7 @@ pub fn handle(event: PlaylistEvent, state: &mut AppState) -> Vec<Action> {
             // ON-path). The col was just pushed; read it back to
             // collect art keys.
             let mut follow_ups: Vec<Action> = Vec::new();
-            if saved_view.show_artwork {
+            if artwork_visible {
                 let batch = super::dispatch_miller::collect_all_art_to_load(
                     state.playlist_nav.columns.last(),
                     &state.artwork.grid_cache,
@@ -168,151 +159,6 @@ pub fn handle(event: PlaylistEvent, state: &mut AppState) -> Vec<Action> {
                 }
             }
             follow_ups
-        }
-
-        // Subsequent page — append to the existing column.
-        PlaylistEvent::PlaylistMorePageLoaded {
-            library_key,
-            playlist_key,
-            offset,
-            tracks,
-            total,
-        } => {
-            if state.active_library.as_ref() != Some(&library_key) {
-                return vec![];
-            }
-            let Some(col) = state.playlist_nav.columns.iter_mut().find(|c| {
-                c.lazy
-                    .as_ref()
-                    .map(|l| l.key == *playlist_key)
-                    .unwrap_or(false)
-            }) else {
-                tracing::debug!(
-                    "Playlist more-page reply for {} arrived after column was replaced — discarding",
-                    playlist_key,
-                );
-                return vec![];
-            };
-            if col.tracks.len() != offset as usize {
-                if let Some(lazy) = col.lazy.as_mut() {
-                    lazy.loading = false;
-                }
-                tracing::debug!(
-                    "Discarding out-of-order playlist page for {} at offset {}; current length is {}",
-                    playlist_key,
-                    offset,
-                    col.tracks.len(),
-                );
-                return vec![];
-            }
-            // Refresh total in case the smart playlist shifted between
-            // pages (rare but possible for "Recently Added" if a track
-            // was added mid-scroll).
-            if let Some(lazy) = col.lazy.as_mut() {
-                if let Some(t) = total {
-                    lazy.total = Some(t);
-                }
-                lazy.loading = false;
-            }
-            // Append both the BrowseItem rows and the raw Track records
-            // so the column stays consistent for both render and play.
-            let new_items = crate::app::state::BrowseItem::from_tracks(&tracks);
-            col.items.extend(new_items);
-            col.tracks.extend(tracks);
-
-            // If the user had grouping enabled when the toggle fired,
-            // re-run the grouping over the now-larger track list so
-            // the new tracks slot into the existing albums (or open
-            // new album rows). `group_by_album` resets `selected_index`
-            // to 0, which would visibly snap the user's selection back
-            // to the top of the list every time a page lands on a
-            // long playlist — capture the selected album's key first
-            // so we can restore the selection by key after.
-            let was_grouped = col.grouped_by_album;
-            if was_grouped {
-                let prev_key: Option<String> =
-                    col.items.get(col.selected_index).and_then(|it| match it {
-                        crate::app::state::BrowseItem::Album { key, .. } => Some(key.clone()),
-                        _ => None,
-                    });
-                col.ungroup_by_album();
-                col.group_by_album();
-                if let Some(prev_key) = prev_key {
-                    if let Some(idx) = col.items.iter().position(|it| {
-                        matches!(
-                            it,
-                            crate::app::state::BrowseItem::Album { key, .. } if key == &prev_key
-                        )
-                    }) {
-                        col.selected_index = idx;
-                    }
-                }
-            }
-            let artwork_on = col.artwork_visible;
-            // Continue paginating until the column is fully loaded so
-            // grouping / artwork covers the whole playlist.
-            let next_offset = col.lazy.as_ref().and_then(|lazy| {
-                let total = lazy.total? as usize;
-                if !lazy.loading && col.tracks.len() < total {
-                    Some(col.tracks.len() as u32)
-                } else {
-                    None
-                }
-            });
-
-            let mut follow_ups = vec![];
-            if artwork_on {
-                let batch = super::dispatch_miller::collect_all_art_to_load(
-                    Some(&*col),
-                    &state.artwork.grid_cache,
-                    &state.artwork.grid_pending,
-                );
-                if !batch.is_empty() {
-                    follow_ups.push(SystemAction::LoadAlbumArt(batch).into());
-                }
-            }
-            if let Some(off) = next_offset {
-                follow_ups.push(
-                    crate::app::action::MillerAction::LoadMorePlaylistTracks {
-                        playlist_key,
-                        offset: off,
-                    }
-                    .into(),
-                );
-            }
-            follow_ups
-        }
-
-        PlaylistEvent::PlaylistMorePageFailed {
-            library_key,
-            playlist_key,
-            offset,
-            error,
-        } => {
-            if state.active_library.as_ref() != Some(&library_key) {
-                return vec![];
-            }
-            // Don't surface the error inline — the user has the
-            // already-loaded portion of the playlist visible. Just
-            // release the loading lock so a future scroll can retry.
-            if let Some(lazy) = state
-                .playlist_nav
-                .columns
-                .iter_mut()
-                .filter_map(|c| c.lazy.as_mut())
-                .find(|l| l.key == *playlist_key)
-            {
-                if offset as usize <= lazy.total.unwrap_or(u32::MAX) as usize {
-                    lazy.loading = false;
-                }
-            }
-
-            tracing::warn!(
-                "Playlist more-page fetch failed for {}: {}",
-                playlist_key,
-                error.message
-            );
-            vec![]
-        }
+        } // Subsequent page — append to the existing column.
     }
 }

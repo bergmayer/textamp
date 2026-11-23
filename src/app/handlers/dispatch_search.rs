@@ -4,7 +4,7 @@
 //! ExecuteListFilter, OpenSearchPopup, CloseSearchPopup, OpenLibraryPicker,
 //! CloseLibraryPicker.
 
-use crate::app::action::SearchAction;
+use crate::app::action::{BrowseAction, SearchAction};
 use crate::app::event::*;
 use crate::app::state::{BrowseCategory, BrowseItem, SearchFocus, SearchTab, View};
 use crate::app::{Action, AppState, Event};
@@ -12,6 +12,57 @@ use crate::library::models::SearchResults;
 
 use anyhow::Result;
 use tokio::sync::mpsc;
+
+pub(crate) const SEARCH_DEBOUNCE_SLOT: &str = "search-debounce";
+const FIRST_LETTER_DELAY: std::time::Duration = std::time::Duration::from_millis(220);
+const SEARCH_SLOT: &str = "catalog-search";
+
+pub(crate) fn search_pending(state: &AppState) -> bool {
+    state.sources.nav_tasks.contains_key(SEARCH_DEBOUNCE_SLOT)
+        || state.sources.nav_tasks.contains_key(SEARCH_SLOT)
+        || (!state.search.query.trim().is_empty()
+            && state.sources.nav_tasks.contains_key("search-index"))
+}
+
+static SEARCH_WORKERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
+fn catalog_search(
+    state: &mut AppState,
+) -> std::sync::Arc<crate::services::catalog_search::IndexedCatalog> {
+    let catalog = crate::services::catalog_search::CatalogSearch {
+        artists: state.library.artists.clone(),
+        albums: state.library.albums.clone(),
+        playlists: state.library.playlists.clone(),
+        genres: state.library.album_genres.clone(),
+        aliases: state.library.artist_aliases.clone(),
+        tracks: state.library.all_tracks.clone(),
+    };
+    state.library.search_cache.prepare(catalog)
+}
+
+/// Prepare normalized search fields independently of browsing and user input.
+pub(crate) fn warm_catalog(state: &mut AppState, tx: &mpsc::Sender<Event>) {
+    let catalog = catalog_search(state);
+    if catalog.ready() {
+        return;
+    }
+    crate::app::sources::navidrome::effects::spawn(state, tx, "search-index", async move {
+        let (cancel, mut cancelled) = tokio::sync::oneshot::channel::<()>();
+        let permit = SEARCH_WORKERS.acquire().await?;
+        crate::app::tasks::spawn_blocking(move || {
+            let _permit = permit;
+            catalog.warm(|| {
+                matches!(
+                    cancelled.try_recv(),
+                    Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+                )
+            });
+        })
+        .await?;
+        drop(cancel);
+        Ok(vec![])
+    });
+}
 
 /// Max results per category in launcher/radio search.
 const SEARCH_RESULT_LIMIT: usize = 20;
@@ -41,7 +92,7 @@ fn fuzzy_matches(title: &str, query: &str, query_normalized: &str) -> bool {
 }
 
 /// Dispatch search and filter actions. Returns follow-up actions.
-pub async fn dispatch(
+pub fn dispatch(
     event_tx: &mpsc::Sender<Event>,
     action: SearchAction,
     state: &mut AppState,
@@ -49,10 +100,25 @@ pub async fn dispatch(
     let mut follow_ups = vec![];
 
     match action {
+        SearchAction::SubmitSearch => {
+            if state
+                .sources
+                .nav_tasks
+                .remove(SEARCH_DEBOUNCE_SLOT)
+                .is_some()
+                || (state.search.results.is_none()
+                    && !state.sources.nav_tasks.contains_key(SEARCH_SLOT))
+            {
+                follow_ups.push(SearchAction::ExecuteLocalSearch.into());
+            }
+        }
         SearchAction::ExecuteLocalSearch => {
-            state.search.details = Default::default();
-            let query = state.search.query.to_lowercase();
+            if state.sources.nav_tasks.contains_key(SEARCH_DEBOUNCE_SLOT) {
+                return Ok(vec![]);
+            }
+            let query = state.search.query.trim().to_lowercase();
             if query.is_empty() {
+                state.sources.nav_tasks.remove(SEARCH_SLOT);
                 state.search.results = None;
                 state.list_state.search_item_index = 0;
                 return Ok(vec![]);
@@ -79,55 +145,64 @@ pub async fn dispatch(
                 return Ok(vec![]);
             }
 
-            // Ranked local search: filter artists, albums, playlists, genres from cached data
-            use crate::services::{search_albums_with_ranking, search_with_ranking};
-            let mut artists = search_with_ranking(&state.library.artists, &query, |a| &a.title, 50);
-
-            // Also find artists whose aliases match the query (using normalized matching)
-            let alias_extras: Vec<_> = {
-                let existing_keys: std::collections::HashSet<&str> =
-                    artists.iter().map(|a| a.rating_key.as_str()).collect();
-                let query_norm =
-                    crate::services::artist_alias_service::normalize_artist_name(&query);
-                state.library.artists.iter()
-                    .filter(|a| !existing_keys.contains(a.rating_key.as_str()))
-                    .filter(|a| {
-                        state.library.artist_aliases.get(&a.rating_key)
-                            .is_some_and(|aliases| aliases.iter().any(|al| {
-                                let norm = crate::services::artist_alias_service::normalize_artist_name(al);
-                                norm.contains(&query_norm)
-                            }))
-                    })
-                    .cloned()
-                    .collect()
-            };
-            artists.extend(alias_extras);
-
-            let albums = search_albums_with_ranking(&state.library.albums, &query, 50);
-            let playlists = search_with_ranking(&state.library.playlists, &query, |p| &p.title, 50);
-            let genres = search_with_ranking(&state.library.album_genres, &query, |g| &g.title, 50);
-
-            // Store local results immediately (tracks filled async by API)
-            state.search.results = Some(SearchResults {
-                artists,
-                albums,
-                playlists,
-                genres,
-                tracks: vec![],
-            });
-
-            // Fire async API search for tracks with debounce
-            if state.sources.active.navidrome().is_some() {
-                if let Some(results) = &mut state.search.results {
-                    results.tracks =
-                        search_with_ranking(&state.library.all_tracks, &query, |t| &t.title, 100);
-                }
+            let catalog = catalog_search(state);
+            if catalog.item_count() <= 256 {
+                state.sources.nav_tasks.remove(SEARCH_SLOT);
+                state.search.results = Some(catalog.search(&query, || false));
                 return Ok(vec![]);
             }
+            let categories_only =
+                !catalog.ready() && state.sources.nav_tasks.contains_key("search-index");
+            let catalog_id = state.sources.list_id;
+            let input = state.search.query.clone();
+            crate::app::sources::navidrome::effects::spawn(
+                state,
+                event_tx,
+                SEARCH_SLOT,
+                async move {
+                    let (cancel, mut cancelled) = tokio::sync::oneshot::channel::<()>();
+                    let permit = SEARCH_WORKERS.acquire().await?;
+                    let results = crate::app::tasks::spawn_blocking(move || {
+                        let _permit = permit;
+                        let cancelled = || {
+                            matches!(
+                                cancelled.try_recv(),
+                                Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+                            )
+                        };
+                        if categories_only {
+                            catalog.categories(&query, cancelled)
+                        } else {
+                            catalog.search(&query, cancelled)
+                        }
+                    })
+                    .await?;
+                    drop(cancel);
+                    Ok(vec![
+                        crate::app::sources::navidrome::NavAction::SearchReady {
+                            query: input,
+                            catalog_id,
+                            results,
+                        }
+                        .into(),
+                    ])
+                },
+            );
         }
+
         SearchAction::SelectSearchResult => {
-            if crate::app::result_details::open(state) {
-                return Ok(vec![]);
+            let section = state.search.results.as_ref().map(|results| {
+                if state.search.tab == SearchTab::Global {
+                    resolve_global_index(results, state.list_state.search_item_index).0
+                } else {
+                    state.search.tab
+                }
+            });
+            if matches!(
+                section,
+                Some(SearchTab::Artists | SearchTab::Albums | SearchTab::Tracks)
+            ) {
+                return Ok(crate::app::library_details::search_result_actions(state));
             }
             if state.sources.active.folder().is_some() {
                 let track = state
@@ -142,11 +217,9 @@ pub async fn dispatch(
                         .folder_state
                         .as_mut()
                         .and_then(|nav| nav.focused_mut())
+                        && let Some(index) = column.items.iter().position(|item| &item.key == path)
                     {
-                        if let Some(index) = column.items.iter().position(|item| &item.key == path)
-                        {
-                            column.selected_index = index;
-                        }
+                        column.selected_index = index;
                     }
                     state.popups.set_search_active(false);
                     state.category_column_focused = false;
@@ -159,12 +232,48 @@ pub async fn dispatch(
             follow_ups.extend(follow_up_actions);
         }
         SearchAction::SetSearchQuery(q) => {
-            state.search.query = q;
+            if state.search.query == q {
+                return Ok(vec![]);
+            }
+            state.sources.nav_tasks.remove(SEARCH_DEBOUNCE_SLOT);
+            state.sources.nav_tasks.remove(SEARCH_SLOT);
+            state.search.focus = SearchFocus::Input;
             state.list_state.search_item_index = 0;
-            // Re-run the search on every keystroke. The shared dispatch
-            // path issues local + server track searches and updates
-            // state.search.results when complete.
-            follow_ups.push(Action::Search(SearchAction::ExecuteLocalSearch));
+            state.scroll.search = None;
+            let previous = state.search.results.take();
+            state.search.query = q;
+            let query = state.search.query.trim();
+            let mut characters = unicode_segmentation::UnicodeSegmentation::graphemes(query, true);
+            if characters.next().is_none() {
+                return Ok(vec![]);
+            }
+            if characters.next().is_none() {
+                crate::app::sources::navidrome::effects::spawn(
+                    state,
+                    event_tx,
+                    SEARCH_DEBOUNCE_SLOT,
+                    async {
+                        tokio::time::sleep(FIRST_LETTER_DELAY).await;
+                        Ok(vec![SearchAction::ExecuteLocalSearch.into()])
+                    },
+                );
+            } else {
+                // Refine the visible matches while the indexed search fills in the rest.
+                if let Some(previous) = previous {
+                    state.search.results = Some(
+                        crate::services::catalog_search::CatalogSearch {
+                            artists: std::sync::Arc::new(previous.artists),
+                            albums: std::sync::Arc::new(previous.albums),
+                            playlists: std::sync::Arc::new(previous.playlists),
+                            genres: std::sync::Arc::new(previous.genres),
+                            tracks: std::sync::Arc::new(previous.tracks),
+                            aliases: state.library.artist_aliases.clone(),
+                        }
+                        .search(query, || false),
+                    );
+                }
+                follow_ups.push(SearchAction::ExecuteLocalSearch.into());
+            }
         }
         SearchAction::SetSearchTab(tab) => {
             state.search.tab = if state.sources.active.folder().is_some() {
@@ -179,11 +288,10 @@ pub async fn dispatch(
 
         // Inline list filter actions
         SearchAction::ActivateListFilter => {
-            state.list_filter.version = state.list_filter.version.wrapping_add(1);
+            state.list_filter.advance_version();
             state.list_filter.active = true;
             state.list_filter.query.clear();
             state.list_filter.results = None;
-            state.list_filter.column_results.clear();
             state.list_filter.loading = false;
             state.list_filter.selected = 0;
             // Capture which category and column the filter was activated on
@@ -205,10 +313,10 @@ pub async fn dispatch(
             // underlying `selected_index` while the highlight stays
             // glued to the play row, looking broken.
             let filter_col_idx = state.list_filter.column;
-            if let Some(nav) = state.browse_nav_mut() {
-                if let Some(col) = nav.columns.get_mut(filter_col_idx) {
-                    col.header_selection = crate::app::state::ColumnHeaderSelection::Items;
-                }
+            if let Some(nav) = state.browse_nav_mut()
+                && let Some(col) = nav.columns.get_mut(filter_col_idx)
+            {
+                col.header_selection = crate::app::state::ColumnHeaderSelection::Items;
             }
             // Same reason as the header selection above — any transient
             // "focus is somewhere other than the nav stack" flag
@@ -223,6 +331,7 @@ pub async fn dispatch(
         }
         SearchAction::DeactivateListFilter => {
             state.list_filter.deactivate();
+            state.scroll.browse = None;
         }
         SearchAction::FilteredListUp => {
             // Wrap-around at the top: pressing Up on the first match
@@ -251,10 +360,10 @@ pub async fn dispatch(
             } else {
                 state.list_filter.selected - 1
             };
-            if let Some(ref results) = state.list_filter.results {
-                if let Some(&item_idx) = results.matched_indices.get(state.list_filter.selected) {
-                    super::key_input::update_filter_column_selection(state, item_idx);
-                }
+            if let Some(ref results) = state.list_filter.results
+                && let Some(&item_idx) = results.matched_indices.get(state.list_filter.selected)
+            {
+                super::key_input::update_filter_column_selection(state, item_idx);
             }
             super::key_input::truncate_filter_right_columns(state);
         }
@@ -271,10 +380,10 @@ pub async fn dispatch(
                 return Ok(follow_ups);
             }
             state.list_filter.selected = (state.list_filter.selected + 1) % len;
-            if let Some(ref results) = state.list_filter.results {
-                if let Some(&item_idx) = results.matched_indices.get(state.list_filter.selected) {
-                    super::key_input::update_filter_column_selection(state, item_idx);
-                }
+            if let Some(ref results) = state.list_filter.results
+                && let Some(&item_idx) = results.matched_indices.get(state.list_filter.selected)
+            {
+                super::key_input::update_filter_column_selection(state, item_idx);
             }
             super::key_input::truncate_filter_right_columns(state);
         }
@@ -339,6 +448,7 @@ pub async fn dispatch(
                 // Deactivate filter before drill-down (new column clears filter)
                 state.alphabet_strip_focused = false;
                 state.list_filter.deactivate();
+                state.miller_scroll_manual = false;
                 let drilldown_actions = super::key_input::get_filter_drilldown_actions(state);
                 follow_ups.extend(drilldown_actions);
             }
@@ -346,19 +456,12 @@ pub async fn dispatch(
         SearchAction::AppendListFilterChar(c) => {
             state.list_filter.query.push(c);
             state.list_filter.selected = 0;
-            if is_on_filter_column(state) {
-                super::key_input::truncate_filter_right_columns(state);
-            }
             schedule_list_filter(event_tx, state)?;
         }
         SearchAction::DeleteListFilterChar => {
             state.list_filter.query.pop();
             if state.list_filter.query.is_empty() {
                 state.list_filter.deactivate();
-            } else if is_on_filter_column(state) {
-                state.list_filter.selected = 0;
-                super::key_input::truncate_filter_right_columns(state);
-                schedule_list_filter(event_tx, state)?;
             } else {
                 state.list_filter.selected = 0;
                 schedule_list_filter(event_tx, state)?;
@@ -369,6 +472,7 @@ pub async fn dispatch(
             // char-at-a-time deletion path above).
             if query.is_empty() {
                 state.list_filter.deactivate();
+                state.scroll.browse = None;
             } else {
                 // Activating from scratch mirrors ActivateListFilter:
                 // record category and column so rendering can match.
@@ -389,13 +493,6 @@ pub async fn dispatch(
                 }
                 state.list_filter.query = query;
                 state.list_filter.selected = 0;
-                // No truncation: the GUI filter is a pure visual narrowing
-                // applied to every visible Miller column at once
-                // (browse.rs computes per-column matches at render time),
-                // so the right-of-filter columns must stay populated.
-                // Truncating here was what made the album column vanish
-                // when the user typed in the filter box with the artist
-                // column focused.
                 schedule_list_filter(event_tx, state)?;
             }
         }
@@ -404,7 +501,9 @@ pub async fn dispatch(
         }
         // Search popup actions
         SearchAction::OpenSearchPopup => {
-            state.search.details = Default::default();
+            state.sources.nav_tasks.remove(SEARCH_DEBOUNCE_SLOT);
+            state.sources.nav_tasks.remove(SEARCH_SLOT);
+
             if state.list_filter.active {
                 state.list_filter.deactivate();
             }
@@ -419,7 +518,9 @@ pub async fn dispatch(
             }
         }
         SearchAction::CloseSearchPopup => {
-            state.search.details = Default::default();
+            state.sources.nav_tasks.remove(SEARCH_DEBOUNCE_SLOT);
+            state.sources.nav_tasks.remove(SEARCH_SLOT);
+
             state.popups.set_search_active(false);
         }
 
@@ -446,57 +547,12 @@ pub async fn dispatch(
 
         // Sort popup actions
         SearchAction::OpenSortPopup => {
-            use crate::app::state::{BrowseItem, SortColumnType, SortPopupState};
-
-            if state.view != View::Browse {
-                // no-op outside browse view
-            } else if let Some(nav) = state.browse_nav() {
-                let col_idx = nav.focused_column;
-                if let Some(col) = nav.columns.get(col_idx) {
-                    // Determine column type from content
-                    let first_item = col.items.first();
-                    let column_type = if first_item
-                        .is_some_and(|i| matches!(i, BrowseItem::Artist { .. }))
-                        || col
-                            .items
-                            .iter()
-                            .take(3)
-                            .any(|i| matches!(i, BrowseItem::Artist { .. }))
-                    {
-                        SortColumnType::Artist
-                    } else if first_item.is_some_and(|i| matches!(i, BrowseItem::Album { .. }))
-                        || col
-                            .items
-                            .iter()
-                            .take(4)
-                            .any(|i| matches!(i, BrowseItem::Album { .. }))
-                    {
-                        SortColumnType::Album
-                    } else if first_item.is_some_and(|i| matches!(i, BrowseItem::Track { .. })) {
-                        // Determine if this is a special track column (all-tracks/playlist)
-                        if state.is_special_track_column(nav, col_idx) {
-                            SortColumnType::AllTracks
-                        } else {
-                            SortColumnType::Track
-                        }
-                    } else {
-                        // Genre or other non-sortable column - don't open popup
-                        return Ok(vec![]);
-                    };
-
-                    let is_playlist =
-                        state.browse_category == crate::app::state::BrowseCategory::Playlists;
-                    let popup = SortPopupState::new(
-                        col_idx,
-                        col.title.clone(),
-                        column_type,
-                        col.sort_mode,
-                        col.artwork_visible,
-                        is_playlist,
-                    );
-                    state.popups.close_all();
-                    state.popups.set_sort(Some(popup));
-                }
+            if state.view == View::Browse
+                && let Some(nav) = state.browse_nav()
+                && let Some(popup) = crate::app::view_options::for_column(state, nav.focused_column)
+            {
+                state.popups.close_all();
+                state.popups.set_sort(Some(popup));
             }
         }
         SearchAction::CloseSortPopup => {
@@ -520,34 +576,54 @@ pub async fn dispatch(
                 state, col_idx,
             ));
         }
-        SearchAction::ToggleFocusedColumnArtwork => {
-            let col_idx = match state.browse_nav() {
-                Some(n) => n.focused_column,
-                None => return Ok(vec![]),
-            };
-            follow_ups.extend(super::key_input::sort_popup::toggle_artwork(state, col_idx));
-        }
-        SearchAction::ToggleFocusedColumnGrouping => {
-            let col_idx = match state.browse_nav() {
-                Some(n) => n.focused_column,
-                None => return Ok(vec![]),
-            };
-            // Toggling grouping reshapes the column (track list ↔
-            // album list), so any open track-details pane is now
-            // pointing at a row that may no longer exist. Close it.
-            state.track_pane_open = false;
-            follow_ups.extend(super::key_input::sort_popup::toggle_group_by_album(
-                state, col_idx,
-            ));
-        }
+
         // Adventure launcher popup actions
-        SearchAction::OpenAdventureLauncher => {
+        SearchAction::StartPickedTrackRadio => {
+            if let Some(launcher) = state.popups.adventure_launcher()
+                && let Some(track) = launcher.start_track.clone()
+            {
+                let action =
+                    if launcher.purpose == crate::app::state::TrackPickerPurpose::StayCloseRadio {
+                        crate::app::action::RadioAction::StartStation(
+                            crate::app::state::ActiveStation {
+                                source: crate::library::station::RadioSource::SonicFixed(
+                                    track.rating_key.clone(),
+                                ),
+                                title: format!("Stay Close Mix · {}", track.title),
+                            },
+                        )
+                    } else {
+                        crate::app::action::RadioAction::StartSonicRadio(Box::new(track))
+                    };
+                state.popups.set_adventure_launcher(None);
+                follow_ups.push(action.into());
+            }
+        }
+        action @ (SearchAction::OpenAdventureLauncher
+        | SearchAction::OpenTrackRadioPicker
+        | SearchAction::OpenStayCloseRadioPicker) => {
+            let radio = !matches!(action, SearchAction::OpenAdventureLauncher);
+            let stay_close = matches!(action, SearchAction::OpenStayCloseRadioPicker);
+            let current = if radio {
+                state.current_track().cloned()
+            } else {
+                None
+            };
             state.adventure_launcher_request_id =
                 state.adventure_launcher_request_id.wrapping_add(1);
             state.popups.close_all();
             state
                 .popups
                 .set_adventure_launcher(Some(crate::app::state::AdventureLauncherState {
+                    terminal_focus: Default::default(),
+                    purpose: if stay_close {
+                        crate::app::state::TrackPickerPurpose::StayCloseRadio
+                    } else if radio {
+                        crate::app::state::TrackPickerPurpose::SonicRadio
+                    } else {
+                        crate::app::state::TrackPickerPurpose::Journey
+                    },
+                    stage: Default::default(),
                     step: crate::app::state::AdventureStep::FindStartTrack,
                     query: String::new(),
                     results: None,
@@ -555,11 +631,11 @@ pub async fn dispatch(
                     item_index: 0,
                     loading: false,
                     drill: crate::app::state::AdventureDrillLevel::Search,
-                    start_track: None,
+                    start_track: current,
                     end_track: None,
                     track_count_input: "20".to_string(),
                     scroll_pin: None,
-                    // Sonic Adventure only ever picks tracks (start /
+                    // Journey only ever picks tracks (start /
                     // end), so force the tracks tab — that path makes
                     // `adventure_launcher_select_track` index directly
                     // into `results.tracks` without an artist+album
@@ -577,7 +653,10 @@ pub async fn dispatch(
             state
                 .popups
                 .set_adventure_launcher(Some(crate::app::state::AdventureLauncherState {
-                    step: crate::app::state::AdventureStep::EnterTrackCount,
+                    terminal_focus: crate::app::journey::JourneyControl::End,
+                    purpose: Default::default(),
+                    stage: Default::default(),
+                    step: crate::app::state::AdventureStep::FindEndTrack,
                     query: String::new(),
                     results: None,
                     focus: SearchFocus::Input,
@@ -588,7 +667,7 @@ pub async fn dispatch(
                     end_track: None,
                     track_count_input: "20".to_string(),
                     scroll_pin: None,
-                    // Sonic Adventure only ever picks tracks (start /
+                    // Journey only ever picks tracks (start /
                     // end), so force the tracks tab — that path makes
                     // `adventure_launcher_select_track` index directly
                     // into `results.tracks` without an artist+album
@@ -597,9 +676,42 @@ pub async fn dispatch(
                 }));
         }
         SearchAction::CloseAdventureLauncher => {
+            if state.popups.adventure_launcher().is_some_and(|launcher| {
+                launcher.purpose == crate::app::state::TrackPickerPurpose::Journey
+            }) {
+                state.sources.sonic_tasks.remove("adventure");
+                state.adventure_request_id = state.adventure_request_id.wrapping_add(1);
+                state.adventure = Default::default();
+            }
             state.adventure_launcher_request_id =
                 state.adventure_launcher_request_id.wrapping_add(1);
             state.popups.set_adventure_launcher(None);
+        }
+        SearchAction::AdventureLauncherPlay => {
+            let tracks = state.popups.adventure_launcher_mut().and_then(|launcher| {
+                if let crate::app::state::JourneyStage::Ready(tracks) = &launcher.stage {
+                    Some(tracks.clone())
+                } else {
+                    None
+                }
+            });
+            if let Some(tracks) = tracks {
+                state.popups.set_adventure_launcher(None);
+                follow_ups
+                    .push(crate::app::action::SettingsAction::AdventureComplete(tracks).into());
+            }
+        }
+        SearchAction::AdventureLauncherEdit => {
+            state.sources.sonic_tasks.remove("adventure");
+            state.adventure_request_id = state.adventure_request_id.wrapping_add(1);
+            state.adventure = Default::default();
+            if let Some(launcher) = state.popups.adventure_launcher_mut() {
+                launcher.stage = crate::app::state::JourneyStage::Choosing;
+                launcher.loading = false;
+                launcher.query.clear();
+                launcher.results = None;
+                launcher.focus = SearchFocus::Input;
+            }
         }
         SearchAction::AdventureLauncherSearch => {
             adventure_launcher_search(event_tx, state)?;
@@ -637,23 +749,14 @@ pub async fn dispatch(
                 l.track_count_input = s.chars().filter(|c| c.is_ascii_digit()).take(3).collect();
             }
         }
-        SearchAction::AdventureLauncherClearStart => {
-            state.adventure_launcher_request_id =
-                state.adventure_launcher_request_id.wrapping_add(1);
-            if let Some(l) = state.popups.adventure_launcher_mut() {
-                l.start_track = None;
-                l.step = crate::app::state::AdventureStep::FindStartTrack;
-            }
-        }
-        SearchAction::AdventureLauncherClearEnd => {
-            state.adventure_launcher_request_id =
-                state.adventure_launcher_request_id.wrapping_add(1);
-            if let Some(l) = state.popups.adventure_launcher_mut() {
-                l.end_track = None;
-                l.step = crate::app::state::AdventureStep::FindEndTrack;
-            }
-        }
 
+        SearchAction::AdventureLauncherSetEndpointQuery { step, query } => {
+            if let Some(launcher) = state.popups.adventure_launcher_mut() {
+                launcher.step = step;
+                launcher.query = query;
+            }
+            adventure_launcher_search(event_tx, state)?;
+        }
         SearchAction::AdventureLauncherSetQuery(q) => {
             if let Some(l) = state.popups.adventure_launcher_mut() {
                 l.query = q;
@@ -668,11 +771,14 @@ pub async fn dispatch(
             state
                 .popups
                 .set_artist_radio_picker(Some(crate::app::state::ArtistRadioPickerState {
-                    step: crate::app::state::ArtistRadioPickerStep::EnterCount,
-                    max_artists: 0,
-                    count_input: String::new(),
                     query: String::new(),
-                    filtered_artists: vec![],
+                    filtered_artists: state
+                        .library
+                        .artists
+                        .iter()
+                        .take(ARTIST_PICKER_LIMIT)
+                        .cloned()
+                        .collect(),
                     selected_artists: vec![],
                     focus: SearchFocus::Input,
                     item_index: 0,
@@ -682,26 +788,16 @@ pub async fn dispatch(
         SearchAction::CloseArtistRadioPicker => {
             state.popups.set_artist_radio_picker(None);
         }
-        SearchAction::ArtistRadioPickerSetCount => {
-            if let Some(picker) = state.popups.artist_radio_picker_mut() {
-                let count = picker
-                    .count_input
-                    .parse::<usize>()
-                    .unwrap_or(0)
-                    .clamp(1, 12);
-                picker.max_artists = count;
-                picker.step = crate::app::state::ArtistRadioPickerStep::SelectArtists;
-                picker.query.clear();
-                picker.filtered_artists = state.library.artists.clone();
-                picker.selected_artists.clear();
-                picker.focus = SearchFocus::Input;
-                picker.item_index = 0;
-            }
-        }
         SearchAction::ArtistRadioPickerSearch => {
             if let Some(picker) = state.popups.artist_radio_picker_mut() {
                 if picker.query.is_empty() {
-                    picker.filtered_artists = state.library.artists.clone();
+                    picker.filtered_artists = state
+                        .library
+                        .artists
+                        .iter()
+                        .take(ARTIST_PICKER_LIMIT)
+                        .cloned()
+                        .collect();
                 } else {
                     let (query, query_normalized) = normalize_query(&picker.query);
 
@@ -729,65 +825,75 @@ pub async fn dispatch(
             }
         }
         SearchAction::ArtistRadioPickerToggleArtist => {
-            if let Some(picker) = state.popups.artist_radio_picker_mut() {
-                if let Some(artist) = picker.filtered_artists.get(picker.item_index).cloned() {
-                    // Toggle: remove if already selected, add if not
-                    if let Some(pos) = picker
-                        .selected_artists
-                        .iter()
-                        .position(|a| a.rating_key == artist.rating_key)
-                    {
-                        picker.selected_artists.remove(pos);
-                    } else if picker.selected_artists.len() < picker.max_artists {
-                        let added_key = artist.rating_key.clone();
-                        picker.selected_artists.push(artist);
-
-                        // Auto-launch if max artists reached
-                        if picker.selected_artists.len() == picker.max_artists {
-                            follow_ups.push(SearchAction::ArtistRadioPickerLaunch.into());
-                        } else {
-                            // Clear query and re-populate with all artists, position near selected
-                            picker.query.clear();
-                            picker.filtered_artists = state.library.artists.clone();
-                            picker.focus = SearchFocus::Input;
-                            // Position item_index at the just-added artist in the full list
-                            picker.item_index = picker
-                                .filtered_artists
-                                .iter()
-                                .position(|a| a.rating_key == added_key)
-                                .unwrap_or(0);
-                            picker.scroll_pin = None;
-                        }
-                    }
+            if let Some(picker) = state.popups.artist_radio_picker_mut()
+                && let Some(artist) = picker.filtered_artists.get(picker.item_index).cloned()
+            {
+                // Toggle: remove if already selected, add if not
+                if let Some(pos) = picker
+                    .selected_artists
+                    .iter()
+                    .position(|a| a.rating_key == artist.rating_key)
+                {
+                    picker.selected_artists.remove(pos);
+                } else if picker.selected_artists.len() < 12 {
+                    picker.selected_artists.push(artist);
                 }
             }
         }
         // Artist bio popup (F4)
-        action @ (SearchAction::OpenBiographySource | SearchAction::SearchBiographyOnGoogle) => {
-            let url = state.popups.artist_bio().and_then(|popup| match action {
-                SearchAction::SearchBiographyOnGoogle if !popup.artist_name.trim().is_empty() => {
-                    Some(crate::services::biography::google_search_url(
-                        &popup.artist_name,
-                    ))
+        action @ (SearchAction::OpenBiographySource
+        | SearchAction::SearchBiographyOnWeb
+        | SearchAction::OpenArtistInfoSource
+        | SearchAction::SearchArtistInfoOnWeb) => {
+            let subject = if matches!(
+                action,
+                SearchAction::OpenArtistInfoSource | SearchAction::SearchArtistInfoOnWeb
+            ) {
+                state
+                    .artist_info_column_index()
+                    .and_then(|index| state.browse_nav()?.columns.get(index))
+                    .and_then(|column| match &column.details {
+                        Some(crate::app::state::BrowseDetails::Artist(info)) => {
+                            Some((&info.artist_name, &info.document))
+                        }
+                        _ => None,
+                    })
+            } else {
+                state
+                    .popups
+                    .artist_bio()
+                    .map(|popup| (&popup.artist_name, &popup.document))
+            };
+            let url = subject.and_then(|(name, document)| match action {
+                SearchAction::SearchBiographyOnWeb | SearchAction::SearchArtistInfoOnWeb
+                    if !name.trim().is_empty() =>
+                {
+                    Some(state.web_search_provider.artist_url(name))
                 }
-                SearchAction::OpenBiographySource => popup.document.source_url.clone(),
+                SearchAction::OpenBiographySource | SearchAction::OpenArtistInfoSource => {
+                    document.source_url.clone()
+                }
                 _ => None,
             });
             if let Some(url) = url {
+                // The native host owns browser presentation. Deliver the effect at
+                // the event-loop boundary, including when a detail action produced it.
                 let tx = event_tx.clone();
                 crate::app::tasks::spawn(async move {
-                    if let Err(error) = crate::services::external_search::open_browser(&url).await {
-                        let _ = tx
-                            .send(Event::Effect(
-                                crate::app::action::SystemAction::ShowError(format!(
-                                    "Open biography in browser: {error:#}"
-                                ))
-                                .into(),
-                            ))
-                            .await;
-                    }
+                    let _ = tx
+                        .send(Event::Effect(
+                            crate::app::action::SystemAction::OpenBrowser(url).into(),
+                        ))
+                        .await;
                 });
             }
+        }
+        SearchAction::ShowArtistInfo {
+            artist_key,
+            artist_name,
+        } => super::helpers::biography::show_info(state, event_tx, artist_key, artist_name),
+        SearchAction::ArtistInfoPhoto(delta) => {
+            super::helpers::biography::cycle_info_photo(state, delta)
         }
         SearchAction::ShowArtistBio {
             artist_key,
@@ -803,7 +909,7 @@ pub async fn dispatch(
 
 /// Handle SelectSearchResult — navigate to the selected item in the library.
 fn select_search_result(state: &mut AppState) -> Vec<Action> {
-    let results = match state.search.results.take() {
+    let results = match state.search.results.clone() {
         Some(r) => r,
         None => return vec![],
     };
@@ -819,34 +925,12 @@ fn select_search_result(state: &mut AppState) -> Vec<Action> {
     match section {
         SearchTab::Artists => {
             if let Some(artist) = results.artists.get(local_idx) {
-                // Navigate to artist in Library view
-                let artist_key = artist.rating_key.clone();
-                state.search.query.clear();
-
-                state.popups.set_search_active(false);
-                state.set_browse_category(BrowseCategory::Library, false);
-                state.set_view(View::Browse);
-
-                // Find artist in artist_nav and select it
-                if let Some(col) = state.artist_nav.columns.get_mut(0) {
-                    if let Some(pos) = col.items.iter().position(|i| i.key() == artist_key) {
-                        col.selected_index = pos;
-                        state.artist_nav.focused_column = 0;
-                        state.artist_nav.truncate_right();
-                        return vec![
-                            crate::app::action::MillerAction::LoadArtistAlbumsForMiller {
-                                artist_key,
-                                replace_child: false,
-                            }
-                            .into(),
-                        ];
-                    }
-                }
-                // Artist not in nav (cache empty?) — load from scratch
                 return vec![
-                    crate::app::action::MillerAction::LoadArtistAlbumsForMiller {
-                        artist_key,
-                        replace_child: false,
+                    BrowseAction::OpenInLibrary {
+                        artist_key: artist.rating_key.clone(),
+                        artist_name: artist.title.clone(),
+                        album_key: None,
+                        album_title: None,
                     }
                     .into(),
                 ];
@@ -854,52 +938,15 @@ fn select_search_result(state: &mut AppState) -> Vec<Action> {
         }
         SearchTab::Albums => {
             if let Some(album) = results.albums.get(local_idx) {
-                let album_key = album.rating_key.clone();
-                let artist_key = album.parent_rating_key.clone();
-                state.search.query.clear();
-
-                state.popups.set_search_active(false);
-                state.set_browse_category(BrowseCategory::Library, false);
-                state.set_view(View::Browse);
-                state.search.pending_album_key = Some(album_key);
-
-                // If we have the parent artist key, navigate to them
-                if let Some(ref ak) = artist_key {
-                    state.library.selected_artist_name = album.artist_name().to_string();
-                    if let Some(col) = state.artist_nav.columns.get_mut(0) {
-                        if let Some(pos) = col.items.iter().position(|i| i.key() == ak.as_str()) {
-                            col.selected_index = pos;
-                            state.artist_nav.focused_column = 0;
-                            state.artist_nav.truncate_right();
-                            return vec![
-                                crate::app::action::MillerAction::LoadArtistAlbumsForMiller {
-                                    artist_key: ak.clone(),
-                                    replace_child: false,
-                                }
-                                .into(),
-                            ];
-                        }
+                return vec![
+                    BrowseAction::OpenInLibrary {
+                        artist_key: album.parent_rating_key.clone().unwrap_or_default(),
+                        artist_name: album.artist_name().to_owned(),
+                        album_key: Some(album.rating_key.clone()),
+                        album_title: Some(album.title.clone()),
                     }
-                    return vec![
-                        crate::app::action::MillerAction::LoadArtistAlbumsForMiller {
-                            artist_key: ak.clone(),
-                            replace_child: false,
-                        }
-                        .into(),
-                    ];
-                }
-                // No parent artist key — try All Artists column
-                state.library.selected_artist_name = "All Artists".to_string();
-                if let Some(col) = state.artist_nav.columns.get_mut(0) {
-                    // Select "All Artists" entry (index 0)
-                    col.selected_index = 0;
-                    state.artist_nav.focused_column = 0;
-                    state.artist_nav.truncate_right();
-                }
-                return vec![crate::app::action::MillerAction::LoadAllAlbumsForMiller {
-                    replace_child: false,
-                }
-                .into()];
+                    .into(),
+                ];
             }
         }
         SearchTab::Tracks => {
@@ -909,31 +956,27 @@ fn select_search_result(state: &mut AppState) -> Vec<Action> {
         }
         SearchTab::Playlists => {
             if let Some(playlist) = results.playlists.get(local_idx) {
-                let playlist_key = playlist.rating_key.clone();
-                state.search.query.clear();
-
+                crate::app::navigation_history::record(state);
                 state.popups.set_search_active(false);
+                state.library_navigation =
+                    crate::app::navigation_history::LibraryNavigation::Columns(Some(
+                        crate::app::sidebar::SidebarGroup::Playlists,
+                    ));
                 state.set_browse_category(BrowseCategory::Playlists, false);
                 state.set_view(View::Browse);
-
-                // Find playlist in playlist_nav and select it
-                if let Some(col) = state.playlist_nav.columns.get_mut(0) {
-                    if let Some(pos) = col.items.iter().position(|i| i.key() == playlist_key) {
-                        col.selected_index = pos;
-                        state.playlist_nav.focused_column = 0;
-                        state.playlist_nav.truncate_right();
-                        return vec![
-                            crate::app::action::MillerAction::LoadPlaylistTracksForMiller {
-                                playlist_key,
-                                replace_child: false,
-                            }
-                            .into(),
-                        ];
-                    }
-                }
+                state.category_column_focused = false;
+                state.playlist_nav.reset(
+                    "playlists",
+                    BrowseItem::from_playlists(&state.library.playlists),
+                );
+                state.playlist_nav.columns[0].selected_index = state.playlist_nav.columns[0]
+                    .items
+                    .iter()
+                    .position(|item| item.key() == playlist.rating_key)
+                    .unwrap_or(0);
                 return vec![
                     crate::app::action::MillerAction::LoadPlaylistTracksForMiller {
-                        playlist_key,
+                        playlist_key: playlist.rating_key.clone(),
                         replace_child: false,
                     }
                     .into(),
@@ -942,6 +985,7 @@ fn select_search_result(state: &mut AppState) -> Vec<Action> {
         }
         SearchTab::Genres => {
             if let Some(genre) = results.genres.get(local_idx) {
+                crate::app::navigation_history::record(state);
                 let genre_key = genre.effective_key().to_string();
                 let genre_title = genre.title.clone();
                 state.search.query.clear();
@@ -968,11 +1012,13 @@ fn select_search_result(state: &mut AppState) -> Vec<Action> {
                 state.tag_nav.focused_column = 0;
                 state.library.selected_album_title = format!("genre: {}", genre_title);
 
-                return vec![crate::app::action::MillerAction::LoadGenreAlbumsForMiller {
-                    genre_key,
-                    replace_child: false,
-                }
-                .into()];
+                return vec![
+                    crate::app::action::MillerAction::LoadGenreAlbumsForMiller {
+                        genre_key,
+                        replace_child: false,
+                    }
+                    .into(),
+                ];
             }
         }
         _ => {}
@@ -986,6 +1032,11 @@ fn select_search_result(state: &mut AppState) -> Vec<Action> {
 pub fn resolve_global_index(results: &SearchResults, global_idx: usize) -> (SearchTab, usize) {
     let mut offset = 0;
 
+    let global_idx = results
+        .global_order
+        .get(global_idx)
+        .copied()
+        .unwrap_or(global_idx);
     let artists_len = results.artists.len();
     if global_idx < offset + artists_len {
         return (SearchTab::Artists, global_idx - offset);
@@ -1022,19 +1073,19 @@ pub fn resolve_global_index(results: &SearchResults, global_idx: usize) -> (Sear
 /// Schedule inline list filtering without cloning the source column on every
 /// keystroke. Only the debounce generation that survives snapshots the data.
 fn schedule_list_filter(event_tx: &mpsc::Sender<Event>, state: &mut AppState) -> Result<()> {
-    state.list_filter.version = state.list_filter.version.wrapping_add(1);
+    state.list_filter.advance_version();
+    state.list_filter.refresh_anchor = None;
     let version = state.list_filter.version;
 
     if state.list_filter.query.is_empty() {
+        state.scroll.browse = None;
         state.list_filter.results = None;
-        state.list_filter.column_results.clear();
         state.list_filter.loading = false;
         return Ok(());
     }
 
     state.list_filter.loading = true;
     state.list_filter.results = None;
-    state.list_filter.column_results.clear();
 
     let tx = event_tx.clone();
     crate::app::tasks::spawn(async move {
@@ -1051,8 +1102,9 @@ fn schedule_list_filter(event_tx: &mpsc::Sender<Event>, state: &mut AppState) ->
 
 /// Snapshot and filter the winning debounce generation on a blocking worker.
 fn run_list_filter(event_tx: &mpsc::Sender<Event>, state: &mut AppState, version: u64) {
+    use crate::app::filtering::browse_filter_records;
     use crate::services::{
-        browse_filter_records, filter_browse_records, filter_with_priority, DEFAULT_MAX_RESULTS,
+        DEFAULT_MAX_RESULTS, filter_browse_records_until, filter_with_priority_until,
     };
 
     if version != state.list_filter.version
@@ -1062,142 +1114,99 @@ fn run_list_filter(event_tx: &mpsc::Sender<Event>, state: &mut AppState, version
         return;
     }
 
+    let cancelled = state.list_filter.cancellation();
+    let generation = state.library_generation;
+    let column = state.list_filter.column;
     let query = state.list_filter.query.clone();
     let tx = event_tx.clone();
-    match state.list_filter.category {
-        BrowseCategory::Library => {
-            let columns: Vec<_> = state
-                .artist_nav
-                .columns
-                .iter()
-                .map(|column| browse_filter_records(&column.items))
-                .collect();
-            let aliases = state.library.artist_aliases.clone();
-            let comp_keys = state.library.compilations.artist_keys.clone();
-            crate::app::tasks::spawn_blocking(move || {
-                let column_results = columns
+    let category = state.list_filter.category;
+    if category == BrowseCategory::Folders {
+        let Some(items) = state
+            .folder_state
+            .as_ref()
+            .and_then(|nav| nav.columns.get(column))
+            .map(|column| {
+                column
+                    .items
                     .iter()
-                    .map(|items| {
-                        filter_browse_records(
-                            items,
-                            &query,
-                            DEFAULT_MAX_RESULTS,
-                            &aliases,
-                            &comp_keys,
-                        )
-                    })
-                    .collect();
-                let _ = tx.blocking_send(
-                    UiEvent::ListFilterCompleted {
-                        version,
-                        column_results,
-                    }
-                    .into(),
-                );
-            });
-        }
-        BrowseCategory::Playlists => {
-            let columns: Vec<_> = state
-                .playlist_nav
-                .columns
-                .iter()
-                .map(|column| browse_filter_records(&column.items))
-                .collect();
-            crate::app::tasks::spawn_blocking(move || {
-                let empty_aliases = std::collections::HashMap::new();
-                let empty_keys = std::collections::HashSet::new();
-                let column_results = columns
-                    .iter()
-                    .map(|items| {
-                        filter_browse_records(
-                            items,
-                            &query,
-                            DEFAULT_MAX_RESULTS,
-                            &empty_aliases,
-                            &empty_keys,
-                        )
-                    })
-                    .collect();
-                let _ = tx.blocking_send(
-                    UiEvent::ListFilterCompleted {
-                        version,
-                        column_results,
-                    }
-                    .into(),
-                );
-            });
-        }
-        cat if cat.is_tag_section() => {
-            let columns: Vec<_> = state
-                .tag_nav
-                .columns
-                .iter()
-                .map(|column| browse_filter_records(&column.items))
-                .collect();
-            crate::app::tasks::spawn_blocking(move || {
-                let empty_aliases = std::collections::HashMap::new();
-                let empty_keys = std::collections::HashSet::new();
-                let column_results = columns
-                    .iter()
-                    .map(|items| {
-                        filter_browse_records(
-                            items,
-                            &query,
-                            DEFAULT_MAX_RESULTS,
-                            &empty_aliases,
-                            &empty_keys,
-                        )
-                    })
-                    .collect();
-                let _ = tx.blocking_send(
-                    UiEvent::ListFilterCompleted {
-                        version,
-                        column_results,
-                    }
-                    .into(),
-                );
-            });
-        }
-        BrowseCategory::Folders => {
-            let columns: Vec<Vec<String>> = state
-                .folder_state
-                .as_ref()
-                .map(|folder_state| {
-                    folder_state
-                        .columns
-                        .iter()
-                        .map(|column| column.items.iter().map(|item| item.title.clone()).collect())
-                        .collect()
-                })
-                .unwrap_or_default();
-            crate::app::tasks::spawn_blocking(move || {
-                let column_results = columns
-                    .iter()
-                    .map(|items| {
-                        filter_with_priority(
-                            items,
-                            &query,
-                            |title| title.as_str(),
-                            DEFAULT_MAX_RESULTS,
-                        )
-                    })
-                    .collect();
-                let _ = tx.blocking_send(
-                    UiEvent::ListFilterCompleted {
-                        version,
-                        column_results,
-                    }
-                    .into(),
-                );
-            });
-        }
-        _ => {
-            state.list_filter.loading = false;
-        }
+                    .map(|item| item.title.clone())
+                    .collect::<Vec<_>>()
+            })
+        else {
+            state.list_filter.deactivate();
+            return;
+        };
+        crate::app::tasks::spawn_blocking(move || {
+            let Some(results) = filter_with_priority_until(
+                &items,
+                &query,
+                |title| title.as_str(),
+                DEFAULT_MAX_RESULTS,
+                cancelled,
+            ) else {
+                return;
+            };
+            let _ = tx.blocking_send(
+                UiEvent::ListFilterCompleted {
+                    version,
+                    generation,
+                    results,
+                }
+                .into(),
+            );
+        });
+        return;
     }
+    let nav = match category {
+        BrowseCategory::Library => &state.artist_nav,
+        BrowseCategory::Playlists => &state.playlist_nav,
+        cat if cat.is_tag_section() => &state.tag_nav,
+        _ => {
+            state.list_filter.deactivate();
+            return;
+        }
+    };
+    let Some(column) = nav.columns.get(column) else {
+        state.list_filter.deactivate();
+        return;
+    };
+    let items = browse_filter_records(&column.items);
+    let aliases = if category == BrowseCategory::Library {
+        state.library.artist_aliases.clone()
+    } else {
+        Default::default()
+    };
+    let mut comp_keys =
+        if category == BrowseCategory::Library && !state.show_compilation_only_artists {
+            state.library.compilations.artist_keys.clone()
+        } else {
+            Default::default()
+        };
+    if let Some(key) = &state.revealed_compilation_artist {
+        comp_keys.remove(key);
+    }
+    crate::app::tasks::spawn_blocking(move || {
+        let Some(results) = filter_browse_records_until(
+            &items,
+            &query,
+            DEFAULT_MAX_RESULTS,
+            &aliases,
+            &comp_keys,
+            cancelled,
+        ) else {
+            return;
+        };
+        let _ = tx.blocking_send(
+            UiEvent::ListFilterCompleted {
+                version,
+                generation,
+                results,
+            }
+            .into(),
+        );
+    });
 }
 
-/// Adventure launcher: search the cached catalog.
 fn adventure_launcher_search(_event_tx: &mpsc::Sender<Event>, state: &mut AppState) -> Result<()> {
     state.adventure_launcher_request_id = state.adventure_launcher_request_id.wrapping_add(1);
     let launcher = match state.popups.adventure_launcher_mut() {
@@ -1278,6 +1287,7 @@ fn adventure_launcher_search(_event_tx: &mpsc::Sender<Event>, state: &mut AppSta
         vec![]
     };
     launcher.results = Some(SearchResults {
+        global_order: vec![],
         artists,
         albums,
         playlists,
@@ -1304,55 +1314,13 @@ fn adventure_launcher_select_track(
         None => return Ok(vec![]),
     };
 
-    // Extract the selected track based on drill level
-    let track = match &launcher.drill {
-        AdventureDrillLevel::AlbumTracks { tracks, .. } => tracks.get(launcher.item_index).cloned(),
-        AdventureDrillLevel::Search => {
-            // Tab-aware track selection
-            if let Some(ref results) = launcher.results {
-                let idx = launcher.item_index;
-                match launcher.search_tab {
-                    crate::app::state::SearchTab::Tracks => results.tracks.get(idx).cloned(),
-                    crate::app::state::SearchTab::Global => {
-                        let artist_count = results.artists.len();
-                        let album_count = results.albums.len();
-                        if idx >= artist_count + album_count {
-                            results
-                                .tracks
-                                .get(idx - artist_count - album_count)
-                                .cloned()
-                        } else {
-                            None
-                        }
-                    }
-                    _ => None,
-                }
-            } else {
-                None
-            }
-        }
-        AdventureDrillLevel::ArtistAlbums { .. } => {
-            None // Can't select a track from album list
-        }
+    let track = match crate::app::journey::choices(launcher).get(launcher.item_index) {
+        Some(crate::app::journey::Choice::Track(track)) => (*track).clone(),
+        _ => return Ok(vec![]),
     };
-
-    let track = match track {
-        Some(t) => t,
-        None => return Ok(vec![]),
-    };
-
     match launcher.step {
-        AdventureStep::FindStartTrack => {
-            launcher.start_track = Some(track);
-        }
-        AdventureStep::FindEndTrack => {
-            launcher.end_track = Some(track);
-        }
-        AdventureStep::EnterTrackCount => {
-            // Shouldn't happen (count step doesn't select tracks),
-            // but defensively store as start so a stray click isn't lost.
-            launcher.start_track = Some(track);
-        }
+        AdventureStep::FindStartTrack => launcher.start_track = Some(track),
+        AdventureStep::FindEndTrack => launcher.end_track = Some(track),
     }
     // Reset the search panel so the user can pick the other field
     // immediately without manually clearing it.
@@ -1362,19 +1330,15 @@ fn adventure_launcher_select_track(
     launcher.item_index = 0;
     launcher.focus = SearchFocus::Input;
 
-    // Auto-advance the launcher's step so the UI keeps moving after a
-    // selection instead of leaving the user on a now-empty search:
-    //   - Picked a start track → step into EnterTrackCount.
-    //   - Picked an end track when count is set → fire Generate.
-    //   - Picked an end track when count is empty → step into
-    //     EnterTrackCount so the user fills in a count.
-    let both_tracks_set = launcher.start_track.is_some() && launcher.end_track.is_some();
-    let count_set = !launcher.track_count_input.trim().is_empty();
-    if both_tracks_set && count_set {
-        return Ok(vec![SearchAction::AdventureLauncherGenerate.into()]);
-    }
-    if launcher.start_track.is_some() {
-        launcher.step = AdventureStep::EnterTrackCount;
+    launcher.stage = crate::app::state::JourneyStage::Choosing;
+    if launcher.start_track.is_some() && launcher.end_track.is_some() {
+        launcher.terminal_focus = crate::app::journey::JourneyControl::Preview;
+    } else if launcher.start_track.is_some() {
+        launcher.step = AdventureStep::FindEndTrack;
+        launcher.terminal_focus = crate::app::journey::JourneyControl::End;
+    } else {
+        launcher.step = AdventureStep::FindStartTrack;
+        launcher.terminal_focus = crate::app::journey::JourneyControl::Start;
     }
 
     Ok(vec![])
@@ -1382,64 +1346,26 @@ fn adventure_launcher_select_track(
 
 /// Adventure launcher: handle back navigation.
 fn adventure_launcher_back(state: &mut AppState) {
-    use crate::app::state::{AdventureDrillLevel, AdventureStep};
-
+    use crate::app::state::AdventureDrillLevel;
     state.adventure_launcher_request_id = state.adventure_launcher_request_id.wrapping_add(1);
-    let launcher = match state.popups.adventure_launcher_mut() {
-        Some(l) => l,
-        None => return,
+    let Some(launcher) = state.popups.adventure_launcher_mut() else {
+        return;
     };
-
-    match &launcher.drill {
-        AdventureDrillLevel::AlbumTracks { .. } => {
-            // Go back to search level (we don't cache the artist albums level)
-            launcher.drill = AdventureDrillLevel::Search;
-            launcher.item_index = 0;
-            launcher.focus = SearchFocus::Results;
-        }
-        AdventureDrillLevel::ArtistAlbums { .. } => {
-            launcher.drill = AdventureDrillLevel::Search;
-            launcher.item_index = 0;
-            launcher.focus = SearchFocus::Results;
-        }
-        AdventureDrillLevel::Search => {
-            // At search level, back depends on step
-            match launcher.step {
-                AdventureStep::FindStartTrack => {
-                    // Close the launcher
-                    state.popups.set_adventure_launcher(None);
-                }
-                AdventureStep::EnterTrackCount => {
-                    // Go back to FindStartTrack
-                    launcher.step = AdventureStep::FindStartTrack;
-                    launcher.start_track = None;
-                    launcher.query.clear();
-                    launcher.item_index = 0;
-                    launcher.focus = SearchFocus::Input;
-                    // Pre-populate with all artists
-                    let _ = launcher;
-                    let artists = state.library.artists.clone();
-                    if let Some(l) = state.popups.adventure_launcher_mut() {
-                        l.results = Some(SearchResults {
-                            artists,
-                            albums: vec![],
-                            playlists: vec![],
-                            genres: vec![],
-                            tracks: vec![],
-                        });
-                    }
-                }
-                AdventureStep::FindEndTrack => {
-                    // Go back to EnterTrackCount
-                    launcher.step = AdventureStep::EnterTrackCount;
-                }
-            }
-        }
+    if matches!(launcher.drill, AdventureDrillLevel::Search) {
+        state.popups.set_adventure_launcher(None);
+    } else {
+        launcher.drill = AdventureDrillLevel::Search;
+        launcher.item_index = 0;
+        launcher.scroll_pin = None;
+        launcher.focus = SearchFocus::Input;
     }
 }
 
 /// Check if the currently focused column is the filter's target column.
 pub(super) fn is_on_filter_column(state: &AppState) -> bool {
+    if state.browse_category != state.list_filter.category {
+        return false;
+    }
     let filter_col = state.list_filter.column;
     match state.list_filter.category {
         BrowseCategory::Library => state.artist_nav.focused_column == filter_col,
@@ -1451,5 +1377,101 @@ pub(super) fn is_on_filter_column(state: &AppState) -> bool {
             .unwrap_or(true),
         cat if cat.is_tag_section() => state.tag_nav.focused_column == filter_col,
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{app::runtime::Session, audio::AudioPlayer, library::track::Track};
+    use std::{sync::Arc, time::Duration};
+
+    fn search_session() -> Session {
+        let mut session = Session::with_audio(Default::default(), AudioPlayer::new_without_audio());
+        session.state.popups.set_search_active(true);
+        session.state.library.all_tracks = Arc::new(vec![Track {
+            title: "Alpha".into(),
+            ..Default::default()
+        }]);
+        session
+    }
+
+    #[tokio::test]
+    async fn fuzzy_search_waits_for_one_grapheme_and_then_publishes() {
+        let mut session = search_session();
+        session
+            .dispatch(SearchAction::SetSearchQuery("a".into()).into())
+            .await
+            .unwrap();
+        assert!(search_pending(&session.state));
+        assert!(session.state.search.results.is_none());
+
+        let event = tokio::time::timeout(Duration::from_secs(2), session.completions.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let Event::Effect(action) = event else {
+            panic!("expected search timer completion");
+        };
+        session.dispatch(action).await.unwrap();
+        assert!(!search_pending(&session.state));
+        assert_eq!(
+            session.state.search.results.unwrap().tracks[0].title,
+            "Alpha"
+        );
+    }
+
+    #[tokio::test]
+    async fn fuzzy_search_supersedes_first_letter_and_submits_without_waiting() {
+        let mut session = search_session();
+        session
+            .dispatch(SearchAction::SetSearchQuery("á".into()).into())
+            .await
+            .unwrap();
+        assert!(search_pending(&session.state));
+        session
+            .dispatch(SearchAction::ExecuteLocalSearch.into())
+            .await
+            .unwrap();
+        assert!(session.state.search.results.is_none());
+        let request_id = session.state.sources.nav_tasks[SEARCH_DEBOUNCE_SLOT].0;
+
+        session
+            .dispatch(SearchAction::SetSearchQuery("alp".into()).into())
+            .await
+            .unwrap();
+        assert!(!search_pending(&session.state));
+        assert_eq!(
+            session.state.search.results.as_ref().unwrap().tracks[0].title,
+            "Alpha"
+        );
+        session
+            .dispatch(SearchAction::SetSearchQuery("a".into()).into())
+            .await
+            .unwrap();
+        session
+            .dispatch(
+                crate::app::sources::navidrome::NavAction::Completed {
+                    generation: session.state.library_generation,
+                    request_id,
+                    slot: SEARCH_DEBOUNCE_SLOT,
+                    result: Ok(vec![SearchAction::ExecuteLocalSearch.into()]),
+                }
+                .into(),
+            )
+            .await
+            .unwrap();
+        assert!(search_pending(&session.state));
+        assert!(session.state.search.results.is_none());
+
+        session
+            .dispatch(SearchAction::SubmitSearch.into())
+            .await
+            .unwrap();
+        assert!(!search_pending(&session.state));
+        assert_eq!(
+            session.state.search.results.unwrap().tracks[0].title,
+            "Alpha"
+        );
     }
 }

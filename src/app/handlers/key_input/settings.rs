@@ -3,9 +3,9 @@
 use crate::app::action::*;
 use crossterm::event::{self, KeyCode};
 
-use crate::app::state::View;
 use crate::app::Action;
 use crate::app::AppState;
+use crate::app::state::View;
 
 /// Handle Help view keys.
 pub(super) fn handle_help_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
@@ -81,7 +81,15 @@ pub(super) fn handle_settings_keys(
     }
     if key.code == KeyCode::Esc {
         if focus == Focus::Sections {
-            return vec![NavigationAction::SetView(View::Browse).into()];
+            return vec![
+                NavigationAction::SetView(
+                    state
+                        .previous_view
+                        .filter(|view| *view != View::Settings)
+                        .unwrap_or(View::Browse),
+                )
+                .into(),
+            ];
         }
         state.settings_state.focus = Focus::Sections;
         return vec![];
@@ -143,6 +151,9 @@ pub(super) fn handle_settings_keys(
         let scroll = &mut state.settings_state.scroll;
         *scroll = (*scroll).min(max_scroll);
         match key.code {
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                return vec![SettingsAction::SettingsSelect.into()];
+            }
             KeyCode::Up => *scroll = scroll.saturating_sub(1),
             KeyCode::Down => *scroll = scroll.saturating_add(1).min(max_scroll),
             KeyCode::PageUp => *scroll = scroll.saturating_sub(10),

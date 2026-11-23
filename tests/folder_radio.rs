@@ -1,13 +1,13 @@
 use std::collections::HashSet;
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicUsize, Ordering},
 };
 use std::time::Duration;
 use textamp::library::{
-    cache::Store,
-    radio::{select, Recipe},
     FolderLocation, FolderSource,
+    cache::Store,
+    radio::{Recipe, select},
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -56,11 +56,13 @@ async fn random_albums_are_complete_leaf_folders_in_filename_order() {
         assert!(albums.insert(parent));
         excluded.extend(tracks.into_iter().map(|t| t.rating_key));
     }
-    assert!(select(&source, &store, Recipe::RandomAlbum, &excluded)
-        .await
-        .unwrap_err()
-        .to_string()
-        .contains("No unplayed albums"));
+    assert!(
+        select(&source, &store, Recipe::RandomAlbum, &excluded)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("No unplayed albums")
+    );
     let shuffled = select(&source, &store, Recipe::Library, &HashSet::new())
         .await
         .unwrap();
@@ -140,7 +142,10 @@ async fn webdav_radio_uses_only_listings_and_reuses_the_persistent_cache() {
             count.fetch_add(1, Ordering::SeqCst);
             let responses: String = entries.into_iter().map(|(path, dir)| format!("<d:response><d:href>{path}</d:href><d:propstat><d:prop><d:resourcetype>{}</d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>", if dir { "<d:collection/>" } else { "" })).collect();
             let body = format!("<d:multistatus xmlns:d=\"DAV:\">{responses}</d:multistatus>");
-            let response = format!("HTTP/1.1 207 Multi-Status\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            let response = format!(
+                "HTTP/1.1 207 Multi-Status\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
             socket.write_all(response.as_bytes()).await.unwrap();
         }
     });
@@ -266,7 +271,7 @@ async fn shared_station_lifecycle_commits_folder_tracks_and_cancels_obsolete_wor
 async fn prepared_metadata_updates_radio_even_when_audio_output_is_unavailable() {
     use textamp::app::sources::{self, FileAction};
     use textamp::app::state::PlaybackMode;
-    use textamp::library::{track::Track, MediaFile};
+    use textamp::library::{MediaFile, track::Track};
     let mut state = textamp::app::AppState::new();
     state.queue.tracks = vec![Track::from_folder("fixture", "inactive.flac")];
     state.queue.index = Some(0);
@@ -297,4 +302,84 @@ async fn prepared_metadata_updates_radio_even_when_audio_output_is_unavailable()
     assert_eq!(state.queue.tracks[0].title, "inactive.flac");
     assert_eq!(state.playback.duration_ms, 123_000);
     assert_eq!(state.artwork.current_data, Some(vec![1]));
+}
+
+#[tokio::test]
+async fn library_radio_overlaps_sibling_reads_with_four_request_limit() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let barrier = Arc::new(tokio::sync::Barrier::new(4));
+    let active = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let server_active = active.clone();
+    let server_peak = peak.clone();
+    let server = tokio::spawn(async move {
+        let mut handlers = tokio::task::JoinSet::new();
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let barrier = barrier.clone();
+            let active = server_active.clone();
+            let peak = server_peak.clone();
+            handlers.spawn(async move {
+                let mut request = Vec::new();
+                loop {
+                    let mut byte = [0];
+                    socket.read_exact(&mut byte).await.unwrap();
+                    request.push(byte[0]);
+                    if request.ends_with(b"\r\n\r\n") { break; }
+                }
+                let request = String::from_utf8(request).unwrap();
+                let length = request.lines().find_map(|line| {
+                    line.to_ascii_lowercase().strip_prefix("content-length:")?.trim().parse::<usize>().ok()
+                }).unwrap_or(0);
+                let mut body = vec![0; length];
+                socket.read_exact(&mut body).await.unwrap();
+                let path = request.split_whitespace().nth(1).unwrap();
+                let is_root = path == "/music/";
+                if !is_root {
+                    let count = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(count, Ordering::SeqCst);
+                    barrier.wait().await;
+                }
+                let entries = if is_root {
+                    (0..8).map(|i| (format!("/music/album{i}/"), true)).collect::<Vec<_>>()
+                } else {
+                    vec![(format!("{path}track.flac"), false)]
+                };
+                let mut body = String::from("<d:multistatus xmlns:d=\"DAV:\">");
+                for (path, directory) in entries {
+                    body.push_str(&format!("<d:response><d:href>{path}</d:href><d:propstat><d:prop><d:resourcetype>{}</d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>", if directory { "<d:collection/>" } else { "" }));
+                }
+                body.push_str("</d:multistatus>");
+                if !is_root { active.fetch_sub(1, Ordering::SeqCst); }
+                socket.write_all(format!("HTTP/1.1 207 Multi-Status\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            });
+            while let Some(result) = handlers.try_join_next() {
+                result.unwrap();
+            }
+        }
+    });
+    let source = FolderSource {
+        id: "concurrent-radio-fixture".into(),
+        name: "Fixture".into(),
+        location: FolderLocation::Webdav {
+            url: format!("http://{address}/music/"),
+            username: None,
+            password_env: None,
+        },
+    };
+    let cache = tempfile::tempdir().unwrap();
+    let store = Store::at(cache.path().into(), &source.id).unwrap();
+    let tracks = tokio::time::timeout(
+        Duration::from_secs(10),
+        select(&source, &store, Recipe::Library, &HashSet::new()),
+    )
+    .await
+    .expect("sibling listings must overlap")
+    .unwrap();
+    assert_eq!(tracks.len(), 8);
+    assert_eq!(peak.load(Ordering::SeqCst), 4);
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+    assert_eq!(active.load(Ordering::SeqCst), 0);
 }

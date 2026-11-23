@@ -1,9 +1,9 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use textamp::app::{
+    AppState,
     dispatch::dispatch_action,
     handlers::key_input,
     state::{SettingsFocus, SettingsPage, SettingsSection, TextampSetting, View},
-    AppState,
 };
 use textamp::{audio::AudioPlayer, config::Config};
 

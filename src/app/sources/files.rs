@@ -31,7 +31,7 @@ impl From<FileAction> for Action {
     }
 }
 
-pub(super) async fn dispatch(
+pub(super) fn dispatch(
     action: FileAction,
     state: &mut AppState,
     audio: &mut AudioPlayer,
@@ -142,6 +142,7 @@ pub(super) async fn dispatch(
                         nav.columns.truncate(column);
                         nav.columns.push(next);
                         nav.focused_column = column;
+                        state.miller_reveal_right = true;
                     }
                 }
             }
@@ -231,7 +232,7 @@ fn load_folder(
     let store = crate::library::cache::Store::folder(&source);
     let ticket = store
         .as_ref()
-        .map(|store| store.ticket(&path))
+        .map(|store| store.listings().ticket(&path))
         .map_err(|e| e.to_string());
     let task = crate::app::tasks::spawn(async move {
         let ticket = match ticket {
@@ -241,65 +242,71 @@ fn load_folder(
                 None
             }
         };
-        if !force {
-            if let Some(ticket) = ticket.clone() {
-                let read_path = path.clone();
-                match crate::app::tasks::spawn_blocking(move || {
-                    let _ = ticket;
-                    super::cache::read_folder(&store.map_err(anyhow::Error::msg)?, &read_path)
-                })
-                .await
-                {
-                    Ok(Ok(Some(hit))) => {
-                        let refreshing = hit.stale;
-                        if tx
-                            .send(Event::Effect(
-                                FileAction::Listed {
-                                    generation,
-                                    id,
-                                    path: path.clone(),
-                                    column,
-                                    refreshing,
-                                    result: Ok(hit.value),
-                                }
-                                .into(),
-                            ))
-                            .await
-                            .is_err()
-                            || !refreshing
-                        {
-                            return;
-                        }
+        if !force && ticket.is_some() {
+            let read_path = path.clone();
+            match crate::app::tasks::spawn_blocking(move || {
+                super::cache::read_folder(&store.map_err(anyhow::Error::msg)?, &read_path)
+            })
+            .await
+            .map_err(anyhow::Error::from)
+            .and_then(|result| result)
+            {
+                Ok(Some(hit)) => {
+                    let refreshing = hit.stale;
+                    if tx
+                        .send(Event::Effect(
+                            FileAction::Listed {
+                                generation,
+                                id,
+                                path: path.clone(),
+                                column,
+                                refreshing,
+                                result: Ok(hit.value),
+                            }
+                            .into(),
+                        ))
+                        .await
+                        .is_err()
+                        || !refreshing
+                    {
+                        return;
                     }
-                    Ok(Ok(None)) => {}
-                    other => tracing::warn!(
-                        "Folder cache unavailable: {}",
-                        match other {
-                            Ok(Err(e)) => e.to_string(),
-                            Err(e) => e.to_string(),
-                            _ => unreachable!(),
-                        }
-                    ),
                 }
+                Ok(None) => {}
+                Err(error) => tracing::warn!("Folder cache unavailable: {error}"),
             }
         }
         let result = source.list(&path).await.map_err(|e| format!("{e:#}"));
         if let (Some(ticket), Ok(entries)) = (ticket, &result) {
             let entries = entries.clone();
-            let saved = crate::app::tasks::spawn_blocking(move || ticket.write(&entries)).await;
-            if let Err(error) = saved
-                .map_err(|e| e.to_string())
-                .and_then(|r| r.map_err(|e| e.to_string()))
-            {
-                tracing::warn!("Folder cache write: {error}");
-                let _ = tx
-                    .send(Event::Effect(
-                        super::super::action::SystemAction::ShowError(format!(
-                            "Save folder cache: {error}"
+            let save = crate::app::tasks::spawn_blocking(move || ticket.write(&entries));
+            let events = tx.clone();
+            let report = async move {
+                if let Err(error) = save
+                    .await
+                    .map_err(anyhow::Error::from)
+                    .and_then(|result| result)
+                {
+                    tracing::warn!("Folder cache write: {error}");
+                    let _ = events
+                        .send(Event::for_library(
+                            generation,
+                            Event::Effect(
+                                super::super::action::SystemAction::ShowError(format!(
+                                    "Save folder cache: {error}"
+                                ))
+                                .into(),
+                            ),
                         ))
-                        .into(),
-                    ))
-                    .await;
+                        .await;
+                }
+            };
+            if force {
+                // A completed explicit refresh includes the cache commit.
+                report.await;
+            } else {
+                // The session supervises accepted writes after a browse result is published.
+                crate::app::tasks::spawn(report);
             }
         }
         let _ = tx
@@ -376,7 +383,6 @@ pub fn folders(
                 }
             }
         }
-        _ => {} // Catalog completion events cannot apply to file sources.
     }
 }
 
@@ -401,7 +407,7 @@ pub fn play(
         return;
     };
     state.sources.media = crate::app::sources::MediaPreparation::Idle;
-    audio.stop();
+    audio.stop_for_preparation();
     state.playback.request_id = audio.playback_id();
     state.playback.preparation_id = state.playback.preparation_id.wrapping_add(1);
     state.playback.status = PlayStatus::Buffering;

@@ -5,9 +5,9 @@
 
 use crate::app::state::{RelatedArtistGroup, RelatedSource};
 use crate::services::NavigationService;
+use crate::ui::RenderState as AppState;
 use crate::ui::layout::centered_rect;
 use crate::ui::theme::theme;
-use crate::ui::RenderState as AppState;
 use crate::util::truncate_middle;
 
 use ratatui::prelude::*;
@@ -15,11 +15,13 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 
 /// Render the related artists popup overlay.
 pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
+    state.hit_regions.borrow_mut().artist_links.clear();
     let t = theme();
 
     // Centered popup: 65% wide, 80% tall
     let popup_area = centered_rect(65, 80, area);
     frame.render_widget(Clear, popup_area);
+    crate::ui::widgets::register_popup_close(state, popup_area);
 
     let title = format!(" related to: {} ", state.related.source_title);
     let block = Block::default()
@@ -30,6 +32,13 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         .style(Style::default().bg(t.colors.bg_primary));
     let inner = block.inner(popup_area);
     frame.render_widget(block, popup_area);
+    crate::ui::artist_links::visible(
+        frame,
+        state,
+        Rect::new(popup_area.x, popup_area.y, popup_area.width, 1),
+        &state.related.source_title,
+        Some(&state.related.source_key),
+    );
 
     // Register hit regions for mouse handler
     {
@@ -95,6 +104,18 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
             };
             let header_text = format!("  {}{}", group.artist.title, alias_suffix);
             let header_display = truncate_middle(&header_text, max_text_width);
+            crate::ui::artist_links::text(
+                state,
+                Rect::new(
+                    content_area.x,
+                    content_area.y + items.len() as u16,
+                    content_area.width,
+                    1,
+                ),
+                &header_display,
+                &group.artist.title,
+                Some(&group.artist.rating_key),
+            );
 
             let (fg, bg) = if is_selected {
                 (

@@ -1,7 +1,7 @@
 use std::time::Duration;
 use textamp::app::action::SystemAction;
 use textamp::app::dispatch::{dispatch_action, handle_core_event};
-use textamp::app::sources::{navidrome::Session, ActiveSource};
+use textamp::app::sources::{ActiveSource, navidrome::Session};
 use textamp::app::state::{PlaybackMode, View};
 use textamp::app::{AppState, Event};
 use textamp::audio::AudioPlayer;
@@ -44,8 +44,9 @@ async fn analyze(state: &mut AppState) {
     )
     .await
     .unwrap();
+    assert!(state.waveform.task.is_some());
     tokio::time::timeout(Duration::from_secs(10), async {
-        while state.waveform.generating || state.spectrogram.generating {
+        while state.waveform.generating() || state.spectrogram.generating() {
             let event = rx.recv().await.unwrap();
             for action in handle_core_event(event, state, &tx) {
                 dispatch_action(action, state, &mut audio, &mut Config::default(), &tx)
@@ -56,28 +57,26 @@ async fn analyze(state: &mut AppState) {
     })
     .await
     .unwrap();
-    assert!(state.waveform.error.is_none(), "{:?}", state.waveform.error);
     assert!(
-        state.spectrogram.error.is_none(),
+        state.waveform.error().is_none(),
         "{:?}",
-        state.spectrogram.error
+        state.waveform.error()
     );
-    assert!(state
-        .waveform
-        .data
-        .as_ref()
-        .unwrap()
-        .bins
-        .iter()
-        .any(|v| *v > 0.5));
-    assert!(state
-        .spectrogram
-        .data
-        .as_ref()
-        .unwrap()
-        .frames
-        .iter()
-        .any(|v| *v > 0));
+    assert!(
+        state.spectrogram.error().is_none(),
+        "{:?}",
+        state.spectrogram.error()
+    );
+    assert!(state.waveform.data().unwrap().bins.iter().any(|v| *v > 0.5));
+    assert!(
+        state
+            .spectrogram
+            .data()
+            .unwrap()
+            .frames
+            .iter()
+            .any(|v| *v > 0)
+    );
 }
 #[tokio::test]
 async fn folder_visualizers_wait_for_preparation_then_analyze_all_folder_providers() {
@@ -119,8 +118,8 @@ async fn folder_visualizers_wait_for_preparation_then_analyze_all_folder_provide
         )
         .await
         .unwrap();
-        assert!(!state.waveform.generating);
-        assert!(state.waveform.error.is_none());
+        assert!(!state.waveform.generating());
+        assert!(state.waveform.error().is_none());
         state.sources.media =
             textamp::app::sources::MediaPreparation::Ready(MediaFile::local(path.clone()));
         analyze(&mut state).await;
@@ -174,4 +173,92 @@ async fn navidrome_visualizers_read_the_authenticated_raw_stream_without_plex() 
     state.queue.index = Some(0);
     analyze(&mut state).await;
     task.await.unwrap();
+}
+
+#[test]
+fn analysis_progress_is_scoped_to_the_current_track() {
+    use textamp::app::event::VisualizerEvent;
+    use textamp::app::state::AnalysisProgress;
+    let mut state = AppState::new();
+    state.waveform.track_key = Some("current".into());
+    state.waveform.start();
+    let (tx, _) = mpsc::channel(8);
+    for key in ["old", "current"] {
+        handle_core_event(
+            Event::Visualizer(VisualizerEvent::AnalysisProgress {
+                track_key: key.into(),
+                progress: AnalysisProgress::Downloading {
+                    received: 25,
+                    total: Some(100),
+                },
+            }),
+            &mut state,
+            &tx,
+        );
+        assert_eq!(state.waveform.progress().is_some(), key == "current");
+    }
+    assert_eq!(
+        state.waveform.progress().unwrap().message(),
+        "Downloading audio… 25%"
+    );
+}
+
+#[tokio::test]
+async fn analysis_retry_and_cache_miss_cannot_replace_completed_data() {
+    use textamp::app::{event::VisualizerEvent, state::AnalysisPhase};
+    let mut state = AppState::new();
+    state.waveform.track_key = Some("current".into());
+    state.waveform.start();
+    let (tx, _rx) = mpsc::channel(16);
+    handle_core_event(
+        Event::Visualizer(VisualizerEvent::WaveformFailed {
+            track_key: "current".into(),
+            error: "Temporary".into(),
+        }),
+        &mut state,
+        &tx,
+    );
+    assert!(matches!(
+        state.waveform.phase,
+        AnalysisPhase::WaitingToRetry
+    ));
+    state.waveform.succeed(textamp::media::WaveformData {
+        track_key: "current".into(),
+        duration_ms: 1000,
+        bins: vec![0.5],
+        version: 1,
+        created_at: 0,
+    });
+    let shared = state.waveform.shared_data().unwrap();
+    let cloned = state.waveform.clone().shared_data().unwrap();
+    assert!(std::sync::Arc::ptr_eq(&shared, &cloned));
+    assert!(
+        handle_core_event(
+            Event::Visualizer(VisualizerEvent::WaveformRetry("current".into())),
+            &mut state,
+            &tx
+        )
+        .is_empty()
+    );
+    handle_core_event(
+        Event::Visualizer(VisualizerEvent::WaveformFailed {
+            track_key: "current".into(),
+            error: "Late failure".into(),
+        }),
+        &mut state,
+        &tx,
+    );
+    assert!(state.waveform.error().is_none());
+    assert!(state.waveform.data().is_some());
+    state.spectrogram.track_key = Some("current".into());
+    state.spectrogram.start();
+    handle_core_event(
+        Event::Visualizer(VisualizerEvent::SpectrogramCacheMiss {
+            track_key: "current".into(),
+        }),
+        &mut state,
+        &tx,
+    );
+    assert!(matches!(state.spectrogram.phase, AnalysisPhase::Idle));
+    assert!(state.spectrogram.error().is_none());
 }

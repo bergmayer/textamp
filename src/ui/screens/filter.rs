@@ -5,41 +5,28 @@
 use crate::app::state::{SearchFocus, SearchTab};
 use crate::library::models::SearchResults;
 use crate::services::NavigationService;
+use crate::ui::RenderState as AppState;
 use crate::ui::layout::centered_rect;
 use crate::ui::theme::theme;
-use crate::ui::RenderState as AppState;
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs};
 
 /// Render the search popup as an overlay.
 pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
+    state.hit_regions.borrow_mut().artist_links.clear();
     let t = theme();
 
-    // Popup takes 50% width, 70% height, centered
-    let details = state
-        .search
-        .details
-        .open
-        .then(|| crate::app::result_details::track_list(state))
-        .flatten();
-    let popup_area = centered_rect(
-        if details.is_some() { 94 } else { 50 },
-        if details.is_some() { 90 } else { 70 },
-        area,
-    );
+    let popup_area = centered_rect(65, 75, area);
     state.hit_regions.borrow_mut().track_pane = None;
 
     // Clear the area behind the popup
     frame.render_widget(Clear, popup_area);
+    crate::ui::widgets::register_popup_close(state, popup_area);
 
     let block = Block::default()
         .title(" search ")
-        .title_bottom(if state.search.details.focused {
-            " ← results · ↑↓ action · Enter select · PgUp/PgDn scroll "
-        } else {
-            " Enter details · Esc close "
-        })
+        .title_bottom(" Enter: show in Library · Esc: close ")
         .title_style(Style::default().fg(t.colors.fg_accent))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(t.colors.fg_accent))
@@ -57,13 +44,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         ])
         .split(inner);
 
-    let panes = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(chunks[2]);
-    let results_area = if details.is_some() {
-        panes[0]
-    } else {
-        chunks[2]
-    };
+    let results_area = chunks[2];
 
     // Register hit regions for mouse handler
     {
@@ -84,15 +65,6 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
 
     // Results
     render_results(frame, state, results_area);
-    if let Some((tracks, index)) = details {
-        crate::ui::app::render_track_details_pane(
-            frame,
-            state,
-            panes[1],
-            &tracks[index],
-            Some(&state.search.details),
-        );
-    }
 }
 
 fn render_tabs(frame: &mut Frame, state: &AppState, area: Rect) {
@@ -177,12 +149,7 @@ fn render_search_input(frame: &mut Frame, state: &AppState, area: Rect) {
     let input_inner = input_block.inner(area);
     frame.render_widget(input_block, area);
 
-    // Show search query with cursor only when input is focused
-    let query_text = if is_input_focused {
-        format!("{}▋", state.search.query)
-    } else {
-        state.search.query.clone()
-    };
+    let query_text = state.search.query.clone();
     let fg = if is_input_focused {
         t.colors.fg_primary
     } else {
@@ -190,6 +157,15 @@ fn render_search_input(frame: &mut Frame, state: &AppState, area: Rect) {
     };
     let input = Paragraph::new(query_text).style(Style::default().fg(fg));
     frame.render_widget(input, input_inner);
+    if is_input_focused {
+        crate::ui::widgets::text_input::render(
+            frame,
+            state,
+            input_inner,
+            crate::app::terminal_text::Target::Search,
+            Style::default().fg(fg).bg(t.colors.bg_primary),
+        );
+    }
 }
 
 fn render_results(frame: &mut Frame, state: &AppState, area: Rect) {
@@ -212,8 +188,7 @@ fn render_results(frame: &mut Frame, state: &AppState, area: Rect) {
         }
     };
 
-    let is_results_focused =
-        state.search.focus == SearchFocus::Results && !state.search.details.focused;
+    let is_results_focused = state.search.focus == SearchFocus::Results;
     let selected_idx = state.list_state.search_item_index;
 
     match state.search.tab {
@@ -296,6 +271,7 @@ fn render_results(frame: &mut Frame, state: &AppState, area: Rect) {
             area,
         ),
     }
+    register_result_artist_links(frame, state, results, area, scroll_pin, selected_idx);
 }
 
 /// Render the All tab with section headers.
@@ -307,130 +283,35 @@ fn render_all_tab(
     scroll_pin: Option<usize>,
     area: Rect,
 ) {
-    let t = theme();
-
-    if results.is_empty() {
-        let empty = Paragraph::new("No matches found")
-            .style(Style::default().fg(t.colors.fg_muted))
-            .alignment(Alignment::Center);
-        frame.render_widget(empty, area);
-        return;
-    }
-
-    let section_lengths = [
-        results.artists.len(),
-        results.albums.len(),
-        results.playlists.len(),
-        results.genres.len(),
-        results.tracks.len(),
-    ];
-    let total_entries: usize = section_lengths
-        .iter()
-        .map(|length| if *length == 0 { 0 } else { length + 1 })
-        .sum();
-
-    let visible_height = area.height as usize;
-
-    // Find display position of selected item
-    let display_selected = {
-        let mut selectable_base = 0;
-        let mut display_base = 0;
-        let mut found = None;
-        for length in section_lengths {
-            if length == 0 {
-                continue;
+    let rows: Vec<_> = (0..results.total_count()).collect();
+    render_single_section(
+        frame,
+        &rows,
+        |&i| {
+            let (tab, index) =
+                crate::app::handlers::dispatch_search::resolve_global_index(results, i);
+            match tab {
+                SearchTab::Artists => format!("Artist · {}", results.artists[index].title),
+                SearchTab::Albums => format!(
+                    "Album · {} — {}",
+                    results.albums[index].title,
+                    results.albums[index].artist_name()
+                ),
+                SearchTab::Tracks => format!(
+                    "Track · {} — {}",
+                    results.tracks[index].title,
+                    results.tracks[index].track_artist()
+                ),
+                SearchTab::Playlists => format!("Playlist · {}", results.playlists[index].title),
+                SearchTab::Genres => format!("Genre · {}", results.genres[index].title),
+                SearchTab::Global => unreachable!(),
             }
-            if selected_idx < selectable_base + length {
-                found = Some(display_base + 1 + selected_idx - selectable_base);
-                break;
-            }
-            selectable_base += length;
-            display_base += length + 1;
-        }
-        found.unwrap_or(0)
-    };
-    let scroll_offset = match scroll_pin {
-        Some(pinned) => pinned,
-        None => {
-            NavigationService::calc_scroll_offset(display_selected, visible_height, total_entries)
-        }
-    };
-
-    let mut items = Vec::with_capacity(visible_height.min(total_entries));
-    for display_index in scroll_offset..(scroll_offset + visible_height).min(total_entries) {
-        let mut local = display_index;
-        let mut global_base = 0;
-        for (section, length) in section_lengths.iter().copied().enumerate() {
-            if length == 0 {
-                continue;
-            }
-            if local == 0 {
-                let name = ["Artists", "Albums", "Playlists", "Genres", "Tracks"][section];
-                items.push(
-                    ListItem::new(format!("── {} ({}) ──", name, length))
-                        .style(Style::default().fg(t.colors.fg_accent)),
-                );
-                break;
-            }
-            local -= 1;
-            if local < length {
-                let text = match section {
-                    0 => format!("  {}", results.artists[local].title),
-                    1 => {
-                        let album = &results.albums[local];
-                        let artist = album.artist_name();
-                        if album.title.is_empty() {
-                            format!("  Unknown Album ({artist}) - {artist}")
-                        } else if let Some(year) = album.year {
-                            format!("  {} ({year}) - {artist}", album.title)
-                        } else {
-                            format!("  {} - {artist}", album.title)
-                        }
-                    }
-                    2 => format!("  {}", results.playlists[local].title),
-                    3 => format!("  {}", results.genres[local].title),
-                    _ => {
-                        let track = &results.tracks[local];
-                        let title = if track.title.is_empty() {
-                            track.file_name().unwrap_or("Unknown Track")
-                        } else {
-                            &track.title
-                        };
-                        format!("  {} - {}", title, track.track_artist())
-                    }
-                };
-                let global_index = global_base + local;
-                let style = if is_focused && global_index == selected_idx {
-                    Style::default()
-                        .fg(t.colors.selection_text)
-                        .bg(t.colors.selection_bar_bg)
-                } else if global_index == selected_idx {
-                    Style::default()
-                        .fg(t.colors.fg_primary)
-                        .bg(t.colors.bg_highlight)
-                } else {
-                    Style::default().fg(t.colors.fg_primary)
-                };
-                items.push(ListItem::new(text).style(style));
-                break;
-            }
-            local -= length;
-            global_base += length;
-        }
-    }
-
-    frame.render_widget(List::new(items), area);
-
-    // Scrollbar for long lists
-    if total_entries > visible_height {
-        crate::ui::widgets::render_scrollbar_borderless(
-            frame,
-            area,
-            total_entries,
-            visible_height,
-            scroll_offset,
-        );
-    }
+        },
+        is_focused,
+        selected_idx,
+        scroll_pin,
+        area,
+    );
 }
 
 /// Render a single-section list (for Artists, Albums, Playlists, Tracks, Genres tabs).
@@ -475,9 +356,7 @@ fn render_single_section<T, F>(
                     .fg(t.colors.selection_text)
                     .bg(t.colors.selection_bar_bg)
             } else if i == selected_idx {
-                Style::default()
-                    .fg(t.colors.fg_primary)
-                    .bg(t.colors.bg_highlight)
+                t.colors.inactive_row()
             } else {
                 Style::default().fg(t.colors.fg_primary)
             };
@@ -496,5 +375,83 @@ fn render_single_section<T, F>(
             visible_height,
             scroll_offset,
         );
+    }
+}
+
+fn register_result_artist_links(
+    frame: &mut Frame,
+    state: &AppState,
+    results: &SearchResults,
+    area: Rect,
+    pin: Option<usize>,
+    selected: usize,
+) {
+    let artist = |artist: &crate::library::models::Artist| {
+        Some((artist.title.clone(), Some(artist.rating_key.clone())))
+    };
+    let album = |album: &crate::library::models::Album| {
+        Some((
+            album.artist_name().to_owned(),
+            album.parent_rating_key.clone(),
+        ))
+    };
+    let track = |track: &crate::library::models::Track| {
+        Some((
+            track.track_artist().to_owned(),
+            track.grandparent_rating_key.clone(),
+        ))
+    };
+    let mut rows = Vec::new();
+    if state.search.tab == SearchTab::Global {
+        for i in 0..results.total_count() {
+            let (tab, index) =
+                crate::app::handlers::dispatch_search::resolve_global_index(results, i);
+            let link = match tab {
+                SearchTab::Artists => artist(&results.artists[index]),
+                SearchTab::Albums => album(&results.albums[index]),
+                SearchTab::Tracks => track(&results.tracks[index]),
+                _ => None,
+            };
+            rows.push((true, link));
+        }
+    } else {
+        let entries = match state.search.tab {
+            SearchTab::Artists => results.artists.iter().map(artist).collect(),
+            SearchTab::Albums => results.albums.iter().map(album).collect(),
+            SearchTab::Tracks => results.tracks.iter().map(track).collect(),
+            _ => Vec::new(),
+        };
+        rows.extend(entries.into_iter().map(|entry| (true, entry)));
+    }
+    let mut index = 0;
+    let selected_display = rows
+        .iter()
+        .position(|(selectable, _)| {
+            if !selectable {
+                return false;
+            }
+            let matches = index == selected;
+            index += 1;
+            matches
+        })
+        .unwrap_or(0);
+    let offset = pin.unwrap_or_else(|| {
+        NavigationService::calc_scroll_offset(selected_display, area.height as usize, rows.len())
+    });
+    for (line, (_, artist)) in rows
+        .into_iter()
+        .skip(offset)
+        .take(area.height as usize)
+        .enumerate()
+    {
+        if let Some((name, key)) = artist {
+            crate::ui::artist_links::visible(
+                frame,
+                state,
+                Rect::new(area.x, area.y + line as u16, area.width, 1),
+                &name,
+                key.as_deref(),
+            );
+        }
     }
 }

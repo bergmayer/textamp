@@ -7,7 +7,7 @@ use textamp::app::state::{BrowseCategory, InputDialog, InputDialogAction, PlaySt
 use textamp::app::{Action, AppState};
 use textamp::audio::AudioPlayer;
 use textamp::config::Config;
-use textamp::library::{filename_cmp, track::Track, FolderLocation, FolderSource};
+use textamp::library::{FolderLocation, FolderSource, filename_cmp, track::Track};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
@@ -110,12 +110,14 @@ async fn local_listing_is_lazy_ordered_and_confined_to_root() {
     {
         std::os::unix::fs::symlink("/etc/passwd", root.path().join("escape.mp3")).unwrap();
         assert!(source.file("escape.mp3").await.is_err());
-        assert!(!source
-            .list("")
-            .await
-            .unwrap()
-            .iter()
-            .any(|e| e.name == "escape.mp3"));
+        assert!(
+            !source
+                .list("")
+                .await
+                .unwrap()
+                .iter()
+                .any(|e| e.name == "escape.mp3")
+        );
     }
 }
 
@@ -180,12 +182,14 @@ fn library_manager_is_available_without_plex_and_path_entry_keeps_slashes() {
         action_type: InputDialogAction::FolderLocation,
     }));
     for c in "/music.test/folder".chars() {
-        assert!(key_input::handle_key(
-            KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
-            &mut state,
-            &Config::default()
-        )
-        .is_empty());
+        assert!(
+            key_input::handle_key(
+                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+                &mut state,
+                &Config::default()
+            )
+            .is_empty()
+        );
     }
     assert_eq!(
         state.popups.input_dialog().unwrap().input.as_str(),
@@ -209,12 +213,14 @@ async fn cancelling_password_entry_does_not_change_library_credentials() {
     state
         .popups
         .set_library_dialog(Some(sources::dialogs::Dialog::Webdav(form)));
-    assert!(key_input::handle_key(
-        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-        &mut state,
-        &config
-    )
-    .is_empty());
+    assert!(
+        key_input::handle_key(
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &mut state,
+            &config
+        )
+        .is_empty()
+    );
     assert!(state.popups.library_dialog().is_none());
     assert_eq!(config.folder_sources[0].location, source.location);
     assert_eq!(state.sources.folders[0].location, source.location);
@@ -458,7 +464,7 @@ async fn webdav_http_failure_is_not_an_empty_library() {
 }
 
 #[test]
-fn all_sources_share_one_manager_and_only_folder_categories_are_visible() {
+fn folder_sources_share_one_manager_and_expose_folders_and_downloads() {
     let mut state = AppState::new();
     state.sources.folders = (0..30)
         .map(|n| FolderSource {
@@ -480,11 +486,10 @@ fn all_sources_share_one_manager_and_only_folder_categories_are_visible() {
     assert_eq!(
         state.category_rows(),
         vec![
-            textamp::app::state::CategoryRow::Search,
-            textamp::app::state::CategoryRow::Header("Browse"),
             textamp::app::state::CategoryRow::Category(
                 textamp::app::state::BrowseCategory::Folders
             ),
+            textamp::app::state::CategoryRow::Root(textamp::app::state::LibraryRoot::Downloads),
         ]
     );
     state.popups.library_picker_index = 20;

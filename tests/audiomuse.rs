@@ -1,5 +1,5 @@
 //! Read-only API contracts, model boundaries and cache round trips. No live services.
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use textamp::audiomuse::{Analysis, Client, Connection, Feature, Filter, Snapshot};
@@ -10,6 +10,8 @@ struct Request {
     query: HashMap<String, String>,
     body: Value,
 }
+const DROP_CONNECTION: u16 = 0;
+
 struct Server {
     url: String,
     task: tokio::task::JoinHandle<()>,
@@ -83,13 +85,19 @@ where
                     assert!(headers.contains("audiomuse_jwt=fixture-session"));
                 }
                 let (code, body) = reply(Request { path, query, body }).await;
+                if code == DROP_CONNECTION {
+                    return;
+                }
                 let body = body.to_string();
                 let cookie = if auth {
                     "Set-Cookie: audiomuse_jwt=fixture-session; HttpOnly; Path=/\r\n"
                 } else {
                     ""
                 };
-                let response = format!("HTTP/1.1 {code} Test\r\nContent-Type: application/json\r\n{cookie}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                let response = format!(
+                    "HTTP/1.1 {code} Test\r\nContent-Type: application/json\r\n{cookie}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
                 let _ = stream.write_all(response.as_bytes()).await;
             });
         }
@@ -195,12 +203,13 @@ async fn sonic_queries_are_read_only_scoped_and_validate_response_shapes() {
     let api = Client::connect(&connection(&s.url), "fixture-password")
         .await
         .unwrap();
-    assert!(api
-        .similar("seed")
-        .await
-        .unwrap_err()
-        .to_string()
-        .contains("track ID"));
+    assert!(
+        api.similar("seed")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("track ID")
+    );
     assert!(api.path("seed", "end", 5).await.is_err());
 }
 
@@ -272,10 +281,12 @@ async fn sync_batches_fit_the_server_request_line_limit() {
         if r.query.contains_key("fields") {
             return (
                 200,
-                page(json!(catalog
-                    .iter()
-                    .map(|id| json!({"id":id,"fp":"a"}))
-                    .collect::<Vec<_>>())),
+                page(json!(
+                    catalog
+                        .iter()
+                        .map(|id| json!({"id":id,"fp":"a"}))
+                        .collect::<Vec<_>>()
+                )),
             );
         }
         let ids: Vec<_> = r.query["ids"].split(',').collect();
@@ -285,10 +296,9 @@ async fn sync_batches_fit_the_server_request_line_limit() {
         seen.lock().unwrap().push(ids.len());
         (
             200,
-            page(json!(ids
-                .iter()
-                .map(|id| analysis(id, "a"))
-                .collect::<Vec<_>>())),
+            page(json!(
+                ids.iter().map(|id| analysis(id, "a")).collect::<Vec<_>>()
+            )),
         )
     })
     .await;
@@ -395,6 +405,34 @@ async fn incomplete_or_repeated_sync_is_an_error_not_an_empty_success() {
 }
 
 #[tokio::test]
+async fn cold_sync_retries_an_interrupted_page_once() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    for recover in [true, false] {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let calls = attempts.clone();
+        let fixture = server(move |request| {
+            if request.path == "auth" {
+                return (200, json!({"status":"ok"}));
+            }
+            assert_eq!(request.query["page"], "1");
+            if calls.fetch_add(1, Ordering::Relaxed) == 0 || !recover {
+                return (DROP_CONNECTION, Value::Null);
+            }
+            (200, page(json!([analysis("one", "a")])))
+        })
+        .await;
+        let api = Client::connect(&connection(&fixture.url), "fixture-password").await.unwrap();
+        let result = api.refresh(&Snapshot::default(), &HashSet::from(["one".into()])).await;
+        assert_eq!(attempts.load(Ordering::Relaxed), 2);
+        if recover {
+            assert!(result.unwrap().tracks.contains_key("one"));
+        } else {
+            assert!(result.is_err());
+        }
+    }
+}
+
+#[tokio::test]
 async fn cold_sync_reads_full_metadata_pages_once_and_reports_progress() {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let seen = requests.clone();
@@ -474,10 +512,11 @@ async fn cold_sync_does_not_return_partial_success_after_a_failed_or_repeated_pa
         let api = Client::connect(&connection(&s.url), "fixture-password")
             .await
             .unwrap();
-        assert!(api
-            .refresh(&Snapshot::default(), &HashSet::from(["one".into()]))
-            .await
-            .is_err());
+        assert!(
+            api.refresh(&Snapshot::default(), &HashSet::from(["one".into()]))
+                .await
+                .is_err()
+        );
     }
 }
 
@@ -568,9 +607,11 @@ async fn auth_and_wrong_track_boundaries_fail_without_exposing_secrets() {
         .await
         .unwrap();
     assert!(api.analysis("right").await.is_err());
-    assert!(connection("https://user:secret@example.test")
-        .validate()
-        .is_err());
+    assert!(
+        connection("https://user:secret@example.test")
+            .validate()
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -639,10 +680,12 @@ async fn changed_batches_overlap_with_a_four_request_bound_and_monotonic_progres
                 if r.query.contains_key("fields") {
                     return (
                         200,
-                        page(json!(catalog
-                            .iter()
-                            .map(|id| json!({"id":id,"fp":"new"}))
-                            .collect::<Vec<_>>())),
+                        page(json!(
+                            catalog
+                                .iter()
+                                .map(|id| json!({"id":id,"fp":"new"}))
+                                .collect::<Vec<_>>()
+                        )),
                     );
                 }
                 let ids: Vec<_> = r.query["ids"].split(',').collect();
@@ -656,10 +699,9 @@ async fn changed_batches_overlap_with_a_four_request_bound_and_monotonic_progres
                 active.fetch_sub(1, Ordering::SeqCst);
                 (
                     200,
-                    page(json!(ids
-                        .iter()
-                        .map(|id| analysis(id, "new"))
-                        .collect::<Vec<_>>())),
+                    page(json!(
+                        ids.iter().map(|id| analysis(id, "new")).collect::<Vec<_>>()
+                    )),
                 )
             }
         }
@@ -741,10 +783,12 @@ async fn failed_changed_batch_rejects_the_refresh_and_keeps_the_previous_snapsho
         if r.query.contains_key("fields") {
             return (
                 200,
-                page(json!(catalog
-                    .iter()
-                    .map(|id| json!({"id":id,"fp":"new"}))
-                    .collect::<Vec<_>>())),
+                page(json!(
+                    catalog
+                        .iter()
+                        .map(|id| json!({"id":id,"fp":"new"}))
+                        .collect::<Vec<_>>()
+                )),
             );
         }
         let ids: Vec<_> = r.query["ids"].split(',').collect();
@@ -753,10 +797,9 @@ async fn failed_changed_batch_rejects_the_refresh_and_keeps_the_previous_snapsho
         }
         (
             200,
-            page(json!(ids
-                .iter()
-                .map(|id| analysis(id, "new"))
-                .collect::<Vec<_>>())),
+            page(json!(
+                ids.iter().map(|id| analysis(id, "new")).collect::<Vec<_>>()
+            )),
         )
     })
     .await;
@@ -770,9 +813,91 @@ async fn failed_changed_batch_rejects_the_refresh_and_keeps_the_previous_snapsho
         ..Default::default()
     };
     let before = serde_json::to_value(&previous).unwrap();
-    assert!(api
-        .refresh(&previous, &ids.into_iter().collect())
-        .await
-        .is_err());
+    assert!(
+        api.refresh(&previous, &ids.into_iter().collect())
+            .await
+            .is_err()
+    );
     assert_eq!(serde_json::to_value(&previous).unwrap(), before);
+}
+
+#[tokio::test]
+async fn interrupted_import_reuses_verified_pages_after_reopening_the_library() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use textamp::library::cache::{REFRESH_INTERVAL, Store};
+
+    let dir = tempfile::tempdir().unwrap();
+    let ticket = || {
+        Store::at(dir.path().into(), "library")
+            .unwrap()
+            .ticket("connection")
+    };
+    let interrupted = Arc::new(AtomicBool::new(true));
+    let mode = interrupted.clone();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let calls = requests.clone();
+    let server = server(move |r| {
+        if r.path == "auth" {
+            return (200, json!({"status":"ok"}));
+        }
+        let n: usize = r.query["page"].parse().unwrap();
+        let first = mode.load(Ordering::SeqCst);
+        let index = r.query.contains_key("fields");
+        calls.lock().unwrap().push((n, index));
+        if n == 9 && first {
+            return (403, json!({}));
+        }
+        // Same total, one edition replaced and another analysis revised.
+        let id = if !first && n == 4 { "replacement".into() } else { n.to_string() };
+        let fp = if !first && n == 3 { "revised" } else { "original" };
+        if index { assert_eq!(r.query["limit"], "1"); }
+        let row = if index { json!({"id":id,"fp":fp}) } else { json!(analysis(&id, fp)) };
+        (200, json!({"provider_type":"navidrome", "total_tracks":10, "has_more":n < 10, "next_page":(n < 10).then_some(n+1), "tracks":[row]}))
+    }).await;
+    let api = Client::connect(&connection(&server.url), "fixture-password")
+        .await
+        .unwrap();
+    let allowed: HashSet<_> = (1..=10)
+        .map(|n| n.to_string())
+        .chain(["replacement".into()])
+        .collect();
+    let previous = Snapshot {
+        updated: 123,
+        ..Default::default()
+    };
+    ticket().write(&previous).unwrap();
+    assert!(
+        api.refresh_resumable(&previous, &allowed, &ticket(), |_| {})
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        ticket()
+            .read::<Snapshot>(REFRESH_INTERVAL)
+            .unwrap()
+            .unwrap()
+            .value
+            .updated,
+        123
+    );
+    requests.lock().unwrap().clear();
+    interrupted.store(false, Ordering::SeqCst);
+    let reopened = ticket();
+    let resumed = api
+        .refresh_resumable(&previous, &allowed, &reopened, |_| {})
+        .await
+        .unwrap();
+    let full: Vec<_> = requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, index)| !index)
+        .map(|(p, _)| *p)
+        .collect();
+    assert_eq!(full, [1, 3, 4, 9, 10]);
+    let mut reference = api.refresh(&previous, &allowed).await.unwrap();
+    reference.updated = resumed.updated;
+    assert_eq!(json!(resumed), json!(reference));
+    reopened.write_finishing_checkpoints(&resumed).unwrap();
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
 }

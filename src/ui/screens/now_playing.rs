@@ -1,19 +1,16 @@
 //! Queue and Now Playing screens.
 //!
-//! Queue view: shows track list with stations panel and artwork.
+//! Queue view: shows the track list with queue-type and tool menus.
 //! Now Playing view: shows artwork, track info, and waveform seekbar.
 
-use crate::app::state::{
-    NowPlayingFocus, PlayStatus, PlaybackMode, QueueSortMode, View, VisualizerTab,
-};
+use crate::app::state::{NowPlayingFocus, PlaybackMode, QueueSortMode, View, VisualizerTab};
 use crate::services::NavigationService;
+use crate::ui::RenderState as AppState;
 use crate::ui::artwork::ArtworkRenderer;
 use crate::ui::theme::theme;
-use crate::ui::RenderState as AppState;
-use crate::util::format_duration;
 
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Tabs};
+use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, Paragraph, Tabs};
 use ratatui_image::picker::Picker;
 use std::cell::RefCell;
 
@@ -55,200 +52,167 @@ pub fn clear_artwork_cache() {
     ARTWORK_RENDERER.with(|r| r.borrow_mut().clear());
 }
 
-/// Format "Artist — Album (Year)" for queue display.
-/// Uses helper methods that handle empty/None fields with fallbacks.
+/// Queue metadata uses the same artist and album labels as the desktop queue.
 fn format_artist_album(track: &crate::library::models::Track) -> String {
-    let artist = track.track_artist();
-    let album = track.album_name();
-    let year = track.year.or(track.parent_year);
-
-    let album_part = if let Some(y) = year {
-        format!("{} ({})", album, y)
-    } else {
-        album.to_string()
-    };
-
-    format!("{} — {}", artist, album_part)
+    format!("{} · {}", track.track_artist(), track.album_name())
 }
 
-/// Render the queue view — left sidebar (Radio / DJ Modes / Remix
-/// Tools / Clear Queue), middle queue list + stations, right
-/// artwork. Mirrors the GUI's Queue layout where the row of action
-/// buttons sits beside the dominant queue list and the artwork is
-/// the right-hand element.
+/// Queue menus share the list header, leaving the rest of the pane for tracks.
 pub fn render_queue_mode(frame: &mut Frame, state: &AppState, area: Rect) {
-    let t = theme();
-
-    frame.render_widget(
-        Block::default().style(Style::default().bg(t.colors.bg_primary)),
-        area,
-    );
-
-    let sidebar_w: u16 = 18;
-    // Make the artwork box square in pixels: terminal cells are
-    // ~2:1 (height:width) so width = 2 × height in cells gives a
-    // pixel-square. Bound by the available column width so it
-    // can't squeeze the queue list, with a sensible floor.
-    let art_width = (area.height.saturating_mul(2))
-        .min(area.width.saturating_sub(sidebar_w + 24))
-        .max(20);
-
-    // Three-column horizontal split: sidebar | queue (shrunken to
-    // Min(24) so the artwork can grow) | artwork.
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(sidebar_w),
-            Constraint::Min(24),
-            Constraint::Length(art_width),
-        ])
-        .split(area);
-
-    // Queue occupies the middle column. The Radio sidebar opens the station palette.
-    let queue_area = chunks[1];
-
-    {
-        let track_block =
-            ratatui::widgets::Block::default().borders(ratatui::widgets::Borders::ALL);
-        let track_inner = track_block.inner(queue_area);
-        let mut hr = state.hit_regions.borrow_mut();
-        hr.queue_content = Some(crate::app::presentation::QueueRegions {
-            track_list: queue_area,
-            track_list_inner: track_inner,
-            art_area: chunks[2],
-        });
-    }
-
-    // Artwork box fills the entire right column. Outer layout
-    // already sized the column so width = 2 × height in cells,
-    // i.e. a pixel-square box — no wasted rows beneath the image.
-    render_now_playing_sidebar(frame, state, chunks[0]);
-    render_track_list(frame, state, queue_area);
-    render_artwork(frame, state, chunks[2]);
+    let block = Block::default().borders(Borders::TOP | Borders::LEFT | Borders::RIGHT);
+    state.hit_regions.borrow_mut().queue_content = Some(crate::app::presentation::QueueRegions {
+        track_list: area,
+        track_list_inner: block.inner(area),
+        art_area: Rect::default(),
+    });
+    render_track_list(frame, state, area);
 }
 
-/// Render the left sidebar with the four GUI-parity buttons:
-/// Capability-filtered Radio / DJ Modes / Remix Tools / Clear Queue. Each button has a
-/// hit region; the mouse handler dispatches the right action (most
-/// open the command palette pre-filtered to the relevant subset).
-fn render_now_playing_sidebar(frame: &mut Frame, state: &AppState, area: Rect) {
-    use crate::ui::theme::theme;
-    use ratatui::widgets::{Block, Borders};
-    let t = theme();
+pub(crate) fn queue_menu_symbol(menu: crate::app::queue_controls::Menu) -> &'static str {
+    match menu {
+        crate::app::queue_controls::Menu::QueueType => "◉",
+        crate::app::queue_controls::Menu::Tools => "✎",
+    }
+}
 
-    let sidebar_focused = state.view == View::Queue
-        && matches!(
-            state.now_playing_focus,
-            crate::app::state::NowPlayingFocus::Sidebar
-        );
+/// Current artwork and metadata occupy the space above the transport and visualizer.
+pub fn render_current_track(frame: &mut Frame, state: &AppState, area: Rect) {
+    if area.is_empty() {
+        return;
+    }
+    let colors = theme().colors;
     let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(if sidebar_focused {
-            t.colors.title_focused
-        } else {
-            t.colors.border
-        }))
-        .style(
-            Style::default()
-                .bg(t.colors.bg_primary)
-                .fg(t.colors.fg_primary),
-        );
+        .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
+        .title(" Now Playing ")
+        .border_style(Style::new().fg(
+            if state.view == View::NowPlaying
+                && state.now_playing_focus == NowPlayingFocus::Artwork
+                && state.tui_transport_focus.is_none()
+                && state.tui_footer_focus.is_none()
+                && state.tui_artist_focus.is_none()
+            {
+                colors.fg_accent
+            } else {
+                colors.border
+            },
+        ))
+        .style(Style::new().bg(colors.bg_primary));
     let inner = block.inner(area);
+    let inner = Rect::new(
+        inner.x + u16::from(inner.width > 2),
+        inner.y,
+        inner.width.saturating_sub(2),
+        inner.height,
+    );
     frame.render_widget(block, area);
-
-    let buttons = state.now_playing_sidebar_buttons();
-
-    let mut regions: Vec<(Rect, NpSidebarButton)> = Vec::with_capacity(4);
-    for (i, btn) in buttons.iter().copied().enumerate() {
-        let label = btn.label();
-        // Two rows per button: the label, then a blank spacer.
-        let y = inner.y + (i as u16) * 2;
-        if y >= inner.y + inner.height {
-            break;
-        }
-        let row = Rect {
-            x: inner.x,
-            y,
-            width: inner.width,
-            height: 1,
-        };
-
-        // Highlight precedence: keyboard-focused selection > active
-        // state (radio playing / DJ on) > inactive.
-        let is_focus_target =
-            sidebar_focused && state.now_playing_sidebar_index.min(buttons.len() - 1) == i;
-        let active = btn == NpSidebarButton::Radio
-            && matches!(state.playback_mode, crate::app::state::PlaybackMode::Radio);
-        let active = active || (btn == NpSidebarButton::DjModes && state.dj.active_mode.is_some());
-
-        let style = if is_focus_target {
-            Style::default()
-                .fg(t.colors.fg_primary)
-                .bg(t.colors.bg_selection)
-                .add_modifier(ratatui::style::Modifier::BOLD)
-        } else if active {
-            Style::default()
-                .fg(t.colors.fg_primary)
-                .bg(t.colors.bg_highlight)
-        } else {
-            Style::default()
-                .fg(t.colors.fg_primary)
-                .bg(t.colors.bg_primary)
-        };
-        let prefix = if is_focus_target { "▶ " } else { "  " };
-        let label = format!("{}{}", prefix, label);
-        frame.render_widget(ratatui::widgets::Paragraph::new(label).style(style), row);
-        regions.push((row, btn));
+    let art_width = ((f32::from(inner.height.saturating_sub(1)) * 20. / state.cell_width()).round()
+        as u16)
+        .min(inner.width.saturating_sub(24));
+    let columns =
+        Layout::horizontal([Constraint::Length(art_width), Constraint::Min(0)]).split(inner);
+    if let Some(regions) = state.hit_regions.borrow_mut().queue_content.as_mut() {
+        regions.art_area = columns[0];
     }
-
-    state.hit_regions.borrow_mut().now_playing_sidebar = Some(regions);
+    render_current_artwork(frame, state, columns[0]);
+    let inner = Rect::new(
+        columns[1].x + 3.min(columns[1].width),
+        columns[1].y,
+        columns[1].width.saturating_sub(3),
+        columns[1].height,
+    );
+    if let Some(track) = state.current_track() {
+        let title = Paragraph::new(track.title.as_str())
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .style(
+                Style::new()
+                    .fg(colors.fg_primary)
+                    .add_modifier(Modifier::BOLD),
+            );
+        let title_height = (title.line_count(inner.width) as u16)
+            .min(2)
+            .min(inner.height);
+        frame.render_widget(
+            title,
+            Rect::new(inner.x, inner.y, inner.width, title_height),
+        );
+        crate::ui::detail_links::field(
+            frame,
+            state,
+            Rect::new(inner.x, inner.y, inner.width, title_height),
+            track,
+            crate::app::library_details::Destination::Track,
+        );
+        let mut y = inner.y.saturating_add(title_height).saturating_add(1);
+        let label_width = 9.min(inner.width / 3);
+        for (label, value) in crate::app::details::now_playing_rows(track) {
+            if y >= inner.bottom() || value.is_empty() {
+                continue;
+            }
+            let field = Paragraph::new(value.as_str())
+                .wrap(ratatui::widgets::Wrap { trim: false })
+                .style(Style::new().fg(colors.fg_primary));
+            let width = inner.width.saturating_sub(label_width);
+            if width == 0 {
+                break;
+            }
+            let height = (field.line_count(width) as u16)
+                .min(2)
+                .min(inner.bottom() - y);
+            let value_area = Rect::new(inner.x + label_width, y, width, height);
+            frame.render_widget(
+                Paragraph::new(label.as_str()).style(Style::new().fg(colors.fg_muted)),
+                Rect::new(inner.x, y, label_width, 1),
+            );
+            frame.render_widget(field, value_area);
+            if label == "Album" {
+                crate::ui::detail_links::field(
+                    frame,
+                    state,
+                    value_area,
+                    track,
+                    crate::app::library_details::Destination::Album,
+                );
+            }
+            if label == "Artist" {
+                crate::ui::artist_links::visible(
+                    frame,
+                    state,
+                    value_area,
+                    track.track_artist(),
+                    track.grandparent_rating_key.as_deref(),
+                );
+            }
+            y += height;
+        }
+    } else {
+        frame.render_widget(
+            Paragraph::new("Nothing playing").style(Style::new().fg(colors.fg_primary).bold()),
+            Rect::new(inner.x, inner.y, inner.width, inner.height.min(1)),
+        );
+        crate::ui::widgets::logo::render_themed(
+            frame,
+            Rect::new(
+                inner.x,
+                inner.y.saturating_add(2),
+                inner.width,
+                inner.height.saturating_sub(2),
+            ),
+            &colors,
+        );
+    }
 }
-
-/// Identifies which sidebar button was clicked; the mouse handler
-/// resolves it to an action.
-use crate::app::presentation::NpSidebarButton;
 
 /// Render the album artwork.
-fn render_artwork(frame: &mut Frame, state: &AppState, area: Rect) {
-    let t = theme();
-
-    let is_focused =
-        state.view == View::Queue && state.now_playing_focus == NowPlayingFocus::Artwork;
-    let border_color = if is_focused {
-        t.colors.title_focused
-    } else {
-        t.colors.fg_accent
-    };
-    let title_color = if is_focused {
-        t.colors.title_focused
-    } else {
-        t.colors.fg_accent
-    };
-    let block = Block::default()
-        .title(" artwork ")
-        .title_style(Style::default().fg(title_color))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(border_color))
-        .style(Style::default().bg(t.colors.bg_primary));
-
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    render_current_artwork(frame, state, inner);
-}
-
 /// Shared artwork canvas for normal and full-screen views.
 pub(crate) fn render_current_artwork(frame: &mut Frame, state: &AppState, inner: Rect) {
     if inner.is_empty() {
         return;
     }
-    if let (Some(ref data), Some(ref thumb)) =
-        (&state.artwork.current_data, &state.artwork.current_thumb)
-    {
+    if let (Some(data), Some(thumb)) = (&state.artwork.current_data, &state.artwork.current_thumb) {
         ARTWORK_RENDERER.with(|renderer| {
             let mut renderer = renderer.borrow_mut();
             if renderer.load_image(data, thumb) {
-                let canvas = if state.fullscreen_active {
+                let canvas = if state.fullscreen.is_open() {
                     // Scale preserves aspect ratio but anchors at the top left.
                     // Center its canvas using image headers, without decoding again.
                     image::ImageReader::new(std::io::Cursor::new(data))
@@ -282,10 +246,16 @@ pub(crate) fn render_current_artwork(frame: &mut Frame, state: &AppState, inner:
                 render_artwork_placeholder(frame, inner, "Image load failed");
             }
         });
+    } else if let Some(data) = state.current_artwork_bytes() {
+        crate::ui::artwork::render_grid_image(frame, inner, "now-playing-artwork", data);
     } else if state.artwork.fetch.is_loading() {
         render_artwork_placeholder(frame, inner, "Loading...");
     } else {
-        render_artwork_placeholder(frame, inner, "No artwork");
+        crate::ui::artwork::render_placeholder(
+            frame,
+            inner,
+            crate::ui::artwork::Placeholder::Track,
+        );
     }
 }
 
@@ -331,10 +301,8 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
                 }
             }
             PlaybackMode::Queue | PlaybackMode::None => {
-                let mut parts = vec!["now playing".to_string()];
-                if let Some(dj) = state.dj.active_mode {
-                    parts.push(format!("({})", dj.name()));
-                }
+                let mut parts = vec!["Play Queue".to_string()];
+
                 if state.queue.sort_mode == QueueSortMode::Shuffle {
                     parts.push("(shuffled)".to_string());
                 }
@@ -344,19 +312,66 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
     };
 
     let color = if state.view == View::Queue && state.now_playing_focus == NowPlayingFocus::Tracks {
-        t.colors.title_focused
+        t.colors.border_focused
     } else {
-        t.colors.fg_accent
+        t.colors.fg_muted
     };
     let block = Block::default()
-        .title(title)
-        .title_style(Style::default().fg(color))
+        .title(crate::util::truncate_middle(
+            &title,
+            area.width.saturating_sub(10) as usize,
+        ))
+        .title_style(Style::default().fg(if state.view == View::Queue {
+            t.colors.fg_accent
+        } else {
+            t.colors.fg_secondary
+        }))
         .borders(Borders::ALL)
+        .border_type(BorderType::Thick)
+        .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
         .border_style(Style::default().fg(color))
-        .style(Style::default().bg(t.colors.bg_primary));
+        .style(Style::default().bg(t.colors.bg_secondary));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    if area.width >= 10 {
+        use crate::app::queue_controls::Menu;
+        for (offset, menu, focused) in [
+            (8, Menu::QueueType, state.tui_queue_type_focused),
+            (
+                4,
+                Menu::Tools,
+                state.view == View::Queue && state.now_playing_focus == NowPlayingFocus::Tools,
+            ),
+        ] {
+            let rect = Rect::new(area.right() - offset, area.y, 3, 1);
+            let active = menu == Menu::QueueType
+                && crate::app::queue_modes::current(state) != crate::app::queue_modes::Mode::Manual;
+            let style = if focused {
+                t.colors.focused_row()
+            } else {
+                Style::default().bg(t.colors.bg_secondary).fg(if active {
+                    t.colors.fg_accent
+                } else {
+                    t.colors.fg_secondary
+                })
+            };
+            frame.render_widget(
+                Paragraph::new(format!(
+                    "{}{}▾",
+                    queue_menu_symbol(menu),
+                    if active { "•" } else { " " }
+                ))
+                .style(style),
+                rect,
+            );
+            state
+                .hit_regions
+                .borrow_mut()
+                .queue_menus
+                .push((rect, menu));
+        }
+    }
 
     // Get tracks and current index based on mode
     let (tracks, current_idx) = match state.playback_mode {
@@ -370,7 +385,7 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
         } else if state.playback_mode == PlaybackMode::Radio {
             "No radio tracks. Choose a station."
         } else {
-            "Queue is empty. Play a track to start."
+            "Queue is empty."
         };
         let empty = Paragraph::new(msg)
             .style(Style::default().fg(t.colors.fg_muted))
@@ -471,11 +486,11 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
         let (line1_fg, line2_fg, item_bg) = if is_selected && tracks_focused {
             // Selection bar always wins when tracks focused (even on currently playing)
             (
-                Style::default().fg(t.colors.selection_text).bold(),
-                Style::default().fg(t.colors.selection_text),
-                Style::default().bg(t.colors.selection_bar_bg),
+                t.colors.focused_row().bold(),
+                t.colors.focused_row(),
+                t.colors.focused_row(),
             )
-        } else if is_selected {
+        } else if is_selected && is_current {
             // Dim selection when stations panel is focused
             (
                 Style::default().fg(t.colors.fg_primary),
@@ -517,11 +532,39 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
             )),
             Line::from(Span::styled(format!("     {}", subtitle_display), line2_fg)),
         ]);
+        crate::ui::artist_links::text(
+            state,
+            Rect::new(
+                inner.x + 5,
+                inner.y + ((i - scroll_offset) * 2 + 1) as u16,
+                inner.width.saturating_sub(5),
+                1,
+            ),
+            &subtitle_display,
+            track.track_artist(),
+            track.grandparent_rating_key.as_deref(),
+        );
         items.push(ListItem::new(text).style(item_bg));
     }
 
     let list = List::new(items);
     frame.render_widget(list, inner);
+    if let Some(boundary) = state
+        .scroll
+        .queue_drag
+        .as_ref()
+        .and_then(crate::app::queue_pointer::Drag::boundary)
+        && boundary >= scroll_offset
+        && boundary <= scroll_offset + visible_item_count
+    {
+        let y = (inner.y + ((boundary - scroll_offset) * 2) as u16)
+            .min(inner.bottom().saturating_sub(1));
+        frame.render_widget(
+            Paragraph::new("─".repeat(inner.width as usize))
+                .style(Style::new().fg(t.colors.fg_accent)),
+            Rect::new(inner.x, y, inner.width, 1),
+        );
+    }
 
     // Scrollbar for long lists
     if total_display > visible_item_count {
@@ -570,169 +613,15 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
     );
 }
 
-/// Render the now playing view with artwork and waveform seekbar.
-pub fn render_visualizer_mode(frame: &mut Frame, state: &AppState, area: Rect) {
-    let t = theme();
-
-    // Fill background
-    frame.render_widget(
-        Block::default().style(Style::default().bg(t.colors.bg_primary)),
-        area,
-    );
-
-    // Check if we should show artwork (need enough width)
-    let show_artwork = area.width > 50;
-
-    if show_artwork {
-        // Top panel: match queue artwork sizing (40% of height)
-        let top_height = (area.height * 40 / 100).max(8);
-        // Artwork width matches height for square image (2:1 char aspect ratio),
-        // capped at 40% of total width
-        let art_width = (top_height * 2).min(area.width * 40 / 100).max(25);
-
-        // Layout with artwork: top row has art + info, bottom has waveform
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(top_height), Constraint::Min(8)])
-            .split(area);
-
-        // Top row: artwork on left, track info on right
-        let top_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(art_width), Constraint::Min(30)])
-            .split(chunks[0]);
-
-        render_artwork_panel(frame, state, top_chunks[0]);
-        render_track_info_panel(frame, state, top_chunks[1]);
-        render_visualizer_panel(frame, state, chunks[1]);
-    } else {
-        // Narrow layout: track info on top, waveform below
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(5), // Track info
-                Constraint::Min(8),    // Waveform
-            ])
-            .split(area);
-
-        render_track_info_panel(frame, state, chunks[0]);
-        render_visualizer_panel(frame, state, chunks[1]);
-    }
-}
-
-/// Render artwork panel for now playing mode.
-fn render_artwork_panel(frame: &mut Frame, state: &AppState, area: Rect) {
-    let t = theme();
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(t.colors.fg_accent))
-        .style(Style::default().bg(t.colors.bg_primary));
-
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    if let (Some(ref data), Some(ref thumb)) =
-        (&state.artwork.current_data, &state.artwork.current_thumb)
-    {
-        ARTWORK_RENDERER.with(|renderer| {
-            let mut renderer = renderer.borrow_mut();
-            if renderer.load_image(data, thumb) {
-                renderer.render(frame, inner);
-            } else {
-                render_artwork_placeholder(frame, inner, "Image load failed");
-            }
-        });
-    } else if state.artwork.fetch.is_loading() {
-        render_artwork_placeholder(frame, inner, "Loading...");
-    } else {
-        render_artwork_placeholder(frame, inner, "No artwork");
-    }
-}
-
-/// Render track information panel for now playing mode.
-fn render_track_info_panel(frame: &mut Frame, state: &AppState, area: Rect) {
-    let t = theme();
-
-    let block = Block::default()
-        .title(" now playing ")
-        .title_style(Style::default().fg(t.colors.fg_accent))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(t.colors.fg_accent))
-        .style(Style::default().bg(t.colors.bg_primary));
-
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    if let Some(track) = state.current_track() {
-        let title = if track.title.is_empty() {
-            track.file_name().unwrap_or("Unknown Track")
-        } else {
-            &track.title
-        };
-        let artist = track.track_artist();
-        let album = track.album_name();
-
-        let status_icon = match state.playback.status {
-            PlayStatus::Playing => "▶",
-            PlayStatus::Paused => "⏸",
-            _ => "⏹",
-        };
-
-        let position = format_duration(state.playback.position_ms);
-        let duration = format_duration(track.duration_ms());
-
-        let text = vec![
-            Line::from(vec![
-                Span::styled(
-                    format!("{} ", status_icon),
-                    Style::default().fg(t.colors.fg_accent),
-                ),
-                Span::styled(
-                    title.to_string(),
-                    Style::default().fg(t.colors.fg_primary).bold(),
-                ),
-            ]),
-            Line::from(""),
-            Line::from(vec![
-                Span::styled("   ", Style::default()),
-                Span::styled(
-                    artist.to_string(),
-                    Style::default().fg(t.colors.fg_secondary),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled("   ", Style::default()),
-                Span::styled(album.to_string(), Style::default().fg(t.colors.fg_muted)),
-            ]),
-            Line::from(""),
-            Line::from(vec![
-                Span::styled("   ", Style::default()),
-                Span::styled(
-                    format!("{} / {}", position, duration),
-                    Style::default().fg(t.colors.fg_muted),
-                ),
-            ]),
-        ];
-
-        let paragraph = Paragraph::new(text);
-        frame.render_widget(paragraph, inner);
-    } else {
-        let msg = Paragraph::new("No track playing")
-            .style(Style::default().fg(t.colors.fg_muted))
-            .alignment(Alignment::Center);
-        frame.render_widget(msg, inner);
-    }
-}
-
 /// Render the six-mode visualizer panel. Tabs occupy one row above the canvas.
 pub(crate) fn render_visualizer_panel(frame: &mut Frame, state: &AppState, area: Rect) {
     let t = theme();
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(if state.view == View::NowPlaying {
-            t.colors.title_focused
+            t.colors.border_focused
         } else {
             t.colors.border
         }))
@@ -749,7 +638,11 @@ pub(crate) fn render_visualizer_panel(frame: &mut Frame, state: &AppState, area:
     let tab_area = Rect::new(inner.x, inner.y, inner.width, 1);
     // Separate dense spectrogram blocks from the labels above them. Some
     // terminal fonts let half-block glyphs touch the preceding text row.
-    let gap = u16::from(state.visualizer_tab == VisualizerTab::Spectrogram && inner.height > 2);
+    let gap = if state.graphical_visualizer() {
+        2.min(inner.height.saturating_sub(2))
+    } else {
+        u16::from(state.visualizer_tab == VisualizerTab::Spectrogram && inner.height > 2)
+    };
     let content_area = Rect::new(
         inner.x,
         inner.y + 1 + gap,
@@ -773,18 +666,8 @@ pub(crate) fn render_visualizer_panel(frame: &mut Frame, state: &AppState, area:
 
 /// Shared canvas; full-screen input does not enable waveform seeking.
 pub(crate) fn render_visualizer_canvas(frame: &mut Frame, state: &AppState, content_area: Rect) {
-    if matches!(
-        state.sound_output.current,
-        crate::audio::AudioOutput::AirPlay(_)
-    ) && matches!(
-        state.visualizer_tab,
-        VisualizerTab::Meters | VisualizerTab::Vectorscope
-    ) {
-        frame.render_widget(
-            Paragraph::new("Live audio samples unavailable on AirPlay")
-                .alignment(Alignment::Center),
-            content_area,
-        );
+    if state.graphical_visualizer() {
+        state.hit_regions.borrow_mut().graphical_visualizer = Some(content_area);
         return;
     }
     let content_height = content_area.height as usize;
@@ -796,7 +679,37 @@ pub(crate) fn render_visualizer_canvas(frame: &mut Frame, state: &AppState, cont
     match state.visualizer_tab {
         VisualizerTab::Waveform => {
             let mut lines: Vec<Line> = Vec::with_capacity(content_height);
-            draw_waveform_seekbar(&mut lines, state, content_height, content_width);
+            let ruler = content_height >= 5
+                && content_width >= 24
+                && state
+                    .waveform
+                    .data()
+                    .is_some_and(|data| !data.bins.is_empty());
+            draw_waveform_seekbar(
+                &mut lines,
+                state,
+                content_height - usize::from(ruler) * 2,
+                content_width,
+            );
+            if ruler {
+                let mut ticks = vec!['─'; content_width];
+                let mut labels = vec![' '; content_width];
+                for (fraction, text) in crate::media::time_axis::time_ticks(
+                    state.playback.duration_ms,
+                    (content_width / 12).clamp(2, 8),
+                ) {
+                    let x = (fraction * (content_width - 1) as f32).round() as usize;
+                    ticks[x] = '┬';
+                    let x = x.min(content_width.saturating_sub(text.chars().count()));
+                    for (i, c) in text.chars().enumerate() {
+                        if x + i < content_width {
+                            labels[x + i] = c;
+                        }
+                    }
+                }
+                lines.push(Line::from(ticks.into_iter().collect::<String>()));
+                lines.push(Line::from(labels.into_iter().collect::<String>()));
+            }
             let paragraph = Paragraph::new(lines).alignment(Alignment::Center);
             frame.render_widget(paragraph, content_area);
         }
@@ -812,13 +725,15 @@ pub(crate) fn render_visualizer_canvas(frame: &mut Frame, state: &AppState, cont
             let paragraph = Paragraph::new(lines).alignment(Alignment::Center);
             frame.render_widget(paragraph, content_area);
         }
-        VisualizerTab::Landscape => super::visualizers::landscape(frame, state, content_area),
-        VisualizerTab::Meters => super::visualizers::meters(frame, state, content_area),
         VisualizerTab::Vectorscope => {
             let lines = draw_vectorscope(state, content_height, content_width);
-            let paragraph = Paragraph::new(lines).alignment(Alignment::Left);
-            frame.render_widget(paragraph, content_area);
+            frame.render_widget(
+                Paragraph::new(lines).alignment(Alignment::Center),
+                content_area,
+            );
         }
+        VisualizerTab::Landscape => super::visualizers::landscape(frame, state, content_area),
+        VisualizerTab::Meters => super::visualizers::meters(frame, state, content_area),
     }
 }
 
@@ -880,6 +795,14 @@ fn draw_waveform_seekbar(
     height: usize,
     width: usize,
 ) {
+    if state.waveform.data().is_none()
+        && !state.waveform.generating()
+        && state.waveform.error().is_none()
+    {
+        lines.extend((0..height).map(|_| Line::from("")));
+        return;
+    }
+
     // Calculate playback progress
     let progress = if state.playback.duration_ms > 0 {
         state.playback.position_ms as f32 / state.playback.duration_ms as f32
@@ -889,18 +812,15 @@ fn draw_waveform_seekbar(
     let position_col = (progress * width as f32).round() as usize;
     let position_col = position_col.min(width.saturating_sub(1));
 
-    // Check if we have waveform data
-    let waveform_available = state.waveform.data.is_some();
-    let generating = state.waveform.generating;
+    let generating = state.waveform.generating();
 
-    if waveform_available {
+    if let Some(data) = state.waveform.data() {
         // Braille rendering: each terminal cell hosts a 2 × 4 dot
         // grid, giving us **2× horizontal and 4× vertical**
         // sub-resolution. Bars become roughly quarter-cell wide
         // (vs the half-cell `▌`/`▐` blocks). Two amplitude bins
         // per cell — one per dot column — so the waveform's
         // horizontal density doubles too.
-        let data = state.waveform.data.as_ref().unwrap();
         let sub_count = width.saturating_mul(2);
         let total_sub_rows = (height as i32) * 4;
         let center_dot = total_sub_rows / 2;
@@ -991,7 +911,11 @@ fn draw_waveform_seekbar(
             lines.push(Line::from(""));
         }
         lines.push(Line::from(Span::styled(
-            "Generating waveform...",
+            state
+                .waveform
+                .progress()
+                .map(|p| p.message())
+                .unwrap_or_else(|| "Preparing waveform…".into()),
             Style::default().fg(Color::Yellow),
         )));
         lines.push(Line::from(""));
@@ -1021,14 +945,14 @@ fn draw_waveform_seekbar(
             lines.push(Line::from(""));
         }
 
-        if let Some(ref error) = state.waveform.error {
+        if let Some(error) = state.waveform.error() {
             lines.push(Line::from(Span::styled(
                 format!("Waveform error: {}", error),
                 Style::default().fg(Color::Red),
             )));
         } else {
             lines.push(Line::from(Span::styled(
-                "No waveform data available",
+                "",
                 Style::default().fg(Color::Gray),
             )));
         }
@@ -1062,6 +986,14 @@ fn draw_spectrum_analyzer(
     height: usize,
     width: usize,
 ) {
+    if state.spectrogram.data().is_none()
+        && !state.spectrogram.generating()
+        && state.spectrogram.error().is_none()
+    {
+        lines.extend((0..height).map(|_| Line::from("")));
+        return;
+    }
+
     let bar_chars = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
     // Reserve 1 row for seek position indicator at bottom
@@ -1079,11 +1011,11 @@ fn draw_spectrum_analyzer(
     let position_col = (progress * width as f32).round() as usize;
     let position_col = position_col.min(width.saturating_sub(1));
 
-    let spectrogram_available = state.spectrogram.data.is_some();
-    let generating = state.spectrogram.generating;
+    let spectrogram_available = state.spectrogram.data().is_some();
+    let generating = state.spectrogram.generating();
 
     if spectrogram_available {
-        let data = state.spectrogram.data.as_ref().unwrap();
+        let data = state.spectrogram.data().unwrap();
         let frame_idx = data.frame_at_position(state.playback.position_ms);
 
         // Discrete bars with gaps: 1 char bar + 1 char gap = 2 chars per bar slot
@@ -1185,17 +1117,19 @@ fn draw_spectrum_analyzer(
             lines.push(Line::from(""));
         }
 
-        if generating || state.spectrogram.error.is_some() {
-            // Show "Generating" for both active generation and transient errors
-            // (the tick safety net will auto-retry after errors)
+        if generating {
             lines.push(Line::from(Span::styled(
-                "Generating spectrum data...",
+                state
+                    .spectrogram
+                    .progress()
+                    .map(|p| p.message())
+                    .unwrap_or_else(|| "Preparing spectral data…".into()),
                 Style::default().fg(Color::Yellow),
             )));
-        } else {
+        } else if let Some(error) = state.spectrogram.error() {
             lines.push(Line::from(Span::styled(
-                "No spectrum data — play a track to generate",
-                Style::default().fg(Color::Gray),
+                format!("Spectrogram error: {error}"),
+                Style::default().fg(Color::Red),
             )));
         }
         lines.push(Line::from(""));
@@ -1221,17 +1155,14 @@ fn draw_spectrum_analyzer(
     }
 }
 
-/// Draw spectrogram visualization — 2D time×frequency with half-block characters.
-/// Frequency on x-axis (left=low, right=high), time scrolls vertically (current at bottom).
 /// ANSI vectorscope: stereo Lissajous trace (right channel → X,
 /// left channel → Y) rendered with Unicode braille glyphs so each
 /// terminal cell carries a 2 × 4 sub-pixel grid. Mirrors the GUI's
 /// `Vectorscope` widget, sourcing samples from
 /// `state.vectorscope_buffer`.
 ///
-/// Empty buffer / no audio → centered "No audio data" placeholder.
+/// An empty sample buffer leaves the trace area blank.
 fn draw_vectorscope(state: &AppState, height: usize, width: usize) -> Vec<Line<'static>> {
-    let t = theme();
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(height);
 
     if width == 0 || height == 0 {
@@ -1240,25 +1171,7 @@ fn draw_vectorscope(state: &AppState, height: usize, width: usize) -> Vec<Line<'
 
     let samples = &state.vectorscope_buffer;
     if samples.len() < 2 {
-        // Center a "no audio" message on a blank pane.
-        let msg = if state.audio_available {
-            "No audio data — start playback to see the trace"
-        } else {
-            "No audio backend"
-        };
-        for row in 0..height {
-            if row == height / 2 {
-                let pad = width.saturating_sub(msg.chars().count()) / 2;
-                let line_text = format!("{}{}", " ".repeat(pad), msg);
-                lines.push(Line::from(Span::styled(
-                    line_text,
-                    Style::default().fg(t.colors.fg_muted),
-                )));
-            } else {
-                lines.push(Line::from(" ".repeat(width)));
-            }
-        }
-        return lines;
+        return vec![Line::from(" ".repeat(width)); height];
     }
 
     // 2 × 4 sub-pixel grid per terminal cell (braille). Build a
@@ -1356,6 +1269,14 @@ fn draw_vectorscope(state: &AppState, height: usize, width: usize) -> Vec<Line<'
 }
 
 fn draw_spectrogram(lines: &mut Vec<Line<'static>>, state: &AppState, height: usize, width: usize) {
+    if state.spectrogram.data().is_none()
+        && !state.spectrogram.generating()
+        && state.spectrogram.error().is_none()
+    {
+        lines.extend((0..height).map(|_| Line::from("")));
+        return;
+    }
+
     // Reserve 1 row for seek position indicator at bottom
     let vis_height = height.saturating_sub(1);
     if vis_height == 0 {
@@ -1371,11 +1292,11 @@ fn draw_spectrogram(lines: &mut Vec<Line<'static>>, state: &AppState, height: us
     let position_col = (progress * width as f32).round() as usize;
     let position_col = position_col.min(width.saturating_sub(1));
 
-    let spectrogram_available = state.spectrogram.data.is_some();
-    let generating = state.spectrogram.generating;
+    let spectrogram_available = state.spectrogram.data().is_some();
+    let generating = state.spectrogram.generating();
 
     if spectrogram_available {
-        let data = state.spectrogram.data.as_ref().unwrap();
+        let data = state.spectrogram.data().unwrap();
         let current_frame = data.frame_at_position(state.playback.position_ms);
 
         // Each terminal row uses half-block chars (▀) for 2x vertical resolution
@@ -1454,17 +1375,21 @@ fn draw_spectrogram(lines: &mut Vec<Line<'static>>, state: &AppState, height: us
 
         if generating {
             lines.push(Line::from(Span::styled(
-                "Generating spectrogram...",
+                state
+                    .spectrogram
+                    .progress()
+                    .map(|p| p.message())
+                    .unwrap_or_else(|| "Preparing spectral data…".into()),
                 Style::default().fg(Color::Yellow),
             )));
-        } else if let Some(ref error) = state.spectrogram.error {
+        } else if let Some(error) = state.spectrogram.error() {
             lines.push(Line::from(Span::styled(
                 format!("Spectrogram error: {}", error),
                 Style::default().fg(Color::Red),
             )));
         } else {
             lines.push(Line::from(Span::styled(
-                "No spectrogram data — play a track to generate",
+                "",
                 Style::default().fg(Color::Gray),
             )));
         }

@@ -3,34 +3,55 @@
 use crate::app::action::*;
 use crossterm::event::{self, KeyCode, KeyModifiers};
 
-use crate::app::state::{NowPlayingFocus, PlaybackMode, View};
 use crate::app::Action;
 use crate::app::AppState;
+use crate::app::state::{NowPlayingFocus, PlaybackMode, View};
 use crate::library::models::Track;
 
 /// Handle Queue view keys (track list + sidebar buttons).
 pub(super) fn handle_queue_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
-    // Horizontal navigation between the three top panes:
-    //   Sidebar  ←→  Tracks  ←→  Artwork
-    // Left from Tracks → Sidebar; Right from Tracks → Artwork.
-    // Sidebar Right and Artwork Left are handled inside their own
-    // sub-handlers below.
+    if state.tui_queue_type_focused {
+        match key.code {
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                return crate::app::queue_controls::Menu::QueueType.open(state);
+            }
+            KeyCode::Right => {
+                state.tui_queue_type_focused = false;
+                state.now_playing_focus = NowPlayingFocus::Tools;
+                return vec![];
+            }
+            KeyCode::Down | KeyCode::Esc => {
+                state.tui_queue_type_focused = false;
+                return vec![];
+            }
+            _ => {}
+        }
+    }
+    // Header menus are reached with arrows or pane traversal.
     if state.now_playing_focus == NowPlayingFocus::Tracks && key.code == KeyCode::Left {
-        state.now_playing_focus = NowPlayingFocus::Sidebar;
-        return vec![];
+        return vec![NavigationAction::SetView(state.tui_queue_workspace.view()).into()];
     }
     if state.now_playing_focus == NowPlayingFocus::Tracks && key.code == KeyCode::Right {
-        state.now_playing_focus = NowPlayingFocus::Artwork;
+        state.now_playing_focus = NowPlayingFocus::Tools;
         return vec![];
     }
 
-    // Sidebar focused: navigate the four buttons.
-    if state.now_playing_focus == NowPlayingFocus::Sidebar {
-        return handle_sidebar_keys(key, state);
+    if state.now_playing_focus == NowPlayingFocus::Tools {
+        match key.code {
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                return crate::app::queue_controls::Menu::Tools.open(state);
+            }
+            KeyCode::Left => {
+                state.now_playing_focus = NowPlayingFocus::Tracks;
+                state.tui_queue_type_focused = true;
+            }
+            KeyCode::Down | KeyCode::Esc => state.now_playing_focus = NowPlayingFocus::Tracks,
+            _ => {}
+        }
+        return vec![];
     }
 
-    // Artwork focused: arrow keys hop to neighbours; Enter opens
-    // the Artist Bio popup as a little easter egg.
+    // Artwork focus exposes its artist destination.
     if state.now_playing_focus == NowPlayingFocus::Artwork {
         return handle_artwork_keys(key, state);
     }
@@ -63,55 +84,25 @@ fn handle_artwork_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action
             state.now_playing_focus = NowPlayingFocus::Tracks;
             vec![]
         }
-        KeyCode::Enter => {
-            // Easter egg: pressing Enter on the cover art opens the
-            // Artist Bio popup for whichever artist resolves from
-            // the now-playing track (or focused row).
-            match crate::app::handlers::helpers::get_artist_for_bio(state) {
-                Some((artist_key, artist_name)) => vec![SearchAction::ShowArtistBio {
-                    artist_key,
-                    artist_name,
-                }
-                .into()],
-                None => vec![],
-            }
-        }
+        KeyCode::Enter => state
+            .current_track()
+            .cloned()
+            .map(|track| {
+                vec![
+                    BrowseAction::OpenDetailsInLibrary {
+                        track: Box::new(track),
+                        destination: crate::app::library_details::Destination::Artist,
+                    }
+                    .into(),
+                ]
+            })
+            .unwrap_or_default(),
         _ => vec![],
     }
 }
 
 /// Handle keyboard nav over the now-playing left sidebar buttons:
-/// Capability-filtered Radio / DJ Modes / Remix Tools / Clear Queue.
-fn handle_sidebar_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
-    let buttons = state.now_playing_sidebar_buttons();
-    let n = buttons.len();
-    state.now_playing_sidebar_index = state.now_playing_sidebar_index.min(n - 1);
-    match key.code {
-        KeyCode::Up => {
-            state.now_playing_sidebar_index = state.now_playing_sidebar_index.saturating_sub(1);
-            vec![]
-        }
-        KeyCode::Down => {
-            // At the bottom of the sidebar (Clear Queue), Down hops
-            // straight to the visualizer below. Otherwise just
-            // advance to the next button.
-            if state.now_playing_sidebar_index >= n - 1 {
-                state.now_playing_focus = NowPlayingFocus::Tracks;
-                state.visualizer_tab_focused = true;
-                return vec![NavigationAction::SetView(View::NowPlaying).into()];
-            }
-            state.now_playing_sidebar_index = (state.now_playing_sidebar_index + 1).min(n - 1);
-            vec![]
-        }
-        KeyCode::Right | KeyCode::Esc => {
-            state.now_playing_focus = NowPlayingFocus::Tracks;
-            vec![]
-        }
-        KeyCode::Enter => activate_sidebar(state, buttons[state.now_playing_sidebar_index]),
-        _ => vec![],
-    }
-}
-
+/// Capability-filtered Radio / Queue Edits / Clear Queue.
 /// Handle Now Playing visualizer view keys (artwork + track info + waveform seekbar).
 ///
 /// Standard arrow-key navigation: arrows always traverse the
@@ -123,6 +114,9 @@ pub(super) fn handle_now_playing_visualizer_keys(
     key: event::KeyEvent,
     state: &mut AppState,
 ) -> Vec<Action> {
+    if state.now_playing_focus == NowPlayingFocus::Artwork {
+        return handle_artwork_keys(key, state);
+    }
     // When visualizer tab bar is focused, arrow keys navigate tabs.
     if state.visualizer_tab_focused {
         match key.code {
@@ -171,7 +165,7 @@ pub(super) fn handle_now_playing_visualizer_keys(
         // sidebar (Radio / DJ Modes / Remix Tools / Clear Queue) —
         // single keypress from the visualizer to the sidebar.
         KeyCode::Left => {
-            state.now_playing_focus = NowPlayingFocus::Sidebar;
+            state.now_playing_focus = NowPlayingFocus::Tools;
             vec![NavigationAction::SetView(View::Queue).into()]
         }
         // Right jumps up to the queue track list. Symmetric with
@@ -236,6 +230,8 @@ fn handle_queue_track_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Ac
             state.scroll.queue = None;
             if state.list_state.queue_index > 0 {
                 state.list_state.queue_index -= 1;
+            } else {
+                state.tui_queue_type_focused = true;
             }
             vec![]
         }
@@ -278,58 +274,31 @@ fn handle_queue_track_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Ac
         }
 
         KeyCode::Enter => {
-            // If the selected track is already playing, switch to NowPlaying view
-            let is_current = match state.playback_mode {
-                PlaybackMode::Queue | PlaybackMode::None => {
-                    state.queue.index == Some(state.list_state.queue_index)
-                }
-                PlaybackMode::Radio => {
-                    state.radio.track_index == Some(state.list_state.queue_index)
-                }
+            let tracks = if state.playback_mode == PlaybackMode::Radio {
+                &state.radio.tracks
+            } else {
+                &state.queue.tracks
             };
-            if is_current {
-                return vec![
-                    NavigationAction::SetView(View::NowPlaying).into(),
-                    SystemAction::LoadWaveform.into(),
-                ];
-            }
-
-            // Play selected item from queue or radio (without modifying queue order)
-            match state.playback_mode {
-                PlaybackMode::Queue | PlaybackMode::None => {
-                    let queue_idx = state.list_state.queue_index;
-                    if queue_idx < state.queue.tracks.len() {
-                        vec![QueueAction::JumpToQueueIndex(queue_idx).into()]
-                    } else {
-                        vec![]
-                    }
-                }
-                PlaybackMode::Radio => {
-                    // Jump to selected radio track without clearing radio state
-                    if state.list_state.queue_index < state.radio.tracks.len() {
-                        vec![RadioAction::JumpToRadioTrack(state.list_state.queue_index).into()]
-                    } else {
-                        vec![]
-                    }
-                }
-            }
+            tracks
+                .get(state.list_state.queue_index)
+                .cloned()
+                .map(|track| {
+                    vec![
+                        BrowseAction::OpenDetailsInLibrary {
+                            track: Box::new(track),
+                            destination: crate::app::library_details::Destination::Track,
+                        }
+                        .into(),
+                    ]
+                })
+                .unwrap_or_default()
         }
 
         KeyCode::Delete => {
             if !state.queue.selected.is_empty() {
                 return vec![QueueAction::RemoveSelectedFromQueue.into()];
             }
-            match state.playback_mode {
-                PlaybackMode::Queue | PlaybackMode::None => {
-                    vec![QueueAction::RemoveFromQueue(state.list_state.queue_index).into()]
-                }
-                PlaybackMode::Radio => {
-                    let target_idx = state.list_state.queue_index;
-                    let snapshot = state.convert_radio_to_queue("Delete track (from radio)");
-                    state.queue.undo_snapshot = Some(snapshot);
-                    vec![QueueAction::RemoveFromQueue(target_idx).into()]
-                }
-            }
+            vec![QueueAction::RemoveFromQueue(state.list_state.queue_index).into()]
         }
 
         // Alphabet jumping
@@ -352,24 +321,5 @@ fn handle_queue_track_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Ac
         }
 
         _ => vec![],
-    }
-}
-
-pub(crate) fn activate_sidebar(
-    state: &mut AppState,
-    button: crate::app::presentation::NpSidebarButton,
-) -> Vec<Action> {
-    use crate::app::presentation::NpSidebarButton::*;
-    match button {
-        ClearQueue => vec![QueueAction::ClearQueue.into()],
-        Radio | DjModes | Remix => {
-            let query = match button {
-                Radio => "Radio",
-                DjModes => "DJ",
-                _ => "Remix",
-            };
-            crate::app::command_palette::open_with_query(state, query);
-            vec![]
-        }
     }
 }

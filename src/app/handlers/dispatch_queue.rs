@@ -71,13 +71,11 @@ fn get_folder_tracks_from_index(state: &AppState, start_index: usize) -> FolderT
     }
 
     // Navidrome virtual folders are catalog-backed, never server folder URLs.
-    {
-        FolderTrackPlan::MissingCatalogTracks
-    }
+    FolderTrackPlan::MissingCatalogTracks
 }
 
 /// Dispatch queue actions. Returns follow-up actions.
-pub async fn dispatch(
+pub fn dispatch(
     event_tx: &mpsc::Sender<Event>,
     action: QueueAction,
     state: &mut AppState,
@@ -86,7 +84,19 @@ pub async fn dispatch(
 ) -> Result<Vec<Action>> {
     let mut follow_ups = vec![];
 
+    let enemies = matches!(&action, QueueAction::RemixEnemiesReady(_));
+    let replacement_name = if matches!(&action, QueueAction::RemixOppositeDayReady(_)) {
+        "Opposite Day"
+    } else {
+        "Doppelganger"
+    };
     match action {
+        QueueAction::ReorderSelection { from, to } => {
+            crate::app::queue_edit::reorder(state, from, to);
+        }
+        QueueAction::SetRepeat(mode) => {
+            state.queue.repeat = mode;
+        }
         QueueAction::PlayTrack(track) => {
             helpers::play_track(event_tx, *track, state, audio);
         }
@@ -98,6 +108,7 @@ pub async fn dispatch(
         }
         QueueAction::PlayTrackFromCategory(idx) => {
             if idx < state.library.selected_album_tracks.len() {
+                crate::app::queue_edit::record(state, "Play tracks");
                 // Report stop for currently playing track before switching
 
                 // Generate new session ID for this playback context
@@ -119,25 +130,10 @@ pub async fn dispatch(
             }
         }
 
-        QueueAction::PlaySearchResult => {
-            // Play the selected search result (Shift+Enter in search)
-            let play_actions = play_search_result(state);
-            follow_ups.extend(play_actions);
-        }
-
         QueueAction::EnqueueTrack(track) => {
-            // Append a single track to end of queue
-            if state.playback_mode == PlaybackMode::Radio {
-                state.queue.tracks = state.radio.tracks.clone();
-                state.queue.index = state.radio.track_index;
-                state.set_playback_mode(PlaybackMode::Queue);
-                state.radio.clear();
-                if let Some(idx) = state.queue.index {
-                    state.list_state.queue_index = idx;
-                }
-            }
+            crate::app::queue_edit::record(state, "Add track to queue");
             let title = track.title.clone();
-            state.queue.tracks.push(*track);
+            state.playback_buffer_mut().0.push(*track);
             state.set_status(format!("Added \"{}\" to queue", title));
         }
 
@@ -167,24 +163,24 @@ pub async fn dispatch(
                     state.set_status(format!(
                         "Inserted \"{}\" next ({} total)",
                         title,
-                        state.queue.tracks.len()
+                        state.playback_tracks().len()
                     ));
                 } else {
                     state.set_status(format!(
                         "Inserted {} tracks next, starting with \"{}\" ({} total)",
                         added,
                         title,
-                        state.queue.tracks.len()
+                        state.playback_tracks().len()
                     ));
                 }
             }
         }
         QueueAction::TracksLoaded { intent, result } => {
-            if let QueueLoadIntent::ReplaceAndPlay { request_id, .. } = &intent {
-                if *request_id != state.queue_play_request_id {
-                    tracing::debug!("Ignoring stale queue play load");
-                    return Ok(follow_ups);
-                }
+            if let QueueLoadIntent::ReplaceAndPlay { request_id, .. } = &intent
+                && *request_id != state.queue_play_request_id
+            {
+                tracing::debug!("Ignoring stale queue play load");
+                return Ok(follow_ups);
             }
             let tracks = match result {
                 Ok(tracks) => tracks,
@@ -207,17 +203,9 @@ pub async fn dispatch(
                     }
                 }
                 QueueLoadIntent::Append { label } => {
-                    if state.playback_mode == PlaybackMode::Radio {
-                        state.queue.tracks = state.radio.tracks.clone();
-                        state.queue.index = state.radio.track_index;
-                        state.set_playback_mode(PlaybackMode::Queue);
-                        state.radio.clear();
-                        if let Some(index) = state.queue.index {
-                            state.list_state.queue_index = index;
-                        }
-                    }
+                    crate::app::queue_edit::record(state, "Add tracks to queue");
                     let added = tracks.len();
-                    state.queue.tracks.extend(tracks);
+                    state.playback_buffer_mut().0.extend(tracks);
                     state.queue.original.clear();
                     state.queue.sort_mode = QueueSortMode::QueueOrder;
                     state.set_status(format!("Added {added} tracks {label} to queue"));
@@ -226,115 +214,83 @@ pub async fn dispatch(
                     let added = helpers::insert_tracks_next(state, tracks);
                     state.set_status(format!(
                         "Inserted {added} tracks {label} next ({} total)",
-                        state.queue.tracks.len()
+                        state.playback_tracks().len()
                     ));
                 }
             }
         }
         QueueAction::ClearQueue => {
-            // Clear the appropriate queue based on playback mode
-            match state.playback_mode {
-                PlaybackMode::Radio => {
-                    state.radio.clear();
-                }
-                PlaybackMode::Queue | PlaybackMode::None => {
-                    state.queue.tracks.clear();
-                    state.queue.index = None;
-                    state.queue.original.clear();
-                    state.queue.sort_mode = QueueSortMode::QueueOrder;
-                }
+            // Preserve the complete session before clearing; undo restores the queue
+            // without unexpectedly restarting stopped playback.
+            if !state.playback_tracks().is_empty() {
+                state.queue.undo_snapshot = Some(crate::app::state::QueueSnapshot {
+                    recorded_at: std::time::Instant::now(),
+                    contents: if state.playback_mode == PlaybackMode::Radio {
+                        crate::app::state::QueueContents::Radio(Box::new(state.radio.clone()))
+                    } else {
+                        crate::app::state::QueueContents::Queue {
+                            tracks: state.queue.tracks.clone(),
+                            index: state.queue.index,
+                        }
+                    },
+                    description: "Clear Queue".into(),
+                });
             }
+            state.set_playback_mode(PlaybackMode::None);
+            state.radio.clear();
+            state.queue.tracks.clear();
+            state.queue.index = None;
+            state.queue.original.clear();
+            state.queue.sort_mode = QueueSortMode::QueueOrder;
+            state.queue.shuffle_undo_queue = None;
+            state.queue.shuffle_undo_index = None;
+            state.queue_play_request_id = state.queue_play_request_id.wrapping_add(1);
+            state.sources.media = crate::app::sources::MediaPreparation::Idle;
+            state.playback.preparation_id = state.playback.preparation_id.wrapping_add(1);
             state.list_state.queue_index = 0;
             audio.stop();
             state.playback.request_id = audio.playback_id();
             state.playback.status = PlayStatus::Stopped;
-            // Clear artwork so stale cover art doesn't linger
-            state.artwork.current_thumb = None;
-            state.artwork.current_data = None;
-            state.artwork.fetch = crate::app::state::ArtworkFetch::Idle;
+            helpers::reset_current_track(state);
         }
         QueueAction::ToggleQueueShuffle => {
             use crate::services::shuffle_queue;
 
-            if state.playback_mode == PlaybackMode::Radio {
-                // Shuffle/unshuffle radio tracks
-                match state.queue.sort_mode {
-                    QueueSortMode::QueueOrder => {
-                        state.queue.original = state.radio.tracks.clone();
-                        let (shuffled, new_idx) =
-                            shuffle_queue(state.radio.tracks.clone(), state.radio.track_index);
-                        state.radio.tracks = shuffled;
-                        state.radio.track_index = new_idx;
-                        state.queue.sort_mode = QueueSortMode::Shuffle;
-                    }
-                    QueueSortMode::Shuffle => {
-                        let current_key = state.current_track().map(|t| t.rating_key.clone());
-                        state.radio.tracks = std::mem::take(&mut state.queue.original);
-                        state.queue.sort_mode = QueueSortMode::QueueOrder;
-                        if let Some(key) = current_key {
-                            state.radio.track_index =
-                                state.radio.tracks.iter().position(|t| t.rating_key == key);
-                        }
-                    }
+            if state.queue.sort_mode == QueueSortMode::Shuffle && state.queue.original.is_empty() {
+                state.queue.sort_mode = QueueSortMode::QueueOrder;
+            }
+
+            match state.queue.sort_mode {
+                QueueSortMode::QueueOrder => {
+                    let (buffer, index) = state.playback_buffer_mut();
+                    let original = std::mem::take(buffer);
+                    (*buffer, *index) = shuffle_queue(original.clone(), *index);
+                    state.queue.original = original;
+                    state.queue.sort_mode = QueueSortMode::Shuffle;
+                    state.list_state.queue_index = 0;
                 }
-            } else {
-                // Shuffle/unshuffle queue tracks
-                match state.queue.sort_mode {
-                    QueueSortMode::QueueOrder => {
-                        state.queue.original = state.queue.tracks.clone();
-                        let (shuffled, new_idx) = shuffle_queue(
-                            std::mem::take(&mut state.queue.tracks),
-                            state.queue.index,
-                        );
-                        state.queue.tracks = shuffled;
-                        state.queue.index = new_idx; // always Some(0)
-                        state.queue.sort_mode = QueueSortMode::Shuffle;
-                        state.list_state.queue_index = 0;
+                QueueSortMode::Shuffle => {
+                    let original = std::mem::take(&mut state.queue.original);
+                    let current_key = state.current_track().map(|track| track.rating_key.clone());
+                    let (buffer, index) = state.playback_buffer_mut();
+                    *buffer = original;
+                    if let Some(key) = current_key {
+                        *index = buffer.iter().position(|track| track.rating_key == key);
                     }
-                    QueueSortMode::Shuffle => {
-                        let current_key = state.current_track().map(|t| t.rating_key.clone());
-                        state.queue.tracks = std::mem::take(&mut state.queue.original);
-                        state.queue.sort_mode = QueueSortMode::QueueOrder;
-                        if let Some(key) = current_key {
-                            state.queue.index =
-                                state.queue.tracks.iter().position(|t| t.rating_key == key);
-                        }
-                        if let Some(idx) = state.queue.index {
-                            state.list_state.queue_index = idx;
-                        }
+                    if let Some(index) = *index {
+                        state.list_state.queue_index = index;
                     }
+                    state.queue.sort_mode = QueueSortMode::QueueOrder;
                 }
             }
-            // Flush and re-prefetch based on new order
         }
         QueueAction::RemoveFromQueue(idx) => {
-            // Promote Radio → Queue before the bounds check — same
-            // reasoning as MoveQueueTrack, otherwise the index lookup
-            // hits an empty `state.queue.tracks` and silently no-ops.
-            if state.playback_mode == PlaybackMode::Radio {
-                let snapshot = state.convert_radio_to_queue("Remove track (from radio)");
-                state.queue.undo_snapshot = Some(snapshot);
-            }
-            if idx < state.queue.tracks.len() {
-                state.queue.tracks.remove(idx);
-                // Adjust queue_index if needed
-                if let Some(current) = state.queue.index {
-                    if idx < current {
-                        state.queue.index = Some(current - 1);
-                    } else if idx == current && current >= state.queue.tracks.len() {
-                        state.queue.index = if state.queue.tracks.is_empty() {
-                            None
-                        } else {
-                            Some(state.queue.tracks.len() - 1)
-                        };
-                    }
-                }
-                // Adjust list selection
-                let max_visual = state.queue.tracks.len().saturating_sub(1);
-                if state.list_state.queue_index > max_visual {
-                    state.list_state.queue_index = max_visual;
-                }
-            }
+            follow_ups.extend(remove_tracks(
+                event_tx,
+                state,
+                audio,
+                &std::collections::BTreeSet::from([idx]),
+            ));
         }
         QueueAction::JumpToQueueIndex(idx) => {
             // Jump to and play a specific track in the queue (without modifying queue order)
@@ -347,11 +303,6 @@ pub async fn dispatch(
                 state.list_state.queue_index = idx;
                 state.set_playback_mode(PlaybackMode::Queue);
                 helpers::play_current_track(event_tx, state, audio);
-
-                // Trigger DJ mode processing after jump (all modes are continuous)
-                if !state.dj.inserting && state.dj.active_mode.is_some() {
-                    follow_ups.push(crate::app::action::RadioAction::DjModeProcess.into());
-                }
             }
         }
         QueueAction::EnqueueSelection => {
@@ -422,16 +373,18 @@ pub async fn dispatch(
                 };
                 match get_folder_tracks_from_index(state, start) {
                     FolderTrackPlan::Ready(tracks) if !tracks.is_empty() => {
-                        return Ok(vec![QueueAction::TracksLoaded {
-                            intent,
-                            result: Ok(tracks),
-                        }
-                        .into()]);
+                        return Ok(vec![
+                            QueueAction::TracksLoaded {
+                                intent,
+                                result: Ok(tracks),
+                            }
+                            .into(),
+                        ]);
                     }
                     FolderTrackPlan::Ready(_) => {}
                     FolderTrackPlan::MissingCatalogTracks => {
                         state.set_error(
-                            "Folder tracks are no longer in the catalog; refresh with F5".into(),
+                            "Folder tracks are no longer in the catalog; choose Refresh Library".into(),
                         );
                         return Ok(vec![]);
                     }
@@ -492,26 +445,17 @@ pub async fn dispatch(
             };
 
             if !tracks_to_add.is_empty() {
-                // If radio is playing, convert to queue mode
-                if state.playback_mode == PlaybackMode::Radio {
-                    state.queue.tracks = state.radio.tracks.clone();
-                    state.queue.index = state.radio.track_index;
-                    state.set_playback_mode(PlaybackMode::Queue);
-                    state.radio.clear();
-                    if let Some(idx) = state.queue.index {
-                        state.list_state.queue_index = idx;
-                    }
-                }
+                crate::app::queue_edit::record(state, "Add tracks to queue");
 
                 state.queue.original.clear();
                 state.queue.sort_mode = QueueSortMode::QueueOrder;
 
                 let added = tracks_to_add.len();
-                state.queue.tracks.extend(tracks_to_add);
+                state.playback_buffer_mut().0.extend(tracks_to_add);
                 state.set_status(format!(
                     "Added {} to queue ({} total)",
                     added,
-                    state.queue.tracks.len()
+                    state.playback_tracks().len()
                 ));
             }
         }
@@ -568,7 +512,7 @@ pub async fn dispatch(
 
             if let Some((rating_key, title)) = album_to_enqueue {
                 return Ok(vec![
-                    QueueAction::EnqueueAlbumNext { rating_key, title }.into()
+                    QueueAction::EnqueueAlbumNext { rating_key, title }.into(),
                 ]);
             }
 
@@ -585,16 +529,18 @@ pub async fn dispatch(
                 };
                 match get_folder_tracks_from_index(state, start) {
                     FolderTrackPlan::Ready(tracks) if !tracks.is_empty() => {
-                        return Ok(vec![QueueAction::TracksLoaded {
-                            intent,
-                            result: Ok(tracks),
-                        }
-                        .into()]);
+                        return Ok(vec![
+                            QueueAction::TracksLoaded {
+                                intent,
+                                result: Ok(tracks),
+                            }
+                            .into(),
+                        ]);
                     }
                     FolderTrackPlan::Ready(_) => {}
                     FolderTrackPlan::MissingCatalogTracks => {
                         state.set_error(
-                            "Folder tracks are no longer in the catalog; refresh with F5".into(),
+                            "Folder tracks are no longer in the catalog; choose Refresh Library".into(),
                         );
                         return Ok(vec![]);
                     }
@@ -663,6 +609,116 @@ pub async fn dispatch(
                 return Ok(vec![QueueAction::EnqueueTracksNext(tracks_to_add).into()]);
             }
         }
+        QueueAction::PromptExportPlaylist { format, queue } => {
+            let (title, tracks) = if queue {
+                ("Queue".to_owned(), state.playback_tracks().to_vec())
+            } else if let Some(column) = state.playlist_nav.columns.get(1).filter(|column| {
+                !state.playlist_nav.loading
+                    && state.playlist_nav.columns.first().and_then(|root| root.selected_item()).is_some_and(|selected| matches!(&column.play_all_row, Some(crate::app::state::PlayAllRow::Playlist { rating_key, .. }) if rating_key == selected.key()))
+                    && column.lazy.as_ref().is_none_or(|lazy| {
+                    lazy.total
+                        .is_none_or(|total| column.tracks.len() >= total as usize)
+                })
+            }) {
+                (
+                    state
+                        .playlist_nav
+                        .columns
+                        .first()
+                        .and_then(|root| root.selected_item())
+                        .map(|item| item.title().to_owned())
+                        .unwrap_or_else(|| column.title.clone()),
+                    column.tracks.clone(),
+                )
+            } else {
+                state.set_error("Open a complete playlist before exporting".into());
+                return Ok(vec![]);
+            };
+            if tracks.is_empty() {
+                state.set_error("No tracks to export".into());
+                return Ok(vec![]);
+            }
+            if let Err(error) = crate::services::playlist_export::encode(&tracks, format) {
+                state.set_error(error.to_string());
+                return Ok(vec![]);
+            }
+            let name: String = title
+                .chars()
+                .map(|c| {
+                    if c.is_alphanumeric() || " -_".contains(c) {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .collect();
+            let directory = dirs::download_dir()
+                .or_else(dirs::home_dir)
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            let path = directory.join(format!("{}.{}", name.trim(), format.extension()));
+            state.popups.close_all();
+            state
+                .popups
+                .set_input_dialog(Some(crate::app::state::InputDialog {
+                    title: "Export Playlist".into(),
+                    input: path.to_string_lossy().as_ref().into(),
+                    action_type: crate::app::state::InputDialogAction::ExportPlaylist {
+                        generation: state.library_generation,
+                        tracks,
+                        format,
+                    },
+                }));
+        }
+        QueueAction::ExportPlaylist {
+            generation,
+            tracks,
+            format,
+            path,
+        } => {
+            if generation != state.library_generation {
+                return Ok(vec![]);
+            }
+            anyhow::ensure!(!path.as_os_str().is_empty(), "Choose an export path");
+            let tx = event_tx.clone();
+            let target = path.clone();
+            crate::app::tasks::spawn(async move {
+                let result = crate::app::tasks::spawn_blocking(move || {
+                    crate::services::playlist_export::write(&target, &tracks, format)
+                })
+                .await
+                .map_err(|error| crate::app::action::AsyncError {
+                    message: error.to_string(),
+                })
+                .and_then(|result| {
+                    result.map_err(|error| crate::app::action::AsyncError {
+                        message: error.to_string(),
+                    })
+                });
+                let _ = tx
+                    .send(Event::Effect(
+                        QueueAction::PlaylistExported {
+                            generation,
+                            path,
+                            result,
+                        }
+                        .into(),
+                    ))
+                    .await;
+            });
+        }
+        QueueAction::PlaylistExported {
+            generation,
+            path,
+            result,
+        } => {
+            if generation != state.library_generation {
+                return Ok(vec![]);
+            }
+            match result {
+                Ok(()) => state.set_status(format!("Exported {}", path.display())),
+                Err(error) => state.set_error(error.message),
+            }
+        }
         QueueAction::PromptSavePlaylist => {
             // Show input dialog for playlist name
             let has_tracks = !state.playback_tracks().is_empty();
@@ -690,7 +746,14 @@ pub async fn dispatch(
             track_count,
             result,
         } => match result {
-            Ok(()) => {
+            Ok(playlist) => {
+                std::sync::Arc::make_mut(&mut state.library.playlists)
+                    .retain(|existing| existing.rating_key != playlist.rating_key);
+                std::sync::Arc::make_mut(&mut state.library.playlists).push(playlist);
+                state.replace_playlists(state.library.playlists.as_ref().clone());
+                state
+                    .desktop_collapsed_sections
+                    .retain(|section| section != "Playlists");
                 state.set_status(format!("Saved \"{name}\" ({track_count} tracks)"));
                 return Ok(vec![DataAction::LoadPlaylists.into()]);
             }
@@ -700,46 +763,26 @@ pub async fn dispatch(
         },
 
         QueueAction::RemixShuffle => {
-            if state.playback_mode == PlaybackMode::Radio {
-                let snapshot = state.convert_radio_to_queue("Remix: Shuffle (from radio)");
-                state.queue.undo_snapshot = Some(snapshot);
-            }
-
-            use crate::services::shuffle_queue;
-
-            // Save snapshot for Ctrl+Z undo (skip if already set by radio conversion)
-            if state.queue.undo_snapshot.is_none() {
-                state.queue.undo_snapshot = Some(crate::app::state::QueueSnapshot {
-                    contents: crate::app::state::QueueContents::Queue {
-                        tracks: state.queue.tracks.clone(),
-                        index: state.queue.index,
-                    },
-                    description: "Remix: Shuffle".to_string(),
-                });
-            }
-
-            // Save shuffle-specific undo state (for toggle)
-            state.queue.shuffle_undo_queue = Some(state.queue.tracks.clone());
-            state.queue.shuffle_undo_index = state.queue.index;
-
-            let (shuffled, new_idx) = shuffle_queue(state.queue.tracks.clone(), state.queue.index);
-            state.queue.tracks = shuffled;
-            state.queue.index = new_idx;
+            crate::app::queue_edit::record(state, "Remix: Shuffle");
+            let (buffer, playing) = state.playback_buffer_mut();
+            let original = std::mem::take(buffer);
+            let index = *playing;
+            (*buffer, *playing) = crate::services::shuffle_queue(original.clone(), index);
+            state.queue.shuffle_undo_queue = Some(original);
+            state.queue.shuffle_undo_index = index;
             state.list_state.queue_index = 0;
             state.set_status("Queue shuffled".to_string());
         }
         QueueAction::RemixUndoShuffle => {
             if let Some(original) = state.queue.shuffle_undo_queue.take() {
                 let current_key = state.current_track().map(|t| t.rating_key.clone());
-                state.queue.tracks = original;
-                state.queue.index = state.queue.shuffle_undo_index;
-                // Try to keep the currently playing track as the index
-                if let Some(key) = current_key {
-                    if let Some(idx) = state.queue.tracks.iter().position(|t| t.rating_key == key) {
-                        state.queue.index = Some(idx);
-                    }
-                }
-                if let Some(idx) = state.queue.index {
+                let original_index = state.queue.shuffle_undo_index;
+                let (buffer, playing) = state.playback_buffer_mut();
+                *buffer = original;
+                *playing = current_key
+                    .and_then(|key| buffer.iter().position(|track| track.rating_key == key))
+                    .or(original_index);
+                if let Some(idx) = *playing {
                     state.list_state.queue_index = idx;
                 }
                 state.set_status("Shuffle undone".to_string());
@@ -749,31 +792,79 @@ pub async fn dispatch(
         }
         QueueAction::UndoLastRemix => {
             if let Some(snapshot) = state.queue.undo_snapshot.take() {
+                let playing = state
+                    .current_track()
+                    .map(|track| (track.rating_key.clone(), track.origin.clone()));
+                let was_playing = matches!(
+                    state.playback.status,
+                    PlayStatus::Playing | PlayStatus::Buffering
+                );
+                let was_paused = state.playback.status == PlayStatus::Paused;
+                state.sources.nav_tasks.remove("remix");
+                state.queue_play_request_id = state.queue_play_request_id.wrapping_add(1);
                 match snapshot.contents {
                     crate::app::state::QueueContents::Radio(radio_snap) => {
-                        // Restore radio mode
-                        state.radio = *radio_snap;
-                        state.set_playback_mode(PlaybackMode::Radio);
-                        state.queue.tracks.clear();
-                        state.queue.index = None;
-                        state.queue.original.clear();
-                        if let Some(idx) = state.radio.track_index {
-                            state.list_state.queue_index = idx;
+                        if state.playback_mode == PlaybackMode::Radio {
+                            state.invalidate_radio_refill();
+                        } else {
+                            state.queue.tracks.clear();
+                            state.queue.index = None;
+                            state.set_playback_mode(PlaybackMode::Radio);
                         }
+                        state.radio = *radio_snap;
+                        state.radio.refill = crate::app::state::RadioRefill::Idle;
+                        state.queue.original.clear();
                         state.set_status(format!("Undid {} — resumed radio", snapshot.description));
                     }
                     crate::app::state::QueueContents::Queue { tracks, index } => {
                         // Normal queue undo
                         state.queue.tracks = tracks;
                         state.queue.index = index;
-                        if let Some(idx) = state.queue.index {
-                            state.list_state.queue_index = idx;
-                        }
+                        state.queue.original.clear();
+                        state.queue.sort_mode = QueueSortMode::QueueOrder;
+                        state.set_playback_mode(PlaybackMode::Queue);
                         state.set_status(format!("Undid {}", snapshot.description));
                     }
                 }
                 state.queue.shuffle_undo_queue = None;
                 state.queue.shuffle_undo_index = None;
+                state.queue.selected.clear();
+                state.queue.selection_anchor = None;
+                let restored_index = if state.playback_mode == PlaybackMode::Radio {
+                    state.radio.track_index
+                } else {
+                    state.queue.index
+                };
+                state.list_state.queue_index = restored_index.unwrap_or(0);
+                let retained = playing.as_ref().and_then(|(key, origin)| {
+                    let matches =
+                        |track: &Track| track.rating_key == *key && track.origin == *origin;
+                    let tracks = state.playback_tracks();
+                    restored_index
+                        .filter(|&index| tracks.get(index).is_some_and(matches))
+                        .or_else(|| tracks.iter().position(matches))
+                });
+                if let Some(index) = retained.filter(|_| was_playing || was_paused) {
+                    if state.playback_mode == PlaybackMode::Radio {
+                        state.radio.track_index = Some(index);
+                    } else {
+                        state.queue.index = Some(index);
+                    }
+                    state.list_state.queue_index = index;
+                } else if retained.is_none() || retained != restored_index {
+                    audio.stop();
+                    state.playback.request_id = audio.playback_id();
+                    state.playback.preparation_id = state.playback.preparation_id.wrapping_add(1);
+                    state.sources.media = crate::app::sources::MediaPreparation::Idle;
+                    state.playback.status = PlayStatus::Stopped;
+                    helpers::reset_current_track(state);
+                    if was_playing {
+                        helpers::play_current_track(event_tx, state, audio);
+                    }
+                }
+                if state.current_track().is_some() {
+                    follow_ups.push(crate::app::action::SystemAction::LoadArtwork.into());
+                }
             } else {
                 state.set_error("Nothing to undo".to_string());
             }
@@ -791,20 +882,12 @@ pub async fn dispatch(
                 QueueAction::MoveQueueTrackDown | QueueAction::MoveSelectedTracksDown
             );
             let delta = if down { 1 } else { -1 };
-            if state.playback_mode == PlaybackMode::Radio {
-                let description = if multiple {
-                    "Move tracks (from radio)"
-                } else {
-                    "Move track (from radio)"
-                };
-                state.queue.undo_snapshot = Some(state.convert_radio_to_queue(description));
-            }
             let mut selected: Vec<_> = if multiple {
                 state.queue.selected.iter().copied().collect()
             } else {
                 vec![state.list_state.queue_index]
             };
-            let len = state.queue.tracks.len();
+            let len = state.playback_tracks().len();
             // A block touching the boundary cannot move; preserve its order.
             if selected.is_empty()
                 || selected.iter().any(|&index| {
@@ -819,15 +902,20 @@ pub async fn dispatch(
             if down {
                 selected.reverse();
             }
+            crate::app::queue_edit::record(state, "Move tracks");
+            let (buffer, playing) = state.playback_buffer_mut();
             for &from in &selected {
-                state
-                    .queue
-                    .move_track(from, from.checked_add_signed(delta).unwrap());
+                crate::app::state::move_queue_occurrence(
+                    buffer,
+                    playing,
+                    from,
+                    from.saturating_add_signed(delta),
+                );
             }
             if multiple {
                 state.queue.selected = selected
                     .into_iter()
-                    .map(|index| index.checked_add_signed(delta).unwrap())
+                    .map(|index| index.saturating_add_signed(delta))
                     .collect();
             }
             state.list_state.queue_index = state
@@ -837,54 +925,27 @@ pub async fn dispatch(
                 .min(len.saturating_sub(1));
         }
         QueueAction::RemoveSelectedFromQueue => {
-            if state.playback_mode == PlaybackMode::Radio {
-                let snapshot = state.convert_radio_to_queue("Delete tracks (from radio)");
-                state.queue.undo_snapshot = Some(snapshot);
-            }
-            // Remove all selected tracks (process from highest index down)
-            let selected: Vec<usize> = state.queue.selected.iter().copied().rev().collect();
-            for &idx in &selected {
-                if idx < state.queue.tracks.len() {
-                    state.queue.tracks.remove(idx);
-                    if let Some(qi) = state.queue.index {
-                        if idx < qi {
-                            state.queue.index = Some(qi - 1);
-                        } else if idx == qi && qi >= state.queue.tracks.len() {
-                            state.queue.index = if state.queue.tracks.is_empty() {
-                                None
-                            } else {
-                                Some(state.queue.tracks.len() - 1)
-                            };
-                        }
-                    }
-                }
-            }
-            state.queue.selected.clear();
-            // Adjust visual index
-            let max = state.queue.tracks.len().saturating_sub(1);
-            if state.list_state.queue_index > max {
-                state.list_state.queue_index = max;
-            }
+            follow_ups.extend(remove_tracks(
+                event_tx,
+                state,
+                audio,
+                &state.queue.selected.clone(),
+            ));
         }
         QueueAction::MoveQueueTrack { from, to } => {
-            // Drag-and-drop reorder. `from` and `to` are absolute queue
-            // indices; `to` is the position the dragged row should occupy
-            // after the move (i.e. `Vec::remove(from)` then
-            // `Vec::insert(adjusted_to, track)`).
-            //
-            // Promote a Radio session to a Queue *before* the bounds
-            // check — in Radio mode `state.queue.tracks` is empty
-            // (tracks live in `state.radio.tracks`) and reading its
-            // length would short-circuit the move.
-            if state.playback_mode == PlaybackMode::Radio {
-                let snapshot = state.convert_radio_to_queue("Reorder track (from radio)");
-                state.queue.undo_snapshot = Some(snapshot);
+            let len = state.playback_tracks().len();
+            if from >= len || from == to.min(len - 1) {
+                return Ok(follow_ups);
             }
-            if let Some(destination) = state.queue.move_track(from, to) {
+            crate::app::queue_edit::record(state, "Reorder track");
+            let (buffer, playing) = state.playback_buffer_mut();
+            if let Some(destination) =
+                crate::app::state::move_queue_occurrence(buffer, playing, from, to)
+            {
                 state.list_state.queue_index = destination;
             }
         }
-        QueueAction::RemixBatchReady(mut outcome) => {
+        QueueAction::RemixBatchReady(mut outcome) | QueueAction::RemixEnemiesReady(mut outcome) => {
             let inserts = std::mem::take(&mut outcome.items);
             if inserts.is_empty() {
                 if outcome.failed > 0 {
@@ -897,13 +958,22 @@ pub async fn dispatch(
                         "Remix could not make changes; {} of {} lookups failed: {}",
                         outcome.failed, outcome.attempted, detail
                     ));
+                } else if enemies {
+                    state.set_status("Enemies: no eligible tracks in this library".into());
                 } else {
-                    state.set_status("Remix: no matching changes found".to_string());
+                    state.set_status("Remix: no eligible tracks found in this library after excluding queued albums and disallowed artists".to_string());
                 }
                 return Ok(follow_ups);
             }
 
-            // Collect inserts into a map
+            state.queue.undo_snapshot = Some(crate::app::queue_edit::snapshot(
+                state,
+                if enemies {
+                    "Enemies"
+                } else {
+                    "Insert related tracks"
+                },
+            ));
             let inserts_map: std::collections::HashMap<usize, Vec<Track>> =
                 inserts.into_iter().collect();
 
@@ -912,17 +982,25 @@ pub async fn dispatch(
             positions.sort_unstable_by(|a, b| b.cmp(a));
 
             let mut total_inserted = 0usize;
+            let mut focused = state.list_state.queue_index;
+            let (buffer, playing) = state.playback_buffer_mut();
             for pos in positions {
                 if let Some(insert_tracks) = inserts_map.get(&pos) {
-                    let insert_at = (pos + 1).min(state.queue.tracks.len());
+                    let insert_at = (pos + 1).min(buffer.len());
                     total_inserted += insert_tracks.len();
-                    state
-                        .queue
-                        .tracks
-                        .splice(insert_at..insert_at, insert_tracks.iter().cloned());
+                    if let Some(index) = playing.as_mut()
+                        && *index >= insert_at
+                    {
+                        *index += insert_tracks.len();
+                    }
+                    if focused >= insert_at {
+                        focused += insert_tracks.len();
+                    }
+                    buffer.splice(insert_at..insert_at, insert_tracks.iter().cloned());
                 }
             }
 
+            state.list_state.queue_index = focused;
             if outcome.failed > 0 {
                 state.set_status(format!(
                     "Remix: {} tracks added; {} of {} lookups failed",
@@ -931,10 +1009,9 @@ pub async fn dispatch(
             } else {
                 state.set_status(format!("Remix complete: {} tracks added", total_inserted));
             }
-
-            // Pre-cache upcoming tracks
         }
-        QueueAction::RemixDoppelgangerReady(mut outcome) => {
+        QueueAction::RemixDoppelgangerReady(mut outcome)
+        | QueueAction::RemixOppositeDayReady(mut outcome) => {
             let replacements = std::mem::take(&mut outcome.items);
             if replacements.is_empty() {
                 if outcome.failed > 0 {
@@ -944,44 +1021,47 @@ pub async fn dispatch(
                         .map(|error| error.message.as_str())
                         .unwrap_or("request failed");
                     state.set_error(format!(
-                        "Remix Doppelganger could not replace tracks; {} of {} lookups failed: {}",
+                        "Remix {replacement_name} could not replace tracks; {} of {} lookups failed: {}",
                         outcome.failed, outcome.attempted, detail
                     ));
                 } else {
-                    state.set_status("Remix: Doppelganger — no replacements found".to_string());
+                    state.set_status(format!("Remix: {replacement_name} — no replacements found"));
                 }
                 return Ok(follow_ups);
             }
 
+            state.queue.undo_snapshot =
+                Some(crate::app::queue_edit::snapshot(state, replacement_name));
             let count = replacements.len();
+            let (buffer, playing) = state.playback_buffer_mut();
             let replaced_current = replacements
                 .iter()
-                .any(|(index, _)| state.queue.index == Some(*index));
+                .any(|(index, _)| *playing == Some(*index));
 
-            // Replace tracks in reverse index order to preserve positions
-            let mut sorted = replacements;
-            sorted.sort_unstable_by_key(|item| std::cmp::Reverse(item.0));
-            for (idx, track) in sorted {
-                if idx < state.queue.tracks.len() {
-                    state.queue.tracks[idx] = track;
+            for (idx, track) in replacements {
+                if idx < buffer.len() {
+                    buffer[idx] = track;
                 }
             }
 
             if outcome.failed > 0 {
                 state.set_status(format!(
-                    "Remix: Doppelganger — {} replaced; {} of {} lookups failed",
+                    "Remix: {replacement_name} — {} replaced; {} of {} lookups failed",
                     count, outcome.failed, outcome.attempted
                 ));
             } else {
-                state.set_status(format!("Remix: Doppelganger — {} tracks replaced", count));
+                state.set_status(format!(
+                    "Remix: {replacement_name} — {} tracks replaced",
+                    count
+                ));
             }
 
             // Replacing only later tracks must not interrupt the current song.
             if replaced_current {
+                helpers::reset_current_track(state);
                 follow_ups.push(crate::app::action::PlaybackAction::Stop.into());
+                follow_ups.push(crate::app::action::SystemAction::LoadArtwork.into());
             }
-
-            // Pre-cache upcoming tracks
         }
         _ => anyhow::bail!("Unsupported library operation reached shared handler"),
     }
@@ -1010,94 +1090,45 @@ fn enqueue_search_result(state: &mut AppState) -> Vec<Action> {
     match section {
         SearchTab::Artists => {
             if let Some(artist) = results.artists.get(local_idx) {
-                return vec![QueueAction::EnqueueArtistTracks {
-                    artist_key: artist.rating_key.clone(),
-                    artist_name: artist.title.clone(),
-                }
-                .into()];
+                return vec![
+                    QueueAction::EnqueueArtistTracks {
+                        artist_key: artist.rating_key.clone(),
+                        artist_name: artist.title.clone(),
+                    }
+                    .into(),
+                ];
             }
         }
         SearchTab::Albums => {
             if let Some(album) = results.albums.get(local_idx) {
-                return vec![QueueAction::EnqueueAlbum {
-                    rating_key: album.rating_key.clone(),
-                    title: album.title.clone(),
-                }
-                .into()];
+                return vec![
+                    QueueAction::EnqueueAlbum {
+                        rating_key: album.rating_key.clone(),
+                        title: album.title.clone(),
+                    }
+                    .into(),
+                ];
             }
         }
         SearchTab::Tracks => {
             // Get selected track + all following tracks, add directly to queue
             let tracks: Vec<Track> = results.tracks[local_idx..].to_vec();
             if !tracks.is_empty() {
-                // If radio is playing, convert to queue mode
-                if state.playback_mode == PlaybackMode::Radio {
-                    state.queue.tracks = state.radio.tracks.clone();
-                    state.queue.index = state.radio.track_index;
-                    state.set_playback_mode(PlaybackMode::Queue);
-                    state.radio.clear();
-                    if let Some(idx) = state.queue.index {
-                        state.list_state.queue_index = idx;
-                    }
-                }
+                crate::app::queue_edit::record(state, "Add tracks to queue");
                 state.queue.original.clear();
                 state.queue.sort_mode = QueueSortMode::QueueOrder;
                 let added = tracks.len();
-                state.queue.tracks.extend(tracks);
+                state.playback_buffer_mut().0.extend(tracks);
                 state.set_status(format!(
                     "Added {} to queue ({} total)",
                     added,
-                    state.queue.tracks.len()
+                    state.playback_tracks().len()
                 ));
             }
         }
         SearchTab::Playlists | SearchTab::Genres | SearchTab::Global => {
             // Playlists and genres can't be directly enqueued
         }
-    }
-
-    vec![]
-}
-
-/// Build actions to play a search result (Shift+Enter/Shift+Click in search).
-/// Uses PlayAlbum/PlayArtistTracks/PlayTrack to add to queue AND start playback.
-fn play_search_result(state: &AppState) -> Vec<Action> {
-    use crate::app::state::SearchTab;
-
-    let Some(ref results) = state.search.results else {
-        return vec![];
-    };
-    let idx = state.list_state.search_item_index;
-
-    let (section, local_idx) = if state.search.tab == SearchTab::Global {
-        super::dispatch_search::resolve_global_index(results, idx)
-    } else {
-        (state.search.tab, idx)
-    };
-
-    match section {
-        SearchTab::Artists => {
-            if let Some(artist) = results.artists.get(local_idx) {
-                return vec![QueueAction::PlayArtistTracks {
-                    artist_key: artist.rating_key.clone(),
-                }
-                .into()];
-            }
-        }
-        SearchTab::Albums => {
-            if let Some(album) = results.albums.get(local_idx) {
-                return vec![QueueAction::PlayAlbum {
-                    rating_key: album.rating_key.clone(),
-                }
-                .into()];
-            }
-        }
-        SearchTab::Tracks => {
-            if let Some(track) = results.tracks.get(local_idx) {
-                return vec![QueueAction::PlayTrack(Box::new(track.clone())).into()];
-            }
-        }
-        SearchTab::Playlists | SearchTab::Genres | SearchTab::Global => {}
     }
 
     vec![]
@@ -1121,20 +1152,24 @@ fn enqueue_search_result_next(state: &AppState) -> Vec<Action> {
     match section {
         SearchTab::Artists => {
             if let Some(artist) = results.artists.get(local_idx) {
-                return vec![QueueAction::EnqueueArtistTracksNext {
-                    artist_key: artist.rating_key.clone(),
-                    artist_name: artist.title.clone(),
-                }
-                .into()];
+                return vec![
+                    QueueAction::EnqueueArtistTracksNext {
+                        artist_key: artist.rating_key.clone(),
+                        artist_name: artist.title.clone(),
+                    }
+                    .into(),
+                ];
             }
         }
         SearchTab::Albums => {
             if let Some(album) = results.albums.get(local_idx) {
-                return vec![QueueAction::EnqueueAlbumNext {
-                    rating_key: album.rating_key.clone(),
-                    title: album.title.clone(),
-                }
-                .into()];
+                return vec![
+                    QueueAction::EnqueueAlbumNext {
+                        rating_key: album.rating_key.clone(),
+                        title: album.title.clone(),
+                    }
+                    .into(),
+                ];
             }
         }
         SearchTab::Tracks => {
@@ -1172,6 +1207,41 @@ mod tests {
             make_track("t3", "Track 3"),
             make_track("t4", "Track 4"),
         ]
+    }
+
+    #[test]
+    fn queue_undo_restores_album_replacement_after_successful_load() {
+        let (events, _) = mpsc::channel(8);
+        let mut audio = AudioPlayer::new_without_audio();
+        for previous in [vec![], sample_queue()] {
+            let mut state = AppState::new();
+            state.queue.index = (!previous.is_empty()).then_some(2);
+            let index = state.queue.index;
+            state.queue.tracks = previous.clone();
+            state.queue_play_request_id = 7;
+            let load = |request_id| QueueAction::TracksLoaded {
+                intent: QueueLoadIntent::ReplaceAndPlay {
+                    request_id,
+                    label: None,
+                },
+                result: Ok(vec![make_track("album-track", "Album track")]),
+            };
+            dispatch(&events, load(7), &mut state, &mut audio).unwrap();
+            assert_eq!(state.queue.tracks[0].rating_key, "album-track");
+            dispatch(&events, load(6), &mut state, &mut audio).unwrap();
+            dispatch(&events, load(7), &mut state, &mut audio).unwrap();
+            dispatch(&events, QueueAction::UndoLastRemix, &mut state, &mut audio).unwrap();
+            assert!(
+                state
+                    .queue
+                    .tracks
+                    .iter()
+                    .map(|track| &track.rating_key)
+                    .eq(previous.iter().map(|track| &track.rating_key))
+            );
+            assert_eq!(state.queue.index, index);
+            assert!(state.queue.undo_snapshot.is_none());
+        }
     }
 
     // --- RemoveFromQueue state logic tests ---
@@ -1339,4 +1409,34 @@ mod tests {
     }
 
     // --- pick_diverse_remix tests ---
+}
+
+fn remove_tracks(
+    tx: &mpsc::Sender<Event>,
+    state: &mut AppState,
+    audio: &mut AudioPlayer,
+    selected: &std::collections::BTreeSet<usize>,
+) -> Option<Action> {
+    let status = state.playback.status;
+    if crate::app::queue_edit::remove(state, selected)
+        != crate::app::queue_edit::Removal::RemovedPlayback
+    {
+        return None;
+    }
+    audio.stop();
+    state.playback.request_id = audio.playback_id();
+    state.playback.preparation_id = state.playback.preparation_id.wrapping_add(1);
+    state.sources.media = crate::app::sources::MediaPreparation::Idle;
+    state.playback.status = PlayStatus::Stopped;
+    helpers::reset_current_track(state);
+    if state.current_track().is_some() && status != PlayStatus::Stopped {
+        helpers::play_current_track(tx, state, audio);
+        if status == PlayStatus::Paused && state.playback.status != PlayStatus::Stopped {
+            audio.pause();
+            state.playback.status = PlayStatus::Paused;
+        }
+    }
+    state
+        .current_track()
+        .map(|_| crate::app::action::SystemAction::LoadArtwork.into())
 }

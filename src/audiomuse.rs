@@ -1,9 +1,12 @@
 //! Optional analysis service. Playback and library identity stay with Navidrome.
 //! Only authentication, read-only export and discovery endpoints are used here.
-use anyhow::{ensure, Context, Result};
-use futures::{stream, StreamExt, TryStreamExt};
+mod checkpoint;
+pub(crate) mod ranking;
+
+use anyhow::{Context, Result, ensure};
+use futures::{StreamExt, TryStreamExt, stream};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::time::Duration;
 
@@ -57,6 +60,7 @@ pub struct Client {
     base: reqwest::Url,
     server: String,
     cookie: reqwest::header::HeaderValue,
+    verified_server: std::sync::Arc<tokio::sync::OnceCell<Option<String>>>,
 }
 impl Client {
     pub async fn connect(connection: &Connection, password: &str) -> Result<Self> {
@@ -95,6 +99,7 @@ impl Client {
             base,
             server: connection.server.clone(),
             cookie,
+            verified_server: Default::default(),
         })
     }
     async fn request(
@@ -107,25 +112,20 @@ impl Client {
         url.query_pairs_mut()
             .append_pair("server", &self.server)
             .extend_pairs(params.iter().map(|(k, v)| (*k, v.as_str())));
-        let request = match body {
-            Some(body) => self.http.post(url).json(&body),
-            None => self.http.get(url),
-        }
-        .header(reqwest::header::COOKIE, self.cookie.clone());
-        let mut response = request
-            .send()
-            .await
-            .map_err(|e| e.without_url())
-            .context("Contact AudioMuse")?;
-        let status = response.status();
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(|e| e.without_url())? {
-            ensure!(
-                bytes.len() + chunk.len() <= 8 * 1024 * 1024,
-                "AudioMuse response too large"
-            );
-            bytes.extend_from_slice(&chunk);
-        }
+        let (status, bytes) = match body {
+            Some(body) => self.receive(self.http.post(url).json(&body)).await?,
+            None => match self.receive(self.http.get(url.clone())).await {
+                Err(error)
+                    if path == "api/sync"
+                        && error.downcast_ref::<reqwest::Error>().is_some_and(|e| {
+                            e.is_timeout() || e.is_connect() || e.is_body() || e.is_request()
+                        }) =>
+                {
+                    self.receive(self.http.get(url)).await?
+                }
+                result => result?,
+            },
+        };
         if status.as_u16() == 404 && path == "api/similar_tracks" {
             let error = serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null);
             ensure!(
@@ -151,8 +151,37 @@ impl Client {
         );
         Ok(value)
     }
+    async fn receive(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<(reqwest::StatusCode, Vec<u8>)> {
+        let mut response = request
+            .header(reqwest::header::COOKIE, self.cookie.clone())
+            .send()
+            .await
+            .map_err(|e| e.without_url())
+            .context("Contact AudioMuse")?;
+        let status = response.status();
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|e| e.without_url())? {
+            ensure!(
+                bytes.len() + chunk.len() <= 8 * 1024 * 1024,
+                "AudioMuse response too large"
+            );
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok((status, bytes))
+    }
+
     /// Verify both provider and explicit server binding before accepting any IDs.
     pub async fn verify(&self) -> Result<()> {
+        self.verified_server
+            .get_or_try_init(|| self.verify_server())
+            .await?;
+        Ok(())
+    }
+
+    async fn verify_server(&self) -> Result<Option<String>> {
         let (servers, page) = tokio::try_join!(self.request("api/servers", &[], None), async {
             let page: Page<Analysis> = serde_json::from_value(
                 self.request(
@@ -184,7 +213,7 @@ impl Client {
             page.provider_type == "navidrome",
             "AudioMuse returned another provider's IDs"
         );
-        Ok(())
+        Ok(server["server_id"].as_str().map(str::to_owned))
     }
     /// Read-only sonic discovery. IDs are translated by AudioMuse for `server`.
     pub async fn similar(&self, seed: &str) -> Result<Vec<String>> {
@@ -356,7 +385,52 @@ impl Client {
         &self,
         previous: &Snapshot,
         allowed: &HashSet<String>,
+        progress: impl FnMut(SyncProgress),
+    ) -> Result<Snapshot> {
+        self.refresh_inner(previous, allowed, progress, None).await
+    }
+
+    pub async fn refresh_resumable(
+        &self,
+        previous: &Snapshot,
+        allowed: &HashSet<String>,
+        ticket: &crate::library::cache::Ticket,
+        progress: impl FnMut(SyncProgress),
+    ) -> Result<Snapshot> {
+        self.refresh_inner(previous, allowed, progress, Some(ticket))
+            .await
+    }
+
+    async fn sync_page(&self, page: usize, limit: usize, index: bool) -> Result<Page<Analysis>> {
+        let response: Page<Analysis> = serde_json::from_value(
+            self.request(
+                "api/sync",
+                &[
+                    if index {
+                        ("fields", "index".into())
+                    } else {
+                        ("include_embeddings", "false".into())
+                    },
+                    ("limit", limit.to_string()),
+                    ("page", page.to_string()),
+                ],
+                None,
+            )
+            .await?,
+        )?;
+        ensure!(
+            response.provider_type == "navidrome",
+            "Wrong AudioMuse provider"
+        );
+        Ok(response)
+    }
+
+    async fn refresh_inner(
+        &self,
+        previous: &Snapshot,
+        allowed: &HashSet<String>,
         mut progress: impl FnMut(SyncProgress),
+        ticket: Option<&crate::library::cache::Ticket>,
     ) -> Result<Snapshot> {
         let mut manifest = BTreeMap::new();
         let mut tracks = BTreeMap::new();
@@ -368,27 +442,12 @@ impl Client {
         let mut total = None;
         let mut partial = false;
         let mut preview_sent = false;
+        let mut checkpoints = ticket.filter(|_| cold).map(checkpoint::ColdPages::new);
         loop {
-            let response: Page<Analysis> = serde_json::from_value(
-                self.request(
-                    "api/sync",
-                    &[
-                        if cold {
-                            ("include_embeddings", "false".into())
-                        } else {
-                            ("fields", "index".into())
-                        },
-                        ("limit", "1000".into()),
-                        ("page", page.to_string()),
-                    ],
-                    None,
-                )
-                .await?,
-            )?;
-            ensure!(
-                response.provider_type == "navidrome",
-                "Wrong AudioMuse provider"
-            );
+            let response = match &mut checkpoints {
+                Some(pages) => pages.fetch(self, page, allowed).await?,
+                None => self.sync_page(page, 1000, !cold).await?,
+            };
             ensure!(
                 manifest.len() + response.tracks.len() <= 2_000_000,
                 "AudioMuse library exceeds sync limit"
@@ -434,6 +493,12 @@ impl Client {
                 count > 0 && response.next_page == Some(page + 1),
                 "Invalid AudioMuse pagination"
             );
+            if let Some(pages) = &mut checkpoints {
+                if let Err(error) = pages.save_group(page).await {
+                    tracing::warn!(%error, "Save AudioMuse checkpoint");
+                    checkpoints = None;
+                }
+            }
             page += 1;
         }
         partial |= total != Some(manifest.len());
@@ -645,8 +710,13 @@ impl Analysis {
             .map(|(k, v)| format!("{k}: {v:.3}"))
             .collect::<Vec<_>>()
             .join("\n");
-        format!("Tempo: {} BPM\nEnergy: {}\nKey: {}\n\nInferred labels (model scores, not tag values or probabilities):\n{}",
-            number(self.tempo), number(self.energy), self.musical_key().unwrap_or_else(|| "Unavailable".into()), labels)
+        format!(
+            "Tempo: {} BPM\nEnergy: {}\nKey: {}\n\nInferred labels (model scores, not tag values or probabilities):\n{}",
+            number(self.tempo),
+            number(self.energy),
+            self.musical_key().unwrap_or_else(|| "Unavailable".into()),
+            labels
+        )
     }
 }
 

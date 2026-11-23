@@ -3,7 +3,7 @@
 //! This trait defines the interface that any platform-specific audio
 //! implementation must fulfill:
 //! - TUI (Linux/macOS/Windows): RodioBackend using rodio
-//! - iOS: Would implement using AVFoundation
+//! - iOS: RodioBackend using Core Audio, with AVAudioSession owned by the native host
 //! - Web: Would implement using Web Audio API
 //!
 //! The trait is designed to be:

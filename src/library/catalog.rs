@@ -91,7 +91,16 @@ impl Album {
             return true;
         }
         let name = self.artist_name().trim().to_lowercase();
-        name == "various artists" || name == "various"
+        name == "various artists" || name == "various" || self.has_compilation_title()
+    }
+
+    /// An explicit various-artists prefix identifies a compilation even when
+    /// a provider has assigned individual album records to its performers.
+    pub fn has_compilation_title(&self) -> bool {
+        let title = self.title.trim().to_lowercase();
+        ["va - ", "v.a. - ", "various artists - "]
+            .iter()
+            .any(|prefix| title.starts_with(prefix))
     }
 
     /// Get artist name (handles None and empty string).

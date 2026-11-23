@@ -1,20 +1,20 @@
+use textamp::app::AppState;
 use textamp::app::action::SystemAction;
 use textamp::app::dispatch::dispatch_action;
-use textamp::app::AppState;
 use textamp::audio::AudioPlayer;
 use textamp::config::Config;
 
-use textamp::services::external_search::{generate_search_url, SearchTarget};
+use textamp::services::external_search::{SearchTarget, generate_search_url};
 
-/// Opt-in because this activates Music and can request macOS permissions.
+/// Opt-in because this brings Music to the foreground.
 #[cfg(target_os = "macos")]
 #[tokio::test]
-#[ignore = "Opens Music; requires Automation and Accessibility permission"]
+#[ignore = "Opens the Music app"]
 async fn native_music_search_handoff() {
     let notice = textamp::services::external_search::open_search(SearchTarget::AppleMusic, "Björk")
         .await
         .unwrap();
-    assert_eq!(notice, None, "native search fell back to the browser");
+    assert_eq!(notice, None);
 }
 
 #[test]
@@ -41,11 +41,42 @@ fn external_search_preserves_special_characters_as_one_query() {
 }
 
 #[test]
-fn apple_music_web_fallback_skips_the_country_redirect() {
+fn apple_music_universal_link_includes_the_storefront() {
     assert_eq!(
         generate_search_url(SearchTarget::AppleMusic, "Miles Davis"),
         "https://music.apple.com/us/search?term=Miles%20Davis"
     );
+}
+
+#[test]
+fn apple_music_shortcut_dispatches_the_palette_search_in_the_terminal() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use textamp::app::{Action, handlers::key_input, state::PlayStatus};
+    use textamp::library::models::Track;
+    let mut state = AppState::new();
+    state.queue.tracks = vec![Track {
+        title: "Test song".into(),
+        ..Default::default()
+    }];
+    state.queue.index = Some(0);
+    state.playback.status = PlayStatus::Playing;
+    for modifier in [KeyModifiers::SUPER, KeyModifiers::CONTROL] {
+        for letter in ['a', 'A'] {
+            let actions = key_input::handle_key(
+                KeyEvent::new(KeyCode::Char(letter), modifier | KeyModifiers::SHIFT),
+                &mut state,
+                &Config::default(),
+            );
+            assert!(matches!(
+                actions.as_slice(),
+                [Action::System(SystemAction::OpenExternalSearch {
+                    target: SearchTarget::AppleMusic,
+                    query: Some(_),
+                    ..
+                })]
+            ));
+        }
+    }
 }
 
 #[tokio::test]
@@ -61,9 +92,9 @@ async fn disabled_and_blank_searches_do_not_open_external_apps() {
             "Miles Davis",
             "Apple Music search is disabled in Settings",
         ),
-        (true, " \t\n", "Nothing selected to search"),
+        (true, " \t\n", "No artist, album or track to search"),
     ] {
-        config.ui.enable_apple_music_search = enabled;
+        state.external_search.apple_music = enabled;
         dispatch_action(
             SystemAction::OpenExternalSearch {
                 target: SearchTarget::AppleMusic,

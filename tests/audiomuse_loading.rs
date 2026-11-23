@@ -1,6 +1,6 @@
 //! Shared analysis loading, without credentials, a server, or audio hardware.
 use std::sync::Arc;
-use textamp::app::sources::{audiomuse, navidrome, sonic, ActiveSource};
+use textamp::app::sources::{ActiveSource, audiomuse, navidrome, sonic};
 use textamp::app::state::{BrowseCategory, View};
 use textamp::app::{Action, AppState, Event};
 use textamp::audiomuse::{Analysis, Connection, Feature, Snapshot, SyncProgress};
@@ -66,10 +66,12 @@ fn snapshot() -> Arc<Snapshot> {
 }
 
 fn add_catalog_track(state: &mut AppState) {
-    state.library.all_tracks = vec![serde_json::from_value(serde_json::json!({
-        "ratingKey":"navidrome:analysis-fixture:one", "title":"One"
-    }))
-    .unwrap()];
+    state.library.all_tracks = std::sync::Arc::new(vec![
+        serde_json::from_value(serde_json::json!({
+            "ratingKey":"navidrome:analysis-fixture:one", "title":"One"
+        }))
+        .unwrap(),
+    ]);
 }
 
 #[tokio::test]
@@ -123,6 +125,8 @@ async fn failed_analysis_refresh_keeps_cache_and_requires_manual_retry() {
     add_catalog_track(&mut state);
     state.sources.audiomuse.snapshot = Some(snapshot());
     Arc::make_mut(state.sources.audiomuse.snapshot.as_mut().unwrap()).updated = 1;
+    state.browse_category = textamp::app::BrowseCategory::Library;
+    state.sources.nav_collection = Some(navidrome::commands::CollectionKind::AudioMuse(Feature::Labels));
     let task = pending(&mut state);
     let (tx, _rx) = mpsc::channel(8);
     let generation = state.library_generation;
@@ -140,12 +144,14 @@ async fn failed_analysis_refresh_keeps_cache_and_requires_manual_retry() {
     assert!(state.sources.audiomuse.refresh_failed);
     assert!(state.sources.audiomuse.snapshot.is_some());
     assert!(state.notifications.last_error.is_none());
-    assert!(state
-        .notifications
-        .status_message
-        .as_deref()
-        .unwrap()
-        .contains("cached data kept"));
+    assert!(
+        state
+            .notifications
+            .status_message
+            .as_deref()
+            .unwrap()
+            .contains("cached data kept")
+    );
     audiomuse::check_staleness(&mut state, &tx);
     assert!(!state.sources.nav_tasks.contains_key(audiomuse::SYNC_SLOT));
     audiomuse::open(Feature::Labels, true, &mut state, &tx);
@@ -256,14 +262,16 @@ async fn analysis_views_share_loading_and_completion_follows_the_current_view() 
     .await;
     assert!(!state.artist_nav.loading);
     assert!(!state.artist_nav.columns[0].items.is_empty());
-    assert!(state
-        .sources
-        .audiomuse
-        .snapshot
-        .as_ref()
-        .unwrap()
-        .tracks
-        .contains_key("one"));
+    assert!(
+        state
+            .sources
+            .audiomuse
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .tracks
+            .contains_key("one")
+    );
     assert!(task.await.unwrap_err().is_cancelled());
 }
 
@@ -315,12 +323,14 @@ async fn stale_progress_and_completion_are_rejected_and_failure_clears_loading()
             },
         )
         .await;
-        assert!(!state
-            .notifications
-            .status_message
-            .as_ref()
-            .unwrap()
-            .contains("999"));
+        assert!(
+            !state
+                .notifications
+                .status_message
+                .as_ref()
+                .unwrap()
+                .contains("999")
+        );
         dispatch(
             &mut state,
             &tx,
@@ -368,7 +378,7 @@ async fn disabling_sonic_cancels_the_shared_sync() {
 async fn completed_import_preserves_the_preview_group_and_open_child() {
     let mut state = state();
     add_catalog_track(&mut state);
-    state.library.all_tracks.push(
+    std::sync::Arc::make_mut(&mut state.library.all_tracks).push(
         serde_json::from_value(serde_json::json!({
             "ratingKey":"navidrome:analysis-fixture:two", "title":"Two"
         }))
@@ -410,11 +420,13 @@ async fn completed_import_preserves_the_preview_group_and_open_child() {
             generation,
             request_id: 7,
             slot: audiomuse::SYNC_SLOT,
-            result: Ok(vec![audiomuse::Command::Loaded {
-                snapshot: Arc::new(complete),
-                warning: None,
-            }
-            .into()]),
+            result: Ok(vec![
+                audiomuse::Command::Loaded {
+                    snapshot: Arc::new(complete),
+                    warning: None,
+                }
+                .into(),
+            ]),
         },
     )
     .await;
@@ -470,6 +482,7 @@ async fn analysis_opened_before_a_cold_catalog_resumes_when_tracks_arrive() {
         }))
         .unwrap();
         let action = navidrome::NavAction::Catalog {
+            from_cache: true,
             generation: state.library_generation,
             request_id: state.sources.list_id,
             refreshing: false,
@@ -558,7 +571,7 @@ async fn results(
 #[tokio::test]
 async fn description_history_survives_restart_is_library_scoped_and_arrows_never_prompt() {
     use crossterm::event::KeyCode;
-    use textamp::app::state::{BrowseItem, CategoryRow};
+    use textamp::app::state::{BrowseItem, CategoryRow, LibraryRoot};
     let mut state = state();
     add_catalog_track(&mut state);
     let mut config = textamp::config::Config::default();
@@ -589,14 +602,7 @@ async fn description_history_survives_restart_is_library_scoped_and_arrows_never
     state.category_column_index = state
         .category_rows()
         .iter()
-        .position(|row| {
-            matches!(
-                row,
-                CategoryRow::NavidromeCollection(navidrome::commands::CollectionKind::AudioMuse(
-                    Feature::Describe
-                ))
-            )
-        })
+        .position(|row| matches!(row, CategoryRow::Root(LibraryRoot::DescribeMusic)))
         .unwrap();
     state.category_column_focused = true;
     press(&mut state, &mut config, KeyCode::Right).await;
@@ -604,12 +610,19 @@ async fn description_history_survives_restart_is_library_scoped_and_arrows_never
     assert!(state.popups.input_dialog().is_none());
     assert_eq!(state.artist_nav.focused_column, 0);
     assert_eq!(state.artist_nav.columns[0].items[0].title(), "Quiet piano");
-    assert_eq!(state.artist_nav.columns[1].tracks[0].title, "One");
+    assert_eq!(state.artist_nav.columns.len(), 1);
     press(&mut state, &mut config, KeyCode::Down).await;
-    assert_eq!(state.artist_nav.columns[1].title, "Bright strings");
+    assert!(!state.tui_description_focused);
+    press(&mut state, &mut config, KeyCode::Down).await;
+    assert_eq!(
+        state.artist_nav.columns[0].selected_item().unwrap().title(),
+        "Bright strings"
+    );
+    assert_eq!(state.artist_nav.columns.len(), 1);
     assert!(state.popups.input_dialog().is_none());
     press(&mut state, &mut config, KeyCode::Right).await;
     assert_eq!(state.artist_nav.focused_column, 1);
+    assert_eq!(state.artist_nav.columns[1].title, "Bright strings");
     assert!(matches!(
         state.artist_nav.selected_item(),
         Some(BrowseItem::Track { .. })
@@ -618,7 +631,9 @@ async fn description_history_survives_restart_is_library_scoped_and_arrows_never
     press(&mut state, &mut config, KeyCode::Left).await;
     assert!(state.category_column_focused);
     press(&mut state, &mut config, KeyCode::Enter).await;
-    assert!(state.popups.input_dialog().is_some());
+    assert!(state.tui_description_focused);
+    assert!(state.popups.input_dialog().is_none());
+    assert_eq!(state.artist_nav.columns.len(), 1);
     press(&mut state, &mut config, KeyCode::Esc).await;
     assert_eq!(state.artist_nav.columns[0].items.len(), 2);
     assert!(state.queue.tracks.is_empty());
@@ -644,12 +659,12 @@ async fn description_history_survives_restart_is_library_scoped_and_arrows_never
 #[tokio::test]
 async fn description_results_use_playlist_rows_and_both_rows_click_the_same_track() {
     use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-    use ratatui::{backend::TestBackend, Terminal};
+    use ratatui::{Terminal, backend::TestBackend};
     let mut state = state();
-    state.library.all_tracks = serde_json::from_value(serde_json::json!([
+    state.library.all_tracks = std::sync::Arc::new(serde_json::from_value(serde_json::json!([
         {"ratingKey":"navidrome:analysis-fixture:one", "title":"First song", "grandparentTitle":"First artist", "parentTitle":"First album"},
         {"ratingKey":"navidrome:analysis-fixture:two", "title":"Second song", "grandparentTitle":"Second artist", "parentTitle":"Second album"}
-    ])).unwrap();
+    ])).unwrap());
     let mut config = textamp::config::Config::default();
     results(
         &mut state,
@@ -771,14 +786,14 @@ async fn background_sync_failure_never_interrupts_biography_or_playback_even_wit
         state.view = View::NowPlaying;
         state.playback.status = PlayStatus::Playing;
         state.playback.position_ms = 38000;
-        state.queue.tracks = state.library.all_tracks.clone();
+        state.queue.tracks = state.library.all_tracks.as_ref().clone();
         state.queue.index = Some(0);
         state.popups.set_artist_bio(Some(ArtistBioPopup {
+            artist_key: "fixture-artist".into(),
             artist_name: "Fixture artist".into(),
             document: Default::default(),
             scroll: 3,
             google_focused: true,
-            loading: false,
             image_index: 0,
             task: None,
         }));
@@ -800,12 +815,7 @@ async fn background_sync_failure_never_interrupts_biography_or_playback_even_wit
         )
         .await;
         assert!(state.notifications.last_error.is_none());
-        assert!(state
-            .notifications
-            .status_message
-            .as_deref()
-            .unwrap()
-            .contains("analysis category (F5)"));
+        assert!(state.notifications.status_message.is_none());
         assert!(state.sources.audiomuse.refresh_failed);
         assert_eq!(state.sources.audiomuse.snapshot.is_some(), preview);
         assert_eq!(state.view, View::NowPlaying);
@@ -842,4 +852,122 @@ async fn background_sync_failure_never_interrupts_biography_or_playback_even_wit
         );
         assert!(task.await.unwrap_err().is_cancelled());
     }
+}
+
+#[tokio::test]
+async fn description_search_preserves_history_and_results_until_its_matching_completion() {
+    let mut state = state();
+    add_catalog_track(&mut state);
+    let mut config = textamp::config::Config::default();
+    results(&mut state, &mut config, "Quiet piano", &["one"]).await;
+    results(&mut state, &mut config, "Bright strings", &["one"]).await;
+    let old_request = state.artist_nav_request_id;
+    let history: Vec<_> = state.artist_nav.columns[0]
+        .items
+        .iter()
+        .map(|item| item.title().to_owned())
+        .collect();
+    let previous = state.artist_nav.columns[1].title.clone();
+    act(
+        &mut state,
+        &mut config,
+        audiomuse::Command::Search {
+            feature: Feature::Describe,
+            query: "Warm acoustic music".into(),
+        },
+    )
+    .await;
+    assert!(state.artist_nav.loading);
+    assert_eq!(state.artist_nav.columns.len(), 2);
+    assert_eq!(
+        state.artist_nav.columns[0]
+            .items
+            .iter()
+            .map(|item| item.title().to_owned())
+            .collect::<Vec<_>>(),
+        history
+    );
+    assert_eq!(state.artist_nav.columns[1].title, previous);
+    act(
+        &mut state,
+        &mut config,
+        audiomuse::Command::Results {
+            request_id: old_request,
+            feature: Feature::Describe,
+            title: "Stale response".into(),
+            ids: vec![],
+        },
+    )
+    .await;
+    assert!(state.artist_nav.loading);
+    assert_eq!(state.artist_nav.columns[1].title, previous);
+    results(&mut state, &mut config, "Warm acoustic music", &["one"]).await;
+    assert!(!state.artist_nav.loading);
+    assert_eq!(state.artist_nav.columns[0].items.len(), 3);
+    assert_eq!(
+        state.artist_nav.columns[0].items[0].title(),
+        "Warm acoustic music"
+    );
+    assert_eq!(state.artist_nav.columns[1].title, "Warm acoustic music");
+    state.sources.nav_tasks.remove("audiomuse");
+}
+
+#[tokio::test]
+async fn deleting_description_history_is_persistent_scoped_and_rejects_pending_results() {
+    use crossterm::event::KeyCode;
+    let mut state = state();
+    add_catalog_track(&mut state);
+    let mut config = textamp::config::Config::default();
+    results(&mut state, &mut config, "Quiet piano", &["one"]).await;
+    results(&mut state, &mut config, "Bright strings", &["one"]).await;
+    let library_key = audiomuse::key(state.sources.active.navidrome().unwrap());
+    let other = config.description_history[&library_key].clone();
+    config
+        .description_history
+        .insert("another-library".into(), other.clone());
+    state
+        .sources
+        .audiomuse
+        .description_history
+        .insert("another-library".into(), other);
+    state.artist_nav.focused_column = 0;
+    state.category_column_focused = false;
+    state.focus = textamp::app::state::Focus::Right;
+    let request_id = state.artist_nav_request_id;
+    press(&mut state, &mut config, KeyCode::Delete).await;
+    assert_eq!(config.description_history[&library_key].len(), 1);
+    assert_eq!(
+        config.description_history[&library_key][0].query,
+        "Quiet piano"
+    );
+    assert_eq!(state.artist_nav.columns[1].title, "Quiet piano");
+    assert_eq!(state.artist_nav.focused_column, 0);
+    assert_eq!(config.description_history["another-library"].len(), 2);
+    act(
+        &mut state,
+        &mut config,
+        audiomuse::Command::Results {
+            request_id,
+            feature: Feature::Describe,
+            title: "Bright strings".into(),
+            ids: vec!["one".into()],
+        },
+    )
+    .await;
+    assert_eq!(config.description_history[&library_key].len(), 1);
+    press(&mut state, &mut config, KeyCode::Delete).await;
+    assert!(!config.description_history.contains_key(&library_key));
+    assert!(
+        !state
+            .sources
+            .audiomuse
+            .description_history
+            .contains_key(&library_key)
+    );
+    assert_eq!(state.artist_nav.columns.len(), 1);
+    assert!(state.artist_nav.columns[0].items.is_empty());
+    let restored: textamp::config::Config =
+        toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+    assert!(!restored.description_history.contains_key(&library_key));
+    assert_eq!(restored.description_history["another-library"].len(), 2);
 }

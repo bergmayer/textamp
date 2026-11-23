@@ -40,7 +40,18 @@ struct Registry {
     tasks: HashMap<u64, AbortHandle>,
 }
 
+/// Cancelling owner of all asynchronous work in one application session.
 pub struct TaskSession(Arc<Mutex<Registry>>);
+
+/// Borrowable execution context; dropping it does not cancel its session.
+#[derive(Clone)]
+pub struct TaskContext(Arc<Mutex<Registry>>);
+impl TaskContext {
+    /// Run adapter work under the owning session's task registry.
+    pub async fn run<F: Future>(&self, future: F) -> F::Output {
+        OWNER.scope(self.0.clone(), future).await
+    }
+}
 
 /// Cancels an operation when its last owning state value is replaced/dropped.
 #[derive(Debug, Clone)]
@@ -58,8 +69,13 @@ impl TaskLease {
     pub fn new<T>(task: &JoinHandle<T>) -> Self {
         Self(Arc::new(AbortOnDrop(task.abort_handle())))
     }
+    /// Whether two leases own the same asynchronous operation.
+    #[cfg(feature = "desktop")]
+    pub(crate) fn same_task(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
     pub fn cancel(&self) {
-        self.0 .0.abort();
+        self.0.0.abort();
     }
 }
 
@@ -70,6 +86,18 @@ impl Default for TaskSession {
 }
 
 impl TaskSession {
+    /// Obtain an execution context without transferring cancellation ownership.
+    pub fn context(&self) -> TaskContext {
+        TaskContext(self.0.clone())
+    }
+    /// Cancel all owned work. Repeated shutdown is harmless.
+    pub fn close(&self) {
+        let mut registry = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        registry.closed = true;
+        for (_, task) in registry.tasks.drain() {
+            task.abort();
+        }
+    }
     pub fn new(failures: tokio::sync::mpsc::Sender<super::Event>) -> Self {
         Self(Arc::new(Mutex::new(Registry {
             failures: Some(failures),
@@ -83,11 +111,7 @@ impl TaskSession {
 
 impl Drop for TaskSession {
     fn drop(&mut self) {
-        let mut registry = self.0.lock().unwrap_or_else(|p| p.into_inner());
-        registry.closed = true;
-        for (_, task) in registry.tasks.drain() {
-            task.abort();
-        }
+        self.close();
     }
 }
 
@@ -173,9 +197,53 @@ where
     })
 }
 
+static ANALYSIS_WORKERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
+/// Limit speculative and foreground analysis together. The permit stays with
+/// running CPU work even if its asynchronous observer is cancelled.
+pub async fn analyze<F, R>(work: F) -> Result<R, tokio::task::JoinError>
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    let permit = ANALYSIS_WORKERS
+        .acquire()
+        .await
+        .expect("analysis semaphore is never closed");
+    spawn_blocking(move || {
+        let _permit = permit;
+        work()
+    })
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_observers_do_not_release_running_analysis_capacity() {
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let (entered, mut arrivals) = tokio::sync::mpsc::unbounded_channel();
+        let mut observers = Vec::new();
+        for _ in 0..2 {
+            let barrier = barrier.clone();
+            let entered = entered.clone();
+            observers.push(tokio::spawn(analyze(move || {
+                entered.send(()).unwrap();
+                barrier.wait();
+            })));
+        }
+        arrivals.recv().await.unwrap();
+        arrivals.recv().await.unwrap();
+        let observer = observers.pop().unwrap();
+        observer.abort();
+        assert!(observer.await.unwrap_err().is_cancelled());
+        assert_eq!(ANALYSIS_WORKERS.available_permits(), 0);
+        barrier.wait();
+        observers.pop().unwrap().await.unwrap().unwrap();
+        analyze(|| ()).await.unwrap();
+    }
 
     #[tokio::test]
     async fn session_cancels_descendants_and_reaps_completed_tasks() {

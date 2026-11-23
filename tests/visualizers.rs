@@ -1,16 +1,16 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::{backend::TestBackend, Terminal};
+use ratatui::{Terminal, backend::TestBackend};
 use std::time::Instant;
 use textamp::app::handlers::{key_input, mouse_input};
 use textamp::app::{
-    state::{PlayStatus, View, VisualizerTab},
     AppState,
+    state::{PlayStatus, View, VisualizerTab},
 };
 use textamp::media::SpectrogramData;
 
 #[test]
 fn all_six_visualizers_render_identically_for_each_library_provider() {
-    use textamp::app::sources::{navidrome::Session, ActiveSource};
+    use textamp::app::sources::{ActiveSource, navidrome::Session};
     use textamp::navidrome::{Client, Source};
     let source = Source {
         id: "render".into(),
@@ -26,11 +26,13 @@ fn all_six_visualizers_render_identically_for_each_library_provider() {
     };
     for tab in VisualizerTab::ALL {
         let mut state = fixture(tab);
-        state.waveform.data = Some(textamp::media::generate_waveform_from_pcm(
-            "fixture".into(),
-            60000,
-            &[0.1, 0.5, 0.3, 1.0],
-        ));
+        state
+            .waveform
+            .succeed(textamp::media::generate_waveform_from_pcm(
+                "fixture".into(),
+                60000,
+                &[0.1, 0.5, 0.3, 1.0],
+            ));
         state
             .vectorscope_buffer
             .extend([(0.3, 0.7), (-0.2, 0.4), (0.8, -0.5)]);
@@ -78,17 +80,7 @@ fn all_six_visualizers_render_identically_for_each_library_provider() {
                 expected,
                 "{tab:?}"
             );
-            // Provider capability differences belong in the sidebar, not in
-            // the visualizers. Validate its actual rendered action rows too.
-            let rendered: Vec<_> = state
-                .hit_regions
-                .now_playing_sidebar
-                .as_ref()
-                .unwrap()
-                .iter()
-                .map(|(_, button)| *button)
-                .collect();
-            assert_eq!(rendered, state.now_playing_sidebar_buttons());
+            assert_eq!(state.hit_regions.queue_menus.len(), 2);
         }
     }
 }
@@ -100,7 +92,7 @@ fn fixture(tab: VisualizerTab) -> AppState {
     state.playback.status = PlayStatus::Playing;
     state.playback.position_ms = 18_000;
     state.playback.duration_ms = 60_000;
-    state.spectrogram.data = Some(SpectrogramData {
+    state.spectrogram.succeed(SpectrogramData {
         track_key: "fixture".into(),
         duration_ms: 60_000,
         bins_per_frame: 48,
@@ -153,6 +145,10 @@ fn render(state: &mut AppState, width: u16, height: u16) -> String {
 fn new_modes_render_with_data_without_mutating_meter_history() {
     for tab in [VisualizerTab::Landscape, VisualizerTab::Meters] {
         let mut state = fixture(tab);
+        state.vectorscope_buffer.extend((0..384).map(|i| {
+            let sample = (i as f32 * 0.1).sin();
+            (sample, sample)
+        }));
         let history = state.studio_meters.history.clone();
         for (w, h) in [(40, 10), (60, 24), (120, 42), (200, 60)] {
             let output = render(&mut state, w, h);
@@ -160,10 +156,12 @@ fn new_modes_render_with_data_without_mutating_meter_history() {
             assert!(!output.contains("spectral trail"));
             assert!(!output.contains("Recent sampled"));
             if w == 120 {
-                if tab == VisualizerTab::Landscape {
-                    assert!(output
-                        .chars()
-                        .any(|c| ('\u{2801}'..='\u{28ff}').contains(&c)));
+                if tab != VisualizerTab::Meters {
+                    assert!(
+                        output
+                            .chars()
+                            .any(|c| ('\u{2801}'..='\u{28ff}').contains(&c))
+                    );
                 } else {
                     for caption in [
                         "S T U D I O",
@@ -192,7 +190,12 @@ fn new_modes_render_with_data_without_mutating_meter_history() {
 fn keyboard_cycles_all_six_modes_and_mouse_hits_rendered_tabs() {
     let mut state = fixture(VisualizerTab::Waveform);
     state.visualizer_tab_focused = true;
-    for expected in VisualizerTab::ALL.into_iter().cycle().skip(1).take(6) {
+    for expected in VisualizerTab::ALL
+        .into_iter()
+        .cycle()
+        .skip(1)
+        .take(VisualizerTab::ALL.len())
+    {
         key_input::handle_key(
             KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
             &mut state,
@@ -235,7 +238,7 @@ fn keyboard_cycles_all_six_modes_and_mouse_hits_rendered_tabs() {
 }
 
 #[test]
-fn new_canvases_do_not_seek_and_missing_data_is_explicit() {
+fn analysis_canvases_do_not_seek_and_missing_data_is_blank() {
     for tab in [VisualizerTab::Landscape, VisualizerTab::Meters] {
         let mut state = fixture(tab);
         for view in [View::Queue, View::NowPlaying] {
@@ -259,14 +262,12 @@ fn new_canvases_do_not_seek_and_missing_data_is_explicit() {
             assert!(actions.is_empty(), "{view:?} {tab:?}: {actions:?}");
             assert!(state.seek_drag.is_none());
         }
-        state.spectrogram.data = None;
+        state.spectrogram.phase = textamp::app::state::AnalysisPhase::Idle;
         state.studio_meters = Default::default();
         let output = render(&mut state, 120, 42);
-        assert!(output.contains(if tab == VisualizerTab::Landscape {
-            "No spectral data"
-        } else {
-            "No live PCM"
-        }));
+        assert!(!output.contains("No spectral data"));
+        assert!(!output.contains("No live PCM"));
+        assert!(!output.contains("play a track"));
     }
 }
 

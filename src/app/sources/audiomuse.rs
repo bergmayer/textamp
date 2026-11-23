@@ -12,7 +12,7 @@ pub struct State {
     pub connections: HashMap<String, Connection>,
     pub description_history: HashMap<String, Vec<crate::audiomuse::DescriptionHistory>>,
     pub snapshot: Option<Arc<Snapshot>>,
-    /// A failed import requires F5 or reopening the library, not a retry loop.
+    /// Suppress automatic imports after failure until the user opens or refreshes analysis.
     pub refresh_failed: bool,
 }
 pub const SYNC_SLOT: &str = "audiomuse-sync";
@@ -41,6 +41,9 @@ pub enum Command {
     RestoreDescription {
         query: String,
         replace_child: bool,
+    },
+    RemoveDescription {
+        query: String,
     },
     Configure(LibraryChoice),
     Submit,
@@ -139,21 +142,42 @@ pub(super) async fn client(connection: &Connection, library_key: &str) -> anyhow
 use anyhow::Context;
 
 fn begin(feature: Feature, state: &mut AppState) -> u64 {
+    let retain_history = feature == Feature::Describe
+        && state.sources.nav_collection == Some(CollectionKind::AudioMuse(Feature::Describe))
+        && state
+            .artist_nav
+            .columns
+            .first()
+            .is_some_and(|column| column.title == "Description history");
     state.sources.nav_tasks.remove("collection");
     state.sources.nav_tasks.remove("audiomuse");
     state.set_view(View::Browse);
     state.browse_category = BrowseCategory::Library;
     state.sources.nav_collection = Some(CollectionKind::AudioMuse(feature));
     state.artist_nav_request_id = state.artist_nav_request_id.wrapping_add(1);
-    state.artist_nav = BrowseNavigationState::with_root(feature.label(), vec![]);
-    state.alphabet_strip_focused = false;
-    state.track_pane_focused = false;
-    state.scroll.browse = None;
-    state.select_mode = false;
-    state.miller_scroll_manual = false;
-    state.list_filter.deactivate();
-    state.category_column_index = state.category_rows().iter().position(|row| matches!(row,
-        crate::app::state::CategoryRow::NavidromeCollection(CollectionKind::AudioMuse(f)) if *f == feature)).unwrap_or(0);
+    if !retain_history {
+        state.artist_nav = if feature == Feature::Describe {
+            BrowseNavigationState::with_root("Description history", description_rows(state))
+        } else {
+            BrowseNavigationState::with_root(feature.label(), vec![])
+        };
+        state.alphabet_strip_focused = false;
+        state.track_pane_focused = false;
+        state.scroll.browse = None;
+        state.select_mode = false;
+        state.miller_scroll_manual = false;
+        state.list_filter.deactivate();
+    }
+    if feature == Feature::Describe {
+        state.desktop_library_root = crate::app::state::LibraryRoot::DescribeMusic;
+    }
+    state.category_column_index = state
+        .category_rows()
+        .iter()
+        .position(|row| {
+            *row == crate::app::sidebar::collection_row(CollectionKind::AudioMuse(feature))
+        })
+        .unwrap_or(0);
     state.artist_nav_request_id
 }
 fn current(state: &AppState, request_id: u64, feature: Feature) -> bool {
@@ -208,27 +232,15 @@ pub fn browse_descriptions(state: &mut AppState, take_focus: bool) {
     if connection(state).is_none() || !super::sonic::enabled(state) {
         return;
     }
-    if state.sources.nav_collection != Some(CollectionKind::AudioMuse(Feature::Describe))
-        || state
-            .artist_nav
-            .columns
-            .first()
-            .is_none_or(|c| c.title != "Description history")
-    {
-        begin(Feature::Describe, state);
-        state.artist_nav =
-            BrowseNavigationState::with_root("Description history", description_rows(state));
-        if let Some(BrowseItem::Description { query }) = state.artist_nav.selected_item().cloned() {
-            restore_description(state, &query, true);
-        }
-    }
+    begin(Feature::Describe, state);
+    state.artist_nav.columns.truncate(1);
+    state.artist_nav.focused_column = 0;
+    state.track_pane_open = false;
+    state.track_pane_focused = false;
     state.category_column_focused = !take_focus;
     if take_focus {
         state.artist_nav.focused_column = 0;
     }
-    state.set_status(
-        "Enter on Describe music… writes a new description · Right browses history".into(),
-    );
 }
 
 fn restore_description(state: &mut AppState, query: &str, replace_child: bool) {
@@ -280,7 +292,7 @@ pub fn open(feature: Feature, refresh: bool, state: &mut AppState, tx: &mpsc::Se
         state.set_status("Loading AudioMuse analysis…".into());
         return;
     }
-    start_sync(refresh, state, tx);
+    start_sync(refresh || state.sources.audiomuse.refresh_failed, state, tx);
 }
 
 /// Part of the same weekly metadata maintenance as the Navidrome catalog.
@@ -326,7 +338,7 @@ fn start_sync(refresh: bool, state: &mut AppState, tx: &mpsc::Sender<Event>) {
                 if state.library_loading {
                     "Waiting for the Navidrome library…"
                 } else {
-                    "Load the Navidrome library first (Library → F5)"
+                    "Open Library and choose Refresh Library to load the tracks first"
                 }
                 .into(),
             );
@@ -382,11 +394,13 @@ fn start_sync(refresh: bool, state: &mut AppState, tx: &mpsc::Sender<Event>) {
                             crate::library::cache::now(),
                         ) =>
                 {
-                    return Ok(vec![Command::Loaded {
-                        snapshot: Arc::new(hit.value),
-                        warning: None,
-                    }
-                    .into()]);
+                    return Ok(vec![
+                        Command::Loaded {
+                            snapshot: Arc::new(hit.value),
+                            warning: None,
+                        }
+                        .into(),
+                    ]);
                 }
                 Ok(Some(hit)) => {
                     let snapshot = Arc::new(hit.value);
@@ -416,7 +430,7 @@ fn start_sync(refresh: bool, state: &mut AppState, tx: &mpsc::Sender<Event>) {
             // progress. Each HTTP request already has a 45-second timeout; the
             // client also bounds pagination and rejects repeated/invalid pages.
             let snapshot = api
-                .refresh_with_progress(&previous, &allowed, |progress| {
+                .refresh_resumable(&previous, &allowed, &ticket, |progress| {
                     // Progress is replaceable; never let it block completion or input.
                     let _ = progress_tx.try_send(Event::Effect(
                         Command::Progress {
@@ -430,8 +444,10 @@ fn start_sync(refresh: bool, state: &mut AppState, tx: &mpsc::Sender<Event>) {
                 .await?;
             let snapshot = Arc::new(snapshot);
             let save = snapshot.clone();
-            if let Err(error) =
-                crate::app::tasks::spawn_blocking(move || ticket.write(save.as_ref())).await?
+            if let Err(error) = crate::app::tasks::spawn_blocking(move || {
+                ticket.write_finishing_checkpoints(save.as_ref())
+            })
+            .await?
             {
                 warning = Some(format!("Save AudioMuse cache: {error}"));
             }
@@ -440,8 +456,10 @@ fn start_sync(refresh: bool, state: &mut AppState, tx: &mpsc::Sender<Event>) {
     );
 }
 
-fn viewing_analysis(state: &AppState) -> bool {
-    matches!(state.sources.nav_collection, Some(CollectionKind::AudioMuse(f)) if !f.is_search())
+pub(super) fn viewing_analysis(state: &AppState) -> bool {
+    state.view == View::Browse
+        && state.browse_category == BrowseCategory::Library
+        && matches!(state.sources.nav_collection, Some(CollectionKind::AudioMuse(f)) if !f.is_search())
 }
 
 fn populate(feature: Feature, state: &mut AppState) {
@@ -493,25 +511,23 @@ fn populate(feature: Feature, state: &mut AppState) {
         }
         // Refresh the open group's tracks as well as the group headings.
         // Otherwise an early preview would remain in the child after completion.
-        if let Some(child) = state.artist_nav.columns.get(1) {
-            if let Some(filter) = selected.and_then(|key| serde_json::from_str::<Filter>(&key).ok())
-            {
-                let title = child.title.clone();
-                state.artist_nav.focused_column = 0;
-                drill(state, filter, title, true);
-                state.artist_nav.focused_column = focus;
-            }
+        if let Some(child) = state.artist_nav.columns.get(1)
+            && let Some(filter) = selected.and_then(|key| serde_json::from_str::<Filter>(&key).ok())
+        {
+            let title = child.title.clone();
+            state.artist_nav.focused_column = 0;
+            drill(state, filter, title, true);
+            state.artist_nav.focused_column = focus;
         }
     }
     if let (Some(selected), Some(column)) = (selected_item, state.artist_nav.columns.get_mut(focus))
+        && let Some(index) = column.items.iter().position(|item| item.key() == selected)
     {
-        if let Some(index) = column.items.iter().position(|item| item.key() == selected) {
-            column.selected_index = index;
-        }
+        column.selected_index = index;
     }
     state.artist_nav.loading = false;
     state.set_status(format!(
-        "{} analyzed tracks{}{} · F5 updates",
+        "{} analyzed tracks{}{}",
         snapshot.tracks.len(),
         if snapshot.partial {
             " · partial index"
@@ -544,7 +560,10 @@ fn show_tracks(state: &mut AppState, ids: Vec<String>, title: &str, child: bool)
         .filter_map(|id| by_id.get(id).map(|t| (*t).clone()))
         .collect();
     let excluded = ids.len().saturating_sub(tracks.len());
-    let column = BrowseColumn::new_with_tracks(title, BrowseItem::from_tracks(&tracks), tracks);
+    let mut column = BrowseColumn::new_with_tracks(title, BrowseItem::from_tracks(&tracks), tracks);
+    column.play_all_row = Some(crate::app::state::PlayAllRow::AllTracks {
+        label: "Play All Tracks".into(),
+    });
     if child {
         state.artist_nav.drill_column(column, true);
     } else {
@@ -554,7 +573,7 @@ fn show_tracks(state: &mut AppState, ids: Vec<String>, title: &str, child: bool)
     state.artist_nav.loading = false;
     if excluded > 0 {
         state.set_status(format!(
-            "{excluded} results outside this library omitted · F5 in Library refreshes tracks"
+            "{excluded} results outside this library omitted · choose Refresh Library in Library to update tracks"
         ));
     }
 }
@@ -604,6 +623,7 @@ pub fn track_info(state: &mut AppState, tx: &mpsc::Sender<Event>) {
     state.sources.nav_request_id = state.sources.nav_request_id.wrapping_add(1);
     let request_id = state.sources.nav_request_id;
     state.popups.set_text(Some(TextPopup {
+        lyrics_query: None,
         title: format!("AudioMuse · {}", track.title),
         text: "Loading…".into(),
         scroll: 0,
@@ -628,11 +648,13 @@ pub fn track_info(state: &mut AppState, tx: &mpsc::Sender<Event>) {
                 .map(|a| a.map_or_else(|| "Not analyzed yet".into(), |a| a.summary()))
         }
         .await;
-        Ok(vec![navidrome::NavAction::Text {
-            request_id,
-            result: result.map_err(|e: anyhow::Error| e.to_string()),
-        }
-        .into()])
+        Ok(vec![
+            navidrome::NavAction::Text {
+                request_id,
+                result: result.map_err(|e: anyhow::Error| e.to_string()),
+            }
+            .into(),
+        ])
     });
 }
 
@@ -678,7 +700,13 @@ pub async fn dispatch(
                 key(&session) == library_key,
                 "Library changed; reopen the description results to save this playlist"
             );
-            navidrome::effects::save_playlist(state, tx, session, name.trim().to_owned(), tracks);
+            navidrome::effects::save_playlist(
+                state,
+                tx,
+                session,
+                name.trim().to_owned(),
+                Some(tracks.into()),
+            );
         }
         Command::BrowseDescriptions { take_focus } => browse_descriptions(state, take_focus),
         Command::RestoreDescription {
@@ -687,6 +715,76 @@ pub async fn dispatch(
         } => {
             if state.sources.nav_collection == Some(CollectionKind::AudioMuse(Feature::Describe)) {
                 restore_description(state, &query, replace_child);
+            }
+        }
+        Command::RemoveDescription { query } => {
+            let Some(session) = state.sources.active.navidrome() else {
+                return Ok(vec![]);
+            };
+            let library_key = key(session);
+            let Some(entries) = state
+                .sources
+                .audiomuse
+                .description_history
+                .get_mut(&library_key)
+            else {
+                return Ok(vec![]);
+            };
+            let count = entries.len();
+            entries.retain(|entry| entry.query != query);
+            if entries.len() == count {
+                return Ok(vec![]);
+            }
+            if entries.is_empty() {
+                state
+                    .sources
+                    .audiomuse
+                    .description_history
+                    .remove(&library_key);
+                config.description_history.remove(&library_key);
+            } else {
+                config
+                    .description_history
+                    .insert(library_key, entries.clone());
+            }
+            dispatch_settings::save_config_in_background(
+                tx,
+                config,
+                "remove description history item",
+            );
+            if state.sources.nav_collection == Some(CollectionKind::AudioMuse(Feature::Describe)) {
+                let selected = state
+                    .artist_nav
+                    .columns
+                    .first()
+                    .map_or(0, |column| column.selected_index);
+                let selected_query = state
+                    .artist_nav
+                    .columns
+                    .first()
+                    .and_then(|column| column.selected_item())
+                    .and_then(|item| {
+                        if let BrowseItem::Description { query } = item {
+                            Some(query.clone())
+                        } else {
+                            None
+                        }
+                    });
+                begin(Feature::Describe, state);
+                let rows = description_rows(state);
+                let next = selected_query
+                    .and_then(|query| rows.iter().position(|row| row.key() == query))
+                    .unwrap_or(selected.min(rows.len().saturating_sub(1)));
+                state.artist_nav = BrowseNavigationState::with_root("Description history", rows);
+                state.artist_nav.columns[0].selected_index = next;
+                if let Some(BrowseItem::Description { query }) =
+                    state.artist_nav.selected_item().cloned()
+                {
+                    restore_description(state, &query, true);
+                }
+                state.track_pane_focused = false;
+                state.category_column_focused = false;
+                state.list_filter.deactivate();
             }
         }
         Command::Open { feature, refresh } => open(feature, refresh, state, tx),
@@ -757,13 +855,15 @@ pub async fn dispatch(
             navidrome::effects::spawn(state, tx, "audiomuse", async move {
                 let api = client(&connection, &key(&session)).await?;
                 let ids = api.search(feature, &query).await?;
-                Ok(vec![Command::Results {
-                    request_id,
-                    feature,
-                    title: query,
-                    ids,
-                }
-                .into()])
+                Ok(vec![
+                    Command::Results {
+                        request_id,
+                        feature,
+                        title: query,
+                        ids,
+                    }
+                    .into(),
+                ])
             });
         }
         Command::Results {

@@ -1,0 +1,12 @@
+[package]
+name = "textamp-ios"
+version = "1.0.0"
+edition = "2024"
+license = "Unlicense"
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+textamp = { path = "../..", features = ["mobile"] }
+serde_json = "1"

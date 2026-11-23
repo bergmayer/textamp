@@ -10,17 +10,13 @@
 //! # Cross-Platform Design
 //!
 //! When porting to other platforms:
-//! - iOS: Implement `AudioBackend` using AVFoundation
+//! - iOS: The shared Rodio backend uses Core Audio; the native host owns AVAudioSession
 //! - Web: Implement `AudioBackend` using Web Audio API
 //! - The rest of the app interacts only with the trait, not concrete implementations
 
-pub mod airplay;
-#[cfg(unix)]
-pub mod airplay_native;
-mod output;
-pub use output::{local_devices, AudioOutput};
 pub mod player;
 mod rodio_backend;
+mod spool;
 mod traits;
 
 /// Lock a mutex, recovering from poisoning.

@@ -1,13 +1,13 @@
 //! Private, disposable metadata snapshots for all supported library sources.
 //! No credentials or media URLs are stored here. Call disk methods on a worker.
 use anyhow::{Context, Result};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
     Mutex,
+    atomic::{AtomicU64, Ordering},
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -20,6 +20,8 @@ pub fn refresh_due(timestamp: u64, current: u64) -> bool {
         || timestamp > current
         || current.saturating_sub(timestamp) >= REFRESH_INTERVAL.as_secs()
 }
+/// Demand-loaded folder listings expire independently of the directory index.
+pub const LISTING_TTL: Duration = Duration::from_secs(15 * 60);
 const MAX_FILE: u64 = 512 * 1024 * 1024;
 const MAX_EXPANDED: u64 = 8 * 1024 * 1024 * 1024;
 const MAX_TOTAL: u64 = 512 * 1024 * 1024;
@@ -43,6 +45,7 @@ pub struct Ticket {
     store: Store,
     key: String,
     revision: u64,
+    checkpoint: Option<usize>,
 }
 #[derive(Serialize, Deserialize)]
 struct Snapshot<T> {
@@ -86,8 +89,17 @@ impl Store {
         // Display names are not identity; location changes must not reuse listings.
         Self::new(("folder", &source.id, &source.location))
     }
+    /// Keep demand-loaded file listings in a separate bounded cache directory.
+    pub fn listings(&self) -> Self {
+        Self {
+            root: self.root.join("temporary-listings"),
+            identity: self.identity.clone(),
+            scope: self.scope.clone(),
+        }
+    }
     pub fn ticket(&self, key: &str) -> Ticket {
         Ticket {
+            checkpoint: None,
             store: self.clone(),
             key: key.into(),
             revision: REVISION.fetch_add(1, Ordering::SeqCst),
@@ -107,6 +119,9 @@ impl Store {
     }
     /// Invalidate all writes issued before this clear, including absent files.
     pub fn clear(&self) -> Result<usize> {
+        Ok(self.clear_files()? + self.listings().clear_files()?)
+    }
+    fn clear_files(&self) -> Result<usize> {
         let mut guard = WRITES.lock().unwrap_or_else(|p| p.into_inner());
         let writes = guard.get_or_insert_with(Writes::default);
         writes.scopes.insert(
@@ -124,6 +139,9 @@ impl Store {
         Ok(entries.len())
     }
     pub fn bytes(&self) -> Result<u64> {
+        Ok(self.file_bytes()? + self.listings().file_bytes()?)
+    }
+    fn file_bytes(&self) -> Result<u64> {
         Ok(files(&self.root)?
             .into_iter()
             .filter(|(path, _, _)| self.owns(path))
@@ -133,11 +151,54 @@ impl Store {
 }
 impl Ticket {
     fn path(&self) -> PathBuf {
+        self.path_for(self.checkpoint)
+    }
+
+    fn path_for(&self, checkpoint: Option<usize>) -> PathBuf {
+        let suffix = checkpoint.map(|n| format!(".part-{n}")).unwrap_or_default();
         self.store.root.join(format!(
-            "{}-{:x}.json.gz",
+            "{}-{:x}{suffix}.json.gz",
             self.store.scope,
             md5::compute(self.key.as_bytes())
         ))
+    }
+    pub(crate) fn checkpoint(&self, number: usize) -> Self {
+        Self {
+            checkpoint: Some(number),
+            ..self.clone()
+        }
+    }
+    pub fn write_finishing_checkpoints<T: Serialize>(&self, value: &T) -> Result<()> {
+        self.write(value)?;
+        let mut guard = WRITES.lock().unwrap_or_else(|p| p.into_inner());
+        let writes = guard.get_or_insert_with(Writes::default);
+        if writes.revisions.get(&self.path()) != Some(&self.revision) {
+            return Ok(());
+        }
+        let prefix = format!(
+            "{}-{:x}.part-",
+            self.store.scope,
+            md5::compute(self.key.as_bytes())
+        );
+        for (path, _, _) in files(&self.store.root)? {
+            if path
+                .file_name()
+                .is_some_and(|s| s.to_string_lossy().starts_with(&prefix))
+                && writes
+                    .revisions
+                    .get(&path)
+                    .is_none_or(|r| *r <= self.revision)
+            {
+                std::fs::remove_file(&path)?;
+                writes.revisions.remove(&path);
+            }
+        }
+        Ok(())
+    }
+    /// Check whether budget eviction removed a snapshot since its batch completed.
+    pub(crate) fn exists(&self) -> bool {
+        let path = self.path();
+        path.is_file() || path.with_extension("").is_file()
     }
     pub fn read<T: DeserializeOwned>(&self, ttl: Duration) -> Result<Option<Hit<T>>> {
         let path = self.path();
@@ -219,10 +280,15 @@ impl Ticket {
         let mut guard = WRITES.lock().unwrap_or_else(|p| p.into_inner());
         let writes = guard.get_or_insert_with(Writes::default);
         let path = self.path();
-        if writes
-            .cleared
-            .get(&self.store.root)
-            .is_some_and(|revision| self.revision <= *revision)
+        if self.checkpoint.is_some()
+            && writes
+                .revisions
+                .get(&self.path_for(None))
+                .is_some_and(|r| *r >= self.revision)
+            || writes
+                .cleared
+                .get(&self.store.root)
+                .is_some_and(|revision| self.revision <= *revision)
             || writes
                 .scopes
                 .get(&(self.store.root.clone(), self.store.scope.clone()))
@@ -235,29 +301,53 @@ impl Ticket {
             return Ok(());
         }
         temporary.persist(&path).context("Save library cache")?;
+        writes.revisions.insert(path.clone(), self.revision);
         let legacy = path.with_extension("");
         match std::fs::remove_file(legacy) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e).context("Remove superseded uncompressed cache"),
         }
-        writes.revisions.insert(path.clone(), self.revision);
-        let mut entries = files(&self.store.root)?;
-        let mut total: u64 = entries.iter().map(|(_, size, _)| size).sum();
-        entries.sort_by_key(|(_, _, modified)| *modified);
-        for (old, size, _) in entries {
-            if total <= MAX_TOTAL {
-                break;
-            }
-            if old != path {
-                std::fs::remove_file(&old)?;
-                writes.revisions.remove(&old);
-                total = total.saturating_sub(size);
-            }
-        }
-        Ok(())
+        trim(&self.store.root, &path, MAX_TOTAL, writes)
     }
 }
+
+fn is_checkpoint(path: &Path) -> bool {
+    path.file_name()
+        .is_some_and(|s| s.to_string_lossy().contains(".part-"))
+}
+
+fn trim(root: &Path, saved: &Path, limit: u64, writes: &mut Writes) -> Result<()> {
+    let mut entries = files(root)?;
+    let mut total: u64 = entries.iter().map(|(_, size, _)| size).sum();
+    if total <= limit {
+        return Ok(());
+    }
+    // Keep the indexes needed to open a library ahead of individual item snapshots.
+    let indexes = ["catalog", "browse-catalog-v1", super::tree::KEY]
+        .map(|key| format!("{:x}", md5::compute(key)));
+    entries.sort_by_cached_key(|(path, _, modified)| {
+        let indexed = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.split_once('-'))
+            .and_then(|(_, key)| key.split_once('.'))
+            .is_some_and(|(key, _)| indexes.iter().any(|index| index == key));
+        (!is_checkpoint(path), indexed, *modified)
+    });
+    for (old, size, _) in entries {
+        if total <= limit {
+            break;
+        }
+        if is_checkpoint(&old) || (old != saved && !is_checkpoint(saved)) {
+            std::fs::remove_file(&old)?;
+            writes.revisions.remove(&old);
+            total = total.saturating_sub(size);
+        }
+    }
+    Ok(())
+}
+
 fn files(root: &Path) -> Result<Vec<(PathBuf, u64, SystemTime)>> {
     let entries = match std::fs::read_dir(root) {
         Ok(entries) => entries,
@@ -281,9 +371,12 @@ fn files(root: &Path) -> Result<Vec<(PathBuf, u64, SystemTime)>> {
 }
 fn decode<T: DeserializeOwned>(reader: impl Read, limit: u64) -> Result<T> {
     let mut reader = reader.take(limit + 1);
-    let value = serde_json::from_reader(&mut reader).context("Invalid library cache")?;
+    let mut bytes = Vec::new();
+    reader
+        .read_to_end(&mut bytes)
+        .context("Read expanded library cache")?;
     anyhow::ensure!(reader.limit() > 0, "Expanded cache exceeds safety limit");
-    Ok(value)
+    serde_json::from_slice(&bytes).context("Invalid library cache")
 }
 struct BoundedWriter<W> {
     inner: W,
@@ -324,6 +417,58 @@ fn clear_at(root: &Path) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pressure_evicts_item_snapshots_before_an_older_library_index() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::at(root.path().into(), "budget").unwrap();
+        let catalog = store.ticket("catalog");
+        let item = store.ticket("playlist:old");
+        let saved = store.ticket("playlist:new");
+        for entry in [&catalog, &item, &saved] {
+            entry.write(&"metadata").unwrap();
+        }
+        let limit =
+            catalog.path().metadata().unwrap().len() + saved.path().metadata().unwrap().len();
+        trim(root.path(), &saved.path(), limit, &mut Writes::default()).unwrap();
+        assert!(catalog.exists() && saved.exists());
+        assert!(!item.exists());
+        assert_eq!(store.bytes().unwrap(), limit);
+    }
+
+    #[test]
+    fn checkpoints_yield_to_committed_data_and_obey_refresh_ownership() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::at(root.path().into(), "library").unwrap();
+        let old = store.ticket("analysis");
+        old.write(&"complete").unwrap();
+        let new = store.ticket("analysis");
+        let part = new.checkpoint(0);
+        part.write(&"temporary").unwrap();
+        let limit = old.path().metadata().unwrap().len();
+        trim(root.path(), &part.path(), limit, &mut Writes::default()).unwrap();
+        assert!(old.exists() && !part.exists());
+        part.write(&"progress").unwrap();
+        old.write_finishing_checkpoints(&"old").unwrap();
+        assert!(part.exists());
+        new.write_finishing_checkpoints(&"finished").unwrap();
+        part.write(&"late worker").unwrap();
+        assert!(!part.exists());
+    }
+
+    #[test]
+    fn committed_revision_survives_legacy_cleanup_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::at(directory.path().into(), "fixture").unwrap();
+        let old = store.ticket("album");
+        let latest = store.ticket("album");
+        std::fs::create_dir(latest.path().with_extension("")).unwrap();
+
+        assert!(latest.write(&"new").is_err());
+        old.write(&"old").unwrap();
+        let snapshot = latest.read::<String>(REFRESH_INTERVAL).unwrap().unwrap();
+        assert_eq!(snapshot.value, "new");
+    }
 
     #[test]
     fn clearing_one_library_preserves_others_and_blocks_pending_writes() {
@@ -405,10 +550,12 @@ mod tests {
             .ticket("catalog");
         ticket.write(&LargeCatalog).unwrap();
         assert!(std::fs::metadata(ticket.path()).unwrap().len() < 8 * 1024 * 1024);
-        assert!(ticket
-            .read::<serde::de::IgnoredAny>(Duration::ZERO)
-            .unwrap()
-            .is_some());
+        assert!(
+            ticket
+                .read::<serde::de::IgnoredAny>(Duration::ZERO)
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
@@ -466,27 +613,32 @@ mod tests {
                 .unwrap()
                 .stale
         );
-        assert!(Store::at(dir.path().into(), ("other", "library"))
-            .unwrap()
-            .ticket("root")
-            .read::<Vec<String>>(Duration::ZERO)
-            .unwrap()
-            .is_none());
-        assert!(store
-            .ticket("other-folder")
-            .read::<Vec<String>>(Duration::ZERO)
-            .unwrap()
-            .is_none());
+        assert!(
+            Store::at(dir.path().into(), ("other", "library"))
+                .unwrap()
+                .ticket("root")
+                .read::<Vec<String>>(Duration::ZERO)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .ticket("other-folder")
+                .read::<Vec<String>>(Duration::ZERO)
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(clear_at(dir.path()).unwrap(), 1);
         new.write(&vec!["resurrected"]).unwrap();
         assert!(new.read::<Vec<String>>(Duration::ZERO).unwrap().is_none());
         store.ticket("root").write(&Vec::<String>::new()).unwrap();
-        assert!(new
-            .read::<Vec<String>>(Duration::ZERO)
-            .unwrap()
-            .unwrap()
-            .value
-            .is_empty());
+        assert!(
+            new.read::<Vec<String>>(Duration::ZERO)
+                .unwrap()
+                .unwrap()
+                .value
+                .is_empty()
+        );
     }
     #[test]
     fn corrupt_cache_is_an_error_and_a_valid_refresh_repairs_it() {

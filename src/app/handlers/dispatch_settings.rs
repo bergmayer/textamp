@@ -7,8 +7,8 @@ use crate::audio::AudioPlayer;
 use crate::config::Config;
 
 use anyhow::Result;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::mpsc;
 
 use super::helpers;
@@ -110,7 +110,7 @@ fn apply_artwork_cache_clear(count: usize, state: &mut AppState) {
 }
 
 /// Dispatch settings/cache/adventure actions. Returns follow-up actions.
-pub async fn dispatch(
+pub fn dispatch(
     event_tx: &mpsc::Sender<Event>,
     config: &mut Config,
     action: SettingsAction,
@@ -121,17 +121,124 @@ pub async fn dispatch(
     let mut follow_ups = vec![];
 
     match action {
+        SettingsAction::RememberPlaylistDestination(key) => {
+            if let Some(library) = state.active_library.clone() {
+                state
+                    .last_playlist_destinations
+                    .insert(library.clone(), key.clone());
+                if config
+                    .ui
+                    .last_playlist_destinations
+                    .insert(library, key.clone())
+                    .as_ref()
+                    != Some(&key)
+                {
+                    follow_ups.push(SettingsAction::SaveSettings.into());
+                }
+            }
+        }
+        SettingsAction::PersistCommandHistory => {
+            config.ui.command_history = state.palette.history.clone();
+            config.ui.desktop_command_history.clear();
+            save_config_in_background(event_tx, config, "save command history");
+        }
+        SettingsAction::SetLibraryRootVisible { root, visible } => {
+            crate::app::sidebar::set_library_root_visible(state, root, visible);
+            config.ui.desktop_hidden_library_roots = state.desktop_hidden_library_roots.clone();
+            config.ui.hidden_sections = state.hidden_sections.clone();
+            save_config_in_background(event_tx, config, "save sidebar visibility");
+        }
+
+        SettingsAction::ToggleSidebarGroup(title) => {
+            if state.desktop_collapsed_sections.contains(&title) {
+                state
+                    .desktop_collapsed_sections
+                    .retain(|item| item != &title);
+            } else {
+                state.desktop_collapsed_sections.push(title);
+            }
+            config.ui.desktop_collapsed_sections = state.desktop_collapsed_sections.clone();
+            save_config_in_background(event_tx, config, "save sidebar disclosures");
+        }
+
         SettingsAction::PersistenceFailed { operation, error } => {
             state.set_error(format!("Failed to {operation}: {error}"));
         }
 
+        SettingsAction::SetSinglesTrackLimit(limit) => {
+            if !(1..=crate::services::singles::MAX_LIMIT).contains(&limit) {
+                state.set_error(format!(
+                    "Singles track limit must be between 1 and {}",
+                    crate::services::singles::MAX_LIMIT
+                ));
+                return Ok(vec![]);
+            }
+            state.singles_track_limit = limit;
+            config.ui.singles_track_limit = limit;
+            if state.desktop_library_root == crate::app::state::LibraryRoot::Singles
+                && state.browse_category == crate::app::state::BrowseCategory::Library
+            {
+                crate::app::album_collections::refresh_singles(state);
+            }
+            save_config_in_background(event_tx, config, "save singles track limit");
+        }
+        SettingsAction::SetLargeArtwork(large) => {
+            state.large_artwork = large;
+            config.ui.desktop_large_album_covers = large;
+            save_config_in_background(event_tx, config, "save artwork view options");
+        }
+        SettingsAction::SetShowCompilationOnlyArtists(show) => {
+            config.ui.show_compilation_only_artists = show;
+            state.set_compilation_artists_visible(show);
+            save_config_in_background(event_tx, config, "save artist view options");
+        }
+        SettingsAction::SetRemixAllowSameArtist(allowed) => {
+            if state.remix_allow_same_artist != allowed {
+                state.sources.nav_tasks.remove("remix");
+                state.remix_allow_same_artist = allowed;
+                config.ui.remix_allow_same_artist = allowed;
+                save_config_in_background(event_tx, config, "save queue tools preference");
+                state.set_status("Queue tools preference updated".into());
+            }
+        }
         SettingsAction::OpenSettings => {
             follow_ups.push(crate::app::action::SearchAction::ManageLibraries.into());
             follow_ups.push(SettingsAction::RefreshCacheStats.into());
         }
+        SettingsAction::SetTranscodeBitrate(bitrate) => {
+            if crate::app::preferences::TRANSCODE_BITRATES.contains(&bitrate) {
+                state.transcode_kbps = bitrate;
+                config.playback.transcode_kbps = bitrate;
+                save_config_in_background(event_tx, config, "save transcode preference");
+                state.set_status(if bitrate == 0 {
+                    "Streaming: original file, starting with the next track".into()
+                } else {
+                    format!("Streaming: up to {bitrate} kbps, starting with the next track")
+                });
+            }
+        }
+        SettingsAction::ActivatePreference(item) => {
+            if state
+                .textamp_settings_for(crate::app::preferences::page_for(item))
+                .contains(&item)
+            {
+                follow_ups.extend(apply_preference(event_tx, state, config, item));
+            }
+        }
+        SettingsAction::ReadActivityHistory => {
+            let tx = event_tx.clone();
+            crate::app::tasks::spawn_blocking(move || {
+                let text = crate::util::activity_history_text();
+                let _ = tx.blocking_send(Event::Effect(
+                    SettingsAction::ActivityHistoryLoaded(text.into()).into(),
+                ));
+            });
+        }
+        SettingsAction::ActivityHistoryLoaded(text) => {
+            state.settings_state.activity_history = Some(text)
+        }
         SettingsAction::SettingsSelect => match state.settings_state.section {
             SettingsSection::Textamp => {
-                use crate::app::state::TextampSetting;
                 let Some(item) = state
                     .textamp_settings()
                     .get(state.settings_state.item_index)
@@ -139,70 +246,18 @@ pub async fn dispatch(
                 else {
                     return Ok(vec![]);
                 };
-                match item {
-                    TextampSetting::SoundOutput => {
-                        follow_ups
-                            .push(crate::app::action::PlaybackAction::OpenOutputPicker.into());
-                    }
-                    TextampSetting::Theme(name) => {
-                        state.theme = name;
-                        state.set_status(format!("Theme: {}", name.display_name()));
-                        config.ui.theme = name.config_name().to_string();
-                        save_config_in_background(event_tx, config, "save theme preference");
-                    }
-                    TextampSetting::Artwork(mode) => {
-                        if let Some(key) = state.active_library.as_deref() {
-                            state.artwork.mode = mode;
-                            config.set_artwork_mode(key, mode);
-                            state.set_status(format!("Artwork rendering: {}", mode.name()));
-                            save_config_in_background(event_tx, config, "save artwork preference");
-                        }
-                    }
-                    TextampSetting::ArtworkVisible => {
-                        if let Some(key) = state.active_library.as_deref() {
-                            let visible = !state.artwork.default_visible;
-                            state.artwork.default_visible = visible;
-                            config.set_artwork_visible(key, visible);
-                            state.set_status(
-                                if visible {
-                                    "Covers in new album columns: on"
-                                } else {
-                                    "Covers in new album columns: off"
-                                }
-                                .into(),
-                            );
-                            save_config_in_background(event_tx, config, "save artwork visibility");
-                        }
-                    }
-
-                    TextampSetting::Transcode => {
-                        let options = [0u32, 128, 192, 256, 320];
-                        let current = options
-                            .iter()
-                            .position(|&v| v == state.transcode_kbps)
-                            .unwrap_or(0);
-                        let next = options[(current + 1) % options.len()];
-                        state.transcode_kbps = next;
-                        config.playback.transcode_kbps = next;
-                        save_config_in_background(event_tx, config, "save transcode preference");
-                        state.set_status(if next == 0 {
-                            "Streaming: original file, starting with the next track".into()
-                        } else {
-                            format!("Streaming: up to {next} kbps, starting with the next track")
-                        });
-                    }
-                    TextampSetting::Sidebar(section) => {
-                        follow_ups.push(SettingsAction::ToggleSectionVisibility(section).into());
-                    }
-                    TextampSetting::ExternalSearch(target) => {
-                        follow_ups.push(SettingsAction::ToggleExternalSearchService(target).into())
-                    }
-                }
+                follow_ups.extend(apply_preference(event_tx, state, config, item));
             }
             SettingsSection::Libraries => {
                 follow_ups.push(crate::app::action::SearchAction::ManageLibraries.into())
             }
-            SettingsSection::About => {}
+            SettingsSection::About => {
+                state.settings_state.about_taps += 1;
+                if state.settings_state.about_taps == 4 {
+                    state.settings_state.about_taps = 0;
+                    follow_ups.push(SettingsAction::ReadActivityHistory.into());
+                }
+            }
         },
 
         SettingsAction::SaveSettings => {
@@ -213,9 +268,11 @@ pub async fn dispatch(
             column_key,
             visible,
         } => {
-            config.set_artwork_visible(&library_key, visible);
             if let Some(column_key) = column_key {
                 config.set_column_artwork(&library_key, &column_key, visible);
+                if state.active_library.as_ref() == Some(&library_key) {
+                    state.artwork.column_visibility.insert(column_key, visible);
+                }
             }
             follow_ups.push(SettingsAction::SaveSettings.into());
         }
@@ -258,16 +315,15 @@ pub async fn dispatch(
                 warning: Some(warning),
                 ..
             }) = &result
+                && manual
             {
-                if manual {
-                    state.set_error(format!("Catalog refreshed; {warning}"));
-                }
+                state.set_error(format!("Catalog refreshed; {warning}"));
             }
             if let Err(error) = result {
                 if manual {
                     state.set_error(format!("Re-scan {}: {error}", choice.label()));
                 } else {
-                    tracing::warn!("Folder tree scan: {error}");
+                    tracing::warn!("Library cache scan: {error}");
                 }
             }
             follow_ups.push(SettingsAction::RefreshCacheStats.into());
@@ -334,6 +390,7 @@ pub async fn dispatch(
                 state.artwork.current_thumb = None;
                 state.artwork.fetch = crate::app::state::ArtworkFetch::Idle;
             }
+            crate::app::sources::cache::cancel(&choice, state);
             state.set_status(format!("Clearing artwork for {}...", choice.label()));
             let tx = event_tx.clone();
             crate::app::tasks::spawn_blocking(move || {
@@ -410,20 +467,6 @@ pub async fn dispatch(
             });
             state.settings_state.cache_task = Some(crate::app::tasks::TaskLease::new(&task));
         }
-        SettingsAction::RefreshAllCache => {
-            // One worker owns the whole disk phase. The reducer does not start
-            // replacement preloads or refresh statistics until both clears
-            // have actually completed.
-            state.set_status("Clearing caches...".to_string());
-            let tx = event_tx.clone();
-            crate::app::tasks::spawn_blocking(move || {
-                let library = crate::library::cache::clear_all().map_err(|e| e.to_string());
-                let artwork = crate::media::ArtworkCache::clear_all_libraries();
-                let _ = tx.blocking_send(Event::Effect(
-                    SettingsAction::AllCachesCleared { library, artwork }.into(),
-                ));
-            });
-        }
 
         SettingsAction::CancelAdventure => {
             state.sources.sonic_tasks.remove("adventure");
@@ -433,7 +476,14 @@ pub async fn dispatch(
             state.clear_status();
         }
         SettingsAction::AdventureComplete(tracks) => {
-            // This is handled inline in SetAdventureLength for simplicity
+            let tracks = match crate::services::sonic_adventure::unique_artists(tracks) {
+                Ok(tracks) => tracks,
+                Err(error) => {
+                    state.adventure = crate::app::state::AdventureState::default();
+                    state.set_error(error.to_string());
+                    return Ok(vec![]);
+                }
+            };
             state.adventure = crate::app::state::AdventureState::default();
             // Clear radio state if switching from radio mode
             if state.playback_mode == PlaybackMode::Radio {
@@ -447,12 +497,31 @@ pub async fn dispatch(
             state.set_view(View::Queue);
             helpers::play_current_track(event_tx, state, audio);
         }
-        SettingsAction::AdventureError(msg) => {
-            state.adventure.generating = false;
-            state.set_error(format!("Adventure failed: {}", msg));
-        }
+
         SettingsAction::AdventureGenerated { request_id, result } => {
             if state.adventure_request_id != request_id || !state.adventure.generating {
+                return Ok(vec![]);
+            }
+            let result = result.and_then(|tracks| {
+                crate::services::sonic_adventure::unique_artists(tracks).map_err(|error| {
+                    crate::app::action::AsyncError {
+                        message: error.to_string(),
+                    }
+                })
+            });
+            if let Some(launcher) = state.popups.adventure_launcher_mut() {
+                launcher.stage = match result {
+                    Ok(tracks) if tracks.len() > 2 => {
+                        crate::app::state::JourneyStage::Ready(tracks)
+                    }
+                    Ok(_) => crate::app::state::JourneyStage::Failed(
+                        "No route found. Try tracks with more sonic analysis data.".into(),
+                    ),
+                    Err(error) => crate::app::state::JourneyStage::Failed(error.message),
+                };
+                launcher.loading = false;
+                launcher.item_index = 0;
+                state.adventure = Default::default();
                 return Ok(vec![]);
             }
             match result {
@@ -502,25 +571,17 @@ pub async fn dispatch(
             }
             follow_ups.push(SettingsAction::SaveSettings.into());
         }
-        SettingsAction::ToggleTallMode => {
-            state.tall_mode = !state.tall_mode;
-            config.ui.tall_mode = state.tall_mode;
+        SettingsAction::ToggleSplitView => {
+            state.desktop_split_view = !state.desktop_split_view;
+            config.ui.desktop_split_view = state.desktop_split_view;
             state.set_status(format!(
-                "tall mode: {}",
-                if state.tall_mode { "on" } else { "off" }
+                "split view: {}",
+                if state.desktop_split_view {
+                    "on"
+                } else {
+                    "off"
+                }
             ));
-            follow_ups.push(SettingsAction::SaveSettings.into());
-        }
-        SettingsAction::ToggleMillerLayout => {
-            state.miller_layout = state.miller_layout.toggled();
-            // TUI ribbon scroll state is reset on every layout toggle
-            // so a freshly-toggled mode starts at column 0 — a stale
-            // offset would dangle out of bounds.
-            state.miller_scroll_col = 0;
-            state.miller_scroll_manual = false;
-            state.miller_h_drag_grab = None;
-            config.ui.miller_layout = state.miller_layout;
-            state.set_status(format!("miller layout: {}", state.miller_layout.name()));
             follow_ups.push(SettingsAction::SaveSettings.into());
         }
         SettingsAction::ToggleSectionVisibility(section) => {
@@ -588,9 +649,7 @@ pub async fn dispatch(
             library_key,
             live_playlist_keys,
         } => {
-            // Snapshot the keys we're about to drop so the saver
-            // only fires when something actually changed (no point
-            // rewriting the config every PlaylistsLoaded).
+            // Persist only if pruning changes the saved playlist preferences.
             let before = config
                 .ui
                 .library_view_settings
@@ -652,4 +711,101 @@ pub async fn dispatch(
         _ => anyhow::bail!("Unsupported library operation reached shared handler"),
     }
     Ok(follow_ups)
+}
+
+fn apply_preference(
+    event_tx: &mpsc::Sender<Event>,
+    state: &mut AppState,
+    config: &mut Config,
+    item: crate::app::state::TextampSetting,
+) -> Vec<Action> {
+    use crate::app::state::TextampSetting;
+    let mut follow_ups = Vec::new();
+    match item {
+        TextampSetting::Presentation(mode) => {
+            if !state
+                .windowed_presentation
+                .can_activate(mode.presentation())
+            {
+                return follow_ups;
+            }
+            if let Some(multiple) = mode.gui_multiple_windows() {
+                state.gui_multiple_windows = multiple;
+                let changed = config.ui.desktop_separate_player != multiple
+                    || multiple && (state.desktop_split_view || config.ui.desktop_split_view);
+                config.ui.desktop_separate_player = multiple;
+                if multiple {
+                    state.desktop_split_view = false;
+                    config.ui.desktop_split_view = false;
+                }
+                if changed {
+                    save_config_in_background(event_tx, config, "save window arrangement");
+                }
+            }
+            follow_ups.push(
+                crate::app::action::NavigationAction::SwitchPresentation(mode.presentation())
+                    .into(),
+            );
+        }
+        TextampSetting::LibraryRootVisible(root) => follow_ups.push(
+            SettingsAction::SetLibraryRootVisible {
+                root,
+                visible: !crate::app::sidebar::library_root_visible(state, root),
+            }
+            .into(),
+        ),
+        TextampSetting::SinglesTrackLimit => {
+            state
+                .popups
+                .set_input_dialog(Some(crate::app::state::InputDialog {
+                    title: "Singles: maximum tracks (1–1000)".into(),
+                    input: state.singles_track_limit.to_string().into(),
+                    action_type: crate::app::state::InputDialogAction::SinglesTrackLimit,
+                }));
+        }
+        TextampSetting::RemixAllowSameArtist => {
+            follow_ups.push(
+                SettingsAction::SetRemixAllowSameArtist(!state.remix_allow_same_artist).into(),
+            );
+        }
+        TextampSetting::Theme(name) => {
+            state.theme = name;
+            state.set_status(format!("Theme: {}", name.display_name()));
+            config.ui.theme = name.config_name().to_string();
+            save_config_in_background(event_tx, config, "save theme preference");
+        }
+        TextampSetting::Artwork(mode) => {
+            if let Some(key) = state.active_library.as_deref() {
+                let presentation = state.artwork_presentation();
+                match presentation {
+                    crate::app::launch::WindowedMode::Gui => state.artwork.graphical_mode = mode,
+                    crate::app::launch::WindowedMode::Text => state.artwork.mode = mode,
+                }
+                config.set_artwork_mode(key, presentation, mode);
+                state.set_status(format!("Artwork rendering: {}", mode.name()));
+                save_config_in_background(event_tx, config, "save artwork preference");
+            }
+        }
+        TextampSetting::Transcode => {
+            let options = crate::app::preferences::TRANSCODE_BITRATES;
+            let current = options
+                .iter()
+                .position(|&v| v == state.transcode_kbps)
+                .unwrap_or(0);
+            let next = options[(current + 1) % options.len()];
+            follow_ups.push(SettingsAction::SetTranscodeBitrate(next).into());
+        }
+        TextampSetting::Sidebar(section) => {
+            follow_ups.push(SettingsAction::ToggleSectionVisibility(section).into());
+        }
+        TextampSetting::WebSearch(provider) => {
+            state.web_search_provider = provider;
+            config.ui.web_search_provider = provider;
+            save_config_in_background(event_tx, config, "save browser search preference");
+        }
+        TextampSetting::ExternalSearch(target) => {
+            follow_ups.push(SettingsAction::ToggleExternalSearchService(target).into())
+        }
+    }
+    follow_ups
 }

@@ -6,11 +6,31 @@ use ratatui::layout::Rect;
 /// Registry of all clickable regions, populated each frame during render.
 #[derive(Debug, Default, Clone)]
 pub struct HitRegions {
+    /// Visible overflowing titles retain their clock between terminal frames.
+    pub header_clocks: Vec<(usize, String, usize, std::time::Instant)>,
+    pub download_cancel: Vec<(Rect, String)>,
+    pub download_status: Option<Rect>,
+    /// Visible grapheme boundaries of the focused single-line editor.
+    pub text_input: Option<TextInputRegion>,
+    /// First visible display item of each rendered column.
+    pub miller_offsets: Vec<(usize, usize)>,
+    /// Visible artwork item bounds with their column and original item index.
+    pub miller_item_rows: Vec<(usize, Rect, usize)>,
+    pub artist_links: Vec<ArtistLink>,
+    pub detail_links: Vec<DetailLink>,
+    /// Full ribbon length and leftmost visible slot from the last frame.
+    pub miller_viewport: Option<(usize, usize)>,
+    /// Close affordance for the topmost terminal overlay.
+    pub popup_close: Option<Rect>,
+    pub popup_outer: Option<Rect>,
+    pub motion_hidden: Vec<Rect>,
+    pub player_overlay: Option<Rect>,
+    pub player_toggle: Option<Rect>,
+    pub description_input: Option<Rect>,
+    pub sidebar_group: Option<(Rect, usize)>,
     pub description_save: Option<Rect>,
     pub fullscreen_modes: Vec<(Rect, usize)>,
     pub fullscreen_exit: Option<Rect>,
-    pub sound_output_rows: Vec<(Rect, usize)>,
-    pub sound_output_buttons: Vec<(Rect, usize)>,
     pub settings_sections: Vec<(Rect, crate::app::state::SettingsSection)>,
     pub settings_pages: Vec<(Rect, crate::app::state::SettingsPage)>,
     pub settings_preview: Option<Rect>,
@@ -20,6 +40,7 @@ pub struct HitRegions {
     pub settings_about: Option<ScrollableTextRegion>,
     pub library_option_pages: Vec<(Rect, crate::app::sources::options::OptionsPage)>,
     pub library_option_scroll: usize,
+    pub biography_radio: Option<Rect>,
     pub biography_google: Option<Rect>,
     pub biography_text: Option<ScrollableTextRegion>,
     pub settings_textamp: Option<SettingsContentRegion>,
@@ -58,8 +79,9 @@ pub struct HitRegions {
     /// Transport bar (playback controls, seek bar).
     pub transport: Option<TransportRegions>,
 
-    /// Pointer-only footer controls; never part of keyboard focus traversal.
-    pub footer_shortcuts: Vec<(Rect, crossterm::event::KeyCode)>,
+    /// Navigation buttons on the fixed footer.
+    pub footer_controls: Vec<(Rect, usize)>,
+    pub description_submit: Option<Rect>,
 
     // ── Content (view-dependent, mutually exclusive) ────────────────────────
     /// Category selector column (Browse view, column 0).
@@ -73,6 +95,11 @@ pub struct HitRegions {
 
     /// Miller columns (Browse view, content columns).
     pub miller_columns: Option<MillerRegions>,
+    pub player_sync_column: Option<Rect>,
+    pub player_sync_rows: Vec<(Rect, usize, crate::app::player_sync::Command)>,
+    pub station_rows: Vec<(Rect, usize, String)>,
+    pub station_play: Option<(Rect, String)>,
+    pub queue_menus: Vec<(Rect, super::queue_controls::Menu)>,
 
     /// Track-details pane regions (right-side pane on Browse view
     /// when a Track row is focused). Holds the Play button rect
@@ -86,13 +113,7 @@ pub struct HitRegions {
 
     /// Now Playing visualizer content areas.
     pub now_playing_content: Option<NowPlayingRegions>,
-
-    /// Now Playing left sidebar buttons (Radio / DJ Modes / Remix /
-    /// Clear Queue). Cleared and rebuilt every render of the queue
-    /// view. Stored as a flat list of `(area, which)` pairs because
-    /// the set is small and the click site only needs sequential
-    /// hit-testing.
-    pub now_playing_sidebar: Option<Vec<(Rect, NpSidebarButton)>>,
+    pub graphical_visualizer: Option<Rect>,
 
     /// Similar popup (outer rect).
     pub similar_content: Option<SimilarRegions>,
@@ -100,19 +121,91 @@ pub struct HitRegions {
     /// Related popup (outer rect).
     pub related_content: Option<RelatedRegions>,
 
-    /// Tall-mode split: top half (library / browse) and bottom half
-    /// (now-playing / queue). Populated only when `state.tall_mode` is
-    /// active and the current view is tall-eligible. Used by the
-    /// mouse handler to flip the active view (`Browse` ↔ `NowPlaying`)
-    /// when the user clicks across the boundary.
-    pub tall_mode_split: Option<TallModeSplit>,
-
     /// Niri-style horizontal scrollbar at the bottom of the Browse
     /// view in scrolling Miller-column mode. Populated when there
     /// are more ribbon slots than fit on screen; the mouse handler
     /// translates click / drag positions into a manual ribbon
     /// scroll position.
     pub miller_h_scrollbar: Option<MillerHScrollbar>,
+}
+
+/// Cell geometry for native input-method placement and pointer selection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextInputRegion {
+    pub target: crate::app::terminal_text::Target,
+    pub area: Rect,
+    /// UTF-16 document offset and terminal column, including the final caret.
+    pub carets: Vec<(usize, u16)>,
+}
+impl TextInputRegion {
+    /// Clamp a document position to the nearest visible grapheme boundary.
+    pub fn column(&self, offset: usize) -> u16 {
+        self.carets
+            .iter()
+            .min_by_key(|(index, _)| index.abs_diff(offset))
+            .map_or(self.area.x, |(_, column)| *column)
+    }
+    /// Resolve a pointer column to the nearest visible document boundary.
+    pub fn offset(&self, column: u16) -> usize {
+        self.carets
+            .iter()
+            .min_by_key(|(_, x)| x.abs_diff(column))
+            .map_or(0, |(index, _)| *index)
+    }
+}
+
+/// A library destination bound to the source generation that rendered its label.
+#[derive(Debug, Clone)]
+pub struct ArtistLink {
+    pub area: Rect,
+    pub generation: u64,
+    pub key: String,
+    pub name: String,
+}
+
+impl ArtistLink {
+    /// Resolve a visible name through the shared library-details navigation path.
+    pub fn action(&self, generation: u64) -> Option<super::Action> {
+        (self.generation == generation).then(|| {
+            super::action::BrowseAction::OpenDetailsInLibrary {
+                track: Box::new(crate::library::models::Track {
+                    grandparent_rating_key: Some(self.key.clone()),
+                    grandparent_title: Some(self.name.clone()),
+                    ..Default::default()
+                }),
+                destination: super::library_details::Destination::Artist,
+            }
+            .into()
+        })
+    }
+}
+
+/// A rendered track or album name retaining its library and destination identity.
+#[derive(Debug, Clone)]
+pub struct DetailLink {
+    pub area: Rect,
+    pub generation: u64,
+    pub track_key: String,
+    pub playback_id: u64,
+    pub destination: super::library_details::Destination,
+}
+impl DetailLink {
+    /// Ignore stale render feedback after a library change.
+    pub fn action(&self, state: &super::AppState) -> Option<super::Action> {
+        (self.generation == state.library_generation
+            && self.playback_id == state.playback.request_id)
+            .then_some(())?;
+        state
+            .current_track()
+            .filter(|track| track.rating_key == self.track_key)
+            .map(|track| {
+                super::action::BrowseAction::OpenDetailsInLibrary {
+                    track: Box::new(track.clone()),
+                    destination: self.destination,
+                }
+                .into()
+            })
+    }
 }
 
 /// Visible selectable rows in settings; headings and spacers have no hit target.
@@ -145,16 +238,6 @@ impl ScrollableTextRegion {
             .saturating_sub(self.visible)
             .min(u16::MAX as usize) as u16
     }
-}
-
-/// Tall-mode vertical split: where the boundary between the two halves
-/// lives in the current frame. The top half includes everything up to
-/// (but excluding) the separator row; the bottom half is below the
-/// separator and includes the transport bar.
-#[derive(Debug, Clone)]
-pub struct TallModeSplit {
-    pub top: Rect,
-    pub bottom: Rect,
 }
 
 /// Horizontal scrollbar for the scrolling Miller-column ribbon.
@@ -229,17 +312,14 @@ pub struct SortPopupRegions {
     pub option_count: usize,
 }
 
-/// Adventure launcher popup regions (multi-step).
+/// Single Journey form controls and visible endpoint/preview rows.
 #[derive(Debug, Clone)]
 pub struct AdventureLauncherRegions {
-    /// Outer popup rect.
     pub outer: Rect,
-    /// Inner area (border excluded).
-    pub inner: Rect,
-    /// Number of items currently visible in the results list.
-    pub item_count: usize,
-    /// Y offset where the results list starts (relative to inner.y).
-    pub results_y_offset: u16,
+    pub results: Rect,
+    pub controls: Vec<(Rect, super::journey::JourneyControl)>,
+    pub tabs: Vec<(Rect, super::state::SearchTab)>,
+    pub rows: Vec<(Rect, usize)>,
 }
 
 /// Tab bar regions.
@@ -256,6 +336,8 @@ pub struct TabBarRegions {
 /// Transport bar regions.
 #[derive(Debug, Clone)]
 pub struct TransportRegions {
+    pub area: Rect,
+    pub controls: Vec<(Rect, super::transport_controls::TransportControl)>,
     /// Play/pause button area.
     pub play_pause: Rect,
     /// Seek bar area.
@@ -294,7 +376,8 @@ pub struct TrackPaneRegions {
     pub max_scroll: u16,
     pub outer: Rect,
     pub play_button: Rect,
-    pub following_button: Rect,
+    pub add_button: Rect,
+    pub next_button: Rect,
     /// (rect, index-into-similar-list) per visible similar track.
     pub similar_rows: Vec<(Rect, usize)>,
     /// Hit rect for the small "x" close glyph in the top-right
@@ -330,15 +413,16 @@ pub struct MillerColumnRegion {
     pub rows_per_item: u16,
     /// Whether this column is in artwork grid mode.
     pub is_art_mode: bool,
-    /// Cell-row height the art-grid renderer used for art-height items
-    /// in this column. Only meaningful when `is_art_mode` is true. The
-    /// mouse hit-test uses the same dimensions.
-    pub art_row_height: u16,
     /// Hit rect for the small "x" close glyph in the top-right
     /// corner. `None` for the root column (which isn't closeable).
     /// A click anywhere in this rect closes this column and every
     /// column to its right.
     pub close_x: Option<Rect>,
+    /// Artist Mix icon next to the column close control.
+    /// Opens this column’s existing sort/artwork/grouping options.
+    pub view_options: Option<Rect>,
+    /// Terminal header controls, including the title/filter field.
+    pub controls: Vec<(Rect, super::column_controls::ColumnControl)>,
 }
 
 /// Miller columns layout regions.
@@ -398,35 +482,89 @@ pub struct RelatedRegions {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NpSidebarButton {
-    Radio,
-    DjModes,
-    Remix,
+    AutoMix,
+    Shuffle,
+    Repeat,
+    Twins,
+    Twofer,
+    Stretch,
+    Doppelganger,
+    OppositeDay,
+    Enemies,
+    Save,
+    Undo,
     ClearQueue,
 }
 
 impl NpSidebarButton {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Radio => "Radio",
-            Self::DjModes => "DJ Modes",
-            Self::Remix => "Remix Tools",
+            Self::AutoMix => "Auto-Mix",
+            Self::Shuffle => "Shuffle",
+            Self::Repeat => "Repeat",
+            Self::Twins => "Twins",
+            Self::Twofer => "Twofer",
+            Self::Stretch => "Stretch",
+            Self::Doppelganger => "Doppelganger",
+            Self::OppositeDay => "Opposite Day",
+            Self::Enemies => "Enemies",
+            Self::Save => "Save queue as playlist",
+            Self::Undo => "Undo queue edit",
             Self::ClearQueue => "Clear Queue",
         }
     }
 }
 
+/// Canonical item-count wording for library summaries.
+pub fn item_count_label(count: usize) -> String {
+    format!("{count} {}", if count == 1 { "item" } else { "items" })
+}
+
 impl super::AppState {
-    /// One order for keyboard, mouse and rendering; omit unsupported groups.
-    pub fn now_playing_sidebar_buttons(&self) -> Vec<NpSidebarButton> {
-        use NpSidebarButton::*;
-        let mut buttons = vec![Radio];
-        if super::state::DjMode::ALL.into_iter().any(|mode| {
-            super::sources::command_visible(self, &super::state::PaletteCommandKind::ToggleDj(mode))
-        }) {
-            buttons.push(DjModes);
+    /// Visible item count for the current library destination.
+    pub fn browse_item_count(&self) -> Option<usize> {
+        use super::state::{TuiWorkspace, View};
+        if self.view == View::NowPlaying
+            || (self.view == View::Queue && self.tui_queue_workspace == TuiWorkspace::NowPlaying)
+        {
+            return None;
         }
-        buttons.extend([Remix, ClearQueue]);
-        buttons
+        let (column, length) = self
+            .browse_nav()
+            .and_then(|nav| {
+                nav.columns
+                    .get(nav.focused_column)
+                    .map(|column| (nav.focused_column, column.items.len()))
+            })
+            .or_else(|| {
+                self.folder_state.as_ref().and_then(|nav| {
+                    nav.columns
+                        .get(nav.focused_column)
+                        .map(|column| (nav.focused_column, column.items.len()))
+                })
+            })?;
+        Some(
+            self.list_filter
+                .results
+                .as_ref()
+                .filter(|_| {
+                    !self.list_filter.query.is_empty()
+                        && self.list_filter.category == self.browse_category
+                        && self.list_filter.column == column
+                })
+                .map_or(length, |results| results.matched_indices.len()),
+        )
+    }
+
+    /// Current count, including saved-audio size in the Downloads destination.
+    pub fn browse_item_summary(&self) -> Option<String> {
+        self.browse_item_count().map(|count| {
+            if self.desktop_library_root == super::state::LibraryRoot::Downloads {
+                super::downloads::summary(self, count)
+            } else {
+                item_count_label(count)
+            }
+        })
     }
 }
 
@@ -438,6 +576,17 @@ pub struct RenderFeedback {
 
 impl super::AppState {
     pub fn apply_render_feedback(&mut self, feedback: RenderFeedback) {
+        if let Some((count, start)) = feedback.hit_regions.miller_viewport
+            && (self.miller_reveal_right
+                || self
+                    .hit_regions
+                    .miller_viewport
+                    .is_some_and(|(previous, _)| count > previous))
+        {
+            self.miller_scroll_col = start;
+            self.miller_scroll_manual = true;
+        }
+        self.miller_reveal_right = false;
         self.hit_regions = feedback.hit_regions;
         self.marquee = feedback.marquee;
         self.marquee_subtitle = feedback.marquee_subtitle;

@@ -44,13 +44,13 @@ fn loaded() -> Event {
 
 fn sonic_loaded(state: &mut AppState, playback_id: u64) -> Event {
     state.station_starting = Some(textamp::app::state::StationStart {
-        title: "Sonic Radio".into(),
+        title: "Sonic Mix".into(),
         continue_playback: Some(playback_id),
     });
     RadioEvent::StationTracksLoaded {
         station: ActiveStation {
             source: RadioSource::Sonic("first".into()),
-            title: "Sonic Radio".into(),
+            title: "Sonic Mix".into(),
         },
         tracks: vec![track("first"), track("similar")],
         time_travel_decades: vec![],
@@ -91,9 +91,10 @@ async fn natural_song_end_waits_for_sonic_discovery_instead_of_advancing_old_que
     p.state.playback.playback_started_at = Some(std::time::Instant::now() - Duration::from_secs(5));
     let id = p.state.playback.request_id;
     let result = sonic_loaded(&mut p.state, id);
-    assert!(p
-        .reduce(textamp::app::event::PlaybackEvent::TrackEnded.into())
-        .is_empty());
+    assert!(
+        p.reduce(textamp::app::event::PlaybackEvent::TrackEnded.into())
+            .is_empty()
+    );
     assert_eq!(p.state.playback.status, PlayStatus::Stopped);
     assert_eq!(p.state.current_track().unwrap().rating_key, "first");
     assert!(p.state.station_starting.is_some());
@@ -226,13 +227,14 @@ fn empty_and_duplicate_only_refills_finish_without_an_automatic_retry_loop() {
         assert!(p.reduce(refill(&keys)).is_empty());
         assert_eq!(p.state.radio.refill, RadioRefill::Idle);
         assert_eq!(p.state.radio.tracks.len(), 2);
-        assert!(p
-            .state
-            .notifications
-            .last_error
-            .as_ref()
-            .unwrap()
-            .contains("no new tracks"));
+        assert!(
+            p.state
+                .notifications
+                .last_error
+                .as_ref()
+                .unwrap()
+                .contains("no new tracks")
+        );
     }
 }
 
@@ -247,13 +249,14 @@ async fn stop_rejects_late_station_and_refill_completions() {
     let generation = p.state.radio_generation;
     p.dispatch(PlaybackAction::Stop).await;
     for event in [loaded(), refill(&["new"])] {
-        assert!(p
-            .reduce(Event::RadioResult {
+        assert!(
+            p.reduce(Event::RadioResult {
                 generation,
                 navigation_generation: None,
                 event: Box::new(event),
             })
-            .is_empty());
+            .is_empty()
+        );
     }
     assert!(p.state.station_starting.is_none());
     assert_eq!(p.state.playback.status, PlayStatus::Stopped);
@@ -273,13 +276,14 @@ async fn only_latest_station_can_replace_playback_and_empty_results_preserve_it(
         title: "Artist".into(),
     })
     .await;
-    assert!(p
-        .reduce(Event::RadioResult {
+    assert!(
+        p.reduce(Event::RadioResult {
             generation: old,
             navigation_generation: None,
             event: Box::new(loaded()),
         })
-        .is_empty());
+        .is_empty()
+    );
     assert_eq!(p.state.current_track().unwrap().rating_key, "first");
     let mut event = loaded();
     if let Event::Radio(RadioEvent::StationTracksLoaded { tracks, .. }) = &mut event {
@@ -306,13 +310,14 @@ async fn pause_cancels_station_start_without_stopping_current_music_context() {
     p.dispatch(PlaybackAction::TogglePlayPause).await;
     assert_eq!(p.state.playback.status, PlayStatus::Paused);
     assert!(p.state.station_starting.is_none());
-    assert!(p
-        .reduce(Event::RadioResult {
+    assert!(
+        p.reduce(Event::RadioResult {
             generation,
             navigation_generation: None,
             event: Box::new(loaded()),
         })
-        .is_empty());
+        .is_empty()
+    );
     assert_eq!(p.state.current_track().unwrap().rating_key, "first");
 }
 

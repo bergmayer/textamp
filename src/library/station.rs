@@ -9,18 +9,17 @@ pub fn standard_stations(
 ) -> Vec<Station> {
     use super::capabilities::Feature::*;
     [
-        ("library", "Library Radio", false, LibraryRadio),
-        ("randomArtist", "Random Artist Radio", false, ArtistRadio),
-        ("randomAlbum", "Random Album Radio", false, AlbumRadio),
-        ("deepCuts", "Deep Cuts Radio", false, PlayCounts),
-        ("timeTravel", "Time Travel Radio", false, ReleaseYears),
+        ("randomAlbum", "Play Random Albums", false, AlbumRadio),
+        ("randomArtist", "Random Artist Mix", false, ArtistRadio),
+        ("library", "Library Mix", false, LibraryRadio),
+        ("deepCuts", "Deep Cuts Mix", false, PlayCounts),
+        ("timeTravel", "Time Travel Mix", false, ReleaseYears),
         ("onThisDay", "On This Day", false, ReleaseDates),
-        ("mood", "Mood Radio", true, Moods),
-        ("style", "Style / Genre Radio", true, Genres),
-        ("decade", "Decade Radio", true, ReleaseYears),
-        ("artistMix", "Artist Mix", false, RelatedArtists),
-        ("albumMix", "Album Mix", false, SonicSimilarity),
-        ("sonic", "Sonic Radio", false, SonicSimilarity),
+        ("mood", "Mood Mix", true, Moods),
+        ("style", "Style / Genre Mix", true, Genres),
+        ("decade", "Decade Mix", true, ReleaseYears),
+        ("sonic", "Sonic Mix", false, SonicSimilarity),
+        ("stayClose", "Stay Close Mix", false, SonicSimilarity),
     ]
     .into_iter()
     .filter(|(_, _, _, feature)| capabilities.supports(*feature))
@@ -47,6 +46,9 @@ pub enum RadioSource {
     Artist(String),
     /// Track identity used to seed sonic recommendations, independent of provider.
     Sonic(String),
+    SonicFixed(String),
+    /// Continue the existing queue, staying close to its final track.
+    Related(String),
     Station(String),
 }
 
@@ -54,7 +56,7 @@ impl RadioSource {
     pub fn station_key(&self) -> Option<&str> {
         match self {
             Self::Station(key) => Some(key),
-            Self::Artist(_) | Self::Sonic(_) => None,
+            Self::Artist(_) | Self::Sonic(_) | Self::SonicFixed(_) | Self::Related(_) => None,
         }
     }
 }
@@ -79,6 +81,59 @@ pub struct Station {
 }
 
 impl Station {
+    pub fn is_browsable(&self) -> bool {
+        !(self.is_separator() || self.is_action() || self.is_dj_mode() || self.is_remix())
+    }
+
+    /// Stations with a category or seed picker cannot start directly from their row.
+    pub fn requires_input(&self) -> bool {
+        self.is_category()
+            || matches!(
+                self.identifier.as_deref(),
+                Some("sonic" | "stayClose" | "artist-picker")
+            )
+    }
+
+    pub fn description_text(&self) -> &str {
+        if let Some(description) = self.description.as_deref().filter(|s| !s.trim().is_empty()) {
+            return description;
+        }
+        match self.identifier.as_deref().unwrap_or("") {
+            "randomAlbum" => {
+                "Plays a randomly chosen album in track order, then another album. New albums are added as the queue approaches its end."
+            }
+            "randomArtist" => {
+                "Plays tracks by a randomly chosen artist, then continues with another artist."
+            }
+            "library" => "Plays a continuing selection of tracks from your library.",
+            "deepCuts" => {
+                "Plays less frequently played tracks from your library and keeps adding more."
+            }
+            "timeTravel" => {
+                "Moves through your library's release decades, adding the next batch as playback continues."
+            }
+            "onThisDay" => {
+                "Plays albums released on today's date and continues with matching tracks."
+            }
+            "mood" | "audioMood" => {
+                "Choose a mood to start a continuing station of matching tracks."
+            }
+            "style" => "Choose a genre to start a continuing station of matching tracks.",
+            "decade" => "Choose a release decade to start a continuing station of matching tracks.",
+            "artistMix" => "Mixes an artist's tracks with related artists and keeps adding more.",
+            "albumMix" => "Mixes an album with sonically related tracks and keeps adding more.",
+            "sonic" => {
+                "Choose a starting track. The station follows related tracks as it continues."
+            }
+            "stayClose" => {
+                "Choose a starting track. Each batch stays sonically close to that track."
+            }
+            _ => {
+                "Plays a continuing selection of matching tracks, adding the next batch near the end of the queue."
+            }
+        }
+    }
+
     /// Get the station kind based on its identifier or title.
     pub fn kind(&self) -> StationKind {
         let id = self.identifier.as_deref().unwrap_or("").to_lowercase();
@@ -130,7 +185,7 @@ impl Station {
     }
 
     /// Check if this station is a category with sub-stations.
-    /// Categories like "Mood Radio", "Style Radio", "Decade Radio" have children.
+    /// Categories like "Mood Mix", "Style Mix", "Decade Mix" have children.
     pub fn is_category(&self) -> bool {
         // Filtered choices retain the mood/style/decade identifier, but their
         // query identifies a playable leaf, not another navigation category.
@@ -171,14 +226,14 @@ impl StationKind {
         match self {
             StationKind::ArtistMix => "Artist Mix Builder",
             StationKind::AlbumMix => "Album Mix Builder",
-            StationKind::LibraryRadio => "Library Radio",
-            StationKind::DeepCuts => "Deep Cuts Radio",
-            StationKind::TimeTravel => "Time Travel Radio",
-            StationKind::RandomAlbum => "Random Album Radio",
+            StationKind::LibraryRadio => "Library Mix",
+            StationKind::DeepCuts => "Deep Cuts Mix",
+            StationKind::TimeTravel => "Time Travel Mix",
+            StationKind::RandomAlbum => "Play Random Albums",
             StationKind::OnThisDay => "On This Day",
-            StationKind::Style => "Style Radio",
-            StationKind::Mood => "Mood Radio",
-            StationKind::Decade => "Decade Radio",
+            StationKind::Style => "Style Mix",
+            StationKind::Mood => "Mood Mix",
+            StationKind::Decade => "Decade Mix",
             StationKind::Other => "Radio",
         }
     }

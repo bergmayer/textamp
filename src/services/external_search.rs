@@ -1,6 +1,5 @@
-//! External searches, including native Music search on macOS.
-
-use anyhow::{bail, Context, Result};
+//! Service search URLs and operating-system handoffs.
+use anyhow::{Context, Result, bail};
 use std::time::Duration;
 use tokio::process::Command;
 
@@ -10,6 +9,38 @@ pub enum SearchTarget {
     AppleMusic,
     Spotify,
     YouTube,
+}
+
+impl SearchTarget {
+    /// External services in menu order.
+    pub const ALL: [Self; 3] = [Self::AppleMusic, Self::YouTube, Self::Spotify];
+
+    /// Display name shared by settings, commands and native handoffs.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::AppleMusic => "Apple Music",
+            Self::Spotify => "Spotify",
+            Self::YouTube => "YouTube",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Destination {
+    pub target: SearchTarget,
+    pub label: &'static str,
+    pub native_url: Option<String>,
+    pub web_url: String,
+}
+
+pub fn search_destination(target: SearchTarget, query: &str) -> Destination {
+    Destination {
+        target,
+        label: target.name(),
+        native_url: (target == SearchTarget::Spotify)
+            .then(|| format!("spotify:search:{}", urlencoding::encode(query))),
+        web_url: generate_search_url(target, query),
+    }
 }
 
 /// Browser search URL. Use an explicit storefront to avoid Music's countryless
@@ -27,37 +58,82 @@ pub fn generate_search_url(target: SearchTarget, query: &str) -> String {
     }
 }
 
-/// Open a search, returning a brief notice only when native Music was unavailable.
+/// Apple Music requires its native app. Other services can use web results.
 /// A successful handoff does not imply that the service returned any results.
 pub async fn open_search(target: SearchTarget, query: &str) -> Result<Option<&'static str>> {
     if query.trim().is_empty() {
         bail!("Nothing selected to search");
     }
-    // Native UI requests cannot overlap: two scripts could submit each other's
-    // queries. Reject repeats instead of building up a queue of app launches.
-    static SEARCH: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-    let _search = SEARCH
-        .try_lock()
-        .context("Another search is still opening")?;
-    #[cfg(not(target_os = "macos"))]
-    let notice = None;
-    #[cfg(target_os = "macos")]
-    let mut notice = None;
-    #[cfg(target_os = "macos")]
     if target == SearchTarget::AppleMusic {
-        match run_command(native_music_command(query), Duration::from_secs(15)).await {
-            Ok(()) => return Ok(None),
-            Err(error) => {
-                tracing::warn!("Native Music search unavailable: {error:#}");
-                notice = Some("Music unavailable; using web search (see Help).");
-            }
+        #[cfg(target_os = "macos")]
+        {
+            let mut command = Command::new("/usr/bin/open");
+            command.args(["-b", "com.apple.Music", &generate_search_url(target, query)]);
+            run_command(command, Duration::from_secs(10))
+                .await
+                .context("Could not open the Music app")?;
+            return Ok(None);
+        }
+        #[cfg(target_os = "windows")]
+        {
+            open_windows_music(&generate_search_url(target, query)).await?;
+            return Ok(None);
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        bail!("Apple Music app search is unavailable on this platform");
+    }
+    let destination = search_destination(target, query);
+    if target == SearchTarget::YouTube {
+        open_browser(&destination.web_url).await?;
+        return Ok(None);
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(url) = &destination.native_url {
+        let mut command = Command::new("/usr/bin/open");
+        command.args(["-a", "Spotify", url]);
+        if run_command(command, Duration::from_secs(10)).await.is_ok() {
+            return Ok(None);
         }
     }
-    // open supplies the appropriate platform launchers, but run them ourselves
-    // so a stuck launcher neither blocks the event loop nor survives shutdown.
-    let url = generate_search_url(target, query);
-    open_browser(&url).await?;
-    Ok(notice)
+    #[cfg(not(target_os = "macos"))]
+    if let Some(url) = &destination.native_url {
+        #[cfg(target_os = "windows")]
+        let available = {
+            let scheme = url.split(':').next().unwrap_or_default();
+            let mut command = Command::new("reg");
+            command.args(["query", &format!("HKCR\\{scheme}"), "/v", "URL Protocol"]);
+            run_command(command, Duration::from_secs(3)).await.is_ok()
+        };
+        #[cfg(not(target_os = "windows"))]
+        let available = true;
+        if available && open_browser(url).await.is_ok() {
+            return Ok(None);
+        }
+    }
+    open_browser(&destination.web_url).await?;
+    Ok(None)
+}
+
+#[cfg(target_os = "windows")]
+async fn open_windows_music(url: &str) -> Result<()> {
+    use windows::{
+        Foundation::Uri,
+        System::{Launcher, LauncherOptions},
+        core::HSTRING,
+    };
+    let options = LauncherOptions::new()?;
+    options.SetTargetApplicationPackageFamilyName(&HSTRING::from(
+        "AppleInc.AppleMusicWin_nzyj5cx40ttqa",
+    ))?;
+    let uri = Uri::CreateUri(&HSTRING::from(url))?;
+    let launch = Launcher::LaunchUriWithOptionsAsync(&uri, &options)?;
+    if !tokio::time::timeout(Duration::from_secs(10), async { launch.await })
+        .await
+        .context("Apple Music launch timed out")??
+    {
+        bail!("Could not open the Apple Music app");
+    }
+    Ok(())
 }
 
 /// Hand off a URL to the default browser without blocking the UI indefinitely.
@@ -87,27 +163,21 @@ async fn run_command(mut command: Command, timeout: Duration) -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
-fn native_music_command(query: &str) -> Command {
-    let mut command = Command::new("/usr/bin/osascript");
-    // Metadata is an argument, never executable AppleScript or clipboard text.
-    command.args(["-e", include_str!("music_search.applescript"), "--", query]);
-    command
-}
-
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
-    #[cfg(target_os = "macos")]
     #[test]
-    fn native_query_is_a_literal_argument() {
-        let query = "Björk \" & do shell script \"bad\" --\n日本語";
-        let command = native_music_command(query);
-        let args: Vec<_> = command.as_std().get_args().collect();
-        assert_eq!(args[2], "--");
-        assert_eq!(args[3], query);
-        assert!(!args[1].to_string_lossy().contains(query));
+    fn catalog_search_url_preserves_unicode_ampersands_and_spaces() {
+        let query = "Windy & Carl – Depths";
+        let url =
+            reqwest::Url::parse(&generate_search_url(SearchTarget::AppleMusic, query)).unwrap();
+        assert_eq!(url.host_str(), Some("music.apple.com"));
+        assert_eq!(url.path(), "/us/search");
+        assert_eq!(
+            url.query_pairs().find(|(key, _)| key == "term").unwrap().1,
+            query
+        );
     }
 
     #[cfg(unix)]

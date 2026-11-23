@@ -5,7 +5,7 @@
 use super::helpers;
 use crate::app::action::*;
 use crate::app::event::*;
-use crate::app::state::{BrowseCategory, BrowseItem, PlayStatus, View};
+use crate::app::state::{BrowseItem, PlayStatus, View};
 use crate::app::{Action, AppState, Event};
 
 use std::time::Duration;
@@ -45,10 +45,10 @@ pub(crate) fn reset_account_scoped_state(state: &mut AppState) {
     let old_waveform = std::mem::take(&mut state.waveform);
     let old_spectrogram = std::mem::take(&mut state.spectrogram);
 
-    let artwork_visible = state.artwork.default_visible;
+    let graphical_mode = state.artwork.graphical_mode;
     let artwork_mode = state.artwork.mode;
     let old_artwork = std::mem::take(&mut state.artwork);
-    state.artwork.default_visible = artwork_visible;
+    state.artwork.graphical_mode = graphical_mode;
     state.artwork.mode = artwork_mode;
     state.artwork.grid_generation = artwork_generation;
 
@@ -107,215 +107,6 @@ pub fn handle_app_event(
     };
 
     match event {
-        Event::Data(DataEvent::ArtistsLoaded {
-            library_key,
-            result,
-        }) => {
-            if state.active_library.as_ref() != Some(&library_key) {
-                return vec![];
-            }
-            let mut artists = match result {
-                Ok(artists) => artists,
-                Err(error) => {
-                    state.library.artists_loading = false;
-
-                    state.set_error(error.message);
-                    return vec![];
-                }
-            };
-            // Sort by display title, ignoring "The " prefix
-            artists.sort_by_key(|a| helpers::sort_key(&a.title));
-            state.library.artists_total = artists.len() as u32;
-            state.library.artists = artists;
-            state.library.artists_loading = false;
-
-            // Update artist_nav if we're in Artists category. No auto-drill —
-            // child columns only open on explicit Enter/Right.
-            if state.browse_category == BrowseCategory::Library {
-                let title = "artists";
-                let items = state.build_artist_root_items();
-                state.artist_nav.update_root_items(title, items);
-            }
-            vec![]
-        }
-        Event::Data(DataEvent::ArtistsPageLoaded {
-            library_key,
-            selected_key,
-            artists,
-            total,
-        }) => {
-            if state.active_library.as_ref() != Some(&library_key) {
-                return vec![];
-            }
-            helpers::sorted_merge(&mut state.library.artists, artists, |artist| {
-                helpers::sort_key(&artist.title)
-            });
-            state.library.artists_total = total;
-            if let Some(selected_key) = selected_key {
-                if let Some(position) = state
-                    .library
-                    .artists
-                    .iter()
-                    .position(|artist| artist.rating_key == selected_key)
-                {
-                    state.list_state.artists_index = position;
-                }
-            }
-            state.library.artists_loading = false;
-            vec![]
-        }
-        Event::Data(DataEvent::ArtistsPageFailed { library_key }) => {
-            if state.active_library.as_ref() == Some(&library_key) {
-                state.library.artists_loading = false;
-            }
-            vec![]
-        }
-        Event::Data(DataEvent::AlbumsLoaded(mut albums)) => {
-            // Sort by display title, ignoring "The " prefix
-            albums.sort_by_key(|a| helpers::sort_key(&a.title));
-            state.library.albums = albums;
-            state.library.albums_loading = false;
-            vec![]
-        }
-        Event::Data(DataEvent::PlaylistsLoaded { server_url, result }) => {
-            if state.connected_server_url != server_url {
-                return vec![];
-            }
-            let mut playlists = match result {
-                Ok(playlists) => playlists,
-                Err(error) => {
-                    state.library.playlists_loading = false;
-
-                    state.set_error(error.message);
-                    return vec![];
-                }
-            };
-            // Move "Recently Played" to top of playlist list
-            if let Some(pos) = playlists.iter().position(|p| p.title == "Recently Played") {
-                if pos > 0 {
-                    let rp = playlists.remove(pos);
-                    playlists.insert(0, rp);
-                }
-            }
-
-            // Update playlist_nav with the playlists list. No auto-drill —
-            // child columns only open on explicit Enter/Right.
-            let items = crate::app::state::BrowseItem::from_playlists(&playlists);
-            state.playlist_nav.update_root_items("playlists", items);
-
-            // Build the live-keys set for stale-pruning of saved
-            // per-playlist view toggles. Anything saved against a
-            // playlist that's no longer in this library's list (i.e.
-            // the user deleted it on server) gets dropped from config.
-            let live_keys: std::collections::HashSet<String> =
-                playlists.iter().map(|p| p.rating_key.clone()).collect();
-            let prune_action = state.active_library.as_ref().cloned().map(|lib_key| {
-                SettingsAction::PrunePlaylistViews {
-                    library_key: lib_key,
-                    live_playlist_keys: live_keys,
-                }
-                .into()
-            });
-
-            state.library.playlists = playlists;
-            state.library.playlists_loading = false;
-            prune_action.map(|a: Action| vec![a]).unwrap_or_default()
-        }
-        Event::Data(DataEvent::TracksLoaded(tracks)) => {
-            state.library.selected_album_tracks = tracks;
-            state.library.right_panel_loading = false;
-            vec![]
-        }
-        Event::Data(DataEvent::AlbumTracksLoaded {
-            request_key,
-            tracks,
-        }) => {
-            if state.library.right_panel_request_key.as_deref() != Some(&request_key) {
-                tracing::debug!("Ignoring stale album-tracks completion: {}", request_key);
-                return vec![];
-            }
-            state.library.right_panel_request_key = None;
-            state.library.selected_album_tracks = tracks;
-            state.library.right_panel_loading = false;
-            vec![]
-        }
-        Event::Data(DataEvent::ArtistAlbumsLoaded {
-            request_key,
-            albums,
-        }) => {
-            if state.library.right_panel_request_key.as_deref() != Some(&request_key) {
-                tracing::debug!("Ignoring stale artist-albums completion: {}", request_key);
-                return vec![];
-            }
-            state.library.right_panel_request_key = None;
-            state.library.selected_artist_albums = albums;
-            state.library.right_panel_loading = false;
-            state.focus = crate::app::state::Focus::Right;
-
-            // Check if we need to auto-select a specific album (e.g., from Similar view)
-            if let Some(album_key) = state.search.pending_album_key.take() {
-                // Find the album in the list (+1 offset for "All Tracks" at index 0)
-                if let Some(album_idx) = state
-                    .library
-                    .selected_artist_albums
-                    .iter()
-                    .position(|a| a.rating_key == album_key)
-                {
-                    state.list_state.right_albums_index = album_idx + 1; // +1 for "All Tracks"
-                    state.library.selected_album_title = state.library.selected_artist_albums
-                        [album_idx]
-                        .title
-                        .clone();
-                    return vec![DataAction::LoadAlbumTracks {
-                        rating_key: album_key,
-                    }
-                    .into()];
-                }
-            }
-            vec![]
-        }
-        Event::Data(DataEvent::ArtistAllTracksLoaded {
-            request_key,
-            tracks,
-        }) => {
-            if state.library.right_panel_request_key.as_deref() != Some(&request_key) {
-                tracing::debug!("Ignoring stale artist-tracks completion: {}", request_key);
-                return vec![];
-            }
-            state.library.right_panel_request_key = None;
-            state.library.selected_album_tracks = tracks;
-            state.library.right_panel_loading = false;
-            vec![]
-        }
-        Event::Data(DataEvent::CategoryTracksLoaded {
-            request_key,
-            tracks,
-        }) => {
-            if state.library.right_panel_request_key.as_deref() != Some(&request_key) {
-                tracing::debug!("Ignoring stale category-tracks completion: {}", request_key);
-                return vec![];
-            }
-            state.library.right_panel_request_key = None;
-            if state.library.selected_album_title.is_empty() {
-                if let Some(first) = tracks.first() {
-                    state.library.selected_album_title = first.album_name().to_string();
-                }
-            }
-            state.library.selected_album_tracks = tracks;
-            state.library.right_panel_loading = false;
-            vec![]
-        }
-        Event::Data(DataEvent::CategoryAlbumsLoaded {
-            albums,
-            status_message,
-        }) => {
-            state.library.right_panel_mode = crate::app::state::RightPanelMode::CategoryAlbums;
-            state.library.tag_albums = albums;
-            state.library.tag_albums_index = 0;
-            state.set_status(status_message);
-            state.library.right_panel_loading = false;
-            vec![]
-        }
         Event::Data(DataEvent::ScopedLoadError {
             request_key,
             message,
@@ -337,47 +128,13 @@ pub fn handle_app_event(
             }
             vec![]
         }
-        Event::Data(DataEvent::AllAlbumsForMillerLoaded {
-            library_key,
-            request_id,
-            replace_child,
-            mut albums,
-        }) => {
-            if state.active_library.as_ref() != Some(&library_key)
-                || state.artist_nav_request_id != request_id
-            {
-                return vec![];
-            }
-            // Async completion for LoadAllAlbumsForMiller when state.library.albums was empty
-            albums.sort_by_key(|a| helpers::sort_key(&a.title));
-            state.library.albums = albums;
-            state.library.albums_total = state.library.albums.len() as u32;
-            // Now push the column (same as the sync path in dispatch_miller)
-            vec![MillerAction::LoadAllAlbumsForMiller { replace_child }.into()]
-        }
-        Event::Data(DataEvent::AllAlbumsForMillerFailed {
-            library_key,
-            request_id,
-            error,
-        }) => {
-            if state.active_library.as_ref() != Some(&library_key)
-                || state.artist_nav_request_id != request_id
-            {
-                return vec![];
-            }
-            state.artist_nav.loading = false;
 
-            state.set_error(error.message);
-            vec![]
-        }
         Event::Data(DataEvent::SimilarLoadFailed {
             request_key,
             message,
         }) => {
-            if state.similar.request_key.as_deref() == Some(&request_key) {
-                state.similar.request_key = None;
-                state.similar.loading = false;
-                state.similar.error = Some(message);
+            if state.similar.request.loading_key() == Some(&request_key) {
+                state.similar.request = crate::app::state::SimilarRequest::Failed { message };
             }
             vec![]
         }
@@ -385,15 +142,13 @@ pub fn handle_app_event(
             request_key,
             albums,
         }) => {
-            if state.similar.request_key.as_deref() != Some(&request_key) {
+            if state.similar.request.loading_key() != Some(&request_key) {
                 tracing::debug!("Ignoring stale similar-albums completion: {}", request_key);
                 return vec![];
             }
-            state.similar.request_key = None;
-            state.similar.error = None;
+            state.similar.request = crate::app::state::SimilarRequest::Ready;
             state.similar.albums = albums;
             state.similar.mode = crate::app::state::SimilarMode::Albums;
-            state.similar.loading = false;
             state.list_state.similar_index = 0;
             vec![]
         }
@@ -401,15 +156,13 @@ pub fn handle_app_event(
             request_key,
             tracks,
         }) => {
-            if state.similar.request_key.as_deref() != Some(&request_key) {
+            if state.similar.request.loading_key() != Some(&request_key) {
                 tracing::debug!("Ignoring stale similar-tracks completion: {}", request_key);
                 return vec![];
             }
-            state.similar.request_key = None;
-            state.similar.error = None;
+            state.similar.request = crate::app::state::SimilarRequest::Ready;
             state.similar.tracks = tracks;
             state.similar.mode = crate::app::state::SimilarMode::Tracks;
-            state.similar.loading = false;
             state.list_state.similar_index = 0;
             vec![]
         }
@@ -439,15 +192,13 @@ pub fn handle_app_event(
             request_key,
             artists,
         }) => {
-            if state.similar.request_key.as_deref() != Some(&request_key) {
+            if state.similar.request.loading_key() != Some(&request_key) {
                 tracing::debug!("Ignoring stale similar-artists completion: {}", request_key);
                 return vec![];
             }
-            state.similar.request_key = None;
-            state.similar.error = None;
+            state.similar.request = crate::app::state::SimilarRequest::Ready;
             state.similar.artists = artists;
             state.similar.mode = crate::app::state::SimilarMode::Artists;
-            state.similar.loading = false;
             state.list_state.similar_index = 0;
             vec![]
         }
@@ -466,86 +217,6 @@ pub fn handle_app_event(
             vec![]
         }
 
-        Event::Ui(UiEvent::AdventureLauncherAlbumsLoaded {
-            server_url,
-            request_id,
-            artist_key,
-            artist_name,
-            result,
-        }) => {
-            if state.connected_server_url.as_deref() != server_url.as_deref()
-                || state.adventure_launcher_request_id != request_id
-            {
-                return vec![];
-            }
-            if let Some(launcher) = state.popups.adventure_launcher_mut() {
-                launcher.loading = false;
-                match result {
-                    Ok(albums) => {
-                        launcher.drill = crate::app::state::AdventureDrillLevel::ArtistAlbums {
-                            artist_key,
-                            artist_name,
-                            albums,
-                        };
-                        launcher.item_index = 0;
-                        launcher.focus = crate::app::state::SearchFocus::Results;
-                    }
-                    Err(error) => {
-                        state.set_error(error.message);
-                    }
-                }
-            }
-            vec![]
-        }
-        Event::Ui(UiEvent::AdventureLauncherTracksLoaded {
-            server_url,
-            request_id,
-            album_key,
-            album_title,
-            artist_name,
-            result,
-        }) => {
-            if state.connected_server_url.as_deref() != server_url.as_deref()
-                || state.adventure_launcher_request_id != request_id
-            {
-                return vec![];
-            }
-            if let Some(launcher) = state.popups.adventure_launcher_mut() {
-                launcher.loading = false;
-                match result {
-                    Ok(tracks) => {
-                        launcher.drill = crate::app::state::AdventureDrillLevel::AlbumTracks {
-                            album_key,
-                            album_title,
-                            artist_name,
-                            tracks,
-                        };
-                        launcher.item_index = 0;
-                        launcher.focus = crate::app::state::SearchFocus::Results;
-                    }
-                    Err(error) => {
-                        state.set_error(error.message);
-                    }
-                }
-            }
-            vec![]
-        }
-        Event::Data(DataEvent::ApiError(msg)) => {
-            state.set_error(msg);
-            vec![]
-        }
-        Event::Playback(PlaybackEvent::TrackStarted) => {
-            state.playback.status = PlayStatus::Playing;
-            state.playback.position_ms = 0;
-            // Successful playback supersedes any prior error banner
-            // ("Playback stopped after multiple consecutive errors",
-            // "Track Not Found", etc). Without this the red banner
-            // sticks around even after the user resumes / the queue
-            // recovers, making the app feel broken when it isn't.
-            state.consecutive_playback_errors = 0;
-            state.clear_error();
-            vec![]
-        }
         Event::Playback(PlaybackEvent::TrackEnded) => {
             // Ignore stale TrackEnded events. The tick loop only sends TrackEnded
             // when status is Playing. If status has since changed (e.g., a new station
@@ -586,28 +257,18 @@ pub fn handle_app_event(
                 .as_ref()
                 .is_some_and(|start| start.continue_playback == Some(state.playback.request_id))
             {
-                // Natural completion waits for Sonic Radio, rather than playing
+                // Natural completion waits for Sonic Mix, rather than playing
                 // the old queue's next song. Explicit transport input remains free
                 // to cancel or supersede the pending station.
-                state.set_status("Waiting for Sonic Radio…".into());
+                state.set_status("Waiting for Sonic Mix…".into());
                 vec![]
+            } else if state.queue.repeat == crate::app::state::RepeatMode::Track {
+                vec![PlaybackAction::RetryCurrentTrack.into()]
             } else {
                 vec![PlaybackAction::Next.into()]
             }
         }
-        Event::Playback(PlaybackEvent::PlaybackPaused) => {
-            state.playback.status = PlayStatus::Paused;
-            vec![]
-        }
-        Event::Playback(PlaybackEvent::PlaybackResumed) => {
-            state.playback.status = PlayStatus::Playing;
-            vec![]
-        }
-        Event::Playback(PlaybackEvent::PlaybackStopped) => {
-            state.playback.status = PlayStatus::Stopped;
-            state.playback.position_ms = 0;
-            vec![]
-        }
+
         Event::Playback(PlaybackEvent::SeekFailed {
             playback_id,
             message,
@@ -704,10 +365,6 @@ pub fn handle_app_event(
             }
         }
 
-        Event::Playback(PlaybackEvent::BufferingStart) => {
-            state.playback.status = PlayStatus::Buffering;
-            vec![]
-        }
         Event::Playback(PlaybackEvent::BufferingEnd { playback_id }) => {
             if playback_id != state.playback.request_id
                 || state.playback.status != PlayStatus::Buffering
@@ -721,10 +378,7 @@ pub fn handle_app_event(
             state.playback.playback_started_at = Some(std::time::Instant::now());
             vec![]
         }
-        Event::Playback(PlaybackEvent::PositionUpdate(pos)) => {
-            state.playback.position_ms = pos;
-            vec![]
-        }
+
         Event::Artwork(ArtworkEvent::ArtworkLoaded {
             generation,
             thumb_path,
@@ -777,17 +431,6 @@ pub fn handle_app_event(
             vec![]
         }
 
-        Event::Artwork(ArtworkEvent::ArtworkCacheStats { count, total_bytes }) => {
-            state.artwork.cache_stats = Some((count, total_bytes));
-            vec![]
-        }
-        Event::Cache(CacheEvent::LibraryCacheStats {
-            total_bytes,
-            breakdown,
-        }) => {
-            state.library_cache_stats = Some((total_bytes, breakdown));
-            vec![]
-        }
         Event::Cache(CacheEvent::WaveformCacheStats { count, total_bytes }) => {
             state.waveform_cache_stats = Some((count, total_bytes));
             vec![]
@@ -795,25 +438,25 @@ pub fn handle_app_event(
 
         Event::Tick => {
             // Clear expired modifier bars
-            if let Some(deadline) = state.alt_bar_until {
-                if std::time::Instant::now() >= deadline {
-                    state.alt_bar_until = None;
-                }
+            if let Some(deadline) = state.alt_bar_until
+                && std::time::Instant::now() >= deadline
+            {
+                state.alt_bar_until = None;
             }
 
             // Clear expired toasts (5 second display)
-            if let Some(show_time) = state.notifications.toast_show_time {
-                if show_time.elapsed() > Duration::from_secs(5) {
-                    state.notifications.toast_message = None;
-                    state.notifications.toast_show_time = None;
-                }
+            if let Some(show_time) = state.notifications.toast_show_time
+                && show_time.elapsed() > Duration::from_secs(5)
+            {
+                state.notifications.toast_message = None;
+                state.notifications.toast_show_time = None;
             }
 
             // Clear expired status messages (5 second display)
-            if let Some(show_time) = state.notifications.status_show_time {
-                if show_time.elapsed() > Duration::from_secs(5) {
-                    state.clear_status();
-                }
+            if let Some(show_time) = state.notifications.status_show_time
+                && show_time.elapsed() > Duration::from_secs(5)
+            {
+                state.clear_status();
             }
 
             // Periodic playback progress report to server (~10 seconds)
@@ -823,11 +466,10 @@ pub fn handle_app_event(
                         >= state.playback.duration_ms.saturating_mul(9);
                 if reached_scrobble_threshold
                     && state.playback.scrobble == crate::app::state::ScrobbleState::Pending
+                    && let Some(track) = state.current_track().cloned()
                 {
-                    if let Some(track) = state.current_track().cloned() {
-                        state.playback.scrobble = crate::app::state::ScrobbleState::Queued;
-                        crate::app::sources::navidrome::scrobble(state, event_tx, &track);
-                    }
+                    state.playback.scrobble = crate::app::state::ScrobbleState::Queued;
+                    crate::app::sources::navidrome::scrobble(state, event_tx, &track);
                 }
             }
 
@@ -868,34 +510,25 @@ pub fn handle_app_event(
             // recent rapid-nav gesture and the user has been still for
             // `ART_LOAD_PAUSE_MS`, clear the gate and dispatch one
             // viewport-wide `LoadAlbumArt` batch.
-            if let Some(actions) = super::lazy_art::settle(state) {
-                if !actions.is_empty() {
-                    return actions;
-                }
+            if let Some(actions) = super::lazy_art::settle(state)
+                && !actions.is_empty()
+            {
+                return actions;
             }
 
-            // Track-details pane: lazy-fetch sonically-similar tracks
-            // for whatever Track row is currently focused. Returned
-            // as a follow-up `LoadTrackPaneSimilar` action so the
-            // dispatcher (which has client access) actually fires
-            // the API call. Idempotent — the dispatcher early-returns
-            // when the entry is already loaded or in flight.
-            if state.view == crate::app::state::View::Browse {
-                if let Some(track) = crate::app::sonic_details::visible(state)
-                    .and_then(|d| d.tracks.get(d.index))
-                    .or_else(|| state.focused_track())
+            if state.view == crate::app::state::View::Browse
+                && let Some((track, _)) = crate::app::details::similar_seed(state)
+            {
+                let key = track.rating_key;
+                if crate::app::sources::sonic::enabled(state)
+                    && !key.is_empty()
+                    && !state.track_pane_similar.contains_key(&key)
+                    && !state.track_pane_similar_loading.contains(&key)
                 {
-                    let key = track.rating_key.clone();
-                    if crate::app::sources::sonic::enabled(state)
-                        && !key.is_empty()
-                        && !state.track_pane_similar.contains_key(&key)
-                        && !state.track_pane_similar_loading.contains(&key)
-                    {
-                        return vec![crate::app::action::DataAction::LoadTrackPaneSimilar {
-                            rating_key: key,
-                        }
-                        .into()];
-                    }
+                    return vec![
+                        crate::app::action::DataAction::LoadTrackPaneSimilar { rating_key: key }
+                            .into(),
+                    ];
                 }
             }
 
@@ -977,12 +610,11 @@ pub fn handle_app_event(
                                 scope,
                                 thumb: Some(thumb),
                             } => {
-                                if let Some(artist_key) = scope.artist_key() {
-                                    if !state.artwork.grid_cache.contains_key(artist_key)
-                                        && !state.artwork.grid_pending.contains(artist_key)
-                                    {
-                                        to_load.push((artist_key.to_string(), thumb.clone()));
-                                    }
+                                if let Some(artist_key) = scope.artist_key()
+                                    && !state.artwork.grid_cache.contains_key(artist_key)
+                                    && !state.artwork.grid_pending.contains(artist_key)
+                                {
+                                    to_load.push((artist_key.to_string(), thumb.clone()));
                                 }
                             }
                             BrowseItem::Artist {
@@ -1004,42 +636,39 @@ pub fn handle_app_event(
             }
 
             // Visualizer data safety net: ensure waveform/spectrogram are generated
-            // when the user is on a view where the visualizer panel is rendered.
-            // The GUI's Queue view now shows the visualizer always-on in its
-            // bottom half, so we trip this on both View::NowPlaying and
-            // View::Queue. Catches all edge cases (track change, re-entry,
-            // failed downloads) without fragile event-based triggering.
-            if matches!(state.view, View::NowPlaying | View::Queue)
-                || (state.fullscreen_active && !state.fullscreen_artwork)
+            if ((state.playback_waveform_available && state.view == View::NowPlaying)
+                || (state.visualizers_available
+                    && (matches!(state.view, View::NowPlaying | View::Queue)
+                        || state.desktop_player_visible
+                        || (state.fullscreen.is_open() && !state.fullscreen.is_artwork()))))
+                && let Some(track) = state.current_track().cloned()
             {
-                if let Some(track) = state.current_track().cloned() {
-                    let tk = &track.rating_key;
+                let tk = &track.rating_key;
 
-                    // Ensure track_key is set (handles track change while on this view)
-                    if state.waveform.track_key.as_ref() != Some(tk) {
-                        state.waveform = crate::app::state::WaveformState::default();
-                        state.waveform.track_key = Some(tk.clone());
-                        state.spectrogram = crate::app::state::SpectrogramState::default();
-                        state.spectrogram.track_key = Some(tk.clone());
-                    }
+                // Ensure track_key is set (handles track change while on this view)
+                if state.waveform.track_key.as_ref() != Some(tk) {
+                    state.waveform = crate::app::state::WaveformState::default();
+                    state.waveform.track_key = Some(tk.clone());
+                    state.spectrogram = crate::app::state::SpectrogramState::default();
+                    state.spectrogram.track_key = Some(tk.clone());
+                }
 
-                    // Trigger waveform if needed (co-generates spectrogram)
-                    if state.waveform.data.is_none()
-                        && !state.waveform.generating
-                        && state.waveform.error.is_none()
-                    {
-                        return vec![SystemAction::LoadWaveform.into()];
-                    }
+                // Request the waveform needed by the active playback surface.
+                if state.waveform.data().is_none()
+                    && !state.waveform.generating()
+                    && state.waveform.error().is_none()
+                {
+                    return vec![SystemAction::LoadWaveform.into()];
+                }
 
-                    // Trigger spectrogram independently if waveform is done but spectrogram isn't
-                    if state.spectrogram.data.is_none()
-                        && !state.spectrogram.generating
-                        && state.spectrogram.error.is_none()
-                        && state.waveform.data.is_some()
-                    {
-                        state.spectrogram.error = None;
-                        return vec![SystemAction::LoadSpectrogram.into()];
-                    }
+                // Trigger spectrogram independently if waveform is done but spectrogram isn't
+                if state.visualizers_available
+                    && state.spectrogram.data().is_none()
+                    && !state.spectrogram.generating()
+                    && state.spectrogram.error().is_none()
+                    && state.waveform.data().is_some()
+                {
+                    return vec![SystemAction::LoadSpectrogram.into()];
                 }
             }
 
@@ -1051,25 +680,39 @@ pub fn handle_app_event(
         }
 
         Event::Mouse(mouse_event) => super::mouse_input::handle_mouse(mouse_event, state),
+        Event::Visualizer(VisualizerEvent::AnalysisProgress {
+            track_key,
+            progress,
+        }) => {
+            if state.waveform.track_key.as_ref() == Some(&track_key) && state.waveform.generating()
+            {
+                state.waveform.report(progress.clone());
+            }
+            if state.spectrogram.track_key.as_ref() == Some(&track_key)
+                && state.spectrogram.generating()
+            {
+                state.spectrogram.report(progress);
+            }
+            vec![]
+        }
         Event::Visualizer(VisualizerEvent::WaveformGenerated { track_key, data }) => {
             if state.waveform.track_key.as_ref() == Some(&track_key) {
-                state.waveform.data = Some(data);
-                state.waveform.generating = false;
-                state.waveform.error = None;
+                state.waveform.succeed(data);
                 tracing::debug!("Waveform generated for track: {}", track_key);
             }
             vec![]
         }
         Event::Visualizer(VisualizerEvent::WaveformFailed { track_key, error }) => {
-            if state.waveform.track_key.as_ref() == Some(&track_key) {
+            if state.waveform.track_key.as_ref() == Some(&track_key)
+                && state.waveform.data().is_none()
+            {
                 if state.waveform.retry_count < 3 {
-                    // Silent retry: keep generating=true so UI shows "Generating..."
                     state.waveform.retry_count += 1;
                     let retry_num = state.waveform.retry_count;
                     let tx = event_tx.clone();
                     let tk = track_key.clone();
                     let library_generation = state.library_generation;
-                    crate::app::tasks::spawn(async move {
+                    let retry = crate::app::tasks::spawn(async move {
                         tokio::time::sleep(Duration::from_secs(2 * retry_num as u64)).await;
                         let _ = tx
                             .send(Event::for_library(
@@ -1078,6 +721,8 @@ pub fn handle_app_event(
                             ))
                             .await;
                     });
+                    state.waveform.phase = crate::app::state::AnalysisPhase::WaitingToRetry;
+                    state.waveform.task = Some(crate::app::tasks::TaskLease::new(&retry));
                     tracing::info!(
                         "Waveform retry {}/3 for {}: {}",
                         retry_num,
@@ -1085,9 +730,7 @@ pub fn handle_app_event(
                         error
                     );
                 } else {
-                    // Max retries exhausted — show error
-                    state.waveform.error = Some(error.clone());
-                    state.waveform.generating = false;
+                    state.waveform.fail(error.clone());
                     tracing::warn!(
                         "Waveform failed after 3 retries for {}: {}",
                         track_key,
@@ -1099,20 +742,19 @@ pub fn handle_app_event(
         }
         Event::Visualizer(VisualizerEvent::WaveformCacheHit { track_key, data }) => {
             if state.waveform.track_key.as_ref() == Some(&track_key) {
-                state.waveform.data = Some(data);
-                state.waveform.generating = false;
-                state.waveform.error = None;
+                state.waveform.succeed(data);
                 tracing::debug!("Waveform loaded from cache for track: {}", track_key);
             }
             vec![]
         }
         Event::Visualizer(VisualizerEvent::WaveformRetry(track_key)) => {
-            // generating is still true from the failed attempt; clear it so
-            // LoadWaveform's needs_generation check passes.
             if state.waveform.track_key.as_ref() == Some(&track_key)
-                && state.waveform.data.is_none()
+                && matches!(
+                    state.waveform.phase,
+                    crate::app::state::AnalysisPhase::WaitingToRetry
+                )
             {
-                state.waveform.generating = false;
+                state.waveform.phase = crate::app::state::AnalysisPhase::Idle;
                 vec![SystemAction::LoadWaveform.into()]
             } else {
                 vec![]
@@ -1120,29 +762,32 @@ pub fn handle_app_event(
         }
         Event::Visualizer(VisualizerEvent::SpectrogramGenerated { track_key, data }) => {
             if state.spectrogram.track_key.as_ref() == Some(&track_key) {
-                state.spectrogram.data = Some(data);
-                state.spectrogram.generating = false;
-                state.spectrogram.error = None;
+                state.spectrogram.succeed(data);
                 tracing::debug!("Spectrogram generated for track: {}", track_key);
             }
             vec![]
         }
+        Event::Visualizer(VisualizerEvent::SpectrogramCacheMiss { track_key }) => {
+            if state.spectrogram.track_key.as_ref() == Some(&track_key)
+                && state.spectrogram.data().is_none()
+            {
+                state.spectrogram.phase = crate::app::state::AnalysisPhase::Idle;
+            }
+            vec![]
+        }
         Event::Visualizer(VisualizerEvent::SpectrogramFailed { track_key, error }) => {
-            if state.spectrogram.track_key.as_ref() == Some(&track_key) {
-                state.spectrogram.generating = false;
-                // Only set error for real failures, not empty signals from cache miss
-                if !error.is_empty() {
-                    state.spectrogram.error = Some(error.clone());
-                    tracing::warn!("Spectrogram failed for {}: {}", track_key, error);
-                }
+            if state.spectrogram.track_key.as_ref() == Some(&track_key)
+                && state.spectrogram.data().is_none()
+            {
+                state.spectrogram.phase = crate::app::state::AnalysisPhase::Idle;
+                state.spectrogram.fail(error.clone());
+                tracing::warn!("Spectrogram failed for {}: {}", track_key, error);
             }
             vec![]
         }
         Event::Visualizer(VisualizerEvent::SpectrogramCacheHit { track_key, data }) => {
             if state.spectrogram.track_key.as_ref() == Some(&track_key) {
-                state.spectrogram.data = Some(data);
-                state.spectrogram.generating = false;
-                state.spectrogram.error = None;
+                state.spectrogram.succeed(data);
                 tracing::debug!("Spectrogram loaded from cache for track: {}", track_key);
             }
             vec![]
@@ -1150,32 +795,54 @@ pub fn handle_app_event(
         Event::Radio(event) => super::events_radio::handle(event, state),
         Event::Playlist(event) => super::events_playlist::handle(event, state),
 
-        // Playlist tracks preloaded in background
-
-        // DJ mode tracks ready (continuous modes)
-        Event::Ui(UiEvent::DjTracksReady {
-            result,
-            insert_next,
-        }) => {
-            vec![RadioAction::DjModeTracksReady(result, insert_next).into()]
-        }
-        // DJ mode batch ready (inserter modes)
-        Event::Ui(UiEvent::DjBatchReady { inserts }) => {
-            vec![RadioAction::DjModeBatchReady(inserts).into()]
-        }
         // Queue remix batch ready
-        Event::Ui(UiEvent::RemixBatchReady { outcome }) => {
-            vec![QueueAction::RemixBatchReady(outcome).into()]
-        }
-        Event::Ui(UiEvent::RemixDoppelgangerReady { outcome }) => {
-            vec![QueueAction::RemixDoppelgangerReady(outcome).into()]
-        }
 
         // Multi-artist radio complete
-        Event::Ui(UiEvent::ArtistRadioComplete { outcome }) => {
-            vec![SettingsAction::ArtistRadioComplete(outcome).into()]
+        Event::Ui(UiEvent::ArtistInfoLoaded {
+            generation,
+            request_id,
+            artist_key,
+            result,
+        }) => {
+            if generation != state.library_generation {
+                return vec![];
+            }
+            let mut result = Some(result);
+            let mut picture = None;
+            'owners: for nav in [
+                &mut state.artist_nav,
+                &mut state.playlist_nav,
+                &mut state.tag_nav,
+            ] {
+                for column in &mut nav.columns {
+                    if let Some(crate::app::state::BrowseDetails::Artist(info)) =
+                        &mut column.details
+                    {
+                        if info.request_id != request_id || info.artist_key != artist_key {
+                            continue;
+                        }
+                        info.task = None;
+                        info.document = result.take().unwrap().unwrap_or_else(|error| {
+                            crate::services::biography::Biography {
+                                text: error,
+                                ..Default::default()
+                            }
+                        });
+                        picture = info
+                            .document
+                            .images
+                            .get(info.image_index)
+                            .map(|image| (info.artist_key.clone(), image.data.clone()));
+                        column.selected_index = 0;
+                        break 'owners;
+                    }
+                }
+            }
+            if let Some((key, data)) = picture {
+                state.artwork.insert_grid_art(key, data);
+            }
+            vec![]
         }
-
         Event::Ui(UiEvent::ArtistBioLoaded {
             generation,
             request_id,
@@ -1185,7 +852,6 @@ pub fn handle_app_event(
                 return vec![];
             }
             if let Some(popup) = state.popups.artist_bio_mut() {
-                popup.loading = false;
                 popup.task = None;
                 popup.document =
                     result.unwrap_or_else(|error| crate::services::biography::Biography {
@@ -1200,28 +866,35 @@ pub fn handle_app_event(
         // Inline list filter completed
         Event::Ui(UiEvent::ListFilterCompleted {
             version,
-            column_results,
+            generation,
+            results,
         }) => {
-            // Only apply if this is the most recent filter version
-            if version == state.list_filter.version {
+            if state.list_filter.active
+                && version == state.list_filter.version
+                && generation == state.library_generation
+            {
                 state.list_filter.loading = false;
-                state.list_filter.selected = 0;
-                state.list_filter.results = Some(
-                    column_results
-                        .get(state.list_filter.column)
-                        .cloned()
-                        .unwrap_or_default(),
-                );
-                state.list_filter.column_results = column_results;
+                state.list_filter.selected = state
+                    .list_filter
+                    .refresh_anchor
+                    .take()
+                    .and_then(|anchor| {
+                        results
+                            .matched_indices
+                            .iter()
+                            .position(|index| *index == anchor)
+                    })
+                    .unwrap_or(0);
+                state.list_filter.results = Some(results);
                 // Only update column selection if user is still on the filter column.
                 // If they've drilled deeper (e.g., into subfolders), preserve their
                 // current navigation — changing the selection would jump them away.
-                if super::dispatch_search::is_on_filter_column(state) {
-                    if let Some(ref results) = state.list_filter.results {
-                        if let Some(&first_idx) = results.matched_indices.first() {
-                            super::key_input::update_filter_column_selection(state, first_idx);
-                        }
-                    }
+                if super::dispatch_search::is_on_filter_column(state)
+                    && let Some(ref results) = state.list_filter.results
+                    && let Some(&first_idx) =
+                        results.matched_indices.get(state.list_filter.selected)
+                {
+                    super::key_input::update_filter_column_selection(state, first_idx);
                 }
             }
             vec![]

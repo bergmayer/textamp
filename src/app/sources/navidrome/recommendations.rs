@@ -1,11 +1,12 @@
-//! One analysis adapter for radio, DJs, remixes and discovery. Navidrome owns
+//! One analysis adapter for radio, remixes and discovery. Navidrome owns
 //! identity/playback; AudioMuse can only recommend IDs in the selected catalog.
-use super::{effects::discovery, Session};
-use crate::app::{sources::audiomuse, AppState};
+use super::{Session, effects::discovery};
+use crate::app::{AppState, sources::audiomuse};
 use crate::library::track::Track;
-use anyhow::{ensure, Context, Result};
-use futures::{stream, StreamExt, TryStreamExt};
-use std::collections::HashSet;
+use anyhow::{Context, Result, ensure};
+use futures::{StreamExt, TryStreamExt, stream};
+use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::sync::OnceCell;
 
@@ -21,7 +22,8 @@ pub struct Recommendations {
     sonic_allowed: bool,
     binding: Option<(crate::audiomuse::Connection, String)>,
     direct: OnceCell<Result<crate::audiomuse::Client, String>>,
-    allowed: HashSet<String>,
+    catalog: std::sync::Arc<Vec<Track>>,
+    catalog_indices: OnceLock<HashMap<String, Option<usize>>>,
 }
 impl Recommendations {
     pub fn new(state: &AppState, session: &Session) -> Self {
@@ -36,15 +38,26 @@ impl Recommendations {
                 })
                 .flatten(),
             direct: OnceCell::new(),
-            allowed: state
-                .library
-                .all_tracks
-                .iter()
-                .filter_map(|t| session.id(&t.rating_key).ok())
-                .collect(),
+            catalog: state.library.all_tracks.clone(),
+            catalog_indices: OnceLock::new(),
         }
     }
-    async fn direct(&self) -> Result<&crate::audiomuse::Client> {
+
+    fn catalog_indices(&self) -> &HashMap<String, Option<usize>> {
+        self.catalog_indices.get_or_init(|| {
+            self.catalog
+                .iter()
+                .enumerate()
+                .filter_map(|(index, track)| {
+                    self.session
+                        .id(&track.rating_key)
+                        .ok()
+                        .map(|id| (id, Some(index)))
+                })
+                .collect()
+        })
+    }
+    pub(super) async fn direct(&self) -> Result<&crate::audiomuse::Client> {
         let result = self.direct.get_or_init(|| async {
             let result: Result<_> = async {
             let (connection, key) = self.binding.as_ref()
@@ -66,7 +79,7 @@ impl Recommendations {
             .filter(|t| {
                 self.session
                     .id(&t.rating_key)
-                    .is_ok_and(|id| self.allowed.contains(&id))
+                    .is_ok_and(|id| self.catalog_indices().contains_key(&id))
                     && seen.insert(t.rating_key.clone())
             })
             .collect()
@@ -74,7 +87,7 @@ impl Recommendations {
     async fn resolve(&self, ids: Vec<String>, path: bool) -> Result<Vec<Track>> {
         if path {
             ensure!(
-                ids.iter().all(|id| self.allowed.contains(id))
+                ids.iter().all(|id| self.catalog_indices().contains_key(id))
                     && ids.iter().collect::<HashSet<_>>().len() == ids.len(),
                 "Sonic path leaves this library or repeats tracks"
             );
@@ -82,16 +95,26 @@ impl Recommendations {
         let mut seen = HashSet::new();
         let ids: Vec<_> = ids
             .into_iter()
-            .filter(|id| self.allowed.contains(id) && seen.insert(id.clone()))
+            .filter(|id| self.catalog_indices().contains_key(id) && seen.insert(id.clone()))
             .collect();
         stream::iter(ids)
-            .map(|id| async move {
-                let song = self.session.client.song(&id).await?;
-                ensure!(
-                    song.id == id,
-                    "Navidrome returned the wrong recommended track"
-                );
-                Ok(self.session.track(song))
+            .map(|id| {
+                let cached = self
+                    .catalog_indices()
+                    .get(&id)
+                    .and_then(|index| *index)
+                    .and_then(|index| self.catalog.get(index));
+                async move {
+                    if let Some(track) = cached {
+                        return Ok(track.clone());
+                    }
+                    let song = self.session.client.song(&id).await?;
+                    ensure!(
+                        song.id == id,
+                        "Navidrome returned the wrong recommended track"
+                    );
+                    Ok(self.session.track(song))
+                }
             })
             .buffered(4)
             .try_collect()
@@ -109,7 +132,7 @@ impl Recommendations {
                 "Sonic features are disabled for this library"
             );
             ensure!(
-                self.allowed.contains(id),
+                self.catalog_indices().contains_key(id),
                 "Sonic seed is outside this library"
             );
             let native = if self.session.extensions.contains("sonicSimilarity") {
@@ -133,10 +156,10 @@ impl Recommendations {
                     .filter(|t| t.rating_key != self.session.key(id))
                     .collect::<Vec<_>>()
             });
-            if let Ok(tracks) = &native {
-                if !tracks.is_empty() {
-                    return native;
-                }
+            if let Ok(tracks) = &native
+                && !tracks.is_empty()
+            {
+                return native;
             }
             if self.binding.is_none() && self.direct.get().is_none() {
                 return native;
@@ -162,6 +185,10 @@ impl Recommendations {
         .await
         .context("Analysis request timed out")?
     }
+    pub(super) fn ranked_candidate(&self, id: &str) -> Option<&Track> {
+        self.catalog.get((*self.catalog_indices().get(id)?)?)
+    }
+
     pub async fn mood(&self, mood: &str) -> Result<Vec<Track>> {
         tokio::time::timeout(Duration::from_secs(30), async {
             ensure!(
@@ -203,7 +230,9 @@ impl Recommendations {
                 "Sonic features are disabled for this library"
             );
             ensure!(
-                start != end && self.allowed.contains(start) && self.allowed.contains(end),
+                start != end
+                    && self.catalog_indices().contains_key(start)
+                    && self.catalog_indices().contains_key(end),
                 "Choose distinct sonic path endpoints in this library"
             );
             let native = async {
@@ -268,7 +297,7 @@ impl Recommendations {
                 && tracks.iter().all(|t| self
                     .session
                     .id(&t.rating_key)
-                    .is_ok_and(|id| self.allowed.contains(&id))),
+                    .is_ok_and(|id| self.catalog_indices().contains_key(&id))),
             "Server returned an invalid sonic path"
         );
         Ok(tracks)
@@ -280,40 +309,91 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
-    async fn native_and_direct_analysis_share_scope_paths_and_failure_rules() {
+    async fn cached_recommendations_need_no_network_and_keep_scope_and_order() {
+        let source = crate::navidrome::Source {
+            id: "fixture".into(),
+            name: "Fixture".into(),
+            url: "http://127.0.0.1:1".into(),
+            username: "fixture".into(),
+            libraries: vec![],
+        };
+        let session = Session {
+            client: crate::navidrome::Client::new(&source, "fixture".into(), None).unwrap(),
+            source,
+            extensions: Default::default(),
+        };
+        let mut state = AppState::new();
+        state.library.all_tracks = std::sync::Arc::new(
+            ["a", "b"]
+                .map(|id| Track {
+                    rating_key: session.key(id),
+                    title: id.to_uppercase(),
+                    ..Default::default()
+                })
+                .into(),
+        );
+        let api = Recommendations::new(&state, &session);
+        let tracks = api
+            .resolve(["b", "foreign", "b", "a"].map(str::to_owned).into(), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            tracks
+                .iter()
+                .map(|track| track.title.as_str())
+                .collect::<Vec<_>>(),
+            ["B", "A"]
+        );
+    }
+
+    #[tokio::test]
+    async fn analysis_requests_preserve_library_scope_and_ranking_pages() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let invalid = Arc::new(AtomicBool::new(false));
         let check = invalid.clone();
+        let refreshed = Arc::new(AtomicBool::new(false));
         let task = tokio::spawn(async move {
             while let Ok((mut socket, _)) = listener.accept().await {
                 let check = check.clone();
+                let refreshed = refreshed.clone();
                 tokio::spawn(async move {
                     let mut bytes = Vec::new();
                     let mut chunk = [0; 4096];
-                    loop {
+                    let body_start = loop {
                         let n = socket.read(&mut chunk).await.unwrap();
                         if n == 0 {
                             return;
                         }
                         bytes.extend_from_slice(&chunk[..n]);
-                        if bytes.windows(4).any(|w| w == b"\r\n\r\n") {
-                            break;
+                        if let Some(i) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                            break i + 4;
                         }
+                    };
+                    let text = String::from_utf8(bytes[..body_start].to_vec()).unwrap();
+                    let length = text
+                        .lines()
+                        .filter_map(|line| line.split_once(':'))
+                        .find(|(key, _)| key.eq_ignore_ascii_case("Content-Length"))
+                        .map_or(0, |(_, len)| len.trim().parse::<usize>().unwrap());
+                    while bytes.len() < body_start + length {
+                        let n = socket.read(&mut chunk).await.unwrap();
+                        assert_ne!(n, 0, "Incomplete test request");
+                        bytes.extend_from_slice(&chunk[..n]);
                     }
-                    let text = String::from_utf8_lossy(&bytes);
                     let url = reqwest::Url::parse(&format!(
                         "http://local{}",
                         text.split_whitespace().nth(1).unwrap()
                     ))
                     .unwrap();
                     let p: std::collections::HashMap<_, _> = url.query_pairs().collect();
+                    let mut status = 200;
                     let value = match url.path() {
                         "/auth" => json!({}),
                         "/api/similar_tracks" => {
@@ -330,10 +410,66 @@ mod tests {
                             };
                             json!({"path":[{"item_id":"seed"},{"item_id":middle},{"item_id":"end"}]})
                         }
+                        "/api/servers" => {
+                            json!({"servers":[{"name":"fixture","server_id":"registry-id","server_type":"navidrome"}]})
+                        }
+                        "/api/sync" => {
+                            json!({"total_tracks":0,"tracks":[],"provider_type":"navidrome","has_more":false,"next_page":null})
+                        }
+                        "/plugins/distant_rank/v1/rank" => {
+                            assert!(text.starts_with("POST "));
+                            assert!(text.contains("audiomuse_jwt=fixture"));
+                            let request: serde_json::Value =
+                                serde_json::from_slice(&bytes[body_start..]).unwrap();
+                            assert_eq!(request["server_id"], "registry-id");
+                            assert_eq!(request["queue"], json!(["seed", "seed", "end"]));
+                            assert_eq!(request["music_folder_id"], "test-folder");
+                            let offset = request["offset"].as_u64().unwrap();
+                            let mut response = json!({
+                                "server_id": "registry-id", "mode": request["mode"], "offset": offset,
+                                "generation": "catalog-a",
+                                "scope": {"server_enforced": true, "folder_enforced": false, "music_folder_id": "test-folder"}
+                            });
+                            match offset {
+                                0 => {
+                                    assert!(request.get("generation").is_none());
+                                    if request["mode"] == "whole_queue" {
+                                        response["candidates"] =
+                                            json!([{"id":"outside"},{"id":"seed"},{"id":"match"}]);
+                                        response["next_offset"] = json!(3);
+                                    } else {
+                                        response["positions"] = json!([
+                                            {"position":0,"id":"seed","candidates":[{"id":"outside"},{"id":"match"}],"next_offset":2},
+                                            {"position":1,"id":"seed","candidates":[{"id":"outside"},{"id":"match"}],"next_offset":2},
+                                            {"position":2,"id":"end","candidates":[],"error":{"code":"MISSING_ANALYSIS"}}
+                                        ]);
+                                    }
+                                }
+                                2 | 3 => {
+                                    assert_eq!(request["generation"], "catalog-a");
+                                    if request["mode"] == "whole_queue" {
+                                        if refreshed.swap(true, Ordering::Relaxed) {
+                                            response["candidates"] = json!([{"id":"other"}]);
+                                        } else {
+                                            status = 409;
+                                            response = json!({"error":{"code":"INDEX_CHANGED"}});
+                                        }
+                                    } else {
+                                        response["positions"] = json!([
+                                            {"position":0,"id":"seed","candidates":[{"id":"other"}]},
+                                            {"position":1,"id":"seed","candidates":[{"id":"other"}]},
+                                            {"position":2,"id":"end","candidates":[],"error":{"code":"MISSING_ANALYSIS"}}
+                                        ]);
+                                    }
+                                }
+                                other => panic!("unexpected rank offset {other}"),
+                            }
+                            response
+                        }
                         "/rest/getSong" => {
                             let id = &p["id"];
                             assert_ne!(id, "outside", "Never fetch another library's song");
-                            json!({"subsonic-response":{"status":"ok","song":{"id":id,"title":id}}})
+                            json!({"subsonic-response":{"status":"ok","song":{"id":id,"title":id,"artist":format!("Artist {id}")}}})
                         }
                         "/rest/getSonicSimilarTracks" | "/rest/findSonicPath" => {
                             json!({"subsonic-response":{"status":"failed","error":{"code":70,"message":"index not ready"}}})
@@ -341,7 +477,10 @@ mod tests {
                         other => panic!("unexpected request {other}"),
                     };
                     let body = value.to_string();
-                    let reply = format!("HTTP/1.1 200 OK\r\nSet-Cookie: audiomuse_jwt=fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    let reply = format!(
+                        "HTTP/1.1 {status} Test\r\nSet-Cookie: audiomuse_jwt=fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
                     let _ = socket.write_all(reply.as_bytes()).await;
                 });
             }
@@ -371,7 +510,13 @@ mod tests {
             sonic_allowed: true,
             binding: None,
             direct: OnceCell::new(),
-            allowed: ["seed", "match", "end"].map(str::to_owned).into(),
+            catalog: Default::default(),
+            catalog_indices: OnceLock::from(
+                ["seed", "match", "end"]
+                    .into_iter()
+                    .map(|id| (id.to_owned(), None))
+                    .collect::<HashMap<_, _>>(),
+            ),
         };
         assert!(api.direct.set(Ok(direct)).is_ok()); // Inject a fixture session, never write credentials.
         for plugin in [false, true] {
@@ -388,18 +533,20 @@ mod tests {
             );
         }
         api.sonic_allowed = false;
-        assert!(api
-            .similar("seed", true)
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("disabled"));
-        assert!(api
-            .path("seed", "end", 5)
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("disabled"));
+        assert!(
+            api.similar("seed", true)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("disabled")
+        );
+        assert!(
+            api.path("seed", "end", 5)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("disabled")
+        );
         api.sonic_allowed = true;
         invalid.store(true, Ordering::Relaxed);
         assert!(
@@ -407,6 +554,37 @@ mod tests {
                 .contains("leaves this library")
         );
         assert!(api.similar("outside", true).await.is_err());
+        api.session.client.folder = Some("test-folder".into());
+        api.catalog = Arc::new(
+            ["seed", "match", "other", "end"]
+                .map(|id| Track {
+                    title: id.into(),
+                    rating_key: api.session.key(id),
+                    ..Default::default()
+                })
+                .into(),
+        );
+        api.catalog_indices = OnceLock::new();
+        let ids = ["seed", "seed", "end"].map(str::to_owned);
+        for (mode, expected_failures) in [
+            (crate::audiomuse::ranking::Mode::WholeQueue, 0),
+            (crate::audiomuse::ranking::Mode::PerTrack, 1),
+        ] {
+            let outcome = super::super::remix::rank_queue(&api, mode, &ids)
+                .await
+                .unwrap();
+            assert_eq!(outcome.attempted, 3);
+            assert_eq!(outcome.failed, expected_failures);
+            assert_eq!(
+                outcome
+                    .items
+                    .iter()
+                    .map(|(i, track)| (*i, track.title.as_str()))
+                    .collect::<Vec<_>>(),
+                [(0, "match"), (1, "other")],
+                "Use ranking order, skip other folders and original IDs, and avoid duplicate picks"
+            );
+        }
         api.direct = OnceCell::new();
         assert!(
             api.similar("seed", true).await.is_err(),

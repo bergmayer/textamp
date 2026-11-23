@@ -66,6 +66,7 @@ pub struct Song {
     pub artist: Option<String>,
     pub artist_id: Option<String>,
     pub album_artist: Option<String>,
+    pub display_album_artist: Option<String>,
     pub cover_art: Option<String>,
     pub track: Option<u32>,
     pub disc_number: Option<u32>,
@@ -91,6 +92,8 @@ pub struct ItemDate {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Playlist {
+    pub created: Option<String>,
+    pub changed: Option<String>,
     pub id: String,
     pub name: String,
     pub cover_art: Option<String>,

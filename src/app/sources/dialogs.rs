@@ -14,11 +14,25 @@ pub enum Dialog {
     Webdav(WebdavForm),
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct LocalForm {
+    pub instance: String,
+    pub existing_id: Option<String>,
     pub fields: [Field; 2],
     pub focus: usize,
     pub error: Option<String>,
+}
+
+impl Default for LocalForm {
+    fn default() -> Self {
+        Self {
+            instance: uuid::Uuid::new_v4().to_string(),
+            existing_id: None,
+            fields: Default::default(),
+            focus: 0,
+            error: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -197,6 +211,7 @@ pub struct WebdavDraft {
 
 #[derive(Debug, Clone)]
 pub struct ServerForm {
+    pub instance: String,
     pub source: crate::navidrome::Source,
     pub fields: Box<[Field; 8]>,
     pub analysis_key: Option<String>,
@@ -236,6 +251,7 @@ impl ServerForm {
             Field::new("Navidrome"),
         ];
         Self {
+            instance: uuid::Uuid::new_v4().to_string(),
             source,
             fields: Box::new(fields),
             analysis_key: None,
@@ -277,7 +293,7 @@ impl ServerForm {
             library_key: self.analysis_key.clone(),
         }))
     }
-    fn submit(&self) -> anyhow::Result<Action> {
+    pub(crate) fn submit(&self) -> anyhow::Result<Action> {
         let mut source = self.source.clone();
         source.url = crate::util::server_url::normalize(&self.fields[0].value)?
             .as_str()
@@ -304,7 +320,8 @@ pub struct AnalysisSetup {
     pub library_key: Option<String>,
 }
 
-fn close(state: &mut AppState) {
+/// Close the source form and return to its owning Settings page.
+pub(super) fn close(state: &mut AppState) {
     if matches!(state.popups.library_dialog(), Some(Dialog::Navidrome(form)) if form.busy) {
         state.sources.nav_connection_task = None;
         state.advance_connection_generation();
@@ -377,33 +394,47 @@ fn key_inner(key: KeyEvent, state: &mut AppState) -> Vec<Action> {
         Some(Dialog::Library(options)) => options.items(state).len(),
         _ => 0,
     };
-    if matches!(key.code, KeyCode::Left | KeyCode::Right) {
-        if let Some(Dialog::Library(options)) = state.popups.library_dialog() {
-            let pages = options.pages(state);
-            let index = pages.iter().position(|p| *p == options.page).unwrap_or(0);
-            let page = pages[(index
-                + if key.code == KeyCode::Right {
-                    1
-                } else {
-                    pages.len() - 1
-                })
-                % pages.len()];
-            if let Some(Dialog::Library(options)) = state.popups.library_dialog_mut() {
-                options.set_page(page);
-            }
-            return vec![];
+    if matches!(key.code, KeyCode::Left | KeyCode::Right)
+        && let Some(Dialog::Library(options)) = state.popups.library_dialog()
+    {
+        let pages = options.pages(state);
+        let index = pages.iter().position(|p| *p == options.page).unwrap_or(0);
+        let page = pages[(index
+            + if key.code == KeyCode::Right {
+                1
+            } else {
+                pages.len() - 1
+            })
+            % pages.len()];
+        if let Some(Dialog::Library(options)) = state.popups.library_dialog_mut() {
+            options.set_page(page);
         }
+        return vec![];
     }
     let Some(dialog) = state.popups.library_dialog_mut() else {
         return vec![];
     };
     match dialog {
         Dialog::Local(form) => match key.code {
-            KeyCode::Tab | KeyCode::Down => form.focus = (form.focus + 1) % 4,
-            KeyCode::BackTab | KeyCode::Up => form.focus = (form.focus + 3) % 4,
+            KeyCode::Tab | KeyCode::Down => {
+                form.focus = if form.existing_id.is_some() {
+                    form.focus % 3 + 1
+                } else {
+                    (form.focus + 1) % 4
+                }
+            }
+            KeyCode::BackTab | KeyCode::Up => {
+                form.focus = if form.existing_id.is_some() {
+                    (form.focus + 1) % 3 + 1
+                } else {
+                    (form.focus + 3) % 4
+                }
+            }
             KeyCode::Left | KeyCode::Right if form.focus >= 2 => form.focus = 5 - form.focus,
             KeyCode::Enter => return activate(state),
-            _ if form.focus < 2 => form.fields[form.focus].edit(key),
+            _ if form.focus < 2 && !(form.focus == 0 && form.existing_id.is_some()) => {
+                form.fields[form.focus].edit(key)
+            }
             _ => {}
         },
         Dialog::Library(options) => {
@@ -419,10 +450,12 @@ fn key_inner(key: KeyEvent, state: &mut AppState) -> Vec<Action> {
                 KeyCode::End => options.selected = option_count.saturating_sub(1),
                 KeyCode::Enter | KeyCode::Char(' ') => return super::options::activate(state),
                 KeyCode::F(5) => {
-                    return vec![crate::app::action::SettingsAction::RescanSourceCache(
-                        options.choice.clone(),
-                    )
-                    .into()]
+                    return vec![
+                        crate::app::action::SettingsAction::RescanSourceCache(
+                            options.choice.clone(),
+                        )
+                        .into(),
+                    ];
                 }
                 _ => {}
             }
@@ -514,6 +547,9 @@ fn mouse_inner(event: MouseEvent, state: &mut AppState) -> Vec<Action> {
     };
     match state.popups.library_dialog_mut() {
         Some(Dialog::Local(form)) => {
+            if index == 0 && form.existing_id.is_some() {
+                return vec![];
+            }
             form.focus = index;
             if index < 2 {
                 form.fields[index].cursor = form.fields[index].value.len();
@@ -588,11 +624,23 @@ fn activate(state: &mut AppState) -> Vec<Action> {
                 close(state);
                 return vec![];
             }
-            vec![SourceAction::SaveLocal {
-                path: form.fields[0].value.to_string(),
-                name: form.fields[1].value.to_string(),
+            if let Some(id) = form.existing_id.clone() {
+                vec![
+                    SourceAction::Rename {
+                        id,
+                        name: form.fields[1].value.to_string(),
+                    }
+                    .into(),
+                ]
+            } else {
+                vec![
+                    SourceAction::SaveLocal {
+                        path: form.fields[0].value.to_string(),
+                        name: form.fields[1].value.to_string(),
+                    }
+                    .into(),
+                ]
             }
-            .into()]
         }
         Some(Dialog::Navidrome(form)) => {
             if form.focus == 9 {
@@ -645,7 +693,7 @@ pub async fn dispatch(
     action: SourceAction,
     state: &mut AppState,
 
-    audio: &mut AudioPlayer,
+    _audio: &mut AudioPlayer,
     config: &mut Config,
     tx: &mpsc::Sender<Event>,
 ) -> anyhow::Result<Vec<Action>> {
@@ -773,7 +821,7 @@ pub async fn dispatch(
                 tx,
             );
             state.set_status("WebDAV library saved. Scanning folders in the background.".into());
-            if reload && manager::settings_active(state) {
+            if reload {
                 state
                     .sources
                     .reconnect_sources
@@ -781,9 +829,6 @@ pub async fn dispatch(
                 state.set_status(
                     "Connection saved. Open this library from General to use it.".into(),
                 );
-            } else if reload {
-                super::reset_source(state, audio, tx).await?;
-                return Ok(vec![LibraryChoice::Folder(draft.source).action()]);
             }
         }
         _ => unreachable!(),

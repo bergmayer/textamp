@@ -1,5 +1,5 @@
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 use textamp::app::action::PlaybackAction;
 use textamp::app::handlers::mouse_input::handle_mouse;
 use textamp::app::state::{PlayStatus, View, VisualizerTab};
@@ -68,13 +68,15 @@ fn exercise_drag(state: &mut AppState, area: Rect) {
         0,
     );
     assert!(state.seek_drag.is_none());
-    assert!(mouse(
-        state,
-        MouseEventKind::Drag(MouseButton::Left),
-        area.x + 2,
-        area.y
-    )
-    .is_empty());
+    assert!(
+        mouse(
+            state,
+            MouseEventKind::Drag(MouseButton::Left),
+            area.x + 2,
+            area.y
+        )
+        .is_empty()
+    );
 }
 
 #[test]
@@ -84,7 +86,7 @@ fn scrubber_click_and_drag_work_in_every_visualizer_and_split_layout() {
             for tab in VisualizerTab::ALL {
                 let mut state = AppState::new();
                 state.view = view;
-                state.tall_mode = tall;
+                state.desktop_split_view = tall;
                 state.visualizer_tab = tab;
                 state.playback.duration_ms = 60_000;
                 state.playback.status = PlayStatus::Playing;
@@ -98,10 +100,10 @@ fn scrubber_click_and_drag_work_in_every_visualizer_and_split_layout() {
 
 #[test]
 fn visible_waveform_seeks_regardless_of_keyboard_focus() {
-    for view in [View::Browse, View::Queue, View::NowPlaying] {
+    for view in [View::Queue, View::NowPlaying] {
         let mut state = AppState::new();
         state.view = view;
-        state.tall_mode = view == View::Browse;
+        state.tui_queue_workspace = textamp::app::state::TuiWorkspace::NowPlaying;
         state.visualizer_tab = VisualizerTab::Waveform;
         state.playback.duration_ms = 60_000;
         state.playback.status = PlayStatus::Playing;
@@ -155,24 +157,28 @@ fn overlays_and_unknown_duration_do_not_start_a_seek() {
         .as_ref()
         .unwrap()
         .visualizer_content_area;
-    assert!(mouse(
-        &mut state,
-        MouseEventKind::Down(MouseButton::Left),
-        area.x,
-        area.y
-    )
-    .is_empty());
+    assert!(
+        mouse(
+            &mut state,
+            MouseEventKind::Down(MouseButton::Left),
+            area.x,
+            area.y
+        )
+        .is_empty()
+    );
     assert!(state.seek_drag.is_none());
     state.playback.duration_ms = 60_000;
     state.palette.open = true;
     render(&mut state);
-    assert!(mouse(
-        &mut state,
-        MouseEventKind::Down(MouseButton::Left),
-        area.x,
-        area.y
-    )
-    .is_empty());
+    assert!(
+        mouse(
+            &mut state,
+            MouseEventKind::Down(MouseButton::Left),
+            area.x,
+            area.y
+        )
+        .is_empty()
+    );
     assert!(state.seek_drag.is_none());
 }
 
@@ -193,7 +199,7 @@ fn spectrogram_leaves_text_and_a_blank_row_above_its_canvas_untouched() {
         let canvas = regions.visualizer_content_area;
         let tabs = regions.visualizer_tab_area;
         assert_eq!(canvas.y, tabs.bottom() + 1);
-        state.spectrogram.data = Some(textamp::media::SpectrogramData {
+        state.spectrogram.succeed(textamp::media::SpectrogramData {
             track_key: "fixture".into(),
             duration_ms: 60_000,
             bins_per_frame: 48,

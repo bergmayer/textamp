@@ -46,7 +46,10 @@ async fn stream_smoke(wav: Vec<u8>) {
             if socket.read(&mut request).await.unwrap() == 0 {
                 continue;
             }
-            let header = format!("HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", wav.len());
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                wav.len()
+            );
             if socket.write_all(header.as_bytes()).await.is_ok() {
                 let _ = socket.write_all(&wav).await;
             }
@@ -245,7 +248,10 @@ fn main() {
 
     eprintln!(
         "FAIL: sink never drained within the deadline: position={:?}, playing={}, paused={}, underruns={}",
-        backend.position(), backend.is_playing(), backend.is_paused(), backend.underrun_count(),
+        backend.position(),
+        backend.is_playing(),
+        backend.is_paused(),
+        backend.underrun_count(),
     );
     std::process::exit(4);
 }

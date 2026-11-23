@@ -3,9 +3,9 @@
 use crate::app::action::*;
 use crossterm::event::{self, KeyCode};
 
-use crate::app::state::{ArtistRadioPickerStep, SearchFocus};
 use crate::app::Action;
 use crate::app::AppState;
+use crate::app::state::SearchFocus;
 
 /// Handle artist radio picker popup keys.
 pub(super) fn handle_artist_radio_picker_keys(
@@ -17,41 +17,7 @@ pub(super) fn handle_artist_radio_picker_keys(
         None => return vec![],
     };
 
-    match picker.step {
-        ArtistRadioPickerStep::EnterCount => handle_count_step(key, picker),
-        ArtistRadioPickerStep::SelectArtists => handle_select_step(key, picker),
-    }
-}
-
-/// Handle keys in the EnterCount step: type a number (2-12), Enter to proceed.
-fn handle_count_step(
-    key: event::KeyEvent,
-    picker: &mut crate::app::state::ArtistRadioPickerState,
-) -> Vec<Action> {
-    match key.code {
-        KeyCode::Esc => {
-            vec![SearchAction::CloseArtistRadioPicker.into()]
-        }
-        KeyCode::Enter => {
-            let count = picker.count_input.parse::<usize>().unwrap_or(0);
-            if (1..=12).contains(&count) {
-                vec![SearchAction::ArtistRadioPickerSetCount.into()]
-            } else {
-                vec![]
-            }
-        }
-        KeyCode::Backspace => {
-            picker.count_input.pop();
-            vec![]
-        }
-        KeyCode::Char(c) if c.is_ascii_digit() => {
-            if picker.count_input.len() < 2 {
-                picker.count_input.push(c);
-            }
-            vec![]
-        }
-        _ => vec![],
-    }
+    handle_select_step(key, picker)
 }
 
 /// Handle keys in the SelectArtists step: search, navigate, toggle selection.
@@ -80,7 +46,7 @@ fn handle_select_step(
                     vec![]
                 }
                 SearchFocus::Results => {
-                    // Toggle artist selection, then auto-launch if max reached
+                    // Toggle selection without starting playback.
                     vec![SearchAction::ArtistRadioPickerToggleArtist.into()]
                 }
             }
@@ -118,9 +84,9 @@ fn handle_select_step(
                 }
             }
         }
-        // Tab launches when enough artists selected
+        // Tab explicitly starts the selected artist mix.
         KeyCode::Tab => {
-            if picker.selected_artists.len() == picker.max_artists {
+            if !picker.selected_artists.is_empty() {
                 vec![SearchAction::ArtistRadioPickerLaunch.into()]
             } else {
                 vec![]

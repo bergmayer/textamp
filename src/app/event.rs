@@ -18,6 +18,8 @@ pub enum Event {
     // Terminal input ----------------------------------------------------
     /// Raw terminal key press.
     Key(KeyEvent),
+    /// Literal text from bracketed paste or a native input method.
+    Paste(String),
     /// Raw terminal mouse event.
     Mouse(MouseEvent),
     /// Terminal resized to (cols, rows).
@@ -42,14 +44,6 @@ pub enum Event {
     /// generation lets the event loop discard a completion from an earlier
     /// library context before it reaches any reducer.
     LibraryResult {
-        generation: u64,
-        event: Box<Event>,
-    },
-
-    /// Authentication and route-discovery completion scoped to the current
-    /// account. Unlike `LibraryResult`, selecting a library does not invalidate
-    /// this work.
-    ConnectionResult {
         generation: u64,
         event: Box<Event>,
     },
@@ -99,13 +93,6 @@ impl Event {
     /// Scope an asynchronous completion to a server/library generation.
     pub fn for_library(generation: u64, event: impl Into<Event>) -> Self {
         Self::LibraryResult {
-            generation,
-            event: Box::new(event.into()),
-        }
-    }
-
-    pub fn for_connection(generation: u64, event: impl Into<Event>) -> Self {
-        Self::ConnectionResult {
             generation,
             event: Box::new(event.into()),
         }

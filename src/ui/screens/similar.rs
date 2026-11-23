@@ -5,9 +5,9 @@
 
 use crate::app::state::SimilarMode;
 use crate::services::NavigationService;
+use crate::ui::RenderState as AppState;
 use crate::ui::layout::centered_rect;
 use crate::ui::theme::theme;
-use crate::ui::RenderState as AppState;
 use crate::util::{format_duration, truncate_middle};
 
 use ratatui::prelude::*;
@@ -15,23 +15,13 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 
 /// Render the similar content popup overlay.
 pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
+    state.hit_regions.borrow_mut().artist_links.clear();
     let t = theme();
 
     // Centered popup: 65% wide, 80% tall
-    let details = state
-        .similar
-        .details
-        .open
-        .then(|| crate::app::result_details::track_list(state))
-        .flatten();
-    let popup_area = centered_rect(
-        if details.is_some() { 94 } else { 65 },
-        if details.is_some() { 90 } else { 80 },
-        area,
-    );
-    state.hit_regions.borrow_mut().track_pane = None;
+    let popup_area = centered_rect(65, 80, area);
     frame.render_widget(Clear, popup_area);
-
+    crate::ui::widgets::register_popup_close(state, popup_area);
     let mode_label = match state.similar.mode {
         SimilarMode::Albums => "albums",
         SimilarMode::Tracks => "tracks",
@@ -50,29 +40,8 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     let inner = block.inner(popup_area);
     frame.render_widget(block, popup_area);
 
-    let panes =
-        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(inner);
-    let results_inner = if details.is_some() { panes[0] } else { inner };
-    let list_outer = if details.is_some() {
-        Rect::new(
-            popup_area.x,
-            popup_area.y,
-            results_inner.width + 1,
-            popup_area.height,
-        )
-    } else {
-        popup_area
-    };
-    if let Some((tracks, index)) = details {
-        crate::ui::app::render_track_details_pane(
-            frame,
-            state,
-            panes[1],
-            &tracks[index],
-            Some(&state.similar.details),
-        );
-    }
-
+    let results_inner = inner;
+    let list_outer = popup_area;
     // Register hit regions for mouse handler (tab_hint set below after footer rendering)
     {
         let mut hr = state.hit_regions.borrow_mut();
@@ -86,7 +55,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         });
     }
 
-    if state.similar.loading {
+    if state.similar.request.is_loading() {
         let msg = match state.similar.mode {
             SimilarMode::Albums => "Loading similar albums...",
             SimilarMode::Tracks => "Loading similar tracks...",
@@ -114,7 +83,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         1,
     );
 
-    if let Some(error) = &state.similar.error {
+    if let Some(error) = state.similar.request.error() {
         frame.render_widget(
             Paragraph::new(format!("Couldn’t load similar {mode_label}\n\n{error}"))
                 .wrap(Wrap { trim: true })
@@ -132,24 +101,12 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     // Footer with dynamic Tab hint
     let mut footer_spans = vec![
         Span::styled(" [Esc] ", Style::default().fg(t.colors.shortcut_key)),
-        Span::styled(
-            if state.similar.details.focused {
-                "results"
-            } else {
-                "close"
-            },
-            Style::default().fg(t.colors.fg_muted),
-        ),
+        Span::styled("close", Style::default().fg(t.colors.fg_muted)),
     ];
 
     // Track width before [Tab] to compute click region
-    let mut esc_width: u16 = if state.similar.details.focused {
-        " [Esc] results"
-    } else {
-        " [Esc] close"
-    }
-    .len() as u16;
-    if state.similar.error.is_some() && state.similar.source_key.is_some() {
+    let mut esc_width = " [Esc] close".len() as u16;
+    if state.similar.request.error().is_some() && state.similar.source_key.is_some() {
         let retry = "  [F5] retry";
         footer_spans.push(Span::styled(
             retry,
@@ -270,6 +227,18 @@ fn render_albums(frame: &mut Frame, state: &AppState, inner: Rect, popup_area: R
             // Line 2: indented artist
             let subtitle_width = max_text_width.saturating_sub(5);
             let artist_display = truncate_middle(artist, subtitle_width);
+            crate::ui::artist_links::text(
+                state,
+                Rect::new(
+                    inner.x + 5,
+                    inner.y + ((i - scroll_offset) * 2 + 1) as u16,
+                    inner.width.saturating_sub(5),
+                    1,
+                ),
+                &artist_display,
+                artist,
+                album.parent_rating_key.as_deref(),
+            );
 
             let (line1_fg, line2_fg, item_bg) = if is_selected {
                 (
@@ -375,16 +344,24 @@ fn render_tracks(frame: &mut Frame, state: &AppState, inner: Rect, popup_area: R
             let subtitle = format!("{} \u{2014} {}", artist, album);
             let subtitle_width = max_text_width.saturating_sub(5);
             let subtitle_display = truncate_middle(&subtitle, subtitle_width);
+            crate::ui::artist_links::text(
+                state,
+                Rect::new(
+                    inner.x + 5,
+                    inner.y + ((i - scroll_offset) * 2 + 1) as u16,
+                    inner.width.saturating_sub(5),
+                    1,
+                ),
+                &subtitle_display,
+                artist,
+                track.grandparent_rating_key.as_deref(),
+            );
 
             let (line1_fg, line2_fg, item_bg) = if is_selected {
                 (
                     Style::default().fg(t.colors.selection_text),
                     Style::default().fg(t.colors.selection_text),
-                    Style::default().bg(if state.similar.details.focused {
-                        t.colors.bg_highlight
-                    } else {
-                        t.colors.selection_bar_bg
-                    }),
+                    Style::default().bg(t.colors.selection_bar_bg),
                 )
             } else {
                 (
@@ -469,6 +446,18 @@ fn render_artists(frame: &mut Frame, state: &AppState, inner: Rect, popup_area: 
 
             // Line 1: artist title
             let title_display = truncate_middle(&artist.title, max_text_width);
+            crate::ui::artist_links::text(
+                state,
+                Rect::new(
+                    inner.x + 1,
+                    inner.y + ((i - scroll_offset) * 2) as u16,
+                    inner.width.saturating_sub(1),
+                    1,
+                ),
+                &title_display,
+                &artist.title,
+                Some(&artist.rating_key),
+            );
 
             // Line 2: genre tags
             let genres: String = if artist.genre.is_empty() {

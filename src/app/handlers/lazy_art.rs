@@ -13,7 +13,7 @@
 //! viewport — one batch, not one per key event.
 
 use crate::app::action::{Action, SystemAction};
-use crate::app::state::{AppState, ART_LOAD_PAUSE_MS};
+use crate::app::state::{ART_LOAD_PAUSE_MS, AppState};
 use std::time::Duration;
 
 /// If artwork navigation is Moving and motion has been still for at least
@@ -31,7 +31,7 @@ pub fn settle(state: &mut AppState) -> Option<Vec<Action>> {
     }
     state.artwork.navigation = crate::app::state::ArtworkNavigation::Settled;
     let batch = super::dispatch_miller::collect_viewport_art(state);
-    if batch.is_empty() {
+    if batch.is_empty() && state.artwork.grid_requested.is_empty() {
         return Some(vec![]);
     }
     Some(vec![Action::System(SystemAction::LoadAlbumArt(batch))])

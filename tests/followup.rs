@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::{backend::TestBackend, Terminal};
+use ratatui::{Terminal, backend::TestBackend};
 use std::time::Duration;
 use textamp::app::action::QueueAction;
 use textamp::app::dispatch::handle_core_event;
@@ -9,7 +9,7 @@ use textamp::app::state::{
     ActiveStation, BrowseCategory, BrowseColumn, BrowseItem, PlaybackMode, View,
 };
 use textamp::app::tasks::{TaskLease, TaskSession};
-use textamp::app::{AppState, Event};
+use textamp::app::{Action, AppState, Event};
 
 use tokio::sync::mpsc;
 
@@ -25,11 +25,13 @@ async fn replacing_lease_cancels_work_without_waiting_for_network_timeout() {
     drop(lease);
     assert!(!task.is_finished());
     drop(clone);
-    assert!(tokio::time::timeout(Duration::from_secs(1), task)
-        .await
-        .unwrap()
-        .unwrap_err()
-        .is_cancelled());
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .is_cancelled()
+    );
 }
 
 #[tokio::test]
@@ -135,7 +137,6 @@ async fn radio_conversion_and_undo_preserve_current_track_and_station() {
         &mut state,
         &mut textamp::audio::AudioPlayer::new_without_audio(),
     )
-    .await
     .unwrap();
     assert_eq!(state.playback_mode, PlaybackMode::Radio);
     assert_eq!(state.current_track().unwrap().rating_key, "second");
@@ -205,7 +206,6 @@ async fn queue_moves_preserve_block_order_playing_track_and_boundaries() {
         QueueAction::MoveSelectedTracksUp,
     ] {
         textamp::app::handlers::dispatch_queue::dispatch(&tx, action, &mut state, &mut audio)
-            .await
             .unwrap();
         let keys: Vec<_> = state
             .queue
@@ -222,7 +222,6 @@ async fn queue_moves_preserve_block_order_playing_track_and_boundaries() {
         &mut state,
         &mut audio,
     )
-    .await
     .unwrap();
     assert_eq!(state.queue.tracks[2].rating_key, "c");
     assert_eq!(state.current_track().unwrap().rating_key, "c");
@@ -232,7 +231,6 @@ async fn queue_moves_preserve_block_order_playing_track_and_boundaries() {
         &mut state,
         &mut audio,
     )
-    .await
     .unwrap();
     assert_eq!(state.queue.index, Some(4));
     assert_eq!(state.current_track().unwrap().rating_key, "c");
@@ -255,7 +253,6 @@ async fn backing_out_of_station_navigation_does_not_cancel_active_radio_refill()
         &mut state,
         &mut textamp::audio::AudioPlayer::new_without_audio(),
     )
-    .await
     .unwrap();
     assert_eq!(state.radio_generation, playback_generation);
     let stale_navigation = RadioEvent::StationChildrenLoaded {
@@ -345,4 +342,237 @@ fn queue_drag_rotation_matches_documented_order_for_every_small_move() {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn clear_queue_undo_restores_order_and_selection_without_autoplay() {
+    use textamp::app::state::{PlayStatus, PlaybackMode};
+    let mut state = AppState::new();
+    let tracks = vec![track("one"), track("two"), track("three")];
+    state.queue.tracks = tracks.clone();
+    state.queue.index = Some(1);
+    state.set_playback_mode(PlaybackMode::Queue);
+    let mut audio = textamp::audio::AudioPlayer::new_without_audio();
+    let (tx, _rx) = mpsc::channel(8);
+    for action in [
+        QueueAction::ClearQueue,
+        QueueAction::ClearQueue,
+        QueueAction::UndoLastRemix,
+    ] {
+        textamp::app::handlers::dispatch_queue::dispatch(&tx, action, &mut state, &mut audio)
+            .unwrap();
+    }
+    assert_eq!(
+        state
+            .queue
+            .tracks
+            .iter()
+            .map(|t| &t.rating_key)
+            .collect::<Vec<_>>(),
+        tracks.iter().map(|t| &t.rating_key).collect::<Vec<_>>()
+    );
+    assert_eq!(state.queue.index, Some(1));
+    assert_eq!(state.list_state.queue_index, 1);
+    assert_eq!(state.playback.status, PlayStatus::Stopped);
+}
+
+#[test]
+fn repeat_track_applies_to_natural_completion_not_explicit_next() {
+    use textamp::app::{
+        action::PlaybackAction,
+        event::PlaybackEvent,
+        state::{PlayStatus, RepeatMode},
+    };
+    let mut state = AppState::new();
+    state.queue.tracks = vec![track("one"), track("two")];
+    state.queue.index = Some(0);
+    state.playback.status = PlayStatus::Playing;
+    state.queue.repeat = RepeatMode::Track;
+    state.playback.playback_started_at = Some(std::time::Instant::now() - Duration::from_secs(2));
+    let (tx, _rx) = mpsc::channel(8);
+    let actions = handle_core_event(Event::Playback(PlaybackEvent::TrackEnded), &mut state, &tx);
+    assert!(matches!(
+        actions.as_slice(),
+        [Action::Playback(PlaybackAction::RetryCurrentTrack)]
+    ));
+    assert_eq!(state.queue.index, Some(0));
+}
+
+#[tokio::test]
+async fn clearing_radio_exits_mode_cancels_refills_and_undo_restores_without_playing() {
+    use textamp::app::state::{PlayStatus, RadioRefill, StationStart};
+    let mut state = AppState::new();
+    state.set_playback_mode(PlaybackMode::Radio);
+    state.radio.tracks = vec![track("first"), track("second")];
+    state.radio.track_index = Some(1);
+    state.radio.active_station = Some(ActiveStation {
+        source: textamp::library::models::RadioSource::Station("station".into()),
+        title: "Station".into(),
+    });
+    state.radio.refill = RadioRefill::Prefetching;
+    let task = tokio::spawn(std::future::pending::<()>());
+    state.radio_task = Some(TaskLease::new(&task));
+    state.station_starting = Some(StationStart {
+        title: "Next Station".into(),
+        continue_playback: None,
+    });
+    let old_generation = state.radio_generation;
+    state.playback.status = PlayStatus::Playing;
+    assert!(
+        textamp::app::command_palette::materialize_entries(&state)
+            .iter()
+            .any(|entry| matches!(
+                entry.command,
+                textamp::app::state::PaletteCommandKind::StopRadio
+            ))
+    );
+    let (tx, _rx) = mpsc::channel(8);
+    let mut audio = textamp::audio::AudioPlayer::new_without_audio();
+    textamp::app::handlers::dispatch_queue::dispatch(
+        &tx,
+        QueueAction::ClearQueue,
+        &mut state,
+        &mut audio,
+    )
+    .unwrap();
+    assert_eq!(state.playback_mode, PlaybackMode::None);
+    assert_eq!(state.playback.status, PlayStatus::Stopped);
+    assert!(state.radio.active_station.is_none());
+    assert!(state.station_starting.is_none());
+    assert!(state.radio_task.is_none());
+    assert!(state.playback_tracks().is_empty());
+    assert!(
+        textamp::app::command_catalog::disabled_reason(
+            &state,
+            &textamp::app::state::PaletteCommandKind::StopRadio
+        )
+        .is_some()
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .is_cancelled()
+    );
+    for event in [
+        RadioEvent::RadioTracksLoaded {
+            result: Ok(vec![track("late refill")]),
+            time_travel_index: None,
+        },
+        RadioEvent::StationTracksLoaded {
+            station: ActiveStation {
+                source: textamp::library::models::RadioSource::Station("late".into()),
+                title: "Late Station".into(),
+            },
+            tracks: vec![track("late start")],
+            time_travel_decades: vec![],
+            time_travel_index: None,
+        },
+    ] {
+        assert!(
+            handle_core_event(
+                Event::RadioResult {
+                    generation: old_generation,
+                    navigation_generation: None,
+                    event: Box::new(event.into())
+                },
+                &mut state,
+                &tx
+            )
+            .is_empty()
+        );
+        assert!(state.playback_tracks().is_empty());
+    }
+    textamp::app::handlers::dispatch_queue::dispatch(
+        &tx,
+        QueueAction::UndoLastRemix,
+        &mut state,
+        &mut audio,
+    )
+    .unwrap();
+    assert_eq!(state.playback_mode, PlaybackMode::Radio);
+    assert_eq!(state.current_track().unwrap().rating_key, "second");
+    assert_eq!(state.playback.status, PlayStatus::Stopped);
+    assert!(state.radio.refill == RadioRefill::Idle);
+}
+
+#[tokio::test]
+async fn undo_replaced_queue_invalidates_incompatible_audio_and_restores_the_saved_queue() {
+    use textamp::app::state::PlayStatus;
+    let mut state = AppState::new();
+    state.queue.tracks = vec![track("original-one"), track("original-two")];
+    state.queue.index = Some(1);
+    state.set_playback_mode(PlaybackMode::Queue);
+    let mut audio = textamp::audio::AudioPlayer::new_without_audio();
+    let (tx, _rx) = mpsc::channel(32);
+    textamp::app::handlers::dispatch_queue::dispatch(
+        &tx,
+        QueueAction::PlayTracksNow(vec![track("replacement")]),
+        &mut state,
+        &mut audio,
+    )
+    .unwrap();
+    state.playback.status = PlayStatus::Playing;
+    let old_audio = audio.playback_id();
+    let old_preparation = state.playback.preparation_id;
+    textamp::app::handlers::dispatch_queue::dispatch(
+        &tx,
+        QueueAction::UndoLastRemix,
+        &mut state,
+        &mut audio,
+    )
+    .unwrap();
+    assert_eq!(
+        state
+            .queue
+            .tracks
+            .iter()
+            .map(|t| t.rating_key.as_str())
+            .collect::<Vec<_>>(),
+        ["original-one", "original-two"]
+    );
+    assert_eq!(state.current_track().unwrap().rating_key, "original-two");
+    assert_ne!(audio.playback_id(), old_audio);
+    assert_eq!(state.playback.request_id, audio.playback_id());
+    assert!(state.playback.preparation_id > old_preparation);
+    assert_ne!(
+        state.playback.status,
+        PlayStatus::Playing,
+        "without a source, restored metadata must not claim old audio is still playing"
+    );
+}
+
+#[tokio::test]
+async fn undo_queue_edit_preserves_current_audio_when_its_track_is_restored() {
+    use textamp::app::state::{PlayStatus, QueueContents, QueueSnapshot};
+    let mut state = AppState::new();
+    state.queue.tracks = vec![track("one"), track("two")];
+    state.queue.index = Some(0);
+    state.set_playback_mode(PlaybackMode::Queue);
+    state.playback.status = PlayStatus::Playing;
+    state.playback.position_ms = 1234;
+    state.queue.undo_snapshot = Some(QueueSnapshot {
+        recorded_at: std::time::Instant::now(),
+        description: "Edit".into(),
+        contents: QueueContents::Queue {
+            tracks: vec![track("two"), track("one")],
+            index: Some(0),
+        },
+    });
+    let mut audio = textamp::audio::AudioPlayer::new_without_audio();
+    let old_audio = audio.playback_id();
+    let (tx, _rx) = mpsc::channel(32);
+    textamp::app::handlers::dispatch_queue::dispatch(
+        &tx,
+        QueueAction::UndoLastRemix,
+        &mut state,
+        &mut audio,
+    )
+    .unwrap();
+    assert_eq!(state.current_track().unwrap().rating_key, "one");
+    assert_eq!(state.queue.index, Some(1));
+    assert_eq!(state.playback.status, PlayStatus::Playing);
+    assert_eq!(state.playback.position_ms, 1234);
+    assert_eq!(audio.playback_id(), old_audio);
 }

@@ -8,7 +8,9 @@ fn empty_station_detail(source: &crate::library::station::RadioSource) -> &'stat
     use crate::library::models::RadioSource;
     match source {
         RadioSource::Artist(_) => "this artist has no playable tracks",
-        RadioSource::Sonic(_) => "no sonically similar tracks were found",
+        RadioSource::Sonic(_) | RadioSource::SonicFixed(_) | RadioSource::Related(_) => {
+            "no sonically similar tracks were found"
+        }
         RadioSource::Station(key) if key.ends_with("/randomAlbum") => {
             "no playable albums were found in this library"
         }
@@ -40,7 +42,7 @@ pub fn handle(event: RadioEvent, state: &mut AppState) -> Vec<Action> {
                 .take()
                 .and_then(|start| start.continue_playback);
             if continue_playback.is_some_and(|id| id != state.playback.request_id) {
-                state.set_status("Sonic Radio cancelled: playback changed while loading".into());
+                state.set_status("Sonic Mix cancelled: playback changed while loading".into());
                 return vec![];
             }
             let preserve_current =
@@ -61,10 +63,7 @@ pub fn handle(event: RadioEvent, state: &mut AppState) -> Vec<Action> {
                 // Commit only after loading succeeds. Report the old track before
                 // replacing its state; PlayCurrentRadioTrack replaces its audio.
 
-                state.dj.active_mode = None;
-                state.dj.history.clear();
-                state.dj.inserting = false;
-                state.dj.last_was_inserted = false;
+                crate::app::queue_edit::record(state, "Start station");
                 state.clear_error();
                 state.set_playback_mode(PlaybackMode::Radio);
                 state.queue.selected.clear();
@@ -74,12 +73,12 @@ pub fn handle(event: RadioEvent, state: &mut AppState) -> Vec<Action> {
                 state.radio.track_index = Some(0);
                 state.radio.time_travel_index = time_travel_index.unwrap_or(0);
 
-                // Time Travel Radio initialization
+                // Time Travel Mix initialization
                 if !time_travel_decades.is_empty() {
                     state.radio.time_travel_decades = time_travel_decades;
                     state.radio.time_travel_index = time_travel_index.unwrap_or(0);
                     tracing::info!(
-                        "Time Travel Radio: initialized with {} decades, next fetch from index {}",
+                        "Time Travel Mix: initialized with {} decades, next fetch from index {}",
                         state.radio.time_travel_decades.len(),
                         state.radio.time_travel_index
                     );
@@ -88,7 +87,7 @@ pub fn handle(event: RadioEvent, state: &mut AppState) -> Vec<Action> {
                 state.list_state.queue_index = 0;
                 state.set_view(View::Queue);
                 state.set_status(if preserve_current {
-                    "Sonic Radio ready".into()
+                    "Sonic Mix ready".into()
                 } else {
                     format!(
                         "Playing {} ({} tracks)",
@@ -157,17 +156,19 @@ pub fn handle(event: RadioEvent, state: &mut AppState) -> Vec<Action> {
                     return vec![];
                 }
             };
-            // Deduplicate against existing tracks
+            // Keep the audible and upcoming tracks unique; earlier songs may recur.
             let mut existing_keys: std::collections::HashSet<_> = state
                 .radio
                 .tracks
                 .iter()
+                .skip(state.radio.track_index.unwrap_or(0))
                 .map(|t| t.rating_key.clone())
                 .collect();
 
+            let album_station = state.radio.active_station.as_ref().is_some_and(|s| matches!(&s.source, crate::library::station::RadioSource::Station(key) if key.ends_with("/randomAlbum")));
             let unique_tracks: Vec<_> = tracks
                 .into_iter()
-                .filter(|t| existing_keys.insert(t.rating_key.clone()))
+                .filter(|t| album_station || existing_keys.insert(t.rating_key.clone()))
                 .collect();
 
             let added = unique_tracks.len();

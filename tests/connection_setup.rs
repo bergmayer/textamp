@@ -1,11 +1,10 @@
 //! Connection setup uses only loopback fixtures and isolated credential stores.
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use textamp::app::dispatch::{dispatch_action, handle_core_event};
 use textamp::app::sources::{
-    self,
+    self, ActiveSource,
     dialogs::{Dialog, ServerForm},
-    ActiveSource,
 };
 use textamp::app::state::{PlayStatus, SettingsFocus, SettingsSection, View};
 use textamp::app::{AppState, Event};
@@ -16,9 +15,9 @@ use tokio::sync::mpsc;
 
 async fn fixture(
     reply: impl Fn(&str, &HashMap<String, String>, &str, &Value) -> (u16, String, String)
-        + Send
-        + Sync
-        + 'static,
+    + Send
+    + Sync
+    + 'static,
 ) -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -67,7 +66,10 @@ async fn fixture(
                     .collect();
                 let body = serde_json::from_slice(&data[end..]).unwrap_or(Value::Null);
                 let (code, extra, body) = reply(url.path(), &query, &headers, &body);
-                let response = format!("HTTP/1.1 {code} Fixture\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len());
+                let response = format!(
+                    "HTTP/1.1 {code} Fixture\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
                 let _ = socket.write_all(response.as_bytes()).await;
             });
         }
@@ -219,11 +221,13 @@ async fn combined_setup_worker() {
         assert_eq!(state.playback.position_ms, 12345);
         if valid {
             assert_eq!(config.navidrome_sources[0].url, target);
-            assert!(state
-                .settings_state
-                .cache_scans
-                .values()
-                .any(|s| matches!(s.work, sources::cache::Work::Scan(_))));
+            assert!(
+                state
+                    .settings_state
+                    .cache_scans
+                    .values()
+                    .any(|s| matches!(s.work, sources::cache::Work::Scan(_)))
+            );
             if include_analysis {
                 let (key, connection) = config.audiomuse_connections.iter().next().unwrap();
                 assert_eq!(connection.url, format!("{target}/am"));
@@ -304,9 +308,11 @@ async fn combined_setup_worker() {
         } else {
             assert!(config.navidrome_sources.is_empty());
             assert!(config.audiomuse_connections.is_empty());
-            assert!(textamp::library::credentials::load_source("navidrome", &id)
-                .unwrap()
-                .is_none());
+            assert!(
+                textamp::library::credentials::load_source("navidrome", &id)
+                    .unwrap()
+                    .is_none()
+            );
             assert!(
                 matches!(state.popups.library_dialog(),Some(Dialog::Navidrome(form)) if form.error.is_some())
             );
@@ -356,10 +362,12 @@ async fn redirect_loops_and_website_login_redirects_do_not_become_server_address
             .await
             .is_err()
     );
-    assert!(textamp::util::server_url::resolve(&url, "rest/ping")
-        .await
-        .unwrap_err()
-        .to_string()
-        .contains("website login"));
+    assert!(
+        textamp::util::server_url::resolve(&url, "rest/ping")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("website login")
+    );
     server.abort();
 }

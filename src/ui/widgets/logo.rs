@@ -1,4 +1,4 @@
-//! The existing ANSI artwork. About keeps its original colors; the Search
+//! ANSI artwork. About uses the embedded colors; the Search
 //! landing panel and theme preview map its luminance into a theme's colors.
 use crate::ui::theme::ThemeColors;
 use ratatui::prelude::*;
@@ -6,7 +6,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 
 /// Keep both foreground and background shading: the block characters alone
 /// do not carry the artwork. About deliberately does not use this palette.
-fn themed(colors: &ThemeColors) -> Vec<Line<'static>> {
+pub(crate) fn themed(colors: &ThemeColors) -> Vec<Line<'static>> {
     let mut lines = original(Color::Rgb(0, 0, 0));
     for span in lines.iter_mut().flat_map(|line| &mut line.spans) {
         span.style.fg = span.style.fg.map(|color| tint(color, colors));
@@ -40,7 +40,18 @@ pub fn render_themed(frame: &mut Frame, area: Rect, colors: &ThemeColors) {
     if area.is_empty() {
         return;
     }
-    let lines = themed(colors);
+    render_lines(frame, area, themed(colors), colors);
+}
+
+/// Render the original colored ANSI logo, fitted to the available terminal cells.
+pub fn render_original(frame: &mut Frame, area: Rect, colors: &ThemeColors) {
+    render_lines(frame, area, original(colors.bg_primary), colors);
+}
+
+fn render_lines(frame: &mut Frame, area: Rect, lines: Vec<Line<'static>>, colors: &ThemeColors) {
+    if area.is_empty() {
+        return;
+    }
     let width = lines.iter().map(Line::width).max().unwrap_or(0) as u16;
     let height = lines.len() as u16;
     if width == 0 || height == 0 {
@@ -87,7 +98,7 @@ pub fn render_search(frame: &mut Frame, area: Rect, colors: &ThemeColors) {
 
 /// Parse the embedded ANSI art logo, replacing black with the theme background.
 pub fn original(theme_bg: Color) -> Vec<Line<'static>> {
-    let raw = include_str!("../../../textamp_clean.ansi");
+    let raw = include_str!("../../../assets/artwork/textamp_clean.ansi");
     let mut result = Vec::new();
 
     for line in raw.lines() {

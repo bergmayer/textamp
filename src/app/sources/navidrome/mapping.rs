@@ -88,7 +88,11 @@ impl Session {
             genres,
             parent_title: t.album.map(clean),
             parent_rating_key: t.album_id.map(|s| self.key(&s)),
-            grandparent_title: t.album_artist.or_else(|| t.artist.clone()).map(clean),
+            grandparent_title: t
+                .album_artist
+                .or(t.display_album_artist)
+                .or_else(|| t.artist.clone())
+                .map(clean),
             grandparent_rating_key: t.artist_id.map(|s| self.key(&s)),
             original_title: t.artist.map(clean),
             thumb: t.cover_art.map(|s| self.key(&s)),
@@ -96,6 +100,7 @@ impl Session {
             year: t.year,
             duration: t.duration.map(|s| s.saturating_mul(1000)),
             media: vec![Media {
+                container: t.suffix.clone(),
                 audio_codec: t.suffix,
                 bitrate: t.bit_rate,
                 part: vec![MediaPart {
@@ -117,9 +122,40 @@ impl Session {
             composite: p.cover_art.map(|s| self.key(&s)),
             duration: p.duration.map(|s| s.saturating_mul(1000)),
             leaf_count: p.song_count,
-            added_at: None,
-            updated_at: None,
+            added_at: p.created.as_deref().and_then(timestamp),
+            updated_at: p.changed.as_deref().and_then(timestamp),
             smart: false,
         }
+    }
+}
+
+fn timestamp(value: &str) -> Option<i64> {
+    time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
+        .ok()
+        .map(|date| date.unix_timestamp())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn playlist_changes_retain_server_revision_without_requiring_a_size_change() {
+        let source = crate::navidrome::Source {
+            id: "fixture".into(),
+            name: "Fixture".into(),
+            url: "http://127.0.0.1:1".into(),
+            username: "fixture".into(),
+            libraries: vec![],
+        };
+        let session = Session {
+            client: crate::navidrome::Client::new(&source, "fixture".into(), None).unwrap(),
+            source,
+            extensions: Default::default(),
+        };
+        let first: n::Playlist = serde_json::from_value(serde_json::json!({"id":"list","name":"List","songCount":2,"changed":"2026-11-17T12:00:00Z"})).unwrap();
+        let second: n::Playlist = serde_json::from_value(serde_json::json!({"id":"list","name":"List","songCount":2,"changed":"2026-11-17T12:01:00Z"})).unwrap();
+        let (first, second) = (session.playlist(first), session.playlist(second));
+        assert_eq!(first.leaf_count, second.leaf_count);
+        assert_eq!(second.updated_at.unwrap() - first.updated_at.unwrap(), 60);
     }
 }

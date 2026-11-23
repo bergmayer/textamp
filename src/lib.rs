@@ -8,6 +8,7 @@ pub mod app;
 pub mod audio;
 pub mod audiomuse;
 pub mod config;
+pub mod icon;
 pub mod library;
 pub mod media;
 pub mod miller;
@@ -17,3 +18,14 @@ pub mod util;
 
 pub mod navidrome;
 pub mod tui;
+
+#[cfg(feature = "desktop")]
+pub mod desktop;
+
+#[cfg(all(feature = "desktop", target_os = "macos"))]
+pub mod text_mode;
+
+pub mod terminal;
+
+#[cfg(feature = "mobile")]
+pub mod mobile;

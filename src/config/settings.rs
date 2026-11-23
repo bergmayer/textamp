@@ -6,6 +6,10 @@ use std::collections::HashMap;
 /// Root configuration structure.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub players: Vec<crate::services::player_sync::Player>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub webdav_player_sync: crate::app::player_sync::WebdavPlayers,
     /// Recent successful descriptions and ranked result IDs, keyed by exact library identity.
     #[serde(default)]
     pub description_history: HashMap<String, Vec<crate::audiomuse::DescriptionHistory>>,
@@ -36,22 +40,7 @@ pub struct Config {
 }
 
 impl Config {
-    /// Read-only lookup of stored view settings for a single
-    /// playlist. Returns `None` when neither the library nor the
-    /// playlist has any saved entry — the caller should fall back to
-    /// defaults (no grouping, no artwork) in that case.
-    pub fn playlist_view(&self, lib_key: &str, playlist_key: &str) -> Option<PlaylistView> {
-        self.ui
-            .library_view_settings
-            .get(lib_key)?
-            .playlists
-            .get(playlist_key)
-            .copied()
-    }
-
-    /// Write the current per-playlist view to config. An all-default
-    /// view (no grouping, no artwork) deletes the entry rather than
-    /// storing a redundant row — keeps the on-disk config minimal.
+    /// Persist playlist grouping, omitting the ungrouped default.
     pub fn set_playlist_view(&mut self, lib_key: &str, playlist_key: &str, view: PlaylistView) {
         let lib = self
             .ui
@@ -68,36 +57,40 @@ impl Config {
         }
     }
 
-    /// Resolve the saved artwork choices for one library. Older global values
-    /// remain the starting values until this library has its own choices.
-    pub fn artwork_preferences(&self, lib_key: &str) -> (crate::app::state::ArtworkMode, bool) {
+    /// Resolve rendering for one library and presentation; terminal image choices
+    /// are retained even when the current terminal uses a character fallback.
+    pub fn artwork_mode(
+        &self,
+        lib_key: &str,
+        presentation: crate::app::launch::WindowedMode,
+    ) -> crate::app::state::ArtworkMode {
         let library = self.ui.library_view_settings.get(lib_key);
-        (
-            crate::app::state::ArtworkMode::from_config(
-                library
-                    .and_then(|view| view.artwork_mode.as_deref())
-                    .unwrap_or(&self.ui.artwork_mode),
-            ),
-            library
-                .and_then(|view| view.artwork_visible)
-                .unwrap_or(self.ui.cover_art_view),
-        )
+        let value = match presentation {
+            crate::app::launch::WindowedMode::Text => library
+                .and_then(|view| view.artwork_mode.as_deref())
+                .unwrap_or(&self.ui.artwork_mode),
+            crate::app::launch::WindowedMode::Gui => library
+                .and_then(|view| view.graphical_artwork_mode.as_deref())
+                .unwrap_or("auto"),
+        };
+        crate::app::state::ArtworkMode::from_config(value)
     }
-
-    pub fn set_artwork_mode(&mut self, lib_key: &str, mode: crate::app::state::ArtworkMode) {
-        self.ui
+    pub fn set_artwork_mode(
+        &mut self,
+        lib_key: &str,
+        presentation: crate::app::launch::WindowedMode,
+        mode: crate::app::state::ArtworkMode,
+    ) {
+        let library = self
+            .ui
             .library_view_settings
-            .entry(lib_key.to_string())
-            .or_default()
-            .artwork_mode = Some(mode.name().to_string());
-    }
-
-    pub fn set_artwork_visible(&mut self, lib_key: &str, visible: bool) {
-        self.ui
-            .library_view_settings
-            .entry(lib_key.to_string())
-            .or_default()
-            .artwork_visible = Some(visible);
+            .entry(lib_key.to_owned())
+            .or_default();
+        let value = match presentation {
+            crate::app::launch::WindowedMode::Text => &mut library.artwork_mode,
+            crate::app::launch::WindowedMode::Gui => &mut library.graphical_artwork_mode,
+        };
+        *value = Some(mode.name().to_owned());
     }
 
     pub fn set_column_artwork(&mut self, lib_key: &str, column_key: &str, visible: bool) {
@@ -113,7 +106,7 @@ impl Config {
     }
 
     /// Drop stored playlist entries for any playlist that no longer
-    /// exists in the given library. Called after `PlaylistsLoaded`
+    /// exists in the given library. Called after a catalog refresh
     /// so deleted playlists' settings don't accumulate forever.
     pub fn prune_stale_playlist_views(
         &mut self,
@@ -176,6 +169,9 @@ fn default_buffer_size() -> u32 {
 /// UI settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UiConfig {
+    /// Most recently activated windowed presentation; external terminals do not change it.
+    #[serde(default)]
+    pub last_windowed_mode: crate::app::launch::WindowedMode,
     #[serde(default = "default_show_album_art")]
     pub show_album_art: bool,
 
@@ -184,10 +180,6 @@ pub struct UiConfig {
 
     #[serde(default = "default_theme")]
     pub theme: String,
-
-    /// Default for libraries without their own visibility choice.
-    #[serde(default = "default_cover_art_view")]
-    pub cover_art_view: bool,
 
     /// Default for libraries without their own rendering choice.
     #[serde(default = "default_artwork_mode")]
@@ -210,8 +202,12 @@ pub struct UiConfig {
     #[serde(default = "default_enable_search_service")]
     pub enable_apple_music_search: bool,
 
-    /// Same as `enable_apple_music_search` but for Spotify search.
-    #[serde(default = "default_enable_search_service")]
+    /// Browser search provider for artist information and web queries.
+    #[serde(default)]
+    pub web_search_provider: crate::services::web_search::Provider,
+
+    /// Include Spotify search in menus and palettes. Disabled by default.
+    #[serde(default)]
     pub enable_spotify_search: bool,
 
     /// Same as `enable_apple_music_search` but for YouTube search.
@@ -220,7 +216,7 @@ pub struct UiConfig {
 
     /// Per-library artwork and playlist view settings. Outer key is the
     /// library's `lib_key`, inner is the playlist's `rating_key`.
-    /// Pruned on `PlaylistsLoaded` so deleted playlists don't keep
+    /// Pruned on a catalog refresh so deleted playlists don't keep
     /// accumulating stale entries.
     #[serde(default)]
     pub library_view_settings: std::collections::HashMap<String, LibraryViewSettings>,
@@ -232,28 +228,34 @@ pub struct UiConfig {
     /// default to keep the column readable.
     #[serde(default = "default_hidden_sections")]
     pub hidden_sections: Vec<crate::app::state::BrowseCategory>,
+    #[serde(default)]
+    pub desktop_hidden_library_roots: Vec<crate::app::state::LibraryRoot>,
+    /// Multiple persistent desktop windows; false uses temporary in-window dialogs.
+    #[serde(default)]
+    pub desktop_separate_player: bool,
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub last_playlist_destinations: std::collections::HashMap<String, String>,
+    #[serde(default, skip_serializing)]
+    pub desktop_command_history: Vec<String>,
+    #[serde(default)]
+    pub command_history: crate::app::command_history::History,
+    #[serde(default)]
+    pub desktop_large_album_covers: bool,
+    #[serde(default)]
+    pub remix_allow_same_artist: bool,
+    #[serde(default)]
+    pub show_compilation_only_artists: bool,
+    #[serde(default = "crate::services::singles::default_limit")]
+    pub singles_track_limit: u32,
+    #[serde(default)]
+    pub desktop_collapsed_sections: Vec<String>,
     /// Optional Navidrome / AudioMuse sidebar views. Existing category preferences
     /// retain their original configuration format.
     #[serde(default)]
     pub hidden_collections: Vec<crate::app::sources::navidrome::commands::CollectionKind>,
-
-    /// How the Library screen's Miller columns share the horizontal
-    /// space when more than two are open.
-    /// - `"shrinking"` (default): every visible column shrinks to fit.
-    /// - `"scrolling"`: every column keeps its starting width (half
-    ///   the inner area), the layout extends past the screen, and the
-    ///   viewport scrolls as the user drills deeper. A horizontal
-    ///   scroll indicator hints at off-screen columns.
-    #[serde(default)]
-    pub miller_layout: crate::app::state::MillerLayoutMode,
-
-    /// TUI-only: tall-monitor split view. When true, the Library
-    /// screen renders in the top half of the window and the Now
-    /// Playing screen in the bottom half. Tab-toggling between views
-    /// becomes irrelevant. Off by default; toggle with `|` or via the
-    /// command palette.
-    #[serde(default)]
-    pub tall_mode: bool,
+    /// Keep the desktop player visible alongside the library.
+    #[serde(default, alias = "tall_mode")]
+    pub desktop_split_view: bool,
 }
 
 fn default_hidden_sections() -> Vec<crate::app::state::BrowseCategory> {
@@ -266,14 +268,15 @@ pub struct LibraryViewSettings {
     /// Per-playlist toggles, keyed by the playlist's server rating_key.
     #[serde(default)]
     pub playlists: std::collections::HashMap<String, PlaylistView>,
-    /// Per-column artwork overrides, keyed by browse category and parent item.
+    /// Artwork visibility keyed by column type, shared by all presentations.
     #[serde(default)]
     pub columns: std::collections::HashMap<String, bool>,
-    /// Rendering method and default visibility for this library.
+    /// Terminal rendering method for this library.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artwork_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub artwork_visible: Option<bool>,
+    /// Graphical artwork encoding, independent of the terminal encoding.
+    pub graphical_artwork_mode: Option<String>,
 }
 
 impl LibraryViewSettings {
@@ -281,7 +284,7 @@ impl LibraryViewSettings {
         self.playlists.is_empty()
             && self.columns.is_empty()
             && self.artwork_mode.is_none()
-            && self.artwork_visible.is_none()
+            && self.graphical_artwork_mode.is_none()
     }
 }
 
@@ -290,15 +293,12 @@ impl LibraryViewSettings {
 pub struct PlaylistView {
     #[serde(default)]
     pub group_by_album: bool,
-    #[serde(default)]
-    pub show_artwork: bool,
 }
 
 impl PlaylistView {
-    /// True when neither toggle is on — used by the saver to delete
-    /// the entry instead of writing all-default values.
+    /// True for the default ungrouped playlist.
     pub fn is_default(&self) -> bool {
-        !self.group_by_album && !self.show_artwork
+        !self.group_by_album
     }
 }
 
@@ -314,21 +314,31 @@ pub struct WindowConfig {
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
+            last_windowed_mode: Default::default(),
             show_album_art: default_show_album_art(),
             album_art_size: default_album_art_size(),
             theme: default_theme(),
-            cover_art_view: default_cover_art_view(),
             artwork_mode: default_artwork_mode(),
             window: WindowConfig::default(),
             ui_scale: default_ui_scale(),
             enable_apple_music_search: default_enable_search_service(),
-            enable_spotify_search: default_enable_search_service(),
+            web_search_provider: Default::default(),
+            enable_spotify_search: false,
             enable_youtube_search: default_enable_search_service(),
             library_view_settings: std::collections::HashMap::new(),
             hidden_sections: default_hidden_sections(),
+            desktop_hidden_library_roots: vec![],
+            desktop_separate_player: false,
+            last_playlist_destinations: Default::default(),
+            desktop_command_history: vec![],
+            command_history: Default::default(),
+            desktop_large_album_covers: false,
+            remix_allow_same_artist: false,
+            show_compilation_only_artists: false,
+            singles_track_limit: crate::services::singles::DEFAULT_LIMIT,
+            desktop_collapsed_sections: vec![],
             hidden_collections: Vec::new(),
-            miller_layout: crate::app::state::MillerLayoutMode::default(),
-            tall_mode: false,
+            desktop_split_view: false,
         }
     }
 }
@@ -359,10 +369,6 @@ fn default_ui_scale() -> f32 {
 pub const UI_SCALE_MIN: f32 = 0.75;
 pub const UI_SCALE_MAX: f32 = 2.0;
 pub const UI_SCALE_STEP: f32 = 0.1;
-
-fn default_cover_art_view() -> bool {
-    true
-}
 
 impl Default for WindowConfig {
     fn default() -> Self {
@@ -395,4 +401,48 @@ fn default_window_width() -> u32 {
 
 fn default_window_height() -> u32 {
     840
+}
+
+#[cfg(test)]
+mod desktop_layout_tests {
+    use super::*;
+    #[test]
+    fn artwork_rendering_is_independent_and_legacy_terminal_choice_survives() {
+        use crate::app::{launch::WindowedMode, state::ArtworkMode};
+        let mut config: Config =
+            toml::from_str("[ui]\nartwork_mode = \"braille\"\ncover_art_view = false\n").unwrap();
+        assert_eq!(
+            config.artwork_mode("library", WindowedMode::Text),
+            ArtworkMode::Braille
+        );
+        assert_eq!(
+            config.artwork_mode("library", WindowedMode::Gui),
+            ArtworkMode::Auto
+        );
+        config.set_artwork_mode("library", WindowedMode::Gui, ArtworkMode::Halfblocks);
+        let saved = toml::to_string(&config).unwrap();
+        assert!(!saved.contains("cover_art_view"));
+        let restored: Config = toml::from_str(&saved).unwrap();
+        assert_eq!(
+            restored.artwork_mode("library", WindowedMode::Text),
+            ArtworkMode::Braille
+        );
+        assert_eq!(
+            restored.artwork_mode("library", WindowedMode::Gui),
+            ArtworkMode::Halfblocks
+        );
+    }
+    #[test]
+    fn obsolete_column_sizing_is_ignored_and_not_reserialized() {
+        let mut config: Config =
+            toml::from_str("[ui]\ndesktop_column_sizing = \"fit_content\"\n").unwrap();
+        config.ui.desktop_separate_player = true;
+        let restored: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert!(
+            !toml::to_string(&restored)
+                .unwrap()
+                .contains("desktop_column_sizing")
+        );
+        assert!(restored.ui.desktop_separate_player);
+    }
 }

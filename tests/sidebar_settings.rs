@@ -1,11 +1,10 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::{backend::TestBackend, Terminal};
+use ratatui::{Terminal, backend::TestBackend};
 use textamp::app::action::SettingsAction;
 use textamp::app::handlers::{dispatch_settings, key_input, mouse_input};
 use textamp::app::sources::{
-    audiomuse,
-    navidrome::{commands::CollectionKind, Session},
-    ActiveSource,
+    ActiveSource, audiomuse,
+    navidrome::{Session, commands::CollectionKind},
 };
 use textamp::app::state::{
     BrowseCategory, CategoryRow, InputDialog, InputDialogAction, SettingsFocus, SettingsSection,
@@ -45,7 +44,7 @@ fn nav_state() -> AppState {
 }
 
 #[test]
-fn sidebar_has_no_outer_title_and_renders_lowercase_group_headings() {
+fn sidebar_has_no_outer_title_and_renders_disclosure_headings() {
     for provider in ["navidrome", "none", "folder"] {
         let mut state = nav_state();
         match provider {
@@ -53,17 +52,19 @@ fn sidebar_has_no_outer_title_and_renders_lowercase_group_headings() {
             "folder" => state.sources.active = ActiveSource::Folder("fixture".into()),
             _ => {}
         }
-        state.library.playlists = ["Recently Added", "My Playlist"]
-            .into_iter()
-            .enumerate()
-            .map(|(index, title)| {
-                serde_json::from_value(serde_json::json!({
-                    "ratingKey": index.to_string(), "key": format!("/playlists/{index}"),
-                    "title": title, "type": "audio",
-                }))
-                .unwrap()
-            })
-            .collect();
+        state.library.playlists = std::sync::Arc::new(
+            ["Recently Added", "My Playlist"]
+                .into_iter()
+                .enumerate()
+                .map(|(index, title)| {
+                    serde_json::from_value(serde_json::json!({
+                        "ratingKey": index.to_string(), "key": format!("/playlists/{index}"),
+                        "title": title, "type": "audio",
+                    }))
+                    .unwrap()
+                })
+                .collect(),
+        );
         state.view = View::Browse;
         state.category_column_focused = true;
         state.category_column_index = 0;
@@ -79,7 +80,7 @@ fn sidebar_has_no_outer_title_and_renders_lowercase_group_headings() {
             .map(|x| buffer[(x, region.area.y)].symbol())
             .collect();
         assert!(
-            border.chars().all(|c| c == '─'),
+            border.chars().all(|c| c == '━'),
             "untitled sidebar border: {border}"
         );
         for (index, row) in state.category_rows().iter().enumerate() {
@@ -88,11 +89,7 @@ fn sidebar_has_no_outer_title_and_renders_lowercase_group_headings() {
                 let line: String = (region.inner.x..region.inner.right())
                     .map(|x| buffer[(x, y)].symbol())
                     .collect();
-                assert!(
-                    line.contains(&format!("─ {} ─", label.to_lowercase())),
-                    "{provider}: {line}"
-                );
-                assert!(!line.chars().any(char::is_uppercase));
+                assert!(line.contains(&format!("▾ {label}")), "{provider}: {line}");
             }
         }
     }
@@ -113,13 +110,15 @@ fn saved_audiomuse_features_render_after_startup_without_a_loaded_analysis_index
     state.sources.active = ActiveSource::Navidrome(Box::new(session));
     state.view = View::Browse;
     assert!(state.sources.audiomuse.snapshot.is_none());
-    assert!(state
-        .sources
-        .active
-        .navidrome()
-        .unwrap()
-        .extensions
-        .is_empty());
+    assert!(
+        state
+            .sources
+            .active
+            .navidrome()
+            .unwrap()
+            .extensions
+            .is_empty()
+    );
 
     let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
     terminal
@@ -137,19 +136,25 @@ fn saved_audiomuse_features_render_after_startup_without_a_loaded_analysis_index
     let commands = textamp::app::sources::navidrome::commands::entries(&state);
     for feature in Feature::ALL {
         assert!(
-            text.contains(feature.label()),
+            text.contains(if feature == Feature::Describe {
+                "Describe Music"
+            } else {
+                feature.label()
+            }),
             "{} must render before network discovery",
             feature.label()
         );
-        assert!(state
-            .sidebar_sections()
-            .contains(&SidebarSection::Collection(CollectionKind::AudioMuse(
-                feature
-            ))));
+        assert!(
+            state
+                .sidebar_sections()
+                .contains(&SidebarSection::Collection(CollectionKind::AudioMuse(
+                    feature
+                )))
+        );
         assert_eq!(commands.iter().any(|entry| matches!(entry.command,
             textamp::app::state::PaletteCommandKind::Navidrome(
                 textamp::app::sources::navidrome::commands::Command::Collection(CollectionKind::AudioMuse(f))
-            ) if f == feature)), feature.is_search());
+            ) if f == feature)), true);
     }
 }
 
@@ -206,7 +211,6 @@ async fn settings_rows_and_keyboard_actions_follow_the_active_provider() {
                 &mut state,
                 &mut audio,
             )
-            .await
             .unwrap();
             assert!(
                 matches!(actions.as_slice(), [Action::Settings(SettingsAction::ToggleExternalSearchService(selected))] if *selected == target)
@@ -277,7 +281,6 @@ async fn settings_rows_and_keyboard_actions_follow_the_active_provider() {
             &mut state,
             &mut audio,
         )
-        .await
         .unwrap();
         assert!(matches!(
             actions.as_slice(),
@@ -320,7 +323,7 @@ async fn settings_rows_and_keyboard_actions_follow_the_active_provider() {
 }
 
 #[test]
-fn palette_omits_browse_collections_but_keeps_search_and_selection_actions() {
+fn palette_keeps_analysis_commands_and_omits_duplicate_catalog_destinations() {
     use textamp::app::command_palette;
     let mut state = nav_state();
     state.queue.tracks = vec![textamp::library::track::Track {
@@ -352,8 +355,9 @@ fn palette_omits_browse_collections_but_keeps_search_and_selection_actions() {
         let entries = command_palette::materialize_entries(&state);
         for destination in &destinations {
             assert!(
-                !entries.iter().any(|e| e.label == destination.label()),
-                "{} is navigation, not a command ({view:?})",
+                entries.iter().any(|e| e.label == destination.label())
+                    == matches!(destination, CollectionKind::AudioMuse(_)),
+                "{} analysis availability must be independent of sidebar navigation ({view:?})",
                 destination.label()
             );
         }
@@ -387,9 +391,11 @@ fn palette_omits_browse_collections_but_keeps_search_and_selection_actions() {
     }
     // Hiding a sidebar collection must not resurrect it as a palette shortcut.
     state.hidden_collections = destinations;
-    assert!(!command_palette::materialize_entries(&state)
-        .iter()
-        .any(|e| e.label == "Favorite songs"));
+    assert!(
+        !command_palette::materialize_entries(&state)
+            .iter()
+            .any(|e| e.label == "Favorite songs")
+    );
 }
 
 #[tokio::test]
@@ -397,8 +403,11 @@ async fn native_views_share_browse_and_visibility_persists_without_palette_short
     let mut state = nav_state();
     let mut config = Config::default();
     let rows = state.category_rows();
-    assert_eq!(rows[0], CategoryRow::Search);
-    assert_eq!(rows[1], CategoryRow::Header("Browse"));
+    assert_eq!(
+        rows[0],
+        CategoryRow::Root(textamp::app::state::LibraryRoot::Artists)
+    );
+    assert_eq!(rows[1], CategoryRow::Header("Albums"));
     assert!(!rows.contains(&CategoryRow::Header("Navidrome")));
     let target = SidebarSection::Collection(CollectionKind::FavoriteArtists);
     state.settings_state.page = textamp::app::state::SettingsPage::Sidebar;
@@ -407,9 +416,11 @@ async fn native_views_share_browse_and_visibility_persists_without_palette_short
         .iter()
         .position(|s| *s == textamp::app::state::TextampSetting::Sidebar(target))
         .unwrap();
-    assert!(!state
-        .sidebar_sections()
-        .contains(&SidebarSection::Category(BrowseCategory::Moods)));
+    assert!(
+        !state
+            .sidebar_sections()
+            .contains(&SidebarSection::Category(BrowseCategory::Moods))
+    );
     let actions = key_input::handle_key(
         KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
         &mut state,
@@ -429,7 +440,6 @@ async fn native_views_share_browse_and_visibility_persists_without_palette_short
         &mut state,
         &mut audio,
     )
-    .await
     .unwrap();
     assert!(
         matches!(actions.as_slice(), [Action::Settings(SettingsAction::ToggleSectionVisibility(s))] if *s == target)
@@ -441,21 +451,24 @@ async fn native_views_share_browse_and_visibility_persists_without_palette_short
         &mut state,
         &mut audio,
     )
-    .await
     .unwrap();
     // Inspect the normal persistence command; don't write the user's settings in a test.
     assert!(matches!(
         actions.as_slice(),
         [Action::Settings(SettingsAction::SaveSettings)]
     ));
-    assert!(!state
-        .category_rows()
-        .contains(&CategoryRow::NavidromeCollection(
-            CollectionKind::FavoriteArtists
-        )));
-    assert!(!textamp::app::sources::navidrome::commands::entries(&state)
-        .iter()
-        .any(|entry| entry.label == "Favorite artists"));
+    assert!(
+        !state
+            .category_rows()
+            .contains(&CategoryRow::NavidromeCollection(
+                CollectionKind::FavoriteArtists
+            ))
+    );
+    assert!(
+        !textamp::app::sources::navidrome::commands::entries(&state)
+            .iter()
+            .any(|entry| entry.label == "Favorite artists")
+    );
     config
         .ui
         .hidden_collections
@@ -463,10 +476,12 @@ async fn native_views_share_browse_and_visibility_persists_without_palette_short
     let restored: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
     assert_eq!(restored.ui.hidden_collections, config.ui.hidden_collections);
     assert_eq!(restored.ui.hidden_sections, config.ui.hidden_sections);
-    assert!(restored
-        .ui
-        .hidden_collections
-        .contains(&CollectionKind::FavoriteArtists));
+    assert!(
+        restored
+            .ui
+            .hidden_collections
+            .contains(&CollectionKind::FavoriteArtists)
+    );
 }
 
 #[test]
@@ -482,6 +497,11 @@ fn small_settings_scroll_and_mouse_selection_preserve_the_viewport() {
         state.settings_state.item_index,
         state.textamp_settings().len() - 1
     );
+    state.settings_state.item_index = state
+        .textamp_settings()
+        .iter()
+        .rposition(|setting| matches!(setting, textamp::app::state::TextampSetting::Theme(_)))
+        .unwrap();
     let mut terminal = Terminal::new(TestBackend::new(90, 14)).unwrap();
     terminal
         .draw(|frame| {
@@ -513,8 +533,13 @@ fn small_settings_scroll_and_mouse_selection_preserve_the_viewport() {
             .scroll_offset,
         region.scroll_offset
     );
-    // Theme rows only preview, including repeated clicks. Apply is explicit.
-    assert!(mouse_input::handle_mouse(mouse, &mut state).is_empty());
+    assert!(
+        matches!(
+            mouse_input::handle_mouse(mouse, &mut state).as_slice(),
+            [Action::Settings(SettingsAction::SettingsSelect)]
+        ),
+        "clicking the already highlighted theme applies it"
+    );
     assert!(matches!(
         key_input::handle_key(
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
@@ -596,9 +621,11 @@ fn source_specific_choices_and_empty_groups_do_not_leave_unselectable_focus() {
     state
         .hidden_collections
         .extend(Feature::ALL.map(CollectionKind::AudioMuse));
-    assert!(!state
-        .category_rows()
-        .contains(&CategoryRow::Header("AudioMuse")));
+    assert!(
+        !state
+            .category_rows()
+            .contains(&CategoryRow::Header("AudioMuse"))
+    );
     state.sources.active = ActiveSource::Folder("local".into());
     assert_eq!(
         state.sidebar_sections(),
@@ -607,18 +634,33 @@ fn source_specific_choices_and_empty_groups_do_not_leave_unselectable_focus() {
     state.hidden_sections.push(BrowseCategory::Folders);
     state.browse_category = BrowseCategory::Folders;
     state.focus_category_column();
-    assert_eq!(
-        state.category_rows()[state.category_column_index],
-        CategoryRow::Search
-    );
+    use textamp::app::state::LibraryRoot;
+    let mut expected = vec![CategoryRow::Root(LibraryRoot::Downloads)];
+    if cfg!(target_os = "macos") {
+        expected.push(CategoryRow::Root(LibraryRoot::Mp3Players));
+    }
+    assert_eq!(state.category_rows(), expected);
+    assert!(matches!(
+        key_input::handle_key(
+            KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL),
+            &mut state,
+            &Config::default()
+        )
+        .as_slice(),
+        [Action::Search(_)]
+    ));
     state.sources.active = ActiveSource::None;
-    assert!(state
-        .sidebar_sections()
-        .contains(&SidebarSection::Category(BrowseCategory::Moods)));
-    assert!(!state
-        .sidebar_sections()
-        .iter()
-        .any(|s| matches!(s, SidebarSection::Collection(_))));
+    assert!(
+        state
+            .sidebar_sections()
+            .contains(&SidebarSection::Category(BrowseCategory::Moods))
+    );
+    assert!(
+        !state
+            .sidebar_sections()
+            .iter()
+            .any(|s| matches!(s, SidebarSection::Collection(_)))
+    );
 }
 
 #[test]
@@ -697,5 +739,218 @@ fn right_reenters_audiomuse_search_results_while_enter_starts_a_new_search() {
             );
             assert!(actions.is_empty(), "Enter is required for the first prompt");
         }
+    }
+}
+
+#[test]
+fn playlists_always_live_in_sidebar_and_legacy_grouping_is_ignored() {
+    use textamp::app::state::{BrowseColumn, BrowseItem, LibraryRoot, SettingsPage};
+    let mut state = nav_state();
+    state.library.playlists = std::sync::Arc::new(vec![serde_json::from_value(
+        serde_json::json!({"ratingKey":"playlist","key":"/playlists/playlist","title":"My Playlist","type":"audio"}),
+    )
+    .unwrap()]);
+    state.browse_category = BrowseCategory::Playlists;
+    state.playlist_nav.columns = vec![
+        BrowseColumn::new(
+            "playlists",
+            BrowseItem::from_playlists(&state.library.playlists),
+        ),
+        BrowseColumn::new("tracks", vec![]),
+    ];
+    let rows = state.category_rows();
+    assert!(
+        rows.iter()
+            .any(|row| matches!(row, CategoryRow::Playlist(0)))
+    );
+    assert!(
+        !rows
+            .iter()
+            .any(|row| matches!(row, CategoryRow::Category(BrowseCategory::Playlists)))
+    );
+    if cfg!(target_os = "macos") {
+        assert_eq!(
+            rows.last(),
+            Some(&CategoryRow::Root(LibraryRoot::Mp3Players))
+        );
+    }
+    assert_eq!(state.browse_column_offset(), 1);
+    assert!(
+        !state
+            .textamp_settings_for(SettingsPage::Sidebar)
+            .iter()
+            .any(|setting| format!("{setting:?}").contains("GroupPlaylists"))
+    );
+    let legacy: Config = toml::from_str("[ui]\ngroup_playlists=true\n").unwrap();
+    assert!(
+        !toml::to_string(&legacy)
+            .unwrap()
+            .contains("group_playlists")
+    );
+}
+
+#[test]
+fn playlist_names_preserve_order_and_ignore_obsolete_disclosure_state() {
+    use textamp::app::sidebar::{self, SidebarGroup};
+    let mut state = nav_state();
+    state.view = View::Browse;
+    state.desktop_collapsed_sections = vec!["Mu Playlists".into()];
+    state.library.playlists = std::sync::Arc::new(
+        ["Weekend", "Mu Radio", "mu discoveries", "Favourites"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, title)| {
+                serde_json::from_value(serde_json::json!({
+                    "ratingKey": index.to_string(), "key": format!("/playlists/{index}"),
+                    "title": title, "type": "audio"
+                }))
+                .unwrap()
+            })
+            .collect(),
+    );
+    state.station_nav.columns = vec![textamp::app::state::StationColumn::new(
+        None,
+        "Radio".into(),
+        textamp::library::station::standard_stations(
+            "nav-radio",
+            textamp::library::capabilities::NAVIDROME,
+        ),
+    )];
+    let rows = sidebar::visible_rows(&state);
+    let headings: Vec<_> = rows
+        .iter()
+        .filter(|row| row.parent.is_none())
+        .map(|row| row.label.as_str())
+        .collect();
+    assert!(
+        headings
+            .windows(2)
+            .any(|pair| pair == ["Albums", "Playlists"])
+    );
+    assert!(sidebar::allows_disclosure(&rows, "Radio"));
+    assert!(
+        sidebar::group_rows(&state, "Radio")
+            .iter()
+            .any(|(_, row)| row.label == "Play Random Albums")
+    );
+    assert!(
+        sidebar::visible_indices(&rows, &["Radio".into()])
+            .iter()
+            .all(|&i| rows[i].parent != Some(SidebarGroup::Radio))
+    );
+    let playlists: Vec<_> = rows
+        .iter()
+        .filter(|row| row.playlist_key.is_some())
+        .collect();
+    assert_eq!(playlists.len(), 4);
+    for (index, row) in playlists.iter().enumerate() {
+        assert_eq!(row.parent, Some(SidebarGroup::Playlists));
+        assert_eq!(
+            row.playlist_key.as_deref(),
+            Some(index.to_string().as_str())
+        );
+        assert_eq!(row.label, state.library.playlists[index].title);
+    }
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.header && row.label == "Playlists")
+            .count(),
+        1
+    );
+    let categories = state.category_rows();
+    assert_eq!(
+        categories
+            .iter()
+            .filter_map(|row| {
+                if let CategoryRow::Playlist(index) = row {
+                    Some(*index)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2, 3]
+    );
+    state.desktop_collapsed_sections = vec!["Playlists".into()];
+    assert!(
+        sidebar::visible_rows(&state)
+            .iter()
+            .all(|row| row.playlist_key.is_none())
+    );
+    assert_eq!(sidebar::group_rows(&state, "Playlists").len(), 4);
+}
+
+#[test]
+fn terminal_playlist_filter_opens_the_matching_original_row() {
+    let mut state = nav_state();
+    state.view = View::Browse;
+    state.category_column_focused = false;
+    state.tui_sidebar_group = Some(("Playlists".into(), 0));
+    state.replace_playlists(
+        ["First", "Second"]
+            .into_iter()
+            .map(|title| {
+                serde_json::from_value(serde_json::json!({
+                    "ratingKey":title,"key":title,"title":title,"type":"audio"
+                }))
+                .unwrap()
+            })
+            .collect(),
+    );
+    let config = Config::default();
+    for ch in "/Second".chars() {
+        key_input::handle_key(
+            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+            &mut state,
+            &config,
+        );
+    }
+    assert_eq!(state.playlist_group_filter.as_deref(), Some("Second"));
+    let actions = key_input::handle_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut state,
+        &config,
+    );
+    assert!(actions.iter().any(|action| matches!(action,
+        Action::Miller(textamp::app::action::MillerAction::LoadPlaylistTracksForMiller { playlist_key, .. }) if playlist_key == "Second")));
+}
+
+#[test]
+fn select_all_shortcuts_use_the_filtered_rows_in_the_focused_column() {
+    use textamp::app::state::{BrowseColumn, BrowseItem};
+    let config = Config::default();
+    for modifier in [KeyModifiers::SUPER, KeyModifiers::CONTROL] {
+        let mut state = nav_state();
+        state.view = View::Browse;
+        state.browse_category = BrowseCategory::Library;
+        state.category_column_focused = false;
+        state.artist_nav.columns = vec![BrowseColumn::new(
+            "Albums",
+            ["first", "second", "third"]
+                .map(|title| BrowseItem::Album {
+                    key: title.into(),
+                    title: title.into(),
+                    artist: "Artist".into(),
+                    thumb: None,
+                    year: None,
+                    is_placeholder: false,
+                })
+                .to_vec(),
+        )];
+        state.list_filter.active = true;
+        state.list_filter.query = "ir".into();
+        state.list_filter.results = Some(textamp::services::ListFilterResults {
+            matched_indices: vec![2, 0],
+            total_matches: 2,
+            has_more: false,
+        });
+        key_input::handle_key(
+            KeyEvent::new(KeyCode::Char('a'), modifier),
+            &mut state,
+            &config,
+        );
+        let marked = &state.artist_nav.columns[0].selected_set;
+        assert_eq!(marked.len(), 2);
+        assert!(marked.contains(&0) && marked.contains(&2));
     }
 }

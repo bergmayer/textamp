@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::{backend::TestBackend, Terminal};
+use ratatui::{Terminal, backend::TestBackend};
 use std::{
     sync::{Arc, Mutex},
     time::Duration,
@@ -8,19 +8,18 @@ use textamp::app::action::SettingsAction;
 use textamp::app::dispatch::{dispatch_action, handle_core_event};
 use textamp::app::handlers::{key_input, mouse_input};
 use textamp::app::sources::{
-    cache,
+    ActiveSource, LibraryChoice, SourceAction, cache,
     dialogs::Dialog,
     options::{self, OptionAction, OptionsPage},
-    ActiveSource, LibraryChoice, SourceAction,
 };
 use textamp::app::state::{PlayStatus, SettingsFocus, SettingsSection, View};
 use textamp::app::{Action, AppState, Event};
 use textamp::audio::AudioPlayer;
 use textamp::config::Config;
 use textamp::library::{
-    cache::REFRESH_INTERVAL,
-    tree::{Tree, KEY},
     FolderLocation, FolderSource,
+    cache::REFRESH_INTERVAL,
+    tree::{KEY, Tree},
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
@@ -94,12 +93,12 @@ fn enter_manages_and_only_make_active_switches_mouse_and_keyboard_agree() {
     assert!(text.contains("Make active"));
     assert!(text.contains("General") && text.contains("Cache"));
     assert!(
-        !text.contains("Clear library cache"),
+        !text.contains("Clear metadata cache"),
         "maintenance is on its own page"
     );
     press(&mut state, KeyCode::Right);
     let text = draw(&mut state, 110, 35);
-    assert!(text.contains("Clear library cache"));
+    assert!(text.contains("Clear metadata cache"));
     assert!(text.contains("Re-scan library now"));
     press(&mut state, KeyCode::Left);
     draw(&mut state, 110, 35);
@@ -299,7 +298,10 @@ async fn webdav_scan_uses_only_propfind_and_branch_cache_survives_offline() {
                 }
                 body.push_str("</d:multistatus>");
                 captured.lock().unwrap().push(line);
-                let response = format!("HTTP/1.1 207 Multi-Status\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                let response = format!(
+                    "HTTP/1.1 207 Multi-Status\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
                 stream.write_all(response.as_bytes()).await.unwrap();
             });
         }
@@ -320,19 +322,23 @@ async fn webdav_scan_uses_only_propfind_and_branch_cache_survives_offline() {
     settle(&choice, &mut state, &mut audio, &tx, &mut rx).await;
     server.abort();
     assert_eq!(requests.lock().unwrap().len(), 3);
-    assert!(requests
-        .lock()
-        .unwrap()
-        .iter()
-        .all(|r| r.starts_with("PROPFIND ")));
+    assert!(
+        requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|r| r.starts_with("PROPFIND "))
+    );
     let store = choice.cache_store().unwrap();
     assert_eq!(
         cache::read_folder(&store, "Artist").unwrap().unwrap().value[0].path,
         "Artist/Album"
     );
-    assert!(cache::read_folder(&store, "Artist/Album")
-        .unwrap()
-        .is_none());
+    assert!(
+        cache::read_folder(&store, "Artist/Album")
+            .unwrap()
+            .is_none()
+    );
     // Fresh saved tree is reused, even in a new app session with no server.
     state.settings_state.cache_scans.clear();
     cache::start(choice.clone(), false, &mut state, &tx);

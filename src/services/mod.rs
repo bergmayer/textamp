@@ -10,42 +10,41 @@
 //! - Stateless: Operate on data passed to them, return results
 //! - Testable: Pure functions where possible
 //!
-//! When porting to other platforms (iOS, Web), these services can be
-//! reused directly via FFI or compiled to the target platform.
 
 pub mod artist_alias_service;
-mod browse_drill;
 pub mod compilations;
 pub mod external_search;
-mod folder_service;
+pub mod web_search;
 
 mod list_filter_service;
 mod navigation_service;
 mod playback_service;
 pub mod radio;
-mod search_filter_service;
-pub mod track_context;
+pub mod sonic_adventure;
 
-pub use browse_drill::{plan_drill, ClickContext, DrillPlan};
-pub use folder_service::{
-    FolderColumn, FolderItem, FolderItemType, FolderNavigationState, FolderService,
-};
+pub use crate::library::models::{FolderColumn, FolderItem, FolderItemType, FolderNavigationState};
 
+pub(crate) use list_filter_service::CommandSearch;
 pub use list_filter_service::{
-    browse_filter_records, filter_browse_items, filter_browse_records, filter_folder_items,
-    filter_stations, filter_with_priority, search_albums_with_ranking, search_tracks_with_ranking,
-    search_with_ranking, BrowseFilterRecord, DEFAULT_MAX_RESULTS,
+    BrowseFilterRecord, DEFAULT_MAX_RESULTS, ListFilterResults, filter_browse_records,
+    filter_browse_records_until, filter_with_priority, filter_with_priority_until,
+    search_albums_with_ranking, search_tracks_with_ranking, search_tracks_with_ranking_until,
+    search_with_ranking,
 };
 pub use navigation_service::NavigationService;
-pub use playback_service::{shuffle_queue, MAX_HISTORY_SIZE};
-pub use search_filter_service::{FilteredItem, SearchFilterService};
+pub use playback_service::shuffle_queue;
 
-// Re-export waveform from media module for backward compatibility
-pub use crate::media::{
-    generate_waveform, generate_waveform_from_pcm, WaveformCache, WaveformData, WaveformError,
-};
-// Re-export spectrogram from media module
-pub use crate::media::{
-    generate_spectrogram, generate_spectrogram_from_pcm, SpectrogramCache, SpectrogramData,
-};
 pub mod biography;
+pub mod catalog_search;
+
+pub mod release_dates;
+
+pub mod playlist_export;
+
+pub mod catalog_lookup;
+
+pub mod singles;
+
+pub mod downloads;
+
+pub mod player_sync;

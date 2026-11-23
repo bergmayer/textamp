@@ -8,51 +8,20 @@ mod xdg;
 pub use settings::{Config, GeneralConfig, PlaybackConfig, UiConfig};
 pub use xdg::XdgPaths;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::path::PathBuf;
 
 /// Load configuration from XDG config directory.
 ///
 /// Validates configuration values after loading and replaces
-/// invalid values with defaults.
+/// invalid values with defaults. Malformed files return an error and remain unchanged.
 pub fn load_config() -> Result<Config> {
     let paths = XdgPaths::new("textamp");
     paths.ensure_dirs()?;
 
     let config_path = paths.config_file();
 
-    let mut migrated = false;
-    let mut config = if config_path.exists() {
-        let contents = std::fs::read_to_string(&config_path)?;
-        match parse_config(&contents) {
-            Ok((config, removed)) => {
-                migrated = removed;
-                config
-            }
-            Err(e) => {
-                // A corrupt config must not brick startup. Preserve the
-                // broken file (a later settings save would otherwise
-                // overwrite it) and continue with defaults.
-                let backup =
-                    config_path.with_extension(format!("toml.{}.invalid", uuid::Uuid::new_v4()));
-                std::fs::rename(&config_path, &backup).map_err(|error| {
-                    anyhow!(
-                        "Cannot preserve invalid config at {}: {error}",
-                        config_path.display()
-                    )
-                })?;
-                eprintln!(
-                    "Warning: {} is not valid TOML ({}). Using default settings.",
-                    config_path.display(),
-                    e.message()
-                );
-                eprintln!("The unreadable file was moved to {}.", backup.display());
-                Config::default()
-            }
-        }
-    } else {
-        Config::default()
-    };
+    let (mut config, mut migrated) = read_saved_config(&config_path)?;
 
     // Validate and fix invalid values
     validate_config(&mut config);
@@ -98,16 +67,15 @@ pub fn load_config() -> Result<Config> {
 /// discovery reveals that the account has only one music folder.
 pub fn canonicalize_navidrome(config: &mut Config) -> bool {
     let mut changed = false;
-    if let Some(selection) = &mut config.default_navidrome {
-        if let Some(source) = config
+    if let Some(selection) = &mut config.default_navidrome
+        && let Some(source) = config
             .navidrome_sources
             .iter()
             .find(|s| s.id == selection.source_id)
-        {
-            let folder = source.canonical_folder(selection.folder.clone());
-            changed |= folder != selection.folder;
-            selection.folder = folder;
-        }
+    {
+        let folder = source.canonical_folder(selection.folder.clone());
+        changed |= folder != selection.folder;
+        selection.folder = folder;
     }
     config.sonic_disabled_libraries = config
         .sonic_disabled_libraries
@@ -191,16 +159,6 @@ pub fn config_path() -> PathBuf {
     XdgPaths::new("textamp").config_file()
 }
 
-/// Get the path to the auth token file.
-pub fn token_path() -> PathBuf {
-    XdgPaths::new("textamp").token_file()
-}
-
-/// Get the path to the log file.
-pub fn log_path() -> PathBuf {
-    XdgPaths::new("textamp").log_file()
-}
-
 /// Save configuration to XDG config directory.
 ///
 /// Uses atomic write pattern: writes to temp file first, then renames.
@@ -279,5 +237,54 @@ default_volume = 0.3
             validate_config(&mut config);
             assert_eq!(config.playback.default_volume, volume);
         }
+    }
+}
+
+fn read_saved_config(path: &std::path::Path) -> Result<(Config, bool)> {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((Config::default(), false));
+        }
+        Err(error) => {
+            return Err(anyhow!(
+                "Cannot read saved settings at {}: {error}",
+                path.display()
+            ));
+        }
+    };
+    parse_config(&contents).map_err(|error| {
+        let offset = error
+            .span()
+            .map_or(0, |span| span.start.min(contents.len()));
+        let line = contents.as_bytes()[..offset]
+            .iter()
+            .filter(|byte| **byte == b'\n')
+            .count()
+            + 1;
+        anyhow!(
+            "Invalid saved settings at {}, line {line}. The file has been retained.",
+            path.display()
+        )
+    })
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+    #[test]
+    fn invalid_settings_never_become_a_new_empty_profile() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let contents = "[ui\ntheme = 'dark'\n";
+        std::fs::write(&path, contents).unwrap();
+        assert!(
+            read_saved_config(&path)
+                .unwrap_err()
+                .to_string()
+                .contains("line 1")
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), contents);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
     }
 }

@@ -1,7 +1,7 @@
 //! List navigation, scrolling, pagination, and filter selection.
 
-use crate::app::state::{Focus, RightPanelMode, View};
 use crate::app::AppState;
+use crate::app::state::{Focus, RightPanelMode, View};
 
 /// Calculate the scroll offset to keep the selected item centered.
 pub fn calc_scroll_offset(selected: usize, viewport_height: usize, total_items: usize) -> usize {
@@ -374,11 +374,11 @@ mod tests {
         state.view = View::Browse;
         state.focus = Focus::Left;
         state.set_browse_category(BrowseCategory::Library, false);
-        state.library.artists = vec![
+        state.library.artists = std::sync::Arc::new(vec![
             make_artist("1", "A"),
             make_artist("2", "B"),
             make_artist("3", "C"),
-        ];
+        ]);
         state.list_state.artists_index = 0;
 
         adjust_list_index(&mut state, 1);

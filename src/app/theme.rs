@@ -1,8 +1,4 @@
-//! UI-agnostic theme identifier.
-//!
-//! Lives in the app layer so `AppState` does not depend on ratatui directly.
-//! The UI layer maps `ThemeName` to a concrete `crate::ui::theme::Theme`
-//! palette.
+//! Theme identities shared by native and terminal palette adapters.
 
 use serde::{Deserialize, Serialize};
 
@@ -10,6 +6,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ThemeName {
+    System,
     #[default]
     SolarizedDark,
     SolarizedLight,
@@ -28,17 +25,20 @@ pub enum ThemeName {
     Dracula,
     /// Nord — muted icy-blue dark theme.
     Nord,
+    HotDogStand,
 }
 
 impl ThemeName {
     /// All available themes.
     pub fn all() -> &'static [ThemeName] {
         &[
+            ThemeName::System,
             ThemeName::SolarizedDark,
             ThemeName::SolarizedLight,
             ThemeName::Dark,
             ThemeName::Dracula,
             ThemeName::Nord,
+            ThemeName::HotDogStand,
             ThemeName::Norton,
             ThemeName::Platinum,
             ThemeName::BlackAndWhite,
@@ -51,6 +51,7 @@ impl ThemeName {
     /// Display name for the theme.
     pub fn display_name(&self) -> &'static str {
         match self {
+            ThemeName::System => "System",
             ThemeName::Dark => "dark",
             ThemeName::SolarizedDark => "solarized dark",
             ThemeName::SolarizedLight => "solarized light",
@@ -61,13 +62,15 @@ impl ThemeName {
             ThemeName::PhosphorGreen => "phosphor green",
             ThemeName::Norton => "norton",
             ThemeName::Dracula => "dracula",
-            ThemeName::Nord => "nord",
+            ThemeName::Nord => "northern",
+            ThemeName::HotDogStand => "hot dog stand",
         }
     }
 
     /// Config string value.
     pub fn config_name(&self) -> &'static str {
         match self {
+            ThemeName::System => "system",
             ThemeName::Dark => "dark",
             ThemeName::SolarizedDark => "solarized-dark",
             ThemeName::SolarizedLight => "solarized-light",
@@ -79,6 +82,7 @@ impl ThemeName {
             ThemeName::Norton => "norton",
             ThemeName::Dracula => "dracula",
             ThemeName::Nord => "nord",
+            ThemeName::HotDogStand => "hot-dog-stand",
         }
     }
 
@@ -87,6 +91,7 @@ impl ThemeName {
         match s.to_lowercase().as_str() {
             "solarized-dark" | "solarizeddark" => ThemeName::SolarizedDark,
             "solarized-light" | "solarizedlight" => ThemeName::SolarizedLight,
+            "system" => ThemeName::System,
             "dark" => ThemeName::Dark,
             "platinum" | "mac" | "macos9" => ThemeName::Platinum,
             "black-and-white" | "blackandwhite" | "bw" | "mono" => ThemeName::BlackAndWhite,
@@ -98,7 +103,8 @@ impl ThemeName {
             // surviving theme.
             "norton" | "norton-commander" | "nc" | "dos" | "borland" | "retro" => ThemeName::Norton,
             "dracula" => ThemeName::Dracula,
-            "nord" => ThemeName::Nord,
+            "nord" | "northern" => ThemeName::Nord,
+            "hot-dog-stand" | "hotdogstand" => ThemeName::HotDogStand,
             _ => ThemeName::SolarizedDark,
         }
     }

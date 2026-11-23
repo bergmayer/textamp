@@ -1,6 +1,6 @@
 //! Full-frame canvas: artwork in slot 1, then six visualizers; Escape returns.
-use crate::ui::{theme::theme, RenderState};
-use ratatui::{layout::Rect, style::Style, text::Span, widgets::Paragraph, Frame};
+use crate::ui::{RenderState, theme::theme};
+use ratatui::{Frame, layout::Rect, style::Style, text::Span, widgets::Paragraph};
 
 pub fn render(frame: &mut Frame, state: &RenderState, area: Rect) {
     if area.is_empty() {
@@ -24,8 +24,8 @@ pub fn render(frame: &mut Frame, state: &RenderState, area: Rect) {
         0
     };
     let mut x = area.x;
-    for offset in 0..7 {
-        let index = (start + offset) % 7;
+    for offset in 0..labels.len() {
+        let index = (start + offset) % labels.len();
         let label = format!(" {} ", labels[index]);
         let width = (label.len() as u16).min(area.right().saturating_sub(x));
         if width == 0 {
@@ -67,7 +67,7 @@ pub fn render(frame: &mut Frame, state: &RenderState, area: Rect) {
         area.width,
         area.height.saturating_sub(2),
     );
-    if state.fullscreen_artwork {
+    if state.fullscreen.is_artwork() {
         super::screens::now_playing::render_current_artwork(frame, state, canvas);
     } else {
         super::screens::now_playing::render_visualizer_canvas(frame, state, canvas);

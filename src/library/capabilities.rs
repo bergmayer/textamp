@@ -59,7 +59,7 @@ mod tests {
         let stations = crate::library::station::standard_stations("new-server", simple);
         assert_eq!(
             stations.iter().map(|s| s.key.as_str()).collect::<Vec<_>>(),
-            ["new-server/library", "new-server/randomAlbum"]
+            ["new-server/randomAlbum", "new-server/library"]
         );
         let metadata = Capabilities(&[
             Feature::LibraryRadio,
@@ -72,12 +72,16 @@ mod tests {
         let stations = crate::library::station::standard_stations("another-server", metadata);
         assert!(stations.iter().any(|s| s.key.ends_with("/randomArtist")));
         assert!(stations.iter().any(|s| s.key.ends_with("/deepCuts")));
-        assert!(!stations
-            .iter()
-            .any(|s| s.key.ends_with("/sonic") || s.key.ends_with("/albumMix")));
+        assert!(!stations.iter().any(|s| s.key.ends_with("/twofer")));
+        assert!(!stations.iter().any(|s| s.key.ends_with("/stayClose")));
+        assert!(
+            !stations
+                .iter()
+                .any(|s| s.key.ends_with("/sonic") || s.key.ends_with("/albumMix"))
+        );
         assert_eq!(
             crate::library::station::standard_stations("nav", NAVIDROME).len(),
-            12
+            11
         );
     }
 }

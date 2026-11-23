@@ -1,3 +1,4 @@
+mod common;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use textamp::app::action::SearchAction;
 use textamp::app::event::UiEvent;
@@ -10,6 +11,7 @@ use textamp::services::biography::{BioImage, Biography};
 
 fn popup() -> ArtistBioPopup {
     ArtistBioPopup {
+        artist_key: "fixture-artist".into(),
         artist_name: "Tool".into(),
         document: Biography {
             text: "Current bio".into(),
@@ -17,7 +19,6 @@ fn popup() -> ArtistBioPopup {
         },
         scroll: 0,
         google_focused: false,
-        loading: false,
         image_index: 0,
         task: None,
     }
@@ -79,7 +80,7 @@ fn biography_photo_navigation_and_close_preserve_main_view() {
 
 #[test]
 fn biography_renders_readable_text_photos_and_shortcuts_at_small_sizes() {
-    use ratatui::{backend::TestBackend, Terminal};
+    use ratatui::{Terminal, backend::TestBackend};
     let mut png = std::io::Cursor::new(Vec::new());
     image::DynamicImage::new_rgb8(20, 20)
         .write_to(&mut png, image::ImageFormat::Png)
@@ -150,17 +151,21 @@ fn stale_biography_responses_cannot_replace_current_artist() {
     );
 }
 
-#[test]
-fn google_button_and_keyboard_use_the_same_action_without_closing_biography() {
+#[tokio::test]
+async fn compact_browser_button_and_keyboard_share_an_action_without_closing_biography() {
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
-    use ratatui::{backend::TestBackend, Terminal};
+    use ratatui::{Terminal, backend::TestBackend};
     use textamp::app::handlers::mouse_input;
     for loading in [false, true] {
         for (width, height) in [(120, 40), (60, 20), (12, 5)] {
             let mut state = AppState::new();
             let mut bio = popup();
-            bio.loading = loading;
-            bio.document.text = "No biography available from Navidrome or Wikipedia.".into();
+            let task = tokio::spawn(std::future::pending::<()>());
+            bio.task = loading.then(|| textamp::app::tasks::TaskLease::new(&task));
+            if !loading {
+                task.abort();
+            }
+            bio.document.text = "No biography available".into();
             state.popups.set_artist_bio(Some(bio));
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal
@@ -176,16 +181,18 @@ fn google_button_and_keyboard_use_the_same_action_without_closing_biography() {
                     .iter()
                     .map(|cell| cell.symbol())
                     .collect();
-                assert!(text.contains("[ Search Google ]"));
+                assert!(text.contains("[ G ]"));
             }
             for key in [KeyCode::Char('g'), KeyCode::Char('G'), KeyCode::Enter] {
                 if key == KeyCode::Enter {
-                    assert!(key_input::handle_key(
-                        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-                        &mut state,
-                        &Config::default(),
-                    )
-                    .is_empty());
+                    assert!(
+                        key_input::handle_key(
+                            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                            &mut state,
+                            &Config::default(),
+                        )
+                        .is_empty()
+                    );
                     key_input::handle_key(
                         KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
                         &mut state,
@@ -199,7 +206,7 @@ fn google_button_and_keyboard_use_the_same_action_without_closing_biography() {
                 );
                 assert!(matches!(
                     actions.as_slice(),
-                    [Action::Search(SearchAction::SearchBiographyOnGoogle)]
+                    [Action::Search(SearchAction::SearchBiographyOnWeb)]
                 ));
                 assert!(state.popups.artist_bio().is_some());
             }
@@ -215,7 +222,7 @@ fn google_button_and_keyboard_use_the_same_action_without_closing_biography() {
                 );
                 assert!(matches!(
                     actions.as_slice(),
-                    [Action::Search(SearchAction::SearchBiographyOnGoogle)]
+                    [Action::Search(SearchAction::SearchBiographyOnWeb)]
                 ));
                 assert!(state.popups.artist_bio().is_some());
             }
@@ -238,7 +245,7 @@ fn google_button_and_keyboard_use_the_same_action_without_closing_biography() {
 #[test]
 fn biography_arrows_focus_a_visibly_selected_button_and_return_to_text() {
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
-    use ratatui::{backend::TestBackend, Terminal};
+    use ratatui::{Terminal, backend::TestBackend};
     use textamp::app::handlers::mouse_input;
     for long in [false, true] {
         let mut state = AppState::new();
@@ -261,12 +268,14 @@ fn biography_arrows_focus_a_visibly_selected_button_and_return_to_text() {
             .max_scroll();
         assert_eq!(max_scroll > 0, long);
         for _ in 0..max_scroll {
-            assert!(key_input::handle_key(
-                KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
-                &mut state,
-                &Config::default()
-            )
-            .is_empty());
+            assert!(
+                key_input::handle_key(
+                    KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+                    &mut state,
+                    &Config::default()
+                )
+                .is_empty()
+            );
             assert!(!state.popups.artist_bio().unwrap().google_focused);
         }
         key_input::handle_key(
@@ -289,7 +298,7 @@ fn biography_arrows_focus_a_visibly_selected_button_and_return_to_text() {
         );
         assert!(matches!(
             actions.as_slice(),
-            [Action::Search(SearchAction::SearchBiographyOnGoogle)]
+            [Action::Search(SearchAction::SearchBiographyOnWeb)]
         ));
         key_input::handle_key(
             KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
@@ -313,16 +322,18 @@ fn biography_arrows_focus_a_visibly_selected_button_and_return_to_text() {
             &Config::default(),
         );
         let text = state.hit_regions.biography_text.as_ref().unwrap().area;
-        assert!(mouse_input::handle_mouse(
-            MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                column: text.x,
-                row: text.y,
-                modifiers: KeyModifiers::NONE
-            },
-            &mut state
-        )
-        .is_empty());
+        assert!(
+            mouse_input::handle_mouse(
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: text.x,
+                    row: text.y,
+                    modifiers: KeyModifiers::NONE
+                },
+                &mut state
+            )
+            .is_empty()
+        );
         let bio = state.popups.artist_bio().unwrap();
         assert!(!bio.google_focused);
         assert_eq!(bio.scroll, max_scroll);
@@ -344,15 +355,141 @@ fn google_search_encodes_the_artist_as_one_query_parameter() {
 }
 
 #[tokio::test]
+async fn biography_search_reaches_the_host_with_the_artist_query() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    let mut state = AppState::new();
+    let bio = popup();
+    let expected = state.web_search_provider.artist_url(&bio.artist_name);
+    state.popups.set_artist_bio(Some(bio));
+    let actions = textamp::app::handlers::dispatch_search::dispatch(
+        &tx,
+        SearchAction::SearchBiographyOnWeb,
+        &mut state,
+    )
+    .unwrap();
+    assert!(actions.is_empty());
+    let effect = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("browser handoff");
+    assert!(matches!(effect, Some(textamp::app::Event::Effect(
+        Action::System(textamp::app::action::SystemAction::OpenBrowser(url)))) if url == expected));
+}
+
+#[tokio::test]
 async fn closed_biography_cannot_launch_a_browser() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(4);
     let mut state = AppState::new();
     textamp::app::handlers::dispatch_search::dispatch(
         &tx,
-        SearchAction::SearchBiographyOnGoogle,
+        SearchAction::SearchBiographyOnWeb,
         &mut state,
     )
-    .await
     .unwrap();
     assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn artist_info_radio_button_and_key_target_the_biography_artist() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::{Terminal, backend::TestBackend};
+    use textamp::app::handlers::mouse_input;
+    let mut state = common::navidrome_state();
+    state.popups.set_artist_bio(Some(popup()));
+    state.terminal_width = 120;
+    state.terminal_height = 40;
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    terminal
+        .draw(|frame| state.apply_render_feedback(textamp::ui::render(frame, &state)))
+        .unwrap();
+    let region = state.hit_regions.biography_radio.unwrap();
+    let actions = mouse_input::handle_mouse(
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: region.x,
+            row: region.y,
+            modifiers: KeyModifiers::NONE,
+        },
+        &mut state,
+    );
+    assert!(
+        matches!(actions.as_slice(),[Action::Radio(textamp::app::action::RadioAction::StartArtistRadio{key,title})] if key=="fixture-artist" && title=="Tool")
+    );
+    state.popups.set_artist_bio(Some(popup()));
+    let actions = key_input::handle_key(
+        KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+        &mut state,
+        &Config::default(),
+    );
+    assert!(
+        matches!(actions.as_slice(),[Action::Radio(textamp::app::action::RadioAction::StartArtistRadio{key,..})] if key=="fixture-artist")
+    );
+    assert!(state.popups.artist_bio().is_none());
+    assert!(state.queue.tracks.is_empty());
+}
+
+#[tokio::test]
+async fn artist_info_column_owns_cancellation_and_rejects_stale_results() {
+    use textamp::app::{
+        dispatch::handle_core_event,
+        state::{ArtistInfoDetails, BrowseColumn, BrowseDetails, BrowseItem},
+    };
+    let mut state = common::navidrome_state();
+    state.library_generation = 7;
+    let task = tokio::spawn(std::future::pending::<()>());
+    let mut details = BrowseColumn::new("Artist Info", vec![]);
+    details.details = Some(BrowseDetails::Artist(ArtistInfoDetails {
+        artist_key: "artist".into(),
+        artist_name: "Artist".into(),
+        request_id: 42,
+        document: Biography {
+            text: "Current info".into(),
+            ..Default::default()
+        },
+        image_index: 0,
+        task: Some(textamp::app::tasks::TaskLease::new(&task)),
+    }));
+    state.artist_nav.columns = vec![
+        BrowseColumn::new(
+            "albums",
+            vec![BrowseItem::ArtistInfo {
+                artist_key: "artist".into(),
+                artist_name: "Artist".into(),
+                thumb: None,
+            }],
+        ),
+        details,
+    ];
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    for (generation, request_id, key) in [(6, 42, "artist"), (7, 41, "artist"), (7, 42, "other")] {
+        handle_core_event(
+            UiEvent::ArtistInfoLoaded {
+                generation,
+                request_id,
+                artist_key: key.into(),
+                result: Err("Stale failure".into()),
+            }
+            .into(),
+            &mut state,
+            &tx,
+        );
+    }
+    assert!(
+        matches!(&state.artist_nav.columns[1].details,Some(BrowseDetails::Artist(info)) if info.document.text=="Current info" && info.task.is_some())
+    );
+    assert!(state.popups.artist_bio().is_none());
+    state.advance_library_generation();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert_eq!(state.artist_nav.columns.len(), 1);
+    handle_core_event(
+        UiEvent::ArtistInfoLoaded {
+            generation: 7,
+            request_id: 42,
+            artist_key: "artist".into(),
+            result: Err("Late completion".into()),
+        }
+        .into(),
+        &mut state,
+        &tx,
+    );
+    assert_eq!(state.artist_nav.columns.len(), 1);
 }

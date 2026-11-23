@@ -1,5 +1,5 @@
 //! Resolve a server alias before sending any account credentials.
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 use std::time::Duration;
 
 pub fn normalize(input: &str) -> Result<reqwest::Url> {

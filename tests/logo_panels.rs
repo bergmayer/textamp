@@ -1,11 +1,9 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::{backend::TestBackend, layout::Rect, Terminal};
-use textamp::app::handlers::{key_input, mouse_input};
-use textamp::app::state::{
-    CategoryRow, MillerLayoutMode, SettingsFocus, SettingsSection, TextampSetting, View,
-};
-use textamp::app::theme::ThemeName;
+use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 use textamp::app::AppState;
+use textamp::app::handlers::{key_input, mouse_input};
+use textamp::app::state::{CategoryRow, SettingsFocus, SettingsSection, TextampSetting, View};
+use textamp::app::theme::ThemeName;
 use textamp::config::Config;
 use textamp::ui::theme::Theme;
 
@@ -19,7 +17,7 @@ fn draw(state: &mut AppState, width: u16, height: u16) -> Terminal<TestBackend> 
 
 #[test]
 fn search_landing_replaces_content_without_receiving_hidden_content_input() {
-    for layout in [MillerLayoutMode::Shrinking, MillerLayoutMode::Scrolling] {
+    for _ in [()] {
         for tall in [false, true] {
             let mut state = AppState::new();
             assert!(matches!(
@@ -29,8 +27,8 @@ fn search_landing_replaces_content_without_receiving_hidden_content_input() {
             state.view = View::Browse;
             state.category_column_focused = true;
             state.category_column_index = 0;
-            state.miller_layout = layout;
-            state.tall_mode = tall;
+
+            state.desktop_split_view = tall;
             let category = state.browse_category;
             let terminal = draw(&mut state, 150, 50);
             let text: String = terminal
@@ -51,16 +49,18 @@ fn search_landing_replaces_content_without_receiving_hidden_content_input() {
                 MouseEventKind::Down(MouseButton::Right),
                 MouseEventKind::ScrollDown,
             ] {
-                assert!(mouse_input::handle_mouse(
-                    MouseEvent {
-                        kind,
-                        column: pane.x + 2,
-                        row: pane.y + 2,
-                        modifiers: KeyModifiers::NONE,
-                    },
-                    &mut state
-                )
-                .is_empty());
+                assert!(
+                    mouse_input::handle_mouse(
+                        MouseEvent {
+                            kind,
+                            column: pane.x + 2,
+                            row: pane.y + 2,
+                            modifiers: KeyModifiers::NONE,
+                        },
+                        &mut state
+                    )
+                    .is_empty()
+                );
                 assert_eq!(state.category_column_index, 0);
                 assert_eq!(state.browse_category, category);
             }
@@ -83,11 +83,7 @@ fn unfocused_and_non_theme_rows_show_the_applied_theme() {
     state.settings_state.section = SettingsSection::Textamp;
     state.theme = *ThemeName::all().last().unwrap();
     for focus in [SettingsFocus::Sections, SettingsFocus::Content] {
-        state.settings_state.page = if focus == SettingsFocus::Content {
-            textamp::app::state::SettingsPage::Display
-        } else {
-            textamp::app::state::SettingsPage::Themes
-        };
+        state.settings_state.page = textamp::app::state::SettingsPage::Themes;
         state.settings_state.focus = focus;
         state.settings_state.item_index = if focus == SettingsFocus::Content {
             state.textamp_settings().len() - 1
@@ -95,18 +91,11 @@ fn unfocused_and_non_theme_rows_show_the_applied_theme() {
             0
         };
         let terminal = draw(&mut state, 160, 40);
-        if focus == SettingsFocus::Content {
-            assert!(
-                state.hit_regions.settings_preview.is_none(),
-                "artwork uses space for controls, not a theme preview"
-            );
-        } else {
-            let preview = state.hit_regions.settings_preview.unwrap();
-            assert_eq!(
-                terminal.backend().buffer()[(preview.x, preview.y)].bg,
-                Theme::new(state.theme).colors.bg_primary
-            );
-        }
+        let preview = state.hit_regions.settings_preview.unwrap();
+        assert_eq!(
+            terminal.backend().buffer()[(preview.x, preview.y)].bg,
+            Theme::new(state.theme).colors.bg_primary
+        );
     }
 }
 
@@ -130,16 +119,18 @@ fn highlighted_theme_previews_without_applying_and_preview_is_not_clickable() {
         let color = terminal.backend().buffer()[(x, preview.y)].bg;
         assert_eq!(color, Theme::new(*name).colors.bg_primary);
         let selected = state.settings_state.item_index;
-        assert!(mouse_input::handle_mouse(
-            MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                column: x + 3,
-                row: preview.y + 3,
-                modifiers: KeyModifiers::NONE,
-            },
-            &mut state
-        )
-        .is_empty());
+        assert!(
+            mouse_input::handle_mouse(
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: x + 3,
+                    row: preview.y + 3,
+                    modifiers: KeyModifiers::NONE,
+                },
+                &mut state
+            )
+            .is_empty()
+        );
         assert_eq!(state.settings_state.item_index, selected);
         assert_eq!(state.theme, applied, "rendering must not apply a theme");
     }
@@ -167,15 +158,17 @@ fn themed_logo_stays_inside_its_bounds_at_small_sizes_and_keeps_about_colors() {
         }
     }
     assert_eq!(logo::original(ratatui::style::Color::Black), original);
-    assert!(original
-        .iter()
-        .flat_map(|l| &l.spans)
-        .any(|s| matches!(s.style.fg, Some(ratatui::style::Color::Rgb(_, _, _)))));
+    assert!(
+        original
+            .iter()
+            .flat_map(|l| &l.spans)
+            .any(|s| matches!(s.style.fg, Some(ratatui::style::Color::Rgb(_, _, _))))
+    );
 }
 
 #[test]
 fn question_mark_is_not_a_shortcut_and_ctrl_f_still_opens_search() {
-    use textamp::app::{action::SearchAction, Action};
+    use textamp::app::{Action, action::SearchAction};
     for view in [
         View::Browse,
         View::NowPlaying,

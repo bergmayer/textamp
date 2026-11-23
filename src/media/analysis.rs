@@ -1,7 +1,7 @@
 //! Bounded whole-track visualizer analysis, independent of the media provider.
 //! Time buckets coarsen as recordings grow; frequency resolution is unchanged.
-use super::{spectrogram, waveform};
 use super::{SpectrogramData, WaveformData};
+use super::{spectrogram, waveform};
 use std::sync::Arc;
 
 const MAX_BUCKETS: usize = 8192;
@@ -184,7 +184,7 @@ mod tests {
     #[test]
     fn long_recording_retains_late_audio_with_bounded_storage() {
         let mut envelope = Envelope::default();
-        // More than the old 64M mono-sample / 256 MiB decoded ceiling.
+        // Exercise a decoded stream larger than 64 million mono samples.
         for _ in 0..1100 {
             envelope.push(&[0.0; 65536]);
         }

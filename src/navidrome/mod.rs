@@ -1,9 +1,10 @@
 //! OpenSubsonic transport and native metadata. No application, server, or UI dependencies.
-use anyhow::{bail, Context, Result};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::time::Duration;
 
+mod download;
 pub mod models;
 pub use models::*;
 
@@ -147,7 +148,12 @@ impl Client {
             method.starts_with("get") || matches!(method, "ping" | "search3" | "findSonicPath");
         let mut retried = false;
         let body = loop {
-            let request = if write {
+            let request = if method == "getLyricsBySongId" {
+                let mut url = self.url(method, params)?;
+                let form = url.query_pairs().into_owned().collect::<Vec<_>>();
+                url.set_query(None);
+                self.http.post(url).form(&form)
+            } else if write {
                 self.http.post(self.url(method, &[])?).form(params)
             } else {
                 self.http.get(self.url(method, params)?)
@@ -156,19 +162,19 @@ impl Client {
                 Ok(body) => break body,
                 Err(error) if read_only && !retried && interrupted_request(&error) => {
                     retried = true;
-                    tracing::warn!("Retrying interrupted Navidrome {method} request once");
+                    tracing::warn!(%error, "Retrying interrupted Navidrome {method} request once");
                     tokio::time::sleep(Duration::from_secs(2)).await;
                 }
                 Err(error) => return Err(error.context(format!("Navidrome {method}"))),
             }
         };
-        let value: Value =
+        let mut value: Value =
             serde_json::from_slice(&body).context("Navidrome returned malformed JSON")?;
         let response = value
-            .get("subsonic-response")
+            .get_mut("subsonic-response")
             .context("Missing Subsonic response")?;
         match response.get("status").and_then(Value::as_str) {
-            Some("ok") => Ok(response.clone()),
+            Some("ok") => Ok(response.take()),
             Some("failed") => {
                 let code = response["error"]["code"].as_u64().unwrap_or(0);
                 // Do not echo untrusted response bodies (which can contain credentials/HTML).
@@ -267,19 +273,31 @@ impl Client {
         )
     }
     pub async fn songs(&self, query: &str) -> Result<Vec<Song>> {
+        self.songs_with_first_page(query, |_| {}).await
+    }
+    pub async fn songs_with_first_page(
+        &self,
+        query: &str,
+        report: impl FnOnce(Vec<Song>) + Send,
+    ) -> Result<Vec<Song>> {
+        let mut report = Some(report);
         let mut params = self.scope();
         params.extend([
             ("query", query.into()),
             ("artistCount", "0".into()),
             ("albumCount", "0".into()),
         ]);
-        self.pages(
+        self.pages_report(
             "search3",
-            "searchResult3",
-            "song",
+            ("searchResult3", "song"),
             params,
             "songCount",
             "songOffset",
+            move |batch: &[Song]| {
+                if let Some(report) = report.take() {
+                    report(batch.to_vec());
+                }
+            },
         )
         .await
     }
@@ -288,27 +306,56 @@ impl Client {
         method: &str,
         root: &str,
         field: &str,
-        mut params: Vec<(&str, String)>,
+        params: Vec<(&str, String)>,
         count: &str,
         offset: &str,
     ) -> Result<Vec<T>> {
+        self.pages_report(method, (root, field), params, count, offset, |_| {})
+            .await
+    }
+    async fn pages_report<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        response: (&str, &str),
+        mut params: Vec<(&str, String)>,
+        count: &str,
+        offset: &str,
+        mut report: impl FnMut(&[T]) + Send,
+    ) -> Result<Vec<T>> {
+        let (root, field) = response;
         let mut result = Vec::new();
         let mut seen = std::collections::HashSet::new();
         params.push((count, "500".into()));
-        // An explicit bound prevents endless loops on broken pagination. Never return a truncated success.
-        for page in 0..2000 {
+        use futures::{StreamExt, stream};
+        let fetch = |page: usize| {
             let mut query = params.clone();
             query.push((offset, (page * 500).to_string()));
-            let value = self.call(method, &query).await?;
-            let batch: Vec<Value> = array(&value[root], field)?;
+            async move {
+                let value = self.call(method, &query).await?;
+                array::<Value>(&value[root], field)
+            }
+        };
+        // Small collections need only one request. Larger collections overlap at
+        // most four read-only pages, consuming results in offset order. Dropping
+        // the stream cancels speculative reads after the final page or an error.
+        let first = fetch(0).await?;
+        let pages = stream::once(std::future::ready(Ok(first)))
+            .chain(stream::iter(1..2000).map(fetch).buffered(4));
+        futures::pin_mut!(pages);
+        while let Some(batch) = pages.next().await {
+            let batch = batch?;
             let count = batch.len();
+            let start = result.len();
             for item in batch {
                 let id = item["id"].as_str().context("Item has no string ID")?;
                 if !seen.insert(id.to_owned()) {
-                    bail!("Navidrome pagination repeated an item; retry after the library scan finishes");
+                    bail!(
+                        "Navidrome pagination repeated an item; retry after the library scan finishes"
+                    );
                 }
                 result.push(serde_json::from_value(item).context("Invalid Navidrome item")?);
             }
+            report(&result[start..]);
             if count < 500 {
                 return Ok(result);
             }
@@ -327,11 +374,10 @@ fn interrupted_request(error: &anyhow::Error) -> bool {
 }
 
 pub fn object<T: DeserializeOwned>(value: &Value, field: &str) -> Result<T> {
-    serde_json::from_value(
+    T::deserialize(
         value
             .get(field)
-            .with_context(|| format!("Missing {field} response"))?
-            .clone(),
+            .with_context(|| format!("Missing {field} response"))?,
     )
     .with_context(|| format!("Malformed {field} response"))
 }
@@ -342,7 +388,7 @@ pub fn array<T: DeserializeOwned>(value: &Value, field: &str) -> Result<Vec<T>> 
     match value.get(field) {
         None | Some(Value::Null) => Ok(Vec::new()),
         Some(items) => {
-            serde_json::from_value(items.clone()).with_context(|| format!("Malformed {field} list"))
+            Vec::<T>::deserialize(items).with_context(|| format!("Malformed {field} list"))
         }
     }
 }

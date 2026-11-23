@@ -1,468 +1,496 @@
-//! Transport bar widget (musikcube-style).
-//!
-//! Layout:
-//! Left:  ▶ 00:00 ━━●──────────── 04:32  │  Track by Artist from Album
-//! Right: [notification OR volume]; lower row shows the selected AirPlay output.
-//!
-//! Notifications temporarily cover the volume widget when active.
+//! Playback controls flank a centered track card and scrubber.
+//! The fixed footer carries navigation controls and contextual status.
 
-use crate::app::state::{NotificationType, PlayStatus};
-use crate::ui::theme::theme;
+use crate::app::state::PlayStatus;
+use crate::app::state::View;
 use crate::ui::RenderState as AppState;
-use crate::util::truncate_str;
+use crate::ui::theme::theme;
 
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
-/// Render the transport bar.
+/// Render a framed transport with centered metadata and a separate scrubber.
 pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
+    use crate::app::transport_controls::TransportControl as Control;
     if area.is_empty() {
         return;
     }
-    let t = theme();
-    let bg_style = Style::default().bg(t.colors.transport_bg);
-
-    // Fill background across both rows.
-    frame.render_widget(Paragraph::new("").style(bg_style), area);
-
-    // Top row: playback controls + track info + volume.
-    // Bottom row: Library / Now Playing tab strip + ":" hint.
-    let top = Rect {
-        x: area.x,
-        y: area.y,
-        width: area.width,
-        height: 1,
-    };
-    let bottom = Rect {
-        x: area.x,
-        y: area.y + 1,
-        width: area.width,
-        height: area.height.saturating_sub(1),
-    };
-
-    // Special case: Inline list filter mode shows filter box across the
-    // top row; the tab strip still renders on the bottom row.
-    if state.list_filter.active {
-        render_with_filter(frame, state, top);
-        render_tab_strip(frame, state, bottom);
-        return;
-    }
-
-    // Special case: Adventure mode messages take over the entire bar
-    if state.adventure.active && !state.adventure.generating {
-        let adventure_text = build_adventure_text(state);
-        let paragraph = Paragraph::new(adventure_text).style(
-            Style::default()
-                .fg(t.colors.fg_accent)
-                .bg(t.colors.transport_bg),
-        );
-        frame.render_widget(paragraph, area);
-        return;
-    }
-
-    // Build left side (playback info)
-    let left_text = build_left_content(state);
-
-    // Build right side (notification or volume + indicators)
-    let right_content = build_right_content(state);
-    let right_text = &right_content.text;
-
-    // The transport content renders only on the top row; the bottom
-    // row is the tab strip (rendered separately at the end).
-    let area = top;
-
-    // Calculate widths using display columns (emoji are 2 cells wide)
-    let right_width = UnicodeWidthStr::width(right_text.as_str()) as u16;
-    let available_width = area.width.saturating_sub(2); // Leave some padding
-
-    // If the right side would overlap, truncate left content
-    let left_max_width = available_width.saturating_sub(right_width + 1) as usize;
-    let left_display = truncate_to_width(&left_text, left_max_width);
-
-    // Create the full line with proper spacing
-    let left_width = UnicodeWidthStr::width(left_display.as_str());
-    let padding = available_width.saturating_sub(left_width as u16 + right_width);
-    let full_line = format!(
-        "{}{:>pad$}{}",
-        left_display,
-        "",
-        right_text,
-        pad = padding as usize
-    );
-
-    // Register transport hit regions
-    // Left content layout: " ⏸ 00:00 ━━●──────────── 04:32 ⏮  ⏭  │  Track info..."
-    //                        ^3  ^5  1  ^20            1 ^5  1^1 2^1  ^5
+    let colors = &theme().colors;
+    let outer = area;
+    let border = ratatui::widgets::Block::default()
+        .borders(ratatui::widgets::Borders::TOP)
+        .border_style(Style::default().fg(colors.border))
+        .style(Style::default().bg(colors.transport_bg));
+    let border = if state.playback_mode == crate::app::state::PlaybackMode::Radio
+        && !state.tui_queue_visible
     {
-        let right_start_x = area.x + left_width as u16 + padding;
-        // The `/ filter` affordance occupies the full right-text region.
-        let search_x = right_start_x;
-        let search_w = right_width;
-
-        // Compute left-side positions from known structure widths
-        let status_w: u16 = 3; // " ⏸ "
-        let pos_str_w = format_time(state.playback.position_ms).len() as u16;
-        let bar_w: u16 = 20; // progress bar
-        let dur_str_w = format_time(state.playback.duration_ms).len() as u16;
-        let seekbar_x = area.x + status_w + pos_str_w + 1; // +1 for space
-        let prev_x = seekbar_x + bar_w + 1 + dur_str_w + 1; // bar + space + dur + space
-        let next_x = prev_x + 1 + 2; // ⏮ + two spaces
-        let separator_w: u16 = 5; // "  │  "
-        let track_info_x = next_x + 1 + separator_w; // ⏭ + separator
-
-        let mut hr = state.hit_regions.borrow_mut();
-        hr.transport = Some(crate::app::presentation::TransportRegions {
-            play_pause: Rect {
-                x: area.x,
-                y: area.y,
-                width: status_w + 2,
-                height: 1,
-            },
-            seekbar: Rect {
-                x: seekbar_x,
-                y: area.y,
-                width: bar_w,
-                height: 1,
-            },
-            prev_track: Rect {
-                x: prev_x.saturating_sub(1),
-                y: area.y,
-                width: 3,
-                height: 1,
-            },
-            next_track: Rect {
-                x: next_x.saturating_sub(1),
-                y: area.y,
-                width: 3,
-                height: 1,
-            },
-            track_info: Some(Rect {
-                x: track_info_x,
-                y: area.y,
-                width: search_x.saturating_sub(track_info_x),
-                height: 1,
-            }),
-            search_icon: Some(Rect {
-                x: search_x,
-                y: area.y,
-                width: search_w,
-                height: 1,
-            }),
-            speaker_icon: None,
-            volume_slider: None,
-        });
-    }
-
-    let paragraph = Paragraph::new(full_line).style(
-        Style::default()
-            .fg(t.colors.fg_primary)
-            .bg(t.colors.transport_bg),
-    );
-
-    frame.render_widget(paragraph, area);
-
-    render_tab_strip(frame, state, bottom);
-}
-
-/// Bottom-row tab strip — Library / Now Playing — mirroring the
-/// GUI's transport-bar tab strip. Active tab uses the selection
-/// background. The right-hand shortcuts have pointer hit regions, but
-/// never become keyboard focus stops. Labels and hit regions share one layout.
-fn render_tab_strip(frame: &mut Frame, state: &AppState, area: Rect) {
-    use crate::app::state::View;
-    let t = theme();
-
-    if area.height == 0 {
-        return;
-    }
-
-    // Library = any Browse view; Now Playing = Queue / NowPlaying.
-    let library_active = state.view == View::Browse;
-    let now_active = matches!(state.view, View::Queue | View::NowPlaying);
-
-    // Lower-case labels matching the visualizer tab strip
-    // (`waveform` / `spectrum` / `spectrogram`). Active tab uses
-    // accent fg + bold; inactive is muted. A `│` divider sits
-    // between the two so the strip visually mirrors the
-    // visualizer's tab style.
-    let lib_label = " library ";
-    let divider = "│";
-    let np_label = " now playing ";
-    // Symbol cheat sheet: `:` = command palette, `/` = inline filter
-    // overlay, `⇥` = Tab toggles Library ↔ Now
-    // Playing, `,` = open Settings (mirrors macOS Cmd+,), `\` =
-    // toggle scrolling Miller layout, `|` = toggle tall split.
-    // Mirrors classic vim chrome — same row as the Library / Now
-    // Playing tabs, on the right edge.
-    use crossterm::event::KeyCode;
-    let mut shortcuts = if state.view == View::Settings {
-        vec![
-            (" F2 close settings ", Some(KeyCode::F(2))),
-            ("·", None),
-            (" F10 categories ", Some(KeyCode::F(10))),
-        ]
-    } else if state.view == View::Browse
-        && state.category_column_focused
-        && state.browse_category == crate::app::state::BrowseCategory::Library
-        && matches!(state.category_rows().get(state.category_column_index),
-            Some(crate::app::state::CategoryRow::NavidromeCollection(kind))
-                if Some(*kind) == state.sources.nav_collection
-                    && matches!(kind,
-                        crate::app::sources::navidrome::commands::CollectionKind::AudioMuse(f)
-                            if f.is_search()))
-    {
-        vec![
-            (" → browse ", Some(KeyCode::Right)),
-            ("·", None),
-            (" Enter new search ", Some(KeyCode::Enter)),
-            ("·", None),
-            (" : commands ", Some(KeyCode::Char(':'))),
-        ]
+        border.title(Line::from(crate::app::queue_modes::label(state)).alignment(Alignment::Right))
     } else {
-        vec![
-            (" : ", Some(KeyCode::Char(':'))),
-            (" / ", Some(KeyCode::Char('/'))),
-            (
-                if state.tall_mode {
-                    " Tab focus "
-                } else {
-                    " ⇥ "
-                },
-                Some(KeyCode::Tab),
-            ),
-            (" , ", Some(KeyCode::Char(','))),
-            (" \\ ", Some(KeyCode::Char('\\'))),
-            (" | ", Some(KeyCode::Char('|'))),
-        ]
+        border
     };
-    if state.view != View::Settings {
-        shortcuts.splice(
-            0..0,
-            [
-                ("F7 full screen ", Some(KeyCode::F(7))),
-                ("·", None),
-                (" F8 output ", Some(KeyCode::F(8))),
-            ],
-        );
-    }
-    let output_label;
-    if state.sound_output.current != crate::audio::AudioOutput::Local {
-        output_label = format!(
-            " [{}]",
-            truncate_str(&state.sound_output.current.label(), 28)
-        );
-        shortcuts.push((&output_label, Some(KeyCode::F(8))));
-    }
-    let palette_hint: String = shortcuts.iter().map(|(label, _)| *label).collect();
-
-    // Active tab uses an inverted (selection-style) background so the
-    // selected/unselected distinction is obvious in every theme — in
-    // B&W in particular, the previous "bold accent on transport bg"
-    // versus "muted on transport bg" lookup was just bold-vs-non-bold
-    // black-on-white, which the user couldn't read at a glance.
-    let active_style = Style::default()
-        .fg(t.colors.selection_bar_fg)
-        .bg(t.colors.selection_bar_bg)
-        .add_modifier(Modifier::BOLD);
-    let inactive_style = Style::default()
-        .fg(t.colors.fg_muted)
-        .bg(t.colors.transport_bg);
-    let divider_style = Style::default()
-        .fg(t.colors.fg_muted)
-        .bg(t.colors.transport_bg);
-
-    let lib_w = UnicodeWidthStr::width(lib_label) as u16;
-    let div_w = UnicodeWidthStr::width(divider) as u16;
-    let np_w = UnicodeWidthStr::width(np_label) as u16;
-    let hint_w = (UnicodeWidthStr::width(palette_hint.as_str()) as u16)
-        .min(area.width.saturating_sub(lib_w + div_w + np_w));
-
-    let lib_x = area.x;
-    let div_x = lib_x + lib_w;
-    let np_x = div_x + div_w;
-    let hint_x = area.x + area.width.saturating_sub(hint_w);
-
-    frame.render_widget(
-        Paragraph::new(lib_label).style(if library_active {
-            active_style
-        } else {
-            inactive_style
-        }),
-        Rect {
-            x: lib_x,
-            y: area.y,
-            width: lib_w,
-            height: 1,
-        },
-    );
-    frame.render_widget(
-        Paragraph::new(divider).style(divider_style),
-        Rect {
-            x: div_x,
-            y: area.y,
-            width: div_w,
-            height: 1,
-        },
-    );
-    frame.render_widget(
-        Paragraph::new(np_label).style(if now_active {
-            active_style
-        } else {
-            inactive_style
-        }),
-        Rect {
-            x: np_x,
-            y: area.y,
-            width: np_w,
-            height: 1,
-        },
-    );
-    frame.render_widget(
-        Paragraph::new(palette_hint).style(
-            Style::default()
-                .fg(t.colors.fg_muted)
-                .bg(t.colors.transport_bg),
-        ),
-        Rect {
-            x: hint_x,
-            y: area.y,
-            width: hint_w,
-            height: 1,
-        },
-    );
-
-    // Clip targets to exactly the displayed portion, including narrow terminals.
-    let mut offset = 0_u16;
-    for (label, key) in shortcuts {
-        let width = UnicodeWidthStr::width(label) as u16;
-        let visible_width = width.min(hint_w.saturating_sub(offset));
-        if let Some(key) = key.filter(|_| visible_width > 0) {
-            state
-                .hit_regions
-                .borrow_mut()
-                .footer_shortcuts
-                .push((Rect::new(hint_x + offset, area.y, visible_width, 1), key));
+    let area = border.inner(outer);
+    frame.render_widget(border, outer);
+    if state.tui_sidebar_visible
+        && (state.view == View::Browse
+            || (state.view == View::Queue
+                && state.tui_queue_workspace == crate::app::state::TuiWorkspace::Library))
+    {
+        let sidebar = state.sidebar_width().min(outer.width / 3);
+        if sidebar > 0 {
+            for (x, symbol) in [(outer.x, "└"), (outer.x + sidebar - 1, "┴")] {
+                frame.render_widget(
+                    Paragraph::new(symbol).style(Style::default().fg(colors.border)),
+                    Rect::new(x, outer.y, 1, 1),
+                );
+            }
         }
-        offset = offset.saturating_add(width);
+    }
+    if area.is_empty() {
+        return;
     }
 
-    // Register click hit regions. The shared tab_bar_action handler
-    // expects index 0 = Library (Browse) and index 2 = Now Playing.
-    let lib_rect = Rect {
-        x: lib_x,
-        y: area.y,
-        width: lib_w,
-        height: 1,
+    frame.render_widget(
+        ratatui::widgets::Block::default().style(Style::default().bg(colors.transport_bg)),
+        area,
+    );
+    let (_, info_width) = crate::ui::layout::transport_widths(
+        f32::from(state.terminal_width) * state.cell_width(),
+        f32::from(state.queue_width()) * state.cell_width(),
+    );
+    let center_width = ((info_width / state.cell_width()).round() as u16)
+        .min(
+            area.width
+                .saturating_sub(if area.width >= 70 { 36 } else { 24 }),
+        )
+        .max(1)
+        .min(area.width);
+    let center = Rect::new(
+        area.x + (area.width - center_width) / 2,
+        area.y,
+        center_width,
+        area.height,
+    );
+    frame.render_widget(
+        ratatui::widgets::Block::default()
+            .style(Style::default().bg(colors.track_card_background())),
+        center,
+    );
+    let row = area.y + u16::from(area.height > 1);
+    let button_style = |control| {
+        if state.tui_transport_focus == Some(control) {
+            colors.focused_row()
+        } else {
+            Style::default()
+                .fg(colors.fg_primary)
+                .bg(colors.transport_bg)
+        }
     };
-    let np_rect = Rect {
-        x: np_x,
-        y: area.y,
-        width: np_w,
-        height: 1,
+    let button_width = (36. / state.cell_width()).round().max(3.) as u16;
+    let control = |index: u16| {
+        let x = if f32::from(center.x.saturating_sub(area.x)) * state.cell_width() >= 132. {
+            ((16. + f32::from(index) * 48.) / state.cell_width()).round() as u16
+        } else {
+            index * 3
+        };
+        Rect::new(area.x + x, row, button_width, 1).intersection(area)
     };
-    let mut hr = state.hit_regions.borrow_mut();
-    hr.tab_bar = Some(crate::app::presentation::TabBarRegions {
-        library_label: None,
-        quit_button: None,
-        tabs: vec![(lib_rect, 0), (np_rect, 2)],
-    });
-}
-
-/// Build adventure mode text for the transport bar.
-fn build_adventure_text(state: &AppState) -> String {
-    if state.adventure.start_track.is_some() && state.adventure.end_track.is_some() {
-        // Both tracks selected - waiting for length input
-        let start = state
-            .adventure
-            .start_track
-            .as_ref()
-            .map(|t| truncate_str(&t.title, 15))
-            .unwrap_or_default();
-        let end = state
-            .adventure
-            .end_track
-            .as_ref()
-            .map(|t| truncate_str(&t.title, 15))
-            .unwrap_or_default();
-        format!("🌟 ADVENTURE: {} → {} (enter length)", start, end)
-    } else if state.adventure.start_track.is_some() {
-        let start_title = state
-            .adventure
-            .start_track
-            .as_ref()
-            .map(|t| truncate_str(&t.title, 20))
-            .unwrap_or_default();
-        format!("🌟 ADVENTURE: {} → select END (Alt+A)", start_title)
+    let previous = control(0);
+    let play = control(1);
+    let next = control(2);
+    for (rect, label, control) in [
+        (previous, "⏮︎", Control::Previous),
+        (
+            play,
+            if state.playback.status == PlayStatus::Playing {
+                "Ⅱ"
+            } else {
+                "▶"
+            },
+            Control::Play,
+        ),
+        (next, "⏭︎", Control::Next),
+    ] {
+        frame.render_widget(
+            Paragraph::new(label.trim())
+                .alignment(Alignment::Center)
+                .style(button_style(control)),
+            rect,
+        );
+    }
+    let metadata_y = area.y + u16::from(area.height > 2);
+    let has_art = center.width >= 24;
+    let art_width = (32. / state.cell_width()).round().max(1.) as u16;
+    let art_gap = (12. / state.cell_width()).round().max(1.) as u16;
+    let text_limit = center.width.saturating_sub(if has_art {
+        2 * (art_width + art_gap + 1)
     } else {
-        "🌟 ADVENTURE: select START track (Alt+A)".to_string()
+        2
+    });
+    let text_width = state
+        .current_track()
+        .map_or_else(
+            || "Nothing playing".width(),
+            |track| {
+                track
+                    .title
+                    .width()
+                    .max(track.track_artist().width() + 3 + track.album_name().width())
+            },
+        )
+        .min(text_limit as usize) as u16;
+    let title_area = Rect::new(
+        center.x + (center.width - text_width) / 2,
+        area.y,
+        text_width,
+        1,
+    );
+    let artist_area = Rect::new(
+        title_area.x,
+        metadata_y,
+        text_width,
+        u16::from(area.height > 1),
+    );
+    if has_art {
+        let art = Rect::new(
+            title_area.x - art_gap - art_width,
+            area.y,
+            art_width,
+            2.min(area.height),
+        );
+        if let Some(data) = state.current_artwork_bytes() {
+            crate::ui::artwork::render_grid_image(frame, art, "transport-artwork", data);
+        } else {
+            crate::ui::artwork::render_placeholder(
+                frame,
+                art,
+                crate::ui::artwork::Placeholder::Track,
+            );
+        }
     }
-}
-
-/// Build the left side of the transport bar (playback controls and track info).
-fn build_left_content(state: &AppState) -> String {
-    let mut line = String::new();
-
-    // Play/pause button at the start (padded for click target)
-    let status_icon = match state.playback.status {
-        PlayStatus::Playing => " ⏸ ",
-        PlayStatus::Paused => " ▶ ",
-        PlayStatus::Stopped => " ▶ ",
-        PlayStatus::Buffering => " ◌ ",
-    };
-    line.push_str(status_icon);
-
-    // Time display with progress bar
-    let pos_str = format_time(state.playback.position_ms);
-    let dur_str = format_time(state.playback.duration_ms);
+    if let Some(track) = state.current_track() {
+        frame.render_widget(
+            Paragraph::new(truncate_to_width(&track.title, title_area.width as usize))
+                .alignment(Alignment::Center)
+                .style(if state.tui_transport_focus == Some(Control::Track) {
+                    colors.focused_row().add_modifier(Modifier::BOLD)
+                } else {
+                    colors.track_card_style().add_modifier(Modifier::BOLD)
+                }),
+            title_area,
+        );
+        crate::ui::detail_links::field(
+            frame,
+            state,
+            title_area,
+            track,
+            crate::app::library_details::Destination::Track,
+        );
+        let artist = track.track_artist();
+        let metadata = truncate_to_width(
+            &format!("{artist} · {}", track.album_name()),
+            artist_area.width as usize,
+        );
+        frame.render_widget(
+            Paragraph::new(metadata.clone())
+                .alignment(Alignment::Center)
+                .style(
+                    if matches!(
+                        state.tui_transport_focus,
+                        Some(Control::Artist | Control::Album)
+                    ) {
+                        colors.focused_row()
+                    } else {
+                        colors.track_card_secondary_style()
+                    },
+                ),
+            artist_area,
+        );
+        let metadata_width = UnicodeWidthStr::width(metadata.as_str()) as u16;
+        let text_area = Rect::new(
+            artist_area.x + artist_area.width.saturating_sub(metadata_width) / 2,
+            artist_area.y,
+            metadata_width.min(artist_area.width),
+            artist_area.height,
+        );
+        let album_start = UnicodeWidthStr::width(artist) as u16 + 3;
+        if text_area.width > album_start {
+            crate::ui::detail_links::field(
+                frame,
+                state,
+                Rect::new(
+                    text_area.x + album_start,
+                    text_area.y,
+                    text_area.width - album_start,
+                    text_area.height,
+                ),
+                track,
+                crate::app::library_details::Destination::Album,
+            );
+        }
+        crate::ui::artist_links::visible(
+            frame,
+            state,
+            artist_area,
+            artist,
+            track.grandparent_rating_key.as_deref(),
+        );
+    } else {
+        frame.render_widget(
+            Paragraph::new("Nothing playing")
+                .alignment(Alignment::Center)
+                .style(colors.track_card_secondary_style()),
+            title_area,
+        );
+    }
+    let seekbar = Rect::new(
+        center.x + 1,
+        area.bottom().saturating_sub(2),
+        center.width.saturating_sub(2),
+        u16::from(area.height > 1),
+    );
     let progress = if state.playback.duration_ms > 0 {
         state.playback.position_ms as f32 / state.playback.duration_ms as f32
     } else {
-        0.0
+        0.
     };
-    let time_bar = build_progress_bar(progress, 20);
+    if seekbar.height > 0 {
+        frame.render_widget(
+            Paragraph::new(build_progress_bar(progress, seekbar.width as usize)).style(
+                if state.tui_transport_focus == Some(Control::Seek) {
+                    colors.focused_row()
+                } else {
+                    colors.track_card_style()
+                },
+            ),
+            seekbar,
+        );
+    }
+    let (elapsed, remaining) = crate::media::time_axis::transport_times(
+        state.playback.position_ms,
+        state.playback.duration_ms,
+    );
+    if area.height >= 4 {
+        let time_area = Rect::new(
+            center.x + 1,
+            area.bottom() - 1,
+            center.width.saturating_sub(2),
+            1,
+        );
+        let style = colors.track_card_secondary_style();
+        frame.render_widget(Paragraph::new(elapsed).style(style), time_area);
+        frame.render_widget(
+            Paragraph::new(remaining)
+                .alignment(Alignment::Right)
+                .style(style),
+            time_area,
+        );
+    }
+    let right = Rect::new(
+        center.right() + 1,
+        area.y,
+        area.right().saturating_sub(center.right() + 1),
+        area.height,
+    );
+    let mut controls = vec![
+        (previous, Control::Previous),
+        (play, Control::Play),
+        (next, Control::Next),
+        (title_area, Control::Track),
+    ];
+    for (area, control) in state
+        .hit_regions
+        .borrow()
+        .artist_links
+        .iter()
+        .filter(|link| artist_area.intersection(link.area) == link.area)
+        .map(|link| (link.area, Control::Artist))
+        .chain(
+            state
+                .hit_regions
+                .borrow()
+                .detail_links
+                .iter()
+                .filter(|link| {
+                    link.destination == crate::app::library_details::Destination::Album
+                        && artist_area.intersection(link.area) == link.area
+                })
+                .map(|link| (link.area, Control::Album)),
+        )
+    {
+        if !controls.iter().any(|(_, visible)| *visible == control) {
+            controls.push((area, control));
+        }
+    }
 
-    line.push_str(&format!("{} {} {} ⏮  ⏭", pos_str, time_bar, dur_str));
-
-    line.push_str("  │  ");
-
-    // Track info
-    if let Some(track) = state.current_track() {
-        let title = if track.title.is_empty() {
-            track.file_name().unwrap_or("Unknown Track")
-        } else {
-            &track.title
-        };
-        line.push_str(title);
-        line.push_str(" by ");
-        line.push_str(track.track_artist());
-        line.push_str(" from ");
-        line.push_str(track.album_name());
+    controls.push((seekbar, Control::Seek));
+    let mut speaker = None;
+    let mut volume = None;
+    if right.width >= 7 {
+        let menu = Rect::new(right.x, row, 2, 1);
+        let lyrics = Rect::new(right.x + 3, row, 2, 1);
+        let mute = Rect::new(right.x + 6, row, 2.min(right.width - 6), 1);
+        for (rect, label, control) in [
+            (menu, "… ", Control::Menu),
+            (lyrics, "¶ ", Control::Lyrics),
+            (
+                mute,
+                if state.playback.muted { "× " } else { "◖ " },
+                Control::Mute,
+            ),
+        ] {
+            frame.render_widget(Paragraph::new(label).style(button_style(control)), rect);
+            controls.push((rect, control));
+        }
+        speaker = Some(mute);
+        if right.width >= 12 {
+            let slider = Rect::new(right.x + 9, row, right.width.saturating_sub(9), 1);
+            frame.render_widget(
+                Paragraph::new(build_progress_bar(
+                    if state.playback.muted {
+                        0.
+                    } else {
+                        state.playback.volume
+                    },
+                    slider.width as usize,
+                ))
+                .style(button_style(Control::Volume)),
+                slider,
+            );
+            controls.push((slider, Control::Volume));
+            volume = Some(slider);
+        }
+    }
+    let player =
+        Rect::new(area.right().saturating_sub(3), area.y, 2.min(area.width), 1).intersection(area);
+    let workspace = if matches!(state.view, View::Settings | View::Similar | View::Related) {
+        state.previous_view.unwrap_or(state.view)
     } else {
-        line.push_str("No track playing");
+        state.view
+    };
+    let active = workspace == View::NowPlaying
+        || (workspace == View::Queue
+            && state.tui_queue_workspace == crate::app::state::TuiWorkspace::NowPlaying);
+    if !active {
+        frame.render_widget(
+            Paragraph::new("⌃ ").style(button_style(Control::Player)),
+            player,
+        );
+        controls.push((player, Control::Player));
     }
-
-    line
+    controls.retain(|(rect, _)| !rect.is_empty());
+    state.hit_regions.borrow_mut().transport = Some(crate::app::presentation::TransportRegions {
+        area: outer,
+        controls,
+        play_pause: play,
+        seekbar,
+        prev_track: previous,
+        next_track: next,
+        track_info: Some(title_area),
+        search_icon: None,
+        speaker_icon: speaker,
+        volume_slider: volume,
+    });
 }
 
-struct RightContent {
-    text: String,
-}
-
-/// Build the right side of the transport bar: any active notification
-/// plus, when a remote player is selected, a `-> Name` indicator.
-fn build_right_content(state: &AppState) -> RightContent {
-    let mut right = String::new();
-
-    if let Some(notification) = state.current_notification() {
-        let icon = match notification.notification_type {
-            NotificationType::Ongoing => "⟳",
-            NotificationType::Toast => "ℹ",
+/// Render the fixed application footer independently of the transport.
+pub fn render_footer(frame: &mut Frame, state: &AppState, area: Rect) {
+    if area.is_empty() {
+        return;
+    }
+    let colors = &theme().colors;
+    let border = ratatui::widgets::Block::default()
+        .borders(ratatui::widgets::Borders::TOP)
+        .border_style(Style::default().fg(colors.border))
+        .style(Style::default().bg(colors.transport_bg));
+    let inner = border.inner(area);
+    frame.render_widget(border, area);
+    if let Some(queue) = &state.hit_regions.borrow().queue_content {
+        for (x, symbol) in [
+            (queue.track_list.x, "┴"),
+            (queue.track_list.right().saturating_sub(1), "┘"),
+        ] {
+            if x >= area.x && x < area.right() {
+                frame.render_widget(
+                    Paragraph::new(symbol).style(Style::default().fg(colors.border)),
+                    Rect::new(x, area.y, 1, 1),
+                );
+            }
+        }
+    }
+    let area = inner;
+    if area.is_empty() {
+        return;
+    }
+    let mut x = area.x + u16::from(area.width > 2);
+    for (index, (key, icon, _)) in crate::app::tui_navigation::FOOTER.iter().enumerate() {
+        let rect = if *key == crossterm::event::KeyCode::Char(']') {
+            Rect::new(area.right().saturating_sub(4), area.y, 3.min(area.width), 1)
+        } else {
+            let rect = Rect::new(x, area.y, 3, 1).intersection(area);
+            x = x.saturating_add(4);
+            rect
         };
-        right.push_str(&format!("{} {} ", icon, notification.message));
+        frame.render_widget(
+            Paragraph::new(*icon).style(if state.tui_footer_focus == Some(index) {
+                colors.focused_row()
+            } else {
+                Style::default().fg(colors.fg_muted).bg(colors.transport_bg)
+            }),
+            rect,
+        );
+        state
+            .hit_regions
+            .borrow_mut()
+            .footer_controls
+            .push((rect, index));
     }
-
-    RightContent { text: right }
+    let message = crate::app::tui_navigation::status(state)
+        .or_else(|| {
+            state
+                .notifications
+                .toast_message
+                .as_deref()
+                .map(str::to_owned)
+                .or_else(|| {
+                    state
+                        .current_notification()
+                        .map(|notification| notification.message.clone())
+                })
+        })
+        .unwrap_or_default();
+    let download_link = crate::app::tui_navigation::status(state).is_none()
+        && state.notifications.toast_message.is_none()
+        && state
+            .current_notification()
+            .is_some_and(|n| n.target.is_some());
+    let count = state.browse_item_summary().unwrap_or_default();
+    let count_width = UnicodeWidthStr::width(count.as_str()) as u16;
+    let right = area.right().saturating_sub(7);
+    let count_width = if right.saturating_sub(x) >= count_width + 3 {
+        count_width
+    } else {
+        0
+    };
+    let message_right = right.saturating_sub(count_width + u16::from(count_width > 0) * 2);
+    let message = truncate_to_width(&message, message_right.saturating_sub(x + 1) as usize);
+    let width = UnicodeWidthStr::width(message.as_str()) as u16;
+    let style = Style::default().fg(colors.fg_muted).bg(colors.transport_bg);
+    frame.render_widget(
+        Paragraph::new(message).style(style),
+        Rect::new(message_right.saturating_sub(width), area.y, width, 1).intersection(area),
+    );
+    if download_link && width > 0 {
+        state.hit_regions.borrow_mut().download_status = Some(
+            Rect::new(message_right.saturating_sub(width), area.y, width, 1).intersection(area),
+        );
+    }
+    if count_width > 0 {
+        frame.render_widget(
+            Paragraph::new(count).style(style),
+            Rect::new(right - count_width, area.y, count_width, 1),
+        );
+    }
 }
 
 /// Build a progress bar with filled/empty segments and position indicator.
@@ -502,132 +530,4 @@ fn truncate_to_width(s: &str, max_width: usize) -> String {
         width += ch_w;
     }
     truncated
-}
-
-/// Format milliseconds as MM:SS.
-fn format_time(ms: u64) -> String {
-    let total_secs = ms / 1000;
-    let mins = total_secs / 60;
-    let secs = total_secs % 60;
-    format!("{:02}:{:02}", mins, secs)
-}
-
-/// Render transport bar with inline filter box active.
-fn render_with_filter(frame: &mut Frame, state: &AppState, area: Rect) {
-    let t = theme();
-
-    // Build left content (full playback info)
-    let left_text = build_left_content(state);
-
-    // Build filter box with blinking cursor - minimum 20 chars wide for comfortable typing
-    let min_filter_width: usize = 24;
-    let cursor_visible = std::time::SystemTime::now()
-        .duration_since(std::time::SystemTime::UNIX_EPOCH)
-        .map(|d| (d.as_millis() / 500) % 2 == 0)
-        .unwrap_or(true);
-    let query_display = if state.list_filter.loading {
-        format!("{}...", state.list_filter.query)
-    } else if cursor_visible {
-        format!("{}▋", state.list_filter.query)
-    } else {
-        format!("{} ", state.list_filter.query)
-    };
-
-    // Show match count if we have results
-    let match_suffix = if let Some(ref results) = state.list_filter.results {
-        if results.has_more {
-            format!(
-                " ({}/{}+)",
-                results.matched_indices.len(),
-                results.total_matches
-            )
-        } else if results.matched_indices.is_empty() {
-            " (no matches)".to_string()
-        } else {
-            format!(" ({})", results.total_matches)
-        }
-    } else {
-        String::new()
-    };
-
-    // Pad query to minimum width for consistent text box appearance
-    let query_width = UnicodeWidthStr::width(query_display.as_str());
-    let query_padded = if query_width < min_filter_width {
-        let padding = min_filter_width - query_width;
-        format!("{}{}", query_display, " ".repeat(padding))
-    } else {
-        query_display
-    };
-
-    let filter_text = format!("🔍 [{}]{}", query_padded, match_suffix);
-
-    // Calculate widths using display columns
-    let filter_width = UnicodeWidthStr::width(filter_text.as_str()) as u16;
-    let available_width = area.width.saturating_sub(2);
-
-    // Truncate left content if needed to fit filter box
-    let left_max_width = available_width.saturating_sub(filter_width + 1) as usize;
-    let left_display = truncate_to_width(&left_text, left_max_width);
-
-    // Create the full line with proper spacing
-    let left_width = UnicodeWidthStr::width(left_display.as_str()) as u16;
-    let padding = available_width.saturating_sub(left_width + filter_width);
-    let full_line = format!(
-        "{}{:>pad$}{}",
-        left_display,
-        "",
-        filter_text,
-        pad = padding as usize
-    );
-
-    // Register transport hit regions for playback controls (still visible in filter mode)
-    {
-        let status_w: u16 = 3;
-        let pos_str_w = format_time(state.playback.position_ms).len() as u16;
-        let bar_w: u16 = 20;
-        let dur_str_w = format_time(state.playback.duration_ms).len() as u16;
-        let seekbar_x = area.x + status_w + pos_str_w + 1;
-        let prev_x = seekbar_x + bar_w + 1 + dur_str_w + 1;
-        let next_x = prev_x + 1 + 2;
-
-        let mut hr = state.hit_regions.borrow_mut();
-        hr.transport = Some(crate::app::presentation::TransportRegions {
-            play_pause: Rect {
-                x: area.x,
-                y: area.y,
-                width: status_w + 2,
-                height: 1,
-            },
-            seekbar: Rect {
-                x: seekbar_x,
-                y: area.y,
-                width: bar_w,
-                height: 1,
-            },
-            prev_track: Rect {
-                x: prev_x.saturating_sub(1),
-                y: area.y,
-                width: 3,
-                height: 1,
-            },
-            next_track: Rect {
-                x: next_x.saturating_sub(1),
-                y: area.y,
-                width: 3,
-                height: 1,
-            },
-            track_info: None,
-            search_icon: None,
-            speaker_icon: None,
-            volume_slider: None,
-        });
-    }
-
-    let paragraph = Paragraph::new(full_line).style(
-        Style::default()
-            .fg(t.colors.fg_primary)
-            .bg(t.colors.transport_bg),
-    );
-
-    frame.render_widget(paragraph, area);
 }

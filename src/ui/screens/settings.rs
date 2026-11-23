@@ -1,7 +1,7 @@
 //! Two-pane settings: flat categories, focused controls, and contextual actions.
 use crate::app::state::{SettingsFocus, SettingsPage, SettingsSection, TextampSetting};
-use crate::ui::theme::theme;
 use crate::ui::RenderState as AppState;
+use crate::ui::theme::theme;
 use ratatui::prelude::*;
 use ratatui::widgets::{
     Block, BorderType, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
@@ -113,15 +113,10 @@ fn render_categories(frame: &mut Frame, state: &AppState, area: Rect) {
     state.hit_regions.borrow_mut().settings_categories = Some(inner);
     let index = state.settings_state.category_index();
     let offset = index.saturating_sub(inner.height.saturating_sub(1) as usize);
-    let labels = [
-        "Libraries",
-        "Appearance",
-        "Artwork",
-        "Audio",
-        "Sidebar",
-        "Search",
-        "About",
-    ];
+    let labels: Vec<_> = std::iter::once("Libraries")
+        .chain(SettingsPage::ALL.into_iter().map(SettingsPage::name))
+        .chain(std::iter::once("About"))
+        .collect();
     for (i, label) in labels
         .iter()
         .enumerate()
@@ -133,9 +128,7 @@ fn render_categories(frame: &mut Frame, state: &AppState, area: Rect) {
         let style = if active && focus {
             selected()
         } else if active {
-            paper()
-                .bg(theme().colors.bg_highlight)
-                .add_modifier(Modifier::BOLD)
+            theme().colors.inactive_row().add_modifier(Modifier::BOLD)
         } else {
             paper()
         };
@@ -149,7 +142,9 @@ fn render_categories(frame: &mut Frame, state: &AppState, area: Rect) {
             0 => hits
                 .settings_sections
                 .push((rect, SettingsSection::Libraries)),
-            6 => hits.settings_sections.push((rect, SettingsSection::About)),
+            i if i == labels.len() - 1 => {
+                hits.settings_sections.push((rect, SettingsSection::About))
+            }
             _ => hits.settings_pages.push((rect, SettingsPage::ALL[i - 1])),
         }
     }
@@ -175,15 +170,14 @@ fn render_textamp(frame: &mut Frame, state: &AppState, area: Rect) {
     frame.render_widget(block, area);
     let settings = state.textamp_settings();
     let subtitle = match page {
-        SettingsPage::Themes => "Color theme · Enter applies".to_string(),
-        SettingsPage::Display => crate::app::sources::library_choices(state)
+        SettingsPage::Themes => crate::app::sources::library_choices(state)
             .into_iter()
             .find(|c| c.active(state))
             .map_or_else(
-                || "Open a library to set its artwork.".into(),
+                || "Theme and artwork rendering".into(),
                 |c| format!("Library: {}", c.label()),
             ),
-        SettingsPage::Audio => "Output and streaming quality".into(),
+        SettingsPage::Audio => "Playback and streaming quality".into(),
         SettingsPage::Sidebar => "Visible in your library sidebar".into(),
         SettingsPage::Services => "Search links in the command palette".into(),
     };
@@ -213,11 +207,25 @@ fn render_textamp(frame: &mut Frame, state: &AppState, area: Rect) {
         } else {
             (rows[1], None)
         };
+    let definitions = crate::app::preferences::page(state, page);
     let mut lines = Vec::new();
     let mut item_lines = Vec::new();
     let mut previous = "";
-    for (i, setting) in settings.iter().enumerate() {
-        let (heading, label) = setting_label(state, *setting);
+    for (i, definition) in definitions.iter().enumerate() {
+        let heading = definition.group;
+        let label = match &definition.value {
+            crate::app::preferences::Value::Toggle { current, .. } => format!(
+                "{} {}",
+                if *current { "[x]" } else { "[ ]" },
+                definition.label
+            ),
+            crate::app::preferences::Value::Choice { selected, .. } => format!(
+                "{} {}",
+                if *selected { "(•)" } else { "( )" },
+                definition.label
+            ),
+            _ => format!("{}: {}", definition.label, definition.value.display()),
+        };
         if heading != previous {
             if !lines.is_empty() {
                 lines.push(Line::from(""));
@@ -280,28 +288,11 @@ fn render_textamp(frame: &mut Frame, state: &AppState, area: Rect) {
         total,
         offset,
     );
-    let help = match settings.get(state.settings_state.item_index) {
-        Some(TextampSetting::Theme(_)) => {
-            "Highlight to preview. Enter or click Apply theme to save."
-        }
-        Some(TextampSetting::SoundOutput) => {
-            "Choose local speakers or AirPlay. Stop playback before changing output."
-        }
-        Some(TextampSetting::Transcode) => {
-            "Enter cycles the bitrate limit for the next track. Original requests the original file."
-        }
-        Some(TextampSetting::Artwork(_)) => "Rendering method for this library's cover art.",
-        Some(TextampSetting::ArtworkVisible) => {
-            "Show covers in new album columns for this library."
-        }
-        Some(TextampSetting::Sidebar(_)) => {
-            "Enter, Space or click to show or hide this sidebar entry."
-        }
-        Some(TextampSetting::ExternalSearch(_)) => {
-            "Enable this service in search commands. Links open in your browser."
-        }
-        None => "Use Libraries to add a source, or F3 to switch libraries.",
-    };
+    let help = definitions.get(state.settings_state.item_index).map_or(
+        "Open a library to configure its preferences.",
+        |definition| definition.description,
+    );
+
     frame.render_widget(
         Paragraph::new(help)
             .wrap(Wrap { trim: true })
@@ -354,13 +345,27 @@ fn render_preview(
         Line::from(""),
         Line::styled(" Library", base.fg(colors.fg_accent)),
         Line::styled(
-            " › A favorite album",
+            format!(" › {}", crate::app::preferences::THEME_PREVIEW_ALBUM),
             Style::default()
                 .fg(colors.selection_bar_fg)
                 .bg(colors.selection_bar_bg),
         ),
-        Line::styled("   First track      3:24", base),
-        Line::styled("   Second track     4:08", base),
+        Line::styled(
+            format!(
+                "   {:<17} {}",
+                crate::app::preferences::THEME_PREVIEW_TRACKS[0].0,
+                crate::app::preferences::THEME_PREVIEW_TRACKS[0].1
+            ),
+            base,
+        ),
+        Line::styled(
+            format!(
+                "   {:<17} {}",
+                crate::app::preferences::THEME_PREVIEW_TRACKS[1].0,
+                crate::app::preferences::THEME_PREVIEW_TRACKS[1].1
+            ),
+            base,
+        ),
         Line::from(""),
         Line::styled(" Playing ━━━━━───  2:10", base.fg(colors.fg_accent)),
         Line::styled(" Enter Play   Esc Back", base.fg(colors.fg_muted)),
@@ -368,68 +373,37 @@ fn render_preview(
     frame.render_widget(Paragraph::new(lines).style(base), inner);
 }
 
-fn setting_label(state: &AppState, setting: TextampSetting) -> (&'static str, String) {
-    use crate::services::external_search::SearchTarget;
-    let radio = |yes| if yes { "(•)" } else { "( )" };
-    let check = |yes| if yes { "[x]" } else { "[ ]" };
-    match setting {
-        TextampSetting::Theme(name) => (
-            "Theme",
-            format!("{} {}", radio(name == state.theme), name.display_name()),
-        ),
-        TextampSetting::SoundOutput => (
-            "Sound output",
-            format!("{}  ›", state.sound_output.current.label()),
-        ),
-        TextampSetting::Artwork(mode) => (
-            "Cover rendering",
-            format!("{} {}", radio(mode == state.artwork.mode), mode.name()),
-        ),
-        TextampSetting::ArtworkVisible => (
-            "Album columns",
-            format!(
-                "{} Show covers in new columns",
-                check(state.artwork.default_visible)
-            ),
-        ),
-        TextampSetting::Transcode => (
-            "Streaming quality",
-            if state.transcode_kbps == 0 {
-                "Original audio  ›".into()
-            } else {
-                format!("Up to {} kbps  ›", state.transcode_kbps)
-            },
-        ),
-        TextampSetting::Sidebar(section) => (
-            "Show in sidebar",
-            format!("{} {}", check(!section.hidden(state)), section.label()),
-        ),
-        TextampSetting::ExternalSearch(target) => {
-            let (label, enabled) = match target {
-                SearchTarget::AppleMusic => ("Apple Music", state.external_search.apple_music),
-                SearchTarget::Spotify => ("Spotify", state.external_search.spotify),
-                SearchTarget::YouTube => ("YouTube", state.external_search.youtube),
-            };
-            ("Search services", format!("{} {label}", check(enabled)))
-        }
-    }
-}
-
 fn render_about(frame: &mut Frame, state: &AppState, area: Rect) {
     let block = panel(" About ").borders(Borders::TOP);
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    let rows = Layout::vertical([
+        Constraint::Length((inner.height / 2).clamp(3, 14).min(inner.height)),
+        Constraint::Min(0),
+    ])
+    .split(inner);
+    if let Some(text) = &state.settings_state.activity_history {
+        let paragraph = Paragraph::new(text.as_ref()).wrap(Wrap { trim: false });
+        let lines = paragraph.line_count(inner.width);
+        state.hit_regions.borrow_mut().settings_about =
+            Some(crate::app::presentation::ScrollableTextRegion {
+                area: inner,
+                lines,
+                visible: inner.height as usize,
+            });
+        frame.render_widget(paragraph.scroll((state.settings_state.scroll, 0)), inner);
+        return;
+    }
+    state.hit_regions.borrow_mut().settings_apply = Some(rows[0]);
+    crate::ui::widgets::logo::render_original(frame, rows[0], &theme().colors);
+    let inner = rows[1];
     let lines = vec![
         Line::styled(
             format!("Textamp {}", env!("CARGO_PKG_VERSION")),
             paper().add_modifier(Modifier::BOLD),
         ),
         Line::from(""),
-        Line::from("Music in your terminal."),
-        Line::from("Subsonic · Navidrome · Local folders · WebDAV"),
-        Line::from(""),
         Line::from("John Bergmayer · Textamp source: Unlicense"),
-        Line::from("Built-in AirPlay: GPL-3.0 · textamp --licenses"),
         Line::from("github.com/bergmayer/textamp"),
         Line::from(""),
         Line::from(format!(

@@ -1,7 +1,8 @@
 //! Radio from directory listings, without a tag/AI scan or downloading media.
 //! A playable leaf directory is an album; parent names are not artist metadata.
-use super::{cache::Store, track::Track, FolderEntry, FolderLocation, FolderSource};
-use anyhow::{ensure, Context, Result};
+use super::{FolderEntry, FolderLocation, FolderSource, cache::Store, track::Track};
+use anyhow::{Context, Result, ensure};
+use futures::{StreamExt, stream::FuturesUnordered};
 use rand::seq::SliceRandom;
 use std::collections::HashSet;
 
@@ -16,10 +17,11 @@ const MAX_DIRECTORIES: usize = 256;
 const MAX_PENDING: usize = 100_000;
 const MAX_DEPTH: usize = 128;
 
-/// Randomized depth-first discovery. It samples branches, not a uniform draw
+/// Randomized branch discovery. Library radio reads up to four directories at
+/// once; random-album radio retains depth-first ordering. It is not a uniform draw
 /// over every album: that would require indexing the entire remote hierarchy.
 /// Listings share the browser's persistent, source-scoped cache. Local listings
-/// are always refreshed; remote snapshots are usable for up to 72 hours.
+/// are always refreshed; remote snapshots follow the weekly refresh policy.
 pub async fn select(
     source: &FolderSource,
     store: &Store,
@@ -30,13 +32,34 @@ pub async fn select(
     let mut visited = HashSet::new();
     let mut candidates = Vec::new();
     let mut albums = 0;
-    while let Some((path, depth)) = pending.pop() {
-        if !visited.insert(path.clone()) {
-            continue;
+    let concurrency = match recipe {
+        Recipe::RandomAlbum => 1,
+        Recipe::Library => 4,
+    };
+    let mut requests = FuturesUnordered::new();
+    loop {
+        while requests.len() < concurrency {
+            let Some((path, depth)) = pending.pop() else {
+                break;
+            };
+            if !visited.insert(path.clone()) {
+                continue;
+            }
+            ensure!(
+                visited.len() <= MAX_DIRECTORIES,
+                "Radio searched 256 folders without enough playable music; choose a smaller library root"
+            );
+            ensure!(depth <= MAX_DEPTH, "Radio folder hierarchy is too deep");
+            requests.push(async move {
+                listing(source, store, &path)
+                    .await
+                    .map(|entries| (depth, entries))
+            });
         }
-        ensure!(visited.len() <= MAX_DIRECTORIES, "Radio searched 256 folders without enough playable music; choose a smaller library root");
-        ensure!(depth <= MAX_DEPTH, "Radio folder hierarchy is too deep");
-        let entries = listing(source, store, &path).await?;
+        let Some(result) = requests.next().await else {
+            break;
+        };
+        let (depth, entries) = result?;
         let mut children: Vec<_> = entries.iter().filter(|e| e.directory).collect();
         let tracks: Vec<_> = entries
             .iter()
@@ -49,7 +72,7 @@ pub async fn select(
                     && !tracks.is_empty()
                     && tracks.iter().all(|t| !excluded.contains(&t.rating_key)) =>
             {
-                return Ok(tracks)
+                return Ok(tracks);
             }
             Recipe::Library if !tracks.is_empty() => {
                 albums += 1;
@@ -71,10 +94,15 @@ pub async fn select(
         );
         pending.extend(children.into_iter().map(|e| (e.path.clone(), depth + 1)));
     }
-    ensure!(!candidates.is_empty(), match recipe {
-        Recipe::RandomAlbum => "No unplayed albums remain in the leaf folders. Start the station again to replay them.",
-        Recipe::Library => "No unplayed audio files remain. Start the station again to replay them.",
-    });
+    ensure!(
+        !candidates.is_empty(),
+        match recipe {
+            Recipe::RandomAlbum =>
+                "No unplayed albums remain in the leaf folders. Start the station again to replay them.",
+            Recipe::Library =>
+                "No unplayed audio files remain. Start the station again to replay them.",
+        }
+    );
     candidates.shuffle(&mut rand::rng());
     candidates.truncate(100);
     Ok(candidates)

@@ -1,6 +1,6 @@
 //! Server-capable state without credentials, network requests or audio hardware.
 pub fn navidrome_state() -> textamp::app::AppState {
-    use textamp::app::sources::{navidrome::Session, ActiveSource};
+    use textamp::app::sources::{ActiveSource, navidrome::Session};
     use textamp::navidrome::{Client, Source};
     let source = Source {
         id: "fixture".into(),

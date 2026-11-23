@@ -12,3 +12,5 @@ pub mod similar;
 pub mod sort_popup;
 
 pub mod visualizers;
+
+pub mod radio;

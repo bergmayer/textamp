@@ -1,10 +1,9 @@
 //! Conventional library forms and account buttons, rendered from draft state.
 use crate::app::sources::dialogs::{Dialog, WebdavForm};
-use crate::ui::theme::theme;
 use crate::ui::RenderState;
+use crate::ui::theme::theme;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
-use unicode_width::UnicodeWidthStr;
 
 pub fn render(frame: &mut Frame, state: &RenderState) {
     let Some(dialog) = state.popups.library_dialog() else {
@@ -46,6 +45,7 @@ pub fn render(frame: &mut Frame, state: &RenderState) {
         .style(super::settings::paper());
     let inner = block.inner(area);
     frame.render_widget(Clear, area);
+    crate::ui::widgets::register_popup_close(state, area);
     frame.render_widget(block, area);
     let mut controls = Vec::new();
     match dialog {
@@ -186,18 +186,54 @@ pub fn render(frame: &mut Frame, state: &RenderState) {
                 controls[index] = rect;
             }
             let help = match items.get(options.selected).map(|(action, _)| action) {
-                Some(OptionAction::Activate) => "Open this library for browsing and playback. Highlighting or editing its settings does not activate it.",
-                Some(OptionAction::Rename) if matches!(options.choice, crate::app::sources::LibraryChoice::Navidrome { .. }) => "Changes the account label in Textamp. Server library names are managed on the server.",
-                Some(OptionAction::Rename) => "Changes the name shown in Textamp. The music folder stays in place.",
-                Some(OptionAction::Connection) => "Edit the saved server address and sign-in. Changes are checked before saving.",
-                Some(OptionAction::Sonic) => "Show or hide analysis and discovery features for this library. Existing analysis is kept.",
-                Some(OptionAction::AudioMuse) => "Connect an AudioMuse analysis server for this library. Textamp reads existing analysis.",
-                Some(OptionAction::Rescan) if crate::app::sources::cache::running(&options.choice, state) => "Cancel the background refresh. The last usable cached catalog is kept.",
-                Some(OptionAction::Rescan) => "Re-scan this library and refresh available analysis now. Normally runs weekly. Folder scans read directory names; audio files are not downloaded.",
-                Some(OptionAction::Clear) => "Remove this library's cached catalog and analysis. Artwork, music and sign-ins are kept. Use Re-scan library to rebuild metadata.",
-                Some(OptionAction::ClearArtwork) => "Remove downloaded images for this library. Other libraries' artwork, music and display choices are kept.",
-                Some(OptionAction::Remove) if matches!(options.choice, crate::app::sources::LibraryChoice::Navidrome { .. }) => "Remove the entire account and its libraries from Textamp. Server music and playlists are kept.",
-                Some(OptionAction::Remove) => "Remove this library from Textamp. Music files are kept.",
+                Some(OptionAction::Activate) => {
+                    "Open this library for browsing and playback. Highlighting or editing its settings does not activate it."
+                }
+                Some(OptionAction::Rename)
+                    if matches!(
+                        options.choice,
+                        crate::app::sources::LibraryChoice::Navidrome { .. }
+                    ) =>
+                {
+                    "Changes the account label in Textamp. Server library names are managed on the server."
+                }
+                Some(OptionAction::Rename) => {
+                    "Changes the name shown in Textamp. The music folder stays in place."
+                }
+                Some(OptionAction::Connection) => {
+                    "Edit the saved server address and sign-in. Changes are checked before saving."
+                }
+                Some(OptionAction::Sonic) => {
+                    "Show or hide analysis and discovery features for this library. Existing analysis is kept."
+                }
+                Some(OptionAction::AudioMuse) => {
+                    "Connect an AudioMuse analysis server for this library. Textamp reads existing analysis."
+                }
+                Some(OptionAction::Rescan)
+                    if crate::app::sources::cache::running(&options.choice, state) =>
+                {
+                    "Cancel the background refresh. The last usable cached catalog is kept."
+                }
+                Some(OptionAction::Rescan) => {
+                    "Re-scan this library and refresh available analysis now. Normally runs weekly. Folder scans read directory names; audio files are not downloaded."
+                }
+                Some(OptionAction::Clear) => {
+                    "Remove this library's cached catalog and analysis. Artwork, music and sign-ins are kept. Use Re-scan library to rebuild metadata."
+                }
+                Some(OptionAction::ClearArtwork) => {
+                    "Remove downloaded images for this library. Other libraries' artwork, music and display choices are kept."
+                }
+                Some(OptionAction::Remove)
+                    if matches!(
+                        options.choice,
+                        crate::app::sources::LibraryChoice::Navidrome { .. }
+                    ) =>
+                {
+                    "Remove the entire account and its libraries from Textamp. Server music and playlists are kept."
+                }
+                Some(OptionAction::Remove) => {
+                    "Remove this library from Textamp. Music files are kept."
+                }
                 _ => "Return to the library list. Changes already applied are saved.",
             };
             frame.render_widget(
@@ -359,24 +395,18 @@ pub fn render(frame: &mut Frame, state: &RenderState) {
                 if input.height == 0 || input.width == 0 {
                     continue;
                 }
-                let focused = focus == index && !busy;
-                let chars: Vec<char> = if (index == 2 || index == 6) && !local {
-                    vec!['•'; field.value.chars().count()]
+                let readonly = index == 0
+                    && matches!(dialog,Dialog::Local(form) if form.existing_id.is_some());
+                let focused = focus == index && !busy && !readonly;
+                let text = if (index == 2 || index == 6) && !local {
+                    "•".repeat(field.value.encode_utf16().count())
                 } else {
-                    field.value.chars().collect()
+                    field.value.to_string()
                 };
-                let caret = field.value[..field.cursor].chars().count();
-                let mut start = 0;
-                while start < caret
-                    && UnicodeWidthStr::width(
-                        chars[start..caret].iter().collect::<String>().as_str(),
-                    ) >= input.width as usize
-                {
-                    start += 1;
-                }
-                let text: String = chars[start..].iter().collect();
                 let style = if focused {
                     super::settings::selected()
+                } else if readonly {
+                    super::settings::paper().fg(theme().colors.fg_muted)
                 } else {
                     super::settings::paper().bg(theme().colors.bg_secondary)
                 };
@@ -398,11 +428,17 @@ pub fn render(frame: &mut Frame, state: &RenderState) {
                     .style(style),
                     input,
                 );
-                if focused {
-                    let offset = UnicodeWidthStr::width(
-                        chars[start..caret].iter().collect::<String>().as_str(),
-                    ) as u16;
-                    frame.set_cursor_position((input.x + offset.min(input.width - 1), input.y));
+                if focused
+                    && let Some(document) = crate::app::terminal_text::document(state)
+                    && matches!(&document.target, crate::app::terminal_text::Target::Library { field, .. } if *field == index)
+                {
+                    crate::ui::widgets::text_input::render(
+                        frame,
+                        state,
+                        input,
+                        document.target,
+                        style,
+                    );
                 }
             }
             let message = if busy {

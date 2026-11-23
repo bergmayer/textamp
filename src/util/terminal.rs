@@ -2,16 +2,16 @@
 
 use std::io::{self, Stdout, Write};
 use std::ops::{Deref, DerefMut};
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crossterm::{
     cursor,
     event::{
-        DisableMouseCapture, EnableMouseCapture, KeyboardEnhancementFlags,
-        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::prelude::*;
 
@@ -80,10 +80,10 @@ impl Drop for TerminalSession {
 }
 
 fn remember_first(first: &mut Option<io::Error>, result: io::Result<()>) {
-    if first.is_none() {
-        if let Err(error) = result {
-            *first = Some(error);
-        }
+    if first.is_none()
+        && let Err(error) = result
+    {
+        *first = Some(error);
     }
 }
 
@@ -98,7 +98,10 @@ fn restore_writer<W: Write>(writer: &mut W) -> io::Result<()> {
         &mut first_error,
         execute!(writer, PopKeyboardEnhancementFlags),
     );
-    remember_first(&mut first_error, execute!(writer, DisableMouseCapture));
+    remember_first(
+        &mut first_error,
+        execute!(writer, DisableMouseCapture, DisableBracketedPaste),
+    );
     remember_first(&mut first_error, execute!(writer, LeaveAlternateScreen));
     remember_first(&mut first_error, execute!(writer, cursor::Show));
     remember_first(&mut first_error, writer.flush());
@@ -131,7 +134,7 @@ pub fn setup_terminal() -> io::Result<TerminalSession> {
         restore_stdio_best_effort();
         return Err(error);
     }
-    if let Err(error) = execute!(stdout, EnableMouseCapture) {
+    if let Err(error) = execute!(stdout, EnableMouseCapture, EnableBracketedPaste) {
         restore_stdio_best_effort();
         return Err(error);
     }
@@ -139,7 +142,11 @@ pub fn setup_terminal() -> io::Result<TerminalSession> {
     // Unsupported terminals harmlessly ignore this protocol extension.
     let _ = execute!(
         stdout,
-        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+                | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES,
+        )
     );
 
     let backend = CrosstermBackend::new(stdout);

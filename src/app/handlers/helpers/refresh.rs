@@ -10,26 +10,45 @@ use tokio::sync::mpsc;
 pub fn refresh_current_view(state: &mut AppState) -> Vec<Action> {
     use crate::app::state::RefreshCategory;
 
+    if state.view == View::Browse
+        && let Some((seed, _)) = crate::app::details::similar_seed(state)
+        && state
+            .track_pane_similar
+            .get(&seed.rating_key)
+            .is_some_and(Result::is_err)
+    {
+        state.track_pane_similar.remove(&seed.rating_key);
+        state.clear_error();
+        return vec![
+            DataAction::LoadTrackPaneSimilar {
+                rating_key: seed.rating_key,
+            }
+            .into(),
+        ];
+    }
+
     if state.view == View::Similar {
         let Some(key) = state.similar.source_key.clone() else {
             return vec![];
         };
         let title = state.similar.source_title.clone();
-        return vec![match state.similar.mode {
-            crate::app::state::SimilarMode::Tracks => DataAction::LoadSimilarTracks {
-                rating_key: key,
-                title,
-            },
-            crate::app::state::SimilarMode::Albums => DataAction::LoadSimilarAlbums {
-                rating_key: key,
-                title,
-            },
-            crate::app::state::SimilarMode::Artists => DataAction::LoadSimilarArtists {
-                artist_key: key,
-                title,
-            },
-        }
-        .into()];
+        return vec![
+            match state.similar.mode {
+                crate::app::state::SimilarMode::Tracks => DataAction::LoadSimilarTracks {
+                    rating_key: key,
+                    title,
+                },
+                crate::app::state::SimilarMode::Albums => DataAction::LoadSimilarAlbums {
+                    rating_key: key,
+                    title,
+                },
+                crate::app::state::SimilarMode::Artists => DataAction::LoadSimilarArtists {
+                    artist_key: key,
+                    title,
+                },
+            }
+            .into(),
+        ];
     }
     if state.view == View::Settings
         && state.settings_state.section == crate::app::state::SettingsSection::Libraries
@@ -49,11 +68,18 @@ pub fn refresh_current_view(state: &mut AppState) -> Vec<Action> {
             if let crate::app::sources::navidrome::commands::CollectionKind::AudioMuse(feature) =
                 kind
             {
-                return vec![crate::app::sources::audiomuse::Command::Open {
-                    feature,
-                    refresh: true,
-                }
-                .into()];
+                return vec![
+                    crate::app::sources::audiomuse::Command::Open {
+                        feature,
+                        refresh: true,
+                    }
+                    .into(),
+                ];
+            }
+            if kind == crate::app::sources::navidrome::commands::CollectionKind::RandomAlbums {
+                state.sources.random_albums =
+                    crate::app::sources::navidrome::random_albums::State::RefreshPending;
+                state.sources.nav_tasks.remove("random-albums");
             }
             return vec![kind.action()];
         }
@@ -98,19 +124,17 @@ pub fn refresh_current_view(state: &mut AppState) -> Vec<Action> {
             .artist_nav
             .columns
             .get(state.artist_nav.focused_column - 1)
-        {
-            if let Some(item) = parent_col.selected_item() {
-                if matches!(
-                    item,
-                    crate::app::state::BrowseItem::AllTracks {
-                        scope: crate::app::state::AllTracksScope::Library,
-                        ..
-                    }
-                ) {
-                    state.set_status("Refreshing all tracks...".to_string());
-                    return vec![SystemAction::RefreshCategory(RefreshCategory::AllTracks).into()];
+            && let Some(item) = parent_col.selected_item()
+            && matches!(
+                item,
+                crate::app::state::BrowseItem::AllTracks {
+                    scope: crate::app::state::AllTracksScope::Library,
+                    ..
                 }
-            }
+            )
+        {
+            state.set_status("Refreshing all tracks...".to_string());
+            return vec![SystemAction::RefreshCategory(RefreshCategory::AllTracks).into()];
         }
     }
 
@@ -184,11 +208,11 @@ pub fn refresh_current_view(state: &mut AppState) -> Vec<Action> {
         _ => None,
     };
 
-    if let Some(cat) = category {
-        if !state.cache_mgmt.background_refresh.contains(&cat) {
-            state.set_status(format!("Refreshing {}...", cat.display_name()));
-            return vec![SystemAction::RefreshCategory(cat).into()];
-        }
+    if let Some(cat) = category
+        && !state.cache_mgmt.background_refresh.contains(&cat)
+    {
+        state.set_status(format!("Refreshing {}...", cat.display_name()));
+        return vec![SystemAction::RefreshCategory(cat).into()];
     }
     vec![]
 }
@@ -225,5 +249,67 @@ pub fn refresh_due_caches(state: &mut AppState, tx: &mpsc::Sender<Event>) {
     state.cache_mgmt.next_refresh_check = Some(now + std::time::Duration::from_secs(3600));
     {
         crate::app::sources::refresh_due_caches(state, tx);
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+    use crate::{
+        app::state::{BrowseColumn, BrowseItem},
+        library::models::Track,
+    };
+
+    #[test]
+    fn failed_detail_retry_keeps_the_browsed_album_and_its_tracks() {
+        let mut state = AppState::new();
+        state.view = View::Browse;
+        state.category_column_focused = false;
+        let track = Track {
+            rating_key: "track".into(),
+            parent_rating_key: Some("album".into()),
+            ..Default::default()
+        };
+        state.artist_nav.columns = vec![BrowseColumn::new_with_tracks(
+            "Album",
+            BrowseItem::from_tracks(std::slice::from_ref(&track)),
+            vec![track],
+        )];
+        state
+            .track_pane_similar
+            .insert("track".into(), Err("Connection failed".into()));
+        let source = crate::navidrome::Source {
+            id: "fixture".into(),
+            name: "Fixture".into(),
+            url: "http://127.0.0.1:1".into(),
+            username: "fixture".into(),
+            libraries: vec![],
+        };
+        let session = crate::app::sources::navidrome::Session {
+            client: crate::navidrome::Client::new(&source, "fixture".into(), None).unwrap(),
+            source,
+            extensions: Default::default(),
+        };
+        state.sources.audiomuse.connections.insert(
+            crate::app::sources::audiomuse::key(&session),
+            crate::audiomuse::Connection {
+                url: "http://127.0.0.1:1".into(),
+                username: "fixture".into(),
+                server: "fixture".into(),
+            },
+        );
+        state.sources.active = crate::app::sources::ActiveSource::Navidrome(Box::new(session));
+        state.track_pane_open = true;
+        let actions = refresh_current_view(&mut state);
+        assert!(
+            matches!(actions.as_slice(), [Action::Data(DataAction::LoadTrackPaneSimilar { rating_key })] if rating_key == "track")
+        );
+        assert!(!state.track_pane_similar.contains_key("track"));
+        assert_eq!(
+            state.artist_nav.columns[0].tracks[0]
+                .parent_rating_key
+                .as_deref(),
+            Some("album")
+        );
     }
 }

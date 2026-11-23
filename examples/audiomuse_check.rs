@@ -121,7 +121,13 @@ async fn run() -> Result<()> {
             path.first() == Some(seed) && path.last() == Some(end),
             "Invalid live sonic path endpoints"
         );
-        println!("PASS: {} available moods; {} mood matches; {} sonic neighbors; {}-track path (read-only)", moods.len(), ids.len(), similar.len(), path.len());
+        println!(
+            "PASS: {} available moods; {} mood matches; {} sonic neighbors; {}-track path (read-only)",
+            moods.len(),
+            ids.len(),
+            similar.len(),
+            path.len()
+        );
     }
     if connect {
         textamp::library::credentials::save_source("audiomuse", &key, password)?;

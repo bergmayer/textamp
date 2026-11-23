@@ -17,18 +17,17 @@ pub fn initialize(state: &mut AppState, config: &Config) {
 }
 
 pub fn startup_choice(config: &Config) -> Option<LibraryChoice> {
-    if let Some(selection) = &config.default_navidrome {
-        if let Some(source) = config
+    if let Some(selection) = &config.default_navidrome
+        && let Some(source) = config
             .navidrome_sources
             .iter()
             .find(|s| s.id == selection.source_id)
-        {
-            return Some(LibraryChoice::Navidrome {
-                source: source.clone(),
-                folder: selection.folder.clone(),
-                name: String::new(),
-            });
-        }
+    {
+        return Some(LibraryChoice::Navidrome {
+            source: source.clone(),
+            folder: selection.folder.clone(),
+            name: String::new(),
+        });
     }
     config
         .default_folder_source

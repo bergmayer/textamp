@@ -1,40 +1,46 @@
 //! Multi-artist radio picker popup.
 //!
-//! Two-step popup:
-//! 1. Enter number of artists to blend (2-12)
-//! 2. Search and select artists from cached library
+//! Search, choose up to twelve artists and explicitly start their station.
 
-use crate::app::state::{ArtistRadioPickerStep, SearchFocus};
+use crate::app::state::SearchFocus;
 use crate::services::NavigationService;
+use crate::ui::RenderState as AppState;
 use crate::ui::layout::centered_rect;
 use crate::ui::theme::theme;
-use crate::ui::RenderState as AppState;
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 
 /// Render the artist radio picker popup as an overlay.
 pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
+    render_in(frame, state, area, false);
+}
+pub fn render_inline(frame: &mut Frame, state: &AppState, area: Rect) {
+    render_in(frame, state, area, true);
+}
+fn render_in(frame: &mut Frame, state: &AppState, area: Rect, inline: bool) {
     let picker = match state.popups.artist_radio_picker() {
         Some(p) => p,
         None => return,
     };
     // Popup takes 50% width, 70% height, centered
-    let popup_area = centered_rect(50, 70, area);
+    let popup_area = if inline {
+        area
+    } else {
+        centered_rect(50, 70, area)
+    };
 
     // Clear the area behind the popup
-    frame.render_widget(Clear, popup_area);
+    if !inline {
+        frame.render_widget(Clear, popup_area);
+        crate::ui::widgets::register_popup_close(state, popup_area);
+    }
 
     // Register hit regions for mouse handler
     {
         let block_tmp = ratatui::widgets::Block::default().borders(ratatui::widgets::Borders::ALL);
         let inner_tmp = block_tmp.inner(popup_area);
-        // For SelectArtists step: results start at inner_y + 5 (2 selected + 3 input)
-        let results_y_offset = if matches!(picker.step, ArtistRadioPickerStep::SelectArtists) {
-            5
-        } else {
-            0
-        };
+        let results_y_offset = 5;
         let results_height = inner_tmp.height.saturating_sub(results_y_offset);
         let mut hr = state.hit_regions.borrow_mut();
         hr.artist_radio_picker = Some(crate::app::presentation::PopupListRegions {
@@ -49,62 +55,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         });
     }
 
-    match picker.step {
-        ArtistRadioPickerStep::EnterCount => render_count_step(frame, picker, popup_area),
-        ArtistRadioPickerStep::SelectArtists => render_select_step(frame, picker, popup_area),
-    }
-}
-
-fn render_count_step(
-    frame: &mut Frame,
-    picker: &crate::app::state::ArtistRadioPickerState,
-    area: Rect,
-) {
-    let t = theme();
-
-    let block = Block::default()
-        .title(" artist radio ")
-        .title_style(Style::default().fg(t.colors.fg_accent))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(t.colors.fg_accent))
-        .style(Style::default().bg(t.colors.bg_primary));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let chunks = ratatui::layout::Layout::default()
-        .direction(ratatui::layout::Direction::Vertical)
-        .constraints([
-            ratatui::layout::Constraint::Length(2), // instructions
-            ratatui::layout::Constraint::Length(3), // input
-            ratatui::layout::Constraint::Min(1),    // spacer
-        ])
-        .split(inner);
-
-    // Instructions
-    let instructions = Paragraph::new(vec![
-        Line::from(Span::styled(
-            "How many artists to blend? (1-12)",
-            Style::default().fg(t.colors.fg_muted),
-        )),
-        Line::from(Span::styled(
-            "Enter a number and press Enter.",
-            Style::default().fg(t.colors.fg_muted).italic(),
-        )),
-    ]);
-    frame.render_widget(instructions, chunks[0]);
-
-    // Input field
-    let input_block = Block::default()
-        .title(" count ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(t.colors.border_focused))
-        .style(Style::default().bg(t.colors.bg_primary));
-    let input_inner = input_block.inner(chunks[1]);
-    frame.render_widget(input_block, chunks[1]);
-
-    let input_text = format!("{}▋", picker.count_input);
-    let input = Paragraph::new(input_text).style(Style::default().fg(t.colors.fg_primary));
-    frame.render_widget(input, input_inner);
+    render_select_step(frame, picker, popup_area);
 }
 
 fn render_select_step(
@@ -115,10 +66,8 @@ fn render_select_step(
     let t = theme();
 
     let title = format!(
-        " select {} artists ({}/{} selected) ",
-        picker.max_artists,
-        picker.selected_artists.len(),
-        picker.max_artists,
+        " Artist Mix · {} selected ",
+        picker.selected_artists.len()
     );
 
     let block = Block::default()
@@ -150,14 +99,7 @@ fn render_select_step(
     } else {
         selected_names.join(", ")
     };
-    let remaining = picker.max_artists - picker.selected_artists.len();
-    let hint = if remaining == 0 {
-        "Press Tab to launch".to_string()
-    } else if remaining == 1 {
-        "Enter to select (auto-launches on final)".to_string()
-    } else {
-        format!("Enter to select ({} remaining)", remaining)
-    };
+    let hint = "Enter: toggle artist   Tab: Start Radio   Esc: Cancel";
     let selected_display = Paragraph::new(vec![
         Line::from(Span::styled(
             selected_text,

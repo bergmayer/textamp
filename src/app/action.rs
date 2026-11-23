@@ -38,6 +38,7 @@ impl<T> AsyncBatchOutcome<T> {
 /// Top-level action routing — each variant maps to a dispatch handler module.
 #[derive(Debug, Clone)]
 pub enum Action {
+    PlayerSync(super::player_sync::Command),
     Source(crate::app::sources::SourceAction),
     System(SystemAction),
     Navigation(NavigationAction),
@@ -58,10 +59,8 @@ pub enum Action {
 
 #[derive(Debug, Clone)]
 pub enum SystemAction {
+    Downloads(super::downloads::Command),
     Quit,
-    /// Pointer activation of a rendered shortcut; uses the real key route/config.
-    ActivateFooterShortcut(crossterm::event::KeyCode),
-
     ShowError(String),
     ClearError,
     SetStatus(String),
@@ -70,18 +69,14 @@ pub enum SystemAction {
     CheckStaleness(crate::app::state::RefreshCategory),
     LoadArtwork,
     LoadWaveform,
+    PrefetchNextWaveform,
     LoadSpectrogram,
     /// Load album art for a batch of albums: Vec<(rating_key, thumb_path)>
     LoadAlbumArt(Vec<(String, String)>),
-    /// Open the system browser to a third-party music search (Apple
-    /// Music / Spotify / YouTube). When `query` is None the dispatcher
-    /// derives one from the currently selected artist/album/track (or
-    /// the now-playing track) via `build_external_search_query`.
-    /// Pass `Some(...)` from a right-click context menu so the search
-    /// targets the right-clicked row even when it's not the focused
-    /// one. The dispatcher also gates the action against the per-target
-    /// "Search ⟨service⟩" toggle in `UiConfig` — disabled targets are
-    /// silently skipped with a status notification.
+    /// Hand a music search to the platform adapter. With no explicit query,
+    /// shared policy selects visible details, the active artist/album column,
+    /// or the playing track. Context menus may supply the clicked row's query.
+    OpenBrowser(String),
     OpenExternalSearch {
         target: crate::services::external_search::SearchTarget,
         query: Option<String>,
@@ -90,8 +85,17 @@ pub enum SystemAction {
 
 #[derive(Debug, Clone)]
 pub enum NavigationAction {
+    SwitchPresentation(super::launch::WindowedMode),
+    OpenLibraryRoot(super::state::LibraryRoot),
+    OpenRadioStation(String),
+    ToggleQueuePanel,
+    ToggleSidebar,
+    ResetDesktopPanels,
+    Undo,
+    Back,
     ToggleFullscreen,
     FullscreenArtwork,
+    DesktopFullscreen(super::state::DesktopFullscreenView),
     SetView(View),
     NextView,
     PrevView,
@@ -124,6 +128,7 @@ pub enum DataAction {
     LoadInitialData,
     LoadArtists,
     LoadPlaylists,
+    PlaylistsLoaded(Vec<crate::library::models::Playlist>),
     LoadArtistAlbums,
     LoadArtistAllTracks,
     LoadSelectedAlbumTracks,
@@ -287,13 +292,7 @@ pub enum MillerAction {
 
 #[derive(Debug, Clone)]
 pub enum PlaybackAction {
-    OpenOutputPicker,
-    DiscoverAirplay,
-    AirplayDiscovered {
-        request_id: u64,
-        result: Result<crate::audio::airplay::OutputDiscovery, String>,
-    },
-    SelectOutput(crate::audio::AudioOutput),
+    OutputInterrupted,
     TogglePlayPause,
     Stop,
     /// Stop local audio and discard playback state without reporting to server.
@@ -308,6 +307,21 @@ pub enum PlaybackAction {
     VolumeUp,
     VolumeDown,
     ToggleMute,
+    ToggleAutoPlay,
+    ToggleAutoMix,
+    MixNext {
+        playback_id: u64,
+    },
+    ShowLyrics,
+    ToggleLyricsSync,
+    RetryLyrics,
+    SelectLyricsLanguage(usize),
+    LyricsLoaded {
+        generation: u64,
+        request: u64,
+        result: Result<Vec<super::lyrics::Document>, String>,
+    },
+    SearchLyrics(String),
 
     RetryCurrentTrack,
 }
@@ -328,6 +342,12 @@ pub enum QueueLoadIntent {
 
 #[derive(Debug, Clone)]
 pub enum QueueAction {
+    /// Move the selected queue occurrences to a drop boundary.
+    ReorderSelection {
+        from: usize,
+        to: usize,
+    },
+    SetRepeat(super::state::RepeatMode),
     PlayTrack(Box<Track>),
     PlayTrackFromCategory(usize),
     PlayAlbum {
@@ -337,7 +357,7 @@ pub enum QueueAction {
         artist_key: String,
     },
     PlayTracksNow(Vec<Track>),
-    PlaySearchResult,
+
     EnqueueSelection,
     EnqueueSelectionNext,
     EnqueueAlbum {
@@ -377,16 +397,33 @@ pub enum QueueAction {
     ToggleQueueShuffle,
     JumpToQueueIndex(usize),
     PromptSavePlaylist,
+    PromptExportPlaylist {
+        format: crate::services::playlist_export::Format,
+        queue: bool,
+    },
+    ExportPlaylist {
+        generation: u64,
+        tracks: Vec<Track>,
+        format: crate::services::playlist_export::Format,
+        path: std::path::PathBuf,
+    },
+    PlaylistExported {
+        generation: u64,
+        path: std::path::PathBuf,
+        result: Result<(), AsyncError>,
+    },
     SaveQueueAsPlaylist(String),
     QueuePlaylistSaved {
         name: String,
         track_count: usize,
-        result: Result<(), AsyncError>,
+        result: Result<crate::library::models::Playlist, AsyncError>,
     },
     RemixGemini,
     RemixTwofer,
     RemixStretch,
     RemixDoppelganger,
+    RemixOppositeDay,
+    RemixEnemies,
     RemixShuffle,
     RemixUndoShuffle,
     UndoLastRemix,
@@ -402,12 +439,15 @@ pub enum QueueAction {
     MoveSelectedTracksDown,
     RemoveSelectedFromQueue,
     RemixBatchReady(AsyncBatchOutcome<Vec<(usize, Vec<Track>)>>),
+    RemixEnemiesReady(AsyncBatchOutcome<Vec<(usize, Vec<Track>)>>),
     RemixDoppelgangerReady(AsyncBatchOutcome<Vec<(usize, Track)>>),
+    RemixOppositeDayReady(AsyncBatchOutcome<Vec<(usize, Track)>>),
 }
 
 #[derive(Debug, Clone)]
 pub enum SearchAction {
     ExecuteLocalSearch,
+    SubmitSearch,
     SelectSearchResult,
     ActivateListFilter,
     DeactivateListFilter,
@@ -429,15 +469,16 @@ pub enum SearchAction {
     },
     OpenSearchPopup,
     CloseSearchPopup,
-    /// Replace the global-search query (text input handler) and
-    /// kick off a fresh `ExecuteLocalSearch`. Mirrors the way the
-    /// adventure launcher's `AdventureLauncherSetQuery` works.
+    /// Replace the search query and schedule matching against the current library.
     SetSearchQuery(String),
     /// Switch the active result-category tab in the global search
     /// popup (Global / Artists / Albums / Tracks / Playlists / Genres).
     SetSearchTab(crate::app::state::SearchTab),
     OpenAdventureLauncher,
-    /// Open the Sonic Adventure launcher with a pre-selected start
+    OpenTrackRadioPicker,
+    OpenStayCloseRadioPicker,
+    StartPickedTrackRadio,
+    /// Open the Journey launcher with a pre-selected start
     /// track — skips the start-track search step and goes straight to
     /// "enter track count". Used by the track context menu and the
     /// Now Playing "Adventure" action when the source already
@@ -468,16 +509,17 @@ pub enum SearchAction {
     /// Replace the track-count input with the given string. Used by
     /// the GUI text-input handler.
     AdventureLauncherSetTrackCount(String),
-    /// Clear `start_track` (X-button on the start-track row).
-    AdventureLauncherClearStart,
-    /// Clear `end_track` (X-button on the end-track row).
-    AdventureLauncherClearEnd,
-    /// Fire generation when the user clicks the "Generate" button.
-    /// Validates start/end/count and dispatches the same path the
-    /// old multi-step launcher used on FindEndTrack select.
+
+    /// Validate start/end/count and generate the selected sonic path.
     AdventureLauncherGenerate,
+    AdventureLauncherPlay,
+    AdventureLauncherEdit,
     /// Replace the search query (TextInput handler) and re-run search.
     AdventureLauncherSetQuery(String),
+    AdventureLauncherSetEndpointQuery {
+        step: crate::app::state::AdventureStep,
+        query: String,
+    },
     OpenLibraryPicker,
     ManageLibraries,
     CloseLibraryPicker,
@@ -488,24 +530,34 @@ pub enum SearchAction {
     /// always operate on the focused Miller column.
     ApplyFocusedSortMode(crate::app::state::ColumnSortMode),
     ReverseFocusedSortDirection,
-    ToggleFocusedColumnArtwork,
-    ToggleFocusedColumnGrouping,
+
     OpenArtistRadioPicker,
     CloseArtistRadioPicker,
     ArtistRadioPickerSearch,
-    ArtistRadioPickerSetCount,
     ArtistRadioPickerToggleArtist,
     ArtistRadioPickerLaunch,
+    ShowArtistInfo {
+        artist_key: String,
+        artist_name: String,
+    },
+    ArtistInfoPhoto(i8),
+    OpenArtistInfoSource,
+    SearchArtistInfoOnWeb,
     ShowArtistBio {
         artist_key: String,
         artist_name: String,
     },
     OpenBiographySource,
-    SearchBiographyOnGoogle,
+    SearchBiographyOnWeb,
 }
 
 #[derive(Debug, Clone)]
 pub enum BrowseAction {
+    SetPlaylistEditing {
+        playlist: String,
+        editing: bool,
+    },
+    OpenSingles,
     LoadStations,
     StationsLoaded {
         library_key: String,
@@ -545,6 +597,15 @@ pub enum BrowseAction {
     /// frame. The handler simply flips `state.track_pane_open` to
     /// true and gives keyboard focus to the pane.
     OpenTrackDetails,
+    OpenDetailsInLibrary {
+        track: Box<Track>,
+        destination: crate::app::library_details::Destination,
+    },
+    /// Inspect a track from the current detail pane's recommendations.
+    OpenSimilarTrack {
+        seed_key: String,
+        track_key: String,
+    },
     /// GUI: close the track-details pane.
     CloseTrackDetails,
     /// "Open in Library": switch to the Library category, drill into
@@ -570,27 +631,17 @@ pub enum FolderAction {
         replace_child: bool,
     },
     PlayFolderTracks,
-    FolderTracksLoaded {
-        request_id: u64,
-        selected_key: Option<String>,
-        selected_index: usize,
-        ordered_keys: Vec<String>,
-        result: Result<Vec<Track>, AsyncError>,
-    },
+
     PlayFolderTrack {
         track_index: usize,
     },
-    FolderTrackLoaded {
-        request_id: u64,
-        selected_key: Option<String>,
-        track_index: usize,
-        result: Result<Vec<Track>, AsyncError>,
-    },
+
     RefreshSubfolder(String),
 }
 
 #[derive(Debug, Clone)]
 pub enum RadioAction {
+    StopStation,
     StartSonicRadio(Box<Track>),
     JumpToRadioTrack(usize),
     PlayCurrentRadioTrack,
@@ -603,21 +654,32 @@ pub enum RadioAction {
     PlayStation(String),
     DrillIntoStation(String, String),
     NavigateStationsBack,
-    ToggleDjMode(crate::app::state::DjMode),
-    DjModeProcess,
-    DjModeTracksReady(Result<Vec<Track>, AsyncError>, bool),
-    DjModeBatchReady(Vec<(usize, Vec<Track>)>),
 }
 
 #[derive(Debug, Clone)]
 pub enum SettingsAction {
+    PersistCommandHistory,
+    RememberPlaylistDestination(String),
+    SetLibraryRootVisible {
+        root: super::state::LibraryRoot,
+        visible: bool,
+    },
+    ToggleSidebarGroup(String),
     PersistenceFailed {
         operation: String,
         error: String,
     },
 
     OpenSettings,
+    SetRemixAllowSameArtist(bool),
+    SetShowCompilationOnlyArtists(bool),
+    SetLargeArtwork(bool),
+    SetSinglesTrackLimit(u32),
+    SetTranscodeBitrate(u32),
     SettingsSelect,
+    ReadActivityHistory,
+    ActivityHistoryLoaded(std::sync::Arc<str>),
+    ActivatePreference(crate::app::state::TextampSetting),
 
     SaveSettings,
     ClearLibraryCache,
@@ -656,14 +718,11 @@ pub enum SettingsAction {
     /// ArtworkEvent. Used by the Settings popup to make sure the
     /// library-options popover shows current sizes when it opens.
     RefreshCacheStats,
-    /// Wipe library + artwork caches, then trigger a fresh load from
-    /// the server. Used by the explicit global cache-refresh action.
-    RefreshAllCache,
 
     SetAdventureLength(usize),
     CancelAdventure,
     AdventureComplete(Vec<Track>),
-    AdventureError(String),
+
     AdventureGenerated {
         request_id: u64,
         result: Result<Vec<Track>, AsyncError>,
@@ -677,16 +736,8 @@ pub enum SettingsAction {
     /// Toggle whether a top-level browse section is shown in the
     /// leftmost browse column. Persists category and collection preferences.
     ToggleSectionVisibility(crate::app::state::SidebarSection),
-    /// TUI-only: flip the Library Miller-column layout between
-    /// shrinking (every column compressed to fit) and scrolling
-    /// (each column at half-screen width, viewport scrolls as the
-    /// user drills). Persisted via `UiConfig::miller_layout`. Bound
-    /// to `\` in the browse view and a checkbox in Settings.
-    ToggleMillerLayout,
-    /// TUI-only: flip the tall-monitor split view (Library on top
-    /// half, Now Playing on bottom half). Persisted via
-    /// `UiConfig::tall_mode`. Bound to `|` and to a palette command.
-    ToggleTallMode,
+    /// Toggle the desktop Library / Now Playing split layout.
+    ToggleSplitView,
     /// Persist a column's artwork visibility for its browse context.
     SaveColumnArtwork {
         library_key: String,
@@ -704,7 +755,7 @@ pub enum SettingsAction {
     },
     /// Drop saved per-playlist view-toggle entries for playlists that
     /// no longer exist in the given library. Sent after a successful
-    /// `PlaylistsLoaded` so deleted playlists' settings don't
+    /// a catalog refresh so deleted playlists' settings don't
     /// accumulate forever in the config.
     PrunePlaylistViews {
         library_key: String,

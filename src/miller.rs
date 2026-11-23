@@ -117,10 +117,10 @@ impl<C: MillerColumn> MillerState<C> {
 
     /// Move to a specific index in the focused column.
     pub fn move_to(&mut self, index: usize) {
-        if let Some(col) = self.focused_mut() {
-            if index < col.item_count() {
-                col.set_selected_index(index);
-            }
+        if let Some(col) = self.focused_mut()
+            && index < col.item_count()
+        {
+            col.set_selected_index(index);
         }
     }
 

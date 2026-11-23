@@ -2,7 +2,7 @@
 use crate::util::serde_helpers::from_str_or_num_opt;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(tag = "provider", rename_all = "snake_case")]
 pub enum TrackOrigin {
     Navidrome {
@@ -34,6 +34,8 @@ pub struct Track {
     pub key: String,
     #[serde(default)]
     pub title: String,
+    #[serde(default)]
+    pub lyrics: Option<String>,
     /// All track-level genre tags, in source order.
     #[serde(default)]
     pub genres: Vec<String>,
@@ -119,14 +121,12 @@ impl Track {
             &Default::default(),
             &Default::default(),
         )?;
-        if let Some(track) = probed.format.default_track() {
-            if let (Some(frames), Some(time_base)) =
+        if let Some(track) = probed.format.default_track()
+            && let (Some(frames), Some(time_base)) =
                 (track.codec_params.n_frames, track.codec_params.time_base)
-            {
-                let time = time_base.calc_time(frames);
-                self.duration =
-                    Some(time.seconds.saturating_mul(1000) + (time.frac * 1000.0) as u64);
-            }
+        {
+            let time = time_base.calc_time(frames);
+            self.duration = Some(time.seconds.saturating_mul(1000) + (time.frac * 1000.0) as u64);
         }
         let mut revisions = Vec::new();
         if let Some(metadata) = probed.metadata.get().and_then(|m| m.current().cloned()) {
@@ -150,6 +150,7 @@ impl Track {
                     continue;
                 }
                 match tag.std_key {
+                    Some(StandardTagKey::Lyrics) => self.lyrics = Some(value),
                     Some(StandardTagKey::TrackTitle) => self.title = value,
                     Some(StandardTagKey::Album) => self.parent_title = Some(value),
                     Some(StandardTagKey::Artist) => self.original_title = Some(value),
@@ -173,6 +174,15 @@ impl Track {
             Some(s) if !s.is_empty() => s,
             _ => self.artist_name(),
         }
+    }
+
+    pub fn distinct_album_artist(&self) -> Option<&str> {
+        self.grandparent_title
+            .as_deref()
+            .map(str::trim)
+            .filter(|artist| {
+                !artist.is_empty() && !artist.eq_ignore_ascii_case(self.track_artist().trim())
+            })
     }
 
     /// Get album name (handles None and empty string).
@@ -212,17 +222,16 @@ impl Track {
         self.duration.unwrap_or(0)
     }
 
-    /// Get the first available media part for streaming.
-    pub fn stream_part(&self) -> Option<&MediaPart> {
-        self.media.first().and_then(|m| m.part.first())
-    }
-
     /// Get best thumbnail (track > album > artist).
     pub fn best_thumb(&self) -> Option<&str> {
-        self.thumb
-            .as_deref()
-            .or(self.parent_thumb.as_deref())
-            .or(self.grandparent_thumb.as_deref())
+        [
+            self.thumb.as_deref(),
+            self.parent_thumb.as_deref(),
+            self.grandparent_thumb.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|thumb| !thumb.is_empty())
     }
 }
 

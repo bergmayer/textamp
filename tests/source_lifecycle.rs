@@ -1,4 +1,4 @@
-use textamp::app::sources::{manager, ActiveSource, LibraryChoice};
+use textamp::app::sources::{ActiveSource, LibraryChoice, manager};
 use textamp::app::{Action, AppState};
 use textamp::config::Config;
 use textamp::library::{FolderLocation, FolderSource};

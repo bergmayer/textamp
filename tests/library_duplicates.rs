@@ -1,8 +1,7 @@
 use textamp::app::sources::{
-    self,
+    self, SourceAction,
     dialogs::{Dialog, WebdavForm},
     navidrome::NavAction,
-    SourceAction,
 };
 use textamp::app::{AppState, Event};
 use textamp::config::Config;

@@ -6,13 +6,13 @@ use textamp::app::state::{BrowseCategory, View};
 use textamp::app::{AppState, Event};
 use textamp::audio::AudioPlayer;
 use textamp::config::Config;
-use textamp::library::{cache::Store, FolderEntry, FolderLocation, FolderSource};
+use textamp::library::{FolderEntry, FolderLocation, FolderSource, cache::Store};
 
 use tokio::sync::mpsc;
 
 #[test]
 fn settings_have_one_library_account_home_and_cache_controls_for_each_provider() {
-    use ratatui::{backend::TestBackend, Terminal};
+    use ratatui::{Terminal, backend::TestBackend};
     use textamp::app::state::{SettingsFocus, SettingsSection};
     assert_eq!(SettingsSection::default(), SettingsSection::Libraries);
     assert_eq!(SettingsSection::all().len(), 3);
@@ -116,6 +116,7 @@ async fn all_folder_types_open_saved_listings_without_a_live_source() {
         };
         let cache = Store::folder(&source).unwrap();
         cache
+            .listings()
             .ticket("")
             .write(&vec![entry("01.flac"), entry("02.flac")])
             .unwrap();
@@ -159,19 +160,25 @@ async fn all_folder_types_open_saved_listings_without_a_live_source() {
         assert!(state.sources.listing.is_none());
         let mut renamed = source.clone();
         renamed.name = "Renamed".into();
-        assert!(Store::folder(&renamed)
-            .unwrap()
-            .ticket("")
-            .read::<Vec<FolderEntry>>(Duration::ZERO)
-            .unwrap()
-            .is_some());
+        assert!(
+            Store::folder(&renamed)
+                .unwrap()
+                .listings()
+                .ticket("")
+                .read::<Vec<FolderEntry>>(Duration::ZERO)
+                .unwrap()
+                .is_some()
+        );
         renamed.id = uuid::Uuid::new_v4().to_string();
-        assert!(Store::folder(&renamed)
-            .unwrap()
-            .ticket("")
-            .read::<Vec<FolderEntry>>(Duration::ZERO)
-            .unwrap()
-            .is_none());
+        assert!(
+            Store::folder(&renamed)
+                .unwrap()
+                .listings()
+                .ticket("")
+                .read::<Vec<FolderEntry>>(Duration::ZERO)
+                .unwrap()
+                .is_none()
+        );
     }
 }
 
@@ -187,6 +194,7 @@ async fn root_f5_forces_a_read_and_successful_empty_refresh_replaces_cache() {
     };
     let cache = Store::folder(&source).unwrap();
     cache
+        .listings()
         .ticket("")
         .write(&vec![entry("removed.flac")])
         .unwrap();
@@ -217,16 +225,21 @@ async fn root_f5_forces_a_read_and_successful_empty_refresh_replaces_cache() {
         receive(&mut state, &mut audio, &tx, &mut rx).await;
     }
     assert!(!state.library_loading);
-    assert!(state.folder_state.as_ref().unwrap().columns[0]
-        .items
-        .is_empty());
-    assert!(cache
-        .ticket("")
-        .read::<Vec<FolderEntry>>(Duration::ZERO)
-        .unwrap()
-        .unwrap()
-        .value
-        .is_empty());
+    assert!(
+        state.folder_state.as_ref().unwrap().columns[0]
+            .items
+            .is_empty()
+    );
+    assert!(
+        cache
+            .listings()
+            .ticket("")
+            .read::<Vec<FolderEntry>>(Duration::ZERO)
+            .unwrap()
+            .unwrap()
+            .value
+            .is_empty()
+    );
     // Clear completion must reload this provider, not send its identity to Plex.
     dispatch_action(
         SettingsAction::LibraryCacheCleared(Ok(1)).into(),
@@ -248,7 +261,7 @@ async fn root_f5_forces_a_read_and_successful_empty_refresh_replaces_cache() {
 
 #[test]
 fn cache_settings_are_available_for_folder_sources_without_plex_login() {
-    use ratatui::{backend::TestBackend, Terminal};
+    use ratatui::{Terminal, backend::TestBackend};
     use textamp::app::state::{SettingsFocus, SettingsSection};
     let mut state = AppState::new();
     state.view = View::Settings;
@@ -285,7 +298,7 @@ fn cache_settings_are_available_for_folder_sources_without_plex_login() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(text.contains("Clear library cache…"));
+    assert!(text.contains("Clear metadata cache…"));
     assert!(text.contains("My music"));
     assert!(!text.contains("signed out"));
     let actions = textamp::app::handlers::key_input::handle_key(

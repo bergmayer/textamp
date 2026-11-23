@@ -1,14 +1,13 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::{backend::TestBackend, Terminal};
+use ratatui::{Terminal, backend::TestBackend};
+use textamp::app::AppState;
 use textamp::app::handlers::{key_input, mouse_input};
 use textamp::app::sources::{
-    self,
+    self, ActiveSource, LibraryChoice, SourceAction,
     dialogs::{Dialog, ServerForm},
     options::{self, OptionAction, OptionsPage},
-    ActiveSource, LibraryChoice, SourceAction,
 };
 use textamp::app::state::{SettingsFocus, SettingsPage, SettingsSection, View};
-use textamp::app::AppState;
 use textamp::config::Config;
 
 fn fixture() -> AppState {
@@ -88,13 +87,15 @@ fn setup_pages_have_matching_mouse_targets_and_keep_playback_unchanged() {
             state.settings_state.page = page;
             state.settings_state.item_index = 0;
             draw(&mut state, width, height, page.name());
-            assert!(!state
-                .hit_regions
-                .settings_textamp
-                .as_ref()
-                .unwrap()
-                .rows
-                .is_empty());
+            assert!(
+                !state
+                    .hit_regions
+                    .settings_textamp
+                    .as_ref()
+                    .unwrap()
+                    .rows
+                    .is_empty()
+            );
             assert_eq!(state.sources.active.folder().unwrap(), "music");
             assert_eq!(state.playback.position_ms, 12345);
         }
@@ -136,10 +137,11 @@ fn library_connection_cancel_returns_to_setup_and_cache_is_separate() {
     press(&mut state, KeyCode::Right);
     if let Some(Dialog::Library(o)) = state.popups.library_dialog() {
         assert_eq!(o.page, OptionsPage::Cache);
-        assert!(!o
-            .items(&state)
-            .iter()
-            .any(|(a, _)| *a == OptionAction::Activate));
+        assert!(
+            !o.items(&state)
+                .iter()
+                .any(|(a, _)| *a == OptionAction::Activate)
+        );
     } else {
         panic!("missing setup")
     }
@@ -399,7 +401,11 @@ fn settings_panels_and_library_dialogs_use_active_theme() {
             terminal
                 .draw(|frame| state.apply_render_feedback(textamp::ui::render(frame, &state)))
                 .unwrap();
-            let border = &terminal.backend().buffer()[(0, 0)];
+            let popup = state
+                .hit_regions
+                .popup_outer
+                .expect("settings overlay bounds");
+            let border = &terminal.backend().buffer()[(popup.x, popup.y)];
             assert_eq!(border.bg, colors.bg_primary, "{name:?} {section:?}");
             assert_eq!(border.fg, colors.fg_accent, "{name:?} {section:?}");
         }
@@ -427,6 +433,10 @@ fn settings_panels_and_library_dialogs_use_active_theme() {
 
 #[tokio::test]
 async fn artwork_choices_follow_each_library_and_settings_show_the_active_one() {
+    let profile = std::env::var_os("TEXTAMP_CARGO_TEST_PROFILE").expect(
+        "Run persistent-settings checks through cargo test with its isolated profile runner",
+    );
+    assert!(textamp::config::config_path().starts_with(std::path::PathBuf::from(profile)));
     use textamp::app::action::SettingsAction;
     use textamp::app::state::{ArtworkMode, SettingsPage};
     let first = tempfile::tempdir().unwrap();
@@ -459,9 +469,15 @@ async fn artwork_choices_follow_each_library_and_settings_show_the_active_one() 
     .unwrap();
     state.view = View::Settings;
     state.settings_state.section = SettingsSection::Textamp;
-    state.settings_state.page = SettingsPage::Display;
+    state.settings_state.page = SettingsPage::Themes;
     state.settings_state.focus = SettingsFocus::Content;
-    state.settings_state.item_index = 1;
+    state.settings_state.item_index = state
+        .textamp_settings()
+        .iter()
+        .position(|item| {
+            *item == textamp::app::state::TextampSetting::Artwork(ArtworkMode::Halfblocks)
+        })
+        .unwrap();
     textamp::app::dispatch::dispatch_action(
         SettingsAction::SettingsSelect.into(),
         &mut state,
@@ -472,9 +488,22 @@ async fn artwork_choices_follow_each_library_and_settings_show_the_active_one() 
     .await
     .unwrap();
     assert_eq!(state.artwork.mode, ArtworkMode::Halfblocks);
-    state.settings_state.item_index = 3;
+    use textamp::app::launch::WindowedMode;
+    assert_eq!(
+        config.artwork_mode("folder:folder-0", WindowedMode::Text),
+        ArtworkMode::Halfblocks
+    );
+    assert_eq!(
+        config.artwork_mode("folder:folder-0", WindowedMode::Gui),
+        ArtworkMode::Auto
+    );
+
+    state.desktop_frontend = true;
     textamp::app::dispatch::dispatch_action(
-        SettingsAction::SettingsSelect.into(),
+        SettingsAction::ActivatePreference(textamp::app::state::TextampSetting::Artwork(
+            ArtworkMode::Braille,
+        ))
+        .into(),
         &mut state,
         &mut audio,
         &mut config,
@@ -482,17 +511,9 @@ async fn artwork_choices_follow_each_library_and_settings_show_the_active_one() 
     )
     .await
     .unwrap();
-    assert!(!state.artwork.default_visible);
-    assert_eq!(
-        config.artwork_preferences("folder:folder-0"),
-        (ArtworkMode::Halfblocks, false)
-    );
-    assert_eq!(
-        config.artwork_preferences("folder:folder-1"),
-        (ArtworkMode::Auto, true)
-    );
-    assert_eq!(config.ui.artwork_mode, "auto");
-    assert!(config.ui.cover_art_view);
+    assert_eq!(state.artwork.mode, ArtworkMode::Halfblocks);
+    assert_eq!(state.artwork.graphical_mode, ArtworkMode::Braille);
+    state.desktop_frontend = false;
 
     sources::dispatch(
         SourceAction::Choose(LibraryChoice::Folder(folders[1].clone())),
@@ -504,10 +525,9 @@ async fn artwork_choices_follow_each_library_and_settings_show_the_active_one() 
     .await
     .unwrap();
     assert_eq!(state.artwork.mode, ArtworkMode::Auto);
-    assert!(state.artwork.default_visible);
     state.view = View::Settings;
     state.settings_state.section = SettingsSection::Textamp;
-    state.settings_state.page = SettingsPage::Display;
+    state.settings_state.page = SettingsPage::Themes;
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
     terminal
         .draw(|frame| state.apply_render_feedback(textamp::ui::render(frame, &state)))
@@ -520,7 +540,7 @@ async fn artwork_choices_follow_each_library_and_settings_show_the_active_one() 
         .map(|cell| cell.symbol())
         .collect();
     assert!(text.contains("Library 1"));
-    assert!(text.contains("Show covers in new columns"));
+    assert!(!text.contains("new columns"));
 
     sources::dispatch(
         SourceAction::Choose(LibraryChoice::Folder(folders[0].clone())),
@@ -532,15 +552,13 @@ async fn artwork_choices_follow_each_library_and_settings_show_the_active_one() 
     .await
     .unwrap();
     assert_eq!(state.artwork.mode, ArtworkMode::Halfblocks);
-    assert!(!state.artwork.default_visible);
-    config.set_column_artwork("folder:folder-0", "albums:artist", true);
     assert_eq!(
-        config.artwork_preferences("folder:folder-0"),
-        (ArtworkMode::Halfblocks, false)
+        config.artwork_mode("folder:folder-0", WindowedMode::Text),
+        ArtworkMode::Halfblocks
     );
     assert_eq!(
-        config.artwork_preferences("folder:folder-1"),
-        (ArtworkMode::Auto, true)
+        config.artwork_mode("folder:folder-1", WindowedMode::Text),
+        ArtworkMode::Auto
     );
 }
 
@@ -570,9 +588,12 @@ fn downloaded_artwork_cache_is_scoped_to_each_library() {
     assert_eq!(second.clear_all(), 1);
 }
 
-#[test]
-fn mouse_opens_categories_previews_themes_and_applies_only_on_request() {
-    use textamp::app::{action::SettingsAction, Action};
+#[tokio::test]
+async fn mouse_previews_theme_then_applies_on_second_click() {
+    use textamp::app::{Action, action::SettingsAction};
+    let profile =
+        std::env::var_os("TEXTAMP_CARGO_TEST_PROFILE").expect("isolated Cargo test profile");
+    assert!(textamp::config::config_path().starts_with(std::path::PathBuf::from(profile)));
     for (width, height) in [(100, 32), (80, 24), (40, 12)] {
         let mut state = fixture();
         state.settings_state.focus = SettingsFocus::Sections;
@@ -593,12 +614,48 @@ fn mouse_opens_categories_previews_themes_and_applies_only_on_request() {
         assert!(mouse_input::handle_mouse(click(target), &mut state).is_empty());
         assert_eq!(state.settings_state.focus, SettingsFocus::Content);
         draw(&mut state, width, height, "mouse-appearance");
+        let (index, selected) = state
+            .textamp_settings()
+            .into_iter()
+            .enumerate()
+            .find_map(|(index, item)| match item {
+                textamp::app::state::TextampSetting::Theme(name) if name != state.theme => {
+                    Some((index, name))
+                }
+                _ => None,
+            })
+            .unwrap();
+        state.settings_state.item_index = index;
+        draw(&mut state, width, height, "mouse-theme");
         let region = state.hit_regions.settings_textamp.clone().unwrap();
-        let (row, index) = *region.rows.last().unwrap();
+        let row = region
+            .rows
+            .iter()
+            .find(|(_, item)| *item == index)
+            .unwrap()
+            .0;
+        state.settings_state.focus = SettingsFocus::Sections;
         let original = state.theme;
         assert!(mouse_input::handle_mouse(click(row), &mut state).is_empty());
-        assert_eq!(state.settings_state.item_index, index);
         assert_eq!(state.theme, original);
+        let actions = mouse_input::handle_mouse(click(row), &mut state);
+        assert_eq!(state.settings_state.item_index, index);
+        let mut config = Config::default();
+        let mut audio = textamp::audio::AudioPlayer::new_without_audio();
+        let (events, _inbox) = tokio::sync::mpsc::channel(8);
+        for action in actions {
+            textamp::app::dispatch::dispatch_action(
+                action,
+                &mut state,
+                &mut audio,
+                &mut config,
+                &events,
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(state.theme, selected);
+        assert_eq!(config.ui.theme, selected.config_name());
         draw(&mut state, width, height, "mouse-preview");
         assert_eq!(
             state
@@ -636,14 +693,16 @@ fn resizing_keeps_selection_and_keyboard_navigation_releases_mouse_scroll() {
     for (width, height) in [(100, 32), (40, 12), (80, 24), (28, 10), (100, 32)] {
         draw(&mut state, width, height, "resize");
         assert_eq!(state.settings_state.item_index, selected);
-        assert!(state
-            .hit_regions
-            .settings_textamp
-            .as_ref()
-            .unwrap()
-            .rows
-            .iter()
-            .any(|(_, i)| *i == selected));
+        assert!(
+            state
+                .hit_regions
+                .settings_textamp
+                .as_ref()
+                .unwrap()
+                .rows
+                .iter()
+                .any(|(_, i)| *i == selected)
+        );
     }
     state.scroll.settings_textamp = Some(0);
     press(&mut state, KeyCode::Up);
@@ -652,28 +711,71 @@ fn resizing_keeps_selection_and_keyboard_navigation_releases_mouse_scroll() {
 }
 
 #[test]
-fn empty_artwork_page_and_audio_page_are_distinct_and_navigate_back() {
+fn appearance_without_a_library_omits_artwork_and_navigates_to_audio() {
     let mut state = AppState::new();
     state.view = View::Settings;
     state.settings_state.section = SettingsSection::Textamp;
-    state.settings_state.page = SettingsPage::Display;
+    state.settings_state.page = SettingsPage::Themes;
     state.settings_state.focus = SettingsFocus::Content;
-    assert!(state.textamp_settings().is_empty());
-    draw(&mut state, 80, 24, "empty-artwork");
-    assert!(state
-        .hit_regions
-        .settings_textamp
-        .as_ref()
-        .unwrap()
-        .rows
-        .is_empty());
+    assert!(
+        !state
+            .textamp_settings()
+            .iter()
+            .any(|item| matches!(item, textamp::app::state::TextampSetting::Artwork(_)))
+    );
+    draw(&mut state, 80, 24, "appearance");
+    assert!(
+        !state
+            .hit_regions
+            .settings_textamp
+            .as_ref()
+            .unwrap()
+            .rows
+            .is_empty()
+    );
     press(&mut state, KeyCode::Left);
     press(&mut state, KeyCode::Down);
     assert_eq!(state.settings_state.page, SettingsPage::Audio);
     press(&mut state, KeyCode::Right);
     assert_eq!(
         state.textamp_settings(),
-        vec![textamp::app::state::TextampSetting::SoundOutput]
+        vec![textamp::app::state::TextampSetting::RemixAllowSameArtist]
     );
     draw(&mut state, 80, 24, "empty-audio");
+}
+
+#[tokio::test]
+async fn graphical_mode_choices_update_arrangement_without_changing_the_library() {
+    use textamp::app::{action::SettingsAction, launch::ApplicationMode, state::TextampSetting};
+    let profile = std::env::var_os("TEXTAMP_CARGO_TEST_PROFILE").expect(
+        "Run persistent-settings checks through cargo test with its isolated profile runner",
+    );
+    assert!(textamp::config::config_path().starts_with(std::path::PathBuf::from(profile)));
+    let mut state = AppState::new();
+    state.windowed_presentation = textamp::app::windowed_presentation::Presentation::windowed();
+    state.active_library = Some("unchanged-library".into());
+    let mut config = Config::default();
+    config.ui.desktop_split_view = true;
+    state.desktop_split_view = true;
+    let mut audio = textamp::audio::AudioPlayer::new_without_audio();
+    let (events, _inbox) = tokio::sync::mpsc::channel(16);
+    for (mode, multiple) in [
+        (ApplicationMode::GuiMultiple, true),
+        (ApplicationMode::GuiSingle, false),
+    ] {
+        textamp::app::dispatch::dispatch_action(
+            SettingsAction::ActivatePreference(TextampSetting::Presentation(mode)).into(),
+            &mut state,
+            &mut audio,
+            &mut config,
+            &events,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.gui_multiple_windows, multiple);
+        assert!(!state.desktop_split_view);
+        assert!(!config.ui.desktop_split_view);
+        assert_eq!(config.ui.desktop_separate_player, multiple);
+        assert_eq!(state.active_library.as_deref(), Some("unchanged-library"));
+    }
 }

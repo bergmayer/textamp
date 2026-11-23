@@ -149,8 +149,10 @@ struct Selection {
     next_decade: Option<usize>,
 }
 enum Recommendation {
-    Seed(String, bool),
+    Artist(String),
+    SonicTrack(String),
     Mood(String),
+    Related(String, bool),
 }
 fn choose(state: &AppState, source: &RadioSource, refill: bool) -> anyhow::Result<Selection> {
     use crate::services::radio::{self, AlbumFilter, Recipe};
@@ -159,15 +161,22 @@ fn choose(state: &AppState, source: &RadioSource, refill: bool) -> anyhow::Resul
             .radio
             .tracks
             .iter()
+            .skip(state.radio.track_index.unwrap_or(0))
             .map(|t| t.rating_key.as_str())
             .collect()
     } else {
         HashSet::new()
     };
-    if let RadioSource::Sonic(key) = source {
+    if let RadioSource::Sonic(key) | RadioSource::SonicFixed(key) | RadioSource::Related(key) =
+        source
+    {
         return Ok(Selection {
             tracks: vec![],
-            related: Some(Recommendation::Seed(key.clone(), true)),
+            related: Some(if matches!(source, RadioSource::Related(_)) {
+                Recommendation::Related(key.clone(), super::recommendations::available(state))
+            } else {
+                Recommendation::SonicTrack(key.clone())
+            }),
             next_decade: None,
         });
     }
@@ -179,13 +188,13 @@ fn choose(state: &AppState, source: &RadioSource, refill: bool) -> anyhow::Resul
         return Ok(Selection {
             tracks,
             // A performer derived only from compilation tags may have no
-            // server artist ID. Its cached tracks still support Artist Radio.
+            // server artist ID. Its cached tracks still support Artist Mix.
             related: state
                 .sources
                 .active
                 .navidrome()
                 .filter(|session| session.id(key).is_ok())
-                .map(|_| Recommendation::Seed(key.into(), false)),
+                .map(|_| Recommendation::Artist(key.into())),
             next_decade: None,
         });
     }
@@ -241,13 +250,16 @@ fn choose(state: &AppState, source: &RadioSource, refill: bool) -> anyhow::Resul
         &played,
     )?;
     let related = selected.tracks.first().and_then(|seed| match kind {
-        "albumMix" => Some((seed.rating_key.clone(), true)),
-        "artistMix" => seed.grandparent_rating_key.clone().map(|key| (key, false)),
+        "albumMix" => Some(Recommendation::SonicTrack(seed.rating_key.clone())),
+        "artists" | "artistMix" | "randomArtist" => seed
+            .grandparent_rating_key
+            .clone()
+            .map(Recommendation::Artist),
         _ => None,
     });
     Ok(Selection {
         tracks: selected.tracks,
-        related: related.map(|(key, sonic)| Recommendation::Seed(key, sonic)),
+        related,
         next_decade: selected.next_decade,
     })
 }
@@ -255,8 +267,18 @@ fn choose(state: &AppState, source: &RadioSource, refill: bool) -> anyhow::Resul
 /// A provider-owned snapshot; shared radio orchestration owns cancellation and
 /// completion delivery. Only recommendation requests need a catalog ID filter.
 pub struct Request {
-    selection: anyhow::Result<Selection>,
-    recommendations: Option<Recommendations>,
+    work: Work,
+    next_decade: Option<usize>,
+}
+
+enum Work {
+    Album(Box<Session>, String),
+    Cached(Vec<Track>),
+    Discover {
+        api: Box<Recommendations>,
+        seed: Recommendation,
+        tracks: Vec<Track>,
+    },
 }
 impl Request {
     pub fn prepare(
@@ -264,60 +286,107 @@ impl Request {
         session: &Session,
         source: &RadioSource,
         refill: bool,
-    ) -> Self {
-        let selection = choose(state, source, refill);
-        let recommendations = selection
-            .as_ref()
-            .ok()
-            .filter(|s| s.related.is_some())
-            .map(|_| Recommendations::new(state, session));
-        Self {
-            selection,
-            recommendations,
+    ) -> Result<Self, AsyncError> {
+        let album = if matches!(source, RadioSource::Station(key) if key == "nav-radio/randomAlbum")
+        {
+            use rand::prelude::IteratorRandom;
+            let queued: HashSet<_> = if refill {
+                state
+                    .radio
+                    .tracks
+                    .iter()
+                    .skip(state.radio.track_index.unwrap_or(0))
+                    .filter_map(|t| t.parent_rating_key.as_deref())
+                    .collect()
+            } else {
+                HashSet::new()
+            };
+            state
+                .library
+                .albums
+                .iter()
+                .filter(|a| !queued.contains(a.rating_key.as_str()))
+                .choose(&mut rand::rng())
+                .or_else(|| state.library.albums.iter().choose(&mut rand::rng()))
+                .map(|a| (session.clone(), a.rating_key.clone()))
+        } else {
+            None
+        };
+        if let Some((session, key)) = album {
+            return Ok(Self {
+                work: Work::Album(Box::new(session), key),
+                next_decade: None,
+            });
         }
+        let Selection {
+            tracks,
+            related,
+            next_decade,
+        } = choose(state, source, refill).map_err(failure)?;
+        let work = match related {
+            None => Work::Cached(tracks),
+            Some(seed) => Work::Discover {
+                api: Box::new(Recommendations::new(state, session)),
+                seed,
+                tracks,
+            },
+        };
+        Ok(Self { work, next_decade })
     }
     pub async fn fetch(self) -> Result<crate::app::sources::radio::Batch, AsyncError> {
         let operation = async {
-            let mut selection = self.selection?;
-            if let Some(recommendation) = selection.related {
-                let api = self
-                    .recommendations
-                    .as_ref()
-                    .expect("recommendation request");
-                let similar = match recommendation {
-                    Recommendation::Seed(seed, true) => {
-                        api.similar(&api.session.id(&seed)?, true).await?
-                    }
-                    Recommendation::Seed(artist, false) => {
-                        let seed = selection
-                            .tracks
-                            .first()
-                            .map(|t| api.session.id(&t.rating_key))
-                            .transpose()?;
-                        match api.artist(&api.session.id(&artist)?, seed.as_deref()).await {
-                            Ok(tracks) => tracks,
-                            Err(error) if !selection.tracks.is_empty() => {
-                                tracing::warn!("Artist radio: related discovery failed; using selected artists' cached tracks: {error:#}");
-                                vec![]
-                            }
-                            Err(error) => return Err(error),
+            let tracks = match self.work {
+                Work::Album(session, key) => session.album_tracks(&key).await?,
+                Work::Cached(tracks) => tracks,
+                Work::Discover {
+                    api,
+                    seed: recommendation,
+                    mut tracks,
+                } => {
+                    let artist_mix = matches!(recommendation, Recommendation::Artist(_));
+                    let mut similar = match recommendation {
+                        Recommendation::SonicTrack(seed) => {
+                            api.similar(&api.session.id(&seed)?, true).await?
                         }
+                        Recommendation::Artist(artist) => {
+                            let seed = tracks
+                                .first()
+                                .map(|t| api.session.id(&t.rating_key))
+                                .transpose()?;
+                            match api.artist(&api.session.id(&artist)?, seed.as_deref()).await {
+                                Ok(matches) => matches,
+                                Err(error) if !tracks.is_empty() => {
+                                    tracing::warn!(
+                                        "Artist radio: related discovery failed; using selected artists' cached tracks: {error:#}"
+                                    );
+                                    vec![]
+                                }
+                                Err(error) => return Err(error),
+                            }
+                        }
+                        Recommendation::Mood(mood) => api.mood(&mood).await?,
+                        Recommendation::Related(seed, sonic) => {
+                            api.similar(&api.session.id(&seed)?, sonic).await?
+                        }
+                    };
+                    if artist_mix && !tracks.is_empty() {
+                        similar.shuffle(&mut rand::rng());
+                        tracks = crate::services::radio::artist_mix(tracks, similar);
+                    } else {
+                        tracks.extend(similar);
+                        let mut seen = HashSet::new();
+                        tracks.retain(|t| seen.insert(t.rating_key.clone()));
+                        tracks.shuffle(&mut rand::rng());
+                        tracks.truncate(100);
                     }
-                    Recommendation::Mood(mood) => api.mood(&mood).await?,
-                };
-                selection.tracks.extend(similar);
-                let mut seen = HashSet::new();
-                selection
-                    .tracks
-                    .retain(|t| seen.insert(t.rating_key.clone()));
-                selection.tracks.shuffle(&mut rand::rng());
-                selection.tracks.truncate(100);
-            }
-            anyhow::ensure!(!selection.tracks.is_empty(), "No matching tracks");
+                    tracks
+                }
+            };
+            anyhow::ensure!(!tracks.is_empty(), "No matching tracks");
             Ok(crate::app::sources::radio::Batch {
-                tracks: selection.tracks,
+                tracks,
                 decades: vec![],
-                next_decade: selection.next_decade,
+                next_decade: self.next_decade,
             })
         };
         operation.await.map_err(failure)
@@ -338,7 +407,7 @@ mod tests {
                 title: "C".into(),
                 ..Default::default()
             });
-        state.library.all_tracks.push(Track {
+        std::sync::Arc::make_mut(&mut state.library.all_tracks).push(Track {
             rating_key: "song".into(),
             original_title: Some("C".into()),
             ..Default::default()
@@ -362,7 +431,7 @@ mod tests {
     fn fixture() -> AppState {
         let mut state = AppState::new();
         for (album, year, genre) in [("a", 1971, "Rock"), ("b", 1992, "Jazz")] {
-            state.library.albums.push(Album {
+            std::sync::Arc::make_mut(&mut state.library.albums).push(Album {
                 rating_key: album.into(),
                 year: Some(year),
                 genre: vec![GenreTag {
@@ -376,7 +445,7 @@ mod tests {
                 ..Default::default()
             });
             for (disc, track) in [(2, 1), (1, 2), (1, 1)] {
-                state.library.all_tracks.push(Track {
+                std::sync::Arc::make_mut(&mut state.library.all_tracks).push(Track {
                     rating_key: format!("{album}-{disc}-{track}"),
                     parent_rating_key: Some(album.into()),
                     grandparent_rating_key: Some(format!("artist-{album}")),
@@ -432,18 +501,24 @@ mod tests {
             assert!(!result.tracks.is_empty(), "{key}");
             assert!(result.related.is_none(), "{key}");
         }
-        assert!(select(&state, "deepCuts", false)
-            .tracks
-            .iter()
-            .all(|t| t.view_count == Some(0)));
-        assert!(select(&state, "decade?id=1990", false)
-            .tracks
-            .iter()
-            .all(|t| t.year == Some(1992)));
-        assert!(select(&state, "style?id=Rock", false)
-            .tracks
-            .iter()
-            .all(|t| t.parent_rating_key.as_deref() == Some("a")));
+        assert!(
+            select(&state, "deepCuts", false)
+                .tracks
+                .iter()
+                .all(|t| t.view_count == Some(0))
+        );
+        assert!(
+            select(&state, "decade?id=1990", false)
+                .tracks
+                .iter()
+                .all(|t| t.year == Some(1992))
+        );
+        assert!(
+            select(&state, "style?id=Rock", false)
+                .tracks
+                .iter()
+                .all(|t| t.parent_rating_key.as_deref() == Some("a"))
+        );
     }
     #[test]
     fn time_travel_advances_decades_and_empty_filters_are_errors() {
@@ -452,21 +527,27 @@ mod tests {
         assert!(first.tracks.iter().all(|t| t.year == Some(1971)));
         state.radio.time_travel_index = first.next_decade.unwrap();
         state.radio.tracks = first.tracks;
-        assert!(select(&state, "timeTravel", true)
-            .tracks
-            .iter()
-            .all(|t| t.year == Some(1992)));
-        assert!(choose(
-            &state,
-            &RadioSource::Station("nav-radio/mood?id=missing".into()),
-            false
-        )
-        .is_err());
-        assert!(choose(
-            &state,
-            &RadioSource::Station("nav-radio/onThisDay".into()),
-            false
-        )
-        .is_err());
+        assert!(
+            select(&state, "timeTravel", true)
+                .tracks
+                .iter()
+                .all(|t| t.year == Some(1992))
+        );
+        assert!(
+            choose(
+                &state,
+                &RadioSource::Station("nav-radio/mood?id=missing".into()),
+                false
+            )
+            .is_err()
+        );
+        assert!(
+            choose(
+                &state,
+                &RadioSource::Station("nav-radio/onThisDay".into()),
+                false
+            )
+            .is_err()
+        );
     }
 }

@@ -57,20 +57,6 @@ impl FolderItem {
         }
     }
 
-    /// Create a new folder item with filesystem path.
-    pub fn folder_with_path(key: String, title: String, path: Option<String>) -> Self {
-        Self {
-            key,
-            title,
-            item_type: FolderItemType::Folder,
-            rating_key: None,
-            duration_ms: None,
-            path,
-            parent_rating_key: None,
-            grandparent_rating_key: None,
-        }
-    }
-
     /// Create a new track item.
     pub fn track(
         key: String,
@@ -92,11 +78,6 @@ impl FolderItem {
         }
     }
 
-    /// Check if this is a folder.
-    pub fn is_folder(&self) -> bool {
-        self.item_type == FolderItemType::Folder
-    }
-
     /// Check if this is a track.
     pub fn is_track(&self) -> bool {
         self.item_type == FolderItemType::Track
@@ -114,6 +95,15 @@ pub struct FolderColumn {
     pub items: Vec<FolderItem>,
     /// Currently selected index
     pub selected_index: usize,
+    #[serde(skip)]
+    pub selected_set: std::collections::BTreeSet<usize>,
+    #[serde(skip)]
+    pub selection_anchor: Option<usize>,
+    /// Resolved metadata for virtual server-folder tracks. Keyed by rating key so
+    /// shuffling items does not reorder or lose their metadata. Runtime only;
+    /// directory caches retain their existing serialized format.
+    #[serde(skip)]
+    pub tracks: std::collections::HashMap<String, super::track::Track>,
     /// Original items before shuffle (None if not shuffled)
     #[serde(skip)]
     original_items: Option<Vec<FolderItem>>,
@@ -127,7 +117,10 @@ impl FolderColumn {
             title,
             items,
             selected_index: 0,
+            selected_set: Default::default(),
+            selection_anchor: None,
             original_items: None,
+            tracks: Default::default(),
         }
     }
 
@@ -156,11 +149,6 @@ impl FolderColumn {
             self.items = items;
         }
         self.selected_index = 0;
-    }
-
-    /// Get items in their original (unshuffled) order for cache persistence.
-    pub fn unshuffled_items(&self) -> &[FolderItem] {
-        self.original_items.as_deref().unwrap_or(&self.items)
     }
 }
 
@@ -232,15 +220,5 @@ impl FolderNavigationState {
     /// Get the selected item in the focused column.
     pub fn selected_item(&self) -> Option<&FolderItem> {
         self.focused().and_then(|c| c.selected_item())
-    }
-
-    /// Get the current folder's key (focused column's key).
-    pub fn current_folder_key(&self) -> Option<&str> {
-        self.focused().and_then(|c| c.key.as_deref())
-    }
-
-    /// Get the number of visible columns (for layout).
-    pub fn visible_columns(&self) -> usize {
-        self.columns.len()
     }
 }

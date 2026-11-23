@@ -5,7 +5,7 @@ use crate::library::track::TrackOrigin;
 
 pub(super) mod browse;
 pub(super) mod discovery;
-mod media;
+pub(super) mod media;
 pub use media::{play, scrobble};
 
 pub fn save_playlist(
@@ -13,27 +13,42 @@ pub fn save_playlist(
     tx: &mpsc::Sender<Event>,
     session: Session,
     name: String,
-    tracks: Vec<Track>,
+    addition: Option<playlist_edit::Addition>,
 ) {
     spawn(state, tx, "playlist-write", async move {
+        let adding = addition.is_some();
+        let mut track_count = 0;
         let result = async {
-            anyhow::ensure!(!tracks.is_empty(), "No tracks to save");
             anyhow::ensure!(!name.trim().is_empty(), "Playlist name cannot be empty");
             let mut params = vec![("name", name.clone())];
-            for track in &tracks {
-                params.push(("songId", session.id(&track.rating_key)?));
+            if let Some(addition) = addition {
+                let ids = addition.song_ids(&session).await?;
+                anyhow::ensure!(!ids.is_empty(), "No tracks to save");
+                track_count = ids.len();
+                params.extend(ids.into_iter().map(|id| ("songId", id)));
             }
-            session.client.call("createPlaylist", &params).await?;
-            Ok(())
+            let response = session.client.call("createPlaylist", &params).await?;
+            let playlist: crate::navidrome::models::Playlist =
+                serde_json::from_value(response["playlist"].clone())?;
+            Ok(session.playlist(playlist))
         }
         .await
         .map_err(failure);
-        Ok(vec![QueueAction::QueuePlaylistSaved {
-            name,
-            track_count: tracks.len(),
-            result,
+        let mut actions = Vec::new();
+        if adding && let Ok(playlist) = &result {
+            actions.push(
+                SettingsAction::RememberPlaylistDestination(playlist.rating_key.clone()).into(),
+            );
         }
-        .into()])
+        actions.push(
+            QueueAction::QueuePlaylistSaved {
+                name,
+                track_count,
+                result,
+            }
+            .into(),
+        );
+        Ok(actions)
     });
 }
 
@@ -103,17 +118,22 @@ pub fn intercept(
     tx: &mpsc::Sender<Event>,
 ) -> Option<Vec<Action>> {
     let session = state.sources.active.navidrome()?.clone();
+    if let Action::Data(DataAction::PlaylistsLoaded(playlists)) = action {
+        state.replace_playlists(playlists.clone());
+        return Some(vec![]);
+    }
     if let Action::Miller(MillerAction::LoadGenreAlbumsForMiller {
         genre_key,
         replace_child,
     }) = action
-    {
-        if matches!(
+        && matches!(
             state.sources.nav_collection,
             Some(commands::CollectionKind::AudioMuse(_))
-        ) {
-            return Some(match serde_json::from_str(genre_key) {
-                Ok(filter) => vec![super::super::audiomuse::Command::Filter {
+        )
+    {
+        return Some(match serde_json::from_str(genre_key) {
+            Ok(filter) => vec![
+                super::super::audiomuse::Command::Filter {
                     filter,
                     title: state
                         .artist_nav
@@ -122,19 +142,18 @@ pub fn intercept(
                         .into(),
                     replace_child: *replace_child,
                 }
-                .into()],
-                Err(_) => vec![SystemAction::ShowError("Invalid AudioMuse filter".into()).into()],
-            });
-        }
+                .into(),
+            ],
+            Err(_) => vec![SystemAction::ShowError("Invalid AudioMuse filter".into()).into()],
+        });
     }
     if let Action::Navigation(NavigationAction::SetCategory {
         category,
         preserve_sections_focus,
     }) = action
+        && state.sources.nav_collection.is_some()
     {
-        if state.sources.nav_collection.is_some() {
-            state.set_browse_category(*category, *preserve_sections_focus);
-        }
+        state.set_browse_category(*category, *preserve_sections_focus);
     }
     if let Some(actions) = browse::intercept(action, state, tx, &session) {
         return Some(actions);
@@ -144,9 +163,10 @@ pub fn intercept(
     }
     match action.clone() {
         Action::System(SystemAction::RefreshCategory(_)) => catalog::load(state, tx),
-        Action::Data(
-            DataAction::LoadInitialData | DataAction::LoadArtists | DataAction::LoadPlaylists,
-        ) => catalog::open(state, tx),
+        Action::Data(DataAction::LoadInitialData | DataAction::LoadArtists) => {
+            catalog::open(state, tx)
+        }
+        Action::Data(DataAction::LoadPlaylists) => catalog::refresh_playlists(state, tx),
         Action::System(SystemAction::CheckStaleness(_)) => catalog::check_staleness(state, tx),
 
         Action::System(SystemAction::LoadArtwork) => media::artwork(state, tx, &session),
@@ -154,9 +174,11 @@ pub fn intercept(
             action @ (QueueAction::RemixGemini
             | QueueAction::RemixTwofer
             | QueueAction::RemixStretch
-            | QueueAction::RemixDoppelganger),
+            | QueueAction::RemixDoppelganger
+            | QueueAction::RemixOppositeDay
+            | QueueAction::RemixEnemies),
         ) => {
-            super::dj::remix(state, tx, action.clone());
+            super::remix::remix(state, tx, action.clone());
         }
         Action::System(SystemAction::LoadAlbumArt(batch)) => {
             media::art_batch(state, tx, &session, batch)
@@ -227,30 +249,31 @@ pub fn intercept(
         }) => {
             state.queue_play_request_id = state.queue_play_request_id.wrapping_add(1);
             let request_id = state.queue_play_request_id;
+            let playlist = state
+                .library
+                .playlists
+                .iter()
+                .find(|playlist| playlist.rating_key == playlist_key)
+                .cloned();
             spawn(state, tx, "playlist-play", async move {
-                let result = async {
-                    let playlist = session.client.playlist(&session.id(&playlist_key)?).await?;
-                    Ok(playlist
-                        .entry
-                        .into_iter()
-                        .map(|t| session.track(t))
-                        .collect())
-                }
-                .await
-                .map_err(failure);
-                Ok(vec![QueueAction::TracksLoaded {
-                    intent: QueueLoadIntent::ReplaceAndPlay {
-                        request_id,
-                        label: Some(title),
-                    },
-                    result,
-                }
-                .into()])
+                let result = super::playlists::tracks(&session, &playlist_key, playlist.as_ref())
+                    .await
+                    .map_err(failure);
+                Ok(vec![
+                    QueueAction::TracksLoaded {
+                        intent: QueueLoadIntent::ReplaceAndPlay {
+                            request_id,
+                            label: Some(title),
+                        },
+                        result,
+                    }
+                    .into(),
+                ])
             });
         }
         Action::Queue(QueueAction::SaveQueueAsPlaylist(name)) => {
             let tracks = state.playback_tracks().to_vec();
-            save_playlist(state, tx, session, name, tracks);
+            save_playlist(state, tx, session, name, Some(tracks.into()));
         }
 
         _ => return super::super::routing::navidrome_fallback(action),
@@ -264,10 +287,25 @@ fn load_album(
     key: String,
     intent: QueueLoadIntent,
 ) {
-    // Queue requests use authoritative album contents, including albums reached
-    // through an account-wide playlist outside the selected music folder.
+    let canonical = state
+        .library
+        .compilations
+        .complete_releases
+        .get(&key)
+        .unwrap_or(&key);
+    let assembled = state
+        .library
+        .compilations
+        .release_members
+        .contains_key(canonical)
+        .then(|| browse::album_tracks(state, canonical))
+        .filter(|tracks| !tracks.is_empty());
+    // Account-wide playlists can reference albums outside the selected folder.
     load_queue(state, tx, intent, async move {
-        session.album_tracks(&key).await
+        match assembled {
+            Some(tracks) => Ok(tracks),
+            None => session.album_tracks(&key).await,
+        }
     });
 }
 
@@ -300,10 +338,12 @@ fn load_queue(
         "queue-write"
     };
     spawn(state, tx, slot, async move {
-        Ok(vec![QueueAction::TracksLoaded {
-            intent,
-            result: work.await.map_err(failure),
-        }
-        .into()])
+        Ok(vec![
+            QueueAction::TracksLoaded {
+                intent,
+                result: work.await.map_err(failure),
+            }
+            .into(),
+        ])
     });
 }

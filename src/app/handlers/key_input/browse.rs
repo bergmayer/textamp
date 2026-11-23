@@ -13,14 +13,262 @@ use crate::app::action::*;
 use crossterm::event::{self, KeyCode, KeyModifiers};
 
 use super::super::helpers;
-use crate::app::state::{BrowseCategory, Focus, RightPanelMode, View};
 use crate::app::Action;
 use crate::app::AppState;
+use crate::app::state::{BrowseCategory, Focus, RightPanelMode, View};
+
+fn handle_column_header(key: event::KeyEvent, state: &mut AppState) -> Option<Vec<Action>> {
+    if state.desktop_frontend {
+        return None;
+    }
+    use crate::app::column_controls;
+    if state.category_column_focused || state.alphabet_strip_focused || state.track_pane_focused {
+        state.tui_column_header = None;
+        return None;
+    }
+    let column = state
+        .browse_nav()
+        .map(|nav| nav.focused_column)
+        .or_else(|| {
+            state
+                .folder_state
+                .as_ref()
+                .map(|folders| folders.focused_column)
+        })?;
+    if state
+        .tui_column_header
+        .is_some_and(|focus| focus.category != state.browse_category || focus.column != column)
+    {
+        state.tui_column_header = None;
+    }
+    if state.tui_column_header.is_none()
+        && state
+            .browse_nav()
+            .and_then(|nav| nav.focused())
+            .is_some_and(|column| {
+                column.header_selection == crate::app::state::ColumnHeaderSelection::Play
+            })
+    {
+        if state
+            .browse_nav()
+            .and_then(|nav| nav.focused())
+            .is_some_and(|column| column.details.is_some())
+        {
+            column_controls::focus(
+                state,
+                column,
+                crate::app::column_controls::ColumnControl::Play,
+            );
+        } else if let Some(column) = state.browse_nav_mut().and_then(|nav| nav.focused_mut()) {
+            column.header_selection = crate::app::state::ColumnHeaderSelection::Items;
+        }
+    }
+    if let Some(focus) = state.tui_column_header {
+        let controls = column_controls::controls(state, column);
+        let index = controls
+            .iter()
+            .position(|control| *control == focus.control)
+            .unwrap_or(0);
+        match key.code {
+            KeyCode::Left | KeyCode::Right => {
+                let next = if key.code == KeyCode::Left {
+                    index.saturating_sub(1)
+                } else {
+                    (index + 1).min(controls.len() - 1)
+                };
+                column_controls::focus(state, column, controls[next]);
+                return Some(vec![]);
+            }
+            KeyCode::Enter => {
+                return Some(column_controls::activate(
+                    state,
+                    column,
+                    focus.control,
+                    if key.modifiers.contains(KeyModifiers::ALT) {
+                        crate::app::column_controls::QueuePlacement::Next
+                    } else {
+                        crate::app::column_controls::QueuePlacement::Now
+                    },
+                ));
+            }
+            KeyCode::Down | KeyCode::Esc => {
+                state.tui_column_header = None;
+                if let Some(column) = state.browse_nav_mut().and_then(|nav| nav.focused_mut()) {
+                    column.header_selection = crate::app::state::ColumnHeaderSelection::Items;
+                }
+                return Some(vec![]);
+            }
+            KeyCode::Up => {
+                column_controls::focus(state, column, controls[0]);
+                return Some(vec![]);
+            }
+            _ => {
+                state.tui_column_header = None;
+            }
+        }
+    }
+    let at_top = state
+        .browse_nav()
+        .and_then(|nav| nav.focused())
+        .is_some_and(|column| {
+            column.selected_index == 0
+                || column.header_selection != crate::app::state::ColumnHeaderSelection::Items
+        })
+        || (state.browse_category == BrowseCategory::Folders
+            && state
+                .folder_state
+                .as_ref()
+                .and_then(|folders| folders.focused())
+                .is_some_and(|column| column.selected_index == 0));
+    if key.code == KeyCode::Up
+        && at_top
+        && state
+            .browse_nav()
+            .and_then(|nav| nav.focused())
+            .is_some_and(|column| column.has_album_details())
+    {
+        column_controls::focus(
+            state,
+            column,
+            crate::app::column_controls::ColumnControl::Details,
+        );
+        return Some(vec![]);
+    }
+    if key.code == KeyCode::Up && at_top {
+        let control = column_controls::controls(state, column).first().copied()?;
+        column_controls::focus(state, column, control);
+        return Some(vec![]);
+    }
+    None
+}
 
 /// Handle Browse view keys (CUA-style).
 pub(super) fn handle_browse_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
+    if crate::app::player_sync::visible(state) && !state.category_column_focused {
+        use crate::app::player_sync as sync;
+        let reporting = matches!(
+            state.player_sync.phase.display(),
+            sync::Phase::Review { .. } | sync::Phase::Inventory { .. }
+        );
+        if reporting {
+            if state.player_sync.report_filter_focused {
+                let mut query = state.player_sync.report_query.clone();
+                match key.code {
+                    KeyCode::Enter | KeyCode::Esc => {
+                        state.player_sync.report_filter_focused = false;
+                        return vec![];
+                    }
+                    KeyCode::Backspace => {
+                        query.pop();
+                    }
+                    KeyCode::Char(ch)
+                        if !key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                    {
+                        query.push(ch)
+                    }
+                    _ => return vec![],
+                }
+                return vec![sync::Command::ReportFilter(query).into()];
+            }
+            if key.code == KeyCode::Char('/') {
+                state.player_sync.report_filter_focused = true;
+                return vec![];
+            }
+        }
+        if !reporting && let Some(query) = sync::webdav_filter(state).map(str::to_owned) {
+            if state.player_sync.webdav_filter_focused {
+                let mut query = query;
+                match key.code {
+                    KeyCode::Enter => {
+                        state.player_sync.webdav_filter_focused = false;
+                        return vec![];
+                    }
+                    KeyCode::Esc => {
+                        state.player_sync.webdav_filter_focused = false;
+                        query.clear();
+                    }
+                    KeyCode::Backspace => {
+                        query.pop();
+                    }
+                    KeyCode::Char(ch)
+                        if !key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                    {
+                        query.push(ch)
+                    }
+                    _ => return vec![],
+                }
+                return vec![sync::Command::FilterWebdav(query).into()];
+            }
+            if key.code == KeyCode::Char('/') {
+                state.player_sync.webdav_filter_focused = true;
+                return vec![];
+            }
+            if matches!(key.code, KeyCode::Left | KeyCode::Backspace)
+                && let Some(parent) = sync::webdav_parent(state)
+            {
+                return vec![parent.into()];
+            }
+        }
+        let rows = crate::app::player_sync::column_rows(state);
+        let last = rows.len().saturating_sub(1);
+        let webdav = sync::webdav_filter(state).is_some();
+        let cursor = &mut state.player_sync.column_cursor;
+        *cursor = (*cursor).min(last);
+        return match key.code {
+            KeyCode::Up => {
+                *cursor = cursor.saturating_sub(1);
+                vec![]
+            }
+            KeyCode::Down => {
+                *cursor = (*cursor + 1).min(last);
+                vec![]
+            }
+            KeyCode::Home => {
+                *cursor = 0;
+                vec![]
+            }
+            KeyCode::End => {
+                *cursor = last;
+                vec![]
+            }
+            KeyCode::Left | KeyCode::Esc => {
+                state.category_column_focused = true;
+                vec![]
+            }
+            KeyCode::Char(' ') if webdav => rows
+                .get(*cursor)
+                .and_then(|(_, command)| match command {
+                    Some(sync::Command::BrowseWebdav(path)) => {
+                        sync::webdav_toggle(state, path.clone())
+                    }
+                    Some(command @ sync::Command::ChooseWebdavFolder { .. }) => {
+                        Some(command.clone())
+                    }
+                    _ => None,
+                })
+                .map(|command| vec![command.into()])
+                .unwrap_or_default(),
+            KeyCode::Enter | KeyCode::Right
+                if !webdav
+                    || !matches!(
+                        rows.get(*cursor),
+                        Some((_, Some(sync::Command::ChooseWebdavFolder { .. })))
+                    ) =>
+            {
+                rows.get(*cursor)
+                    .and_then(|(_, command)| command.clone())
+                    .map(|command| vec![command.into()])
+                    .unwrap_or_default()
+            }
+            _ => vec![],
+        };
+    }
     // Inline list filter mode - handle filter-specific keys
-    if state.list_filter.active {
+    if crate::app::tui_navigation::filter_focused(state) {
         // Check if current focus is on the filter's target column
         let focused_on_filter_column = match state.list_filter.category {
             BrowseCategory::Library => state.artist_nav.focused_column == state.list_filter.column,
@@ -45,12 +293,7 @@ pub(super) fn handle_browse_keys(key: event::KeyEvent, state: &mut AppState) -> 
             KeyCode::Backspace => {
                 return vec![SearchAction::DeleteListFilterChar.into()];
             }
-            // Up/Down navigate the filter results unconditionally.
-            // Even when focus has wandered off to a child column,
-            // pressing Up returns to the filter column AND moves
-            // selection in one step — instead of the previous
-            // two-step where the first Up only re-focused and you
-            // had to press Up again to actually navigate.
+            // Arrow navigation focuses the filter column and moves its selection.
             KeyCode::Up => {
                 if !focused_on_filter_column {
                     truncate_filter_right_columns(state);
@@ -63,22 +306,8 @@ pub(super) fn handle_browse_keys(key: event::KeyEvent, state: &mut AppState) -> 
                 }
                 return vec![SearchAction::FilteredListDown.into()];
             }
-            // Enter / Right on the filter column commits the
-            // highlighted match in one step. Done inline here
-            // rather than via a `SelectFilteredItem` follow-up
-            // because that indirection lost the drill action in
-            // some flows — the follow-up was dispatched but the
-            // user never saw the resulting column. Inline path:
-            //   1. Sync `selected_index` to the filter match
-            //      (the column may have drifted while typing).
-            //   2. Anchor focus on the filter column and drop
-            //      stale right-side children so the drill helper
-            //      reads off the correct column.
-            //   3. Deactivate the filter (the new column owns the
-            //      view; the search box has done its job).
-            //   4. Run the per-category drill helper and return
-            //      that action straight into the dispatch loop —
-            //      same level as a normal Enter on the row.
+            // Commit the highlighted filter match before drilling: synchronize
+            // selection, discard right-side children, then release text focus.
             KeyCode::Enter | KeyCode::Right if focused_on_filter_column => {
                 let item_idx = state
                     .list_filter
@@ -129,6 +358,7 @@ pub(super) fn handle_browse_keys(key: event::KeyEvent, state: &mut AppState) -> 
                     _ => {}
                 }
                 state.list_filter.deactivate();
+                state.miller_scroll_manual = false;
                 // Clear every transient "focus is somewhere other
                 // than the nav stack" flag. In scrolling Miller
                 // layout the renderer's `ribbon_focused` calc
@@ -158,6 +388,10 @@ pub(super) fn handle_browse_keys(key: event::KeyEvent, state: &mut AppState) -> 
             // Other keys fall through to normal handling
             _ => {}
         }
+    }
+
+    if let Some(actions) = handle_column_header(key, state) {
+        return actions;
     }
 
     // Activate filter with / key (when not in filter mode and not on category column)
@@ -271,10 +505,12 @@ pub(super) fn handle_browse_keys(key: event::KeyEvent, state: &mut AppState) -> 
                         vec![FolderAction::LoadFolderRoot.into()]
                     }
                     cat if cat.is_tag_section() => {
-                        vec![BrowseAction::LoadTagAlbums {
-                            replace_child: false,
-                        }
-                        .into()]
+                        vec![
+                            BrowseAction::LoadTagAlbums {
+                                replace_child: false,
+                            }
+                            .into(),
+                        ]
                     }
                     _ => vec![],
                 }
@@ -290,11 +526,7 @@ pub(super) fn handle_browse_keys(key: event::KeyEvent, state: &mut AppState) -> 
                         }
                     }
                     RightPanelMode::AlbumTracks | RightPanelMode::CategoryTracks => {
-                        // Track selected -> play it
-                        vec![
-                            QueueAction::PlayTrackFromCategory(state.list_state.tracks_index)
-                                .into(),
-                        ]
+                        vec![BrowseAction::OpenTrackDetails.into()]
                     }
                     RightPanelMode::CategoryAlbums => {
                         // Album selected in genre view -> load album tracks
@@ -306,10 +538,12 @@ pub(super) fn handle_browse_keys(key: event::KeyEvent, state: &mut AppState) -> 
                         {
                             state.library.selected_album_title = album.title.clone();
                             state.search.pending_album_key = Some(album.rating_key.clone());
-                            vec![DataAction::LoadAlbumTracks {
-                                rating_key: album.rating_key,
-                            }
-                            .into()]
+                            vec![
+                                DataAction::LoadAlbumTracks {
+                                    rating_key: album.rating_key,
+                                }
+                                .into(),
+                            ]
                         } else {
                             vec![]
                         }
@@ -364,20 +598,56 @@ fn handle_category_column_keys(key: event::KeyEvent, state: &mut AppState) -> Ve
     let rows = state.category_rows();
     let num_rows = rows.len().max(1);
 
+    if let Some(CategoryRow::Header(title)) = rows.get(state.category_column_index) {
+        if key.code == KeyCode::Enter {
+            state.playlist_group_filter = None;
+            state.tui_sidebar_group = Some(((*title).into(), 0));
+            state.category_column_focused = false;
+            return vec![];
+        }
+
+        let closed = state
+            .desktop_collapsed_sections
+            .iter()
+            .any(|item| item == title);
+        match key.code {
+            KeyCode::Left if !closed => {
+                return vec![SettingsAction::ToggleSidebarGroup((*title).into()).into()];
+            }
+            KeyCode::Right if closed => {
+                return vec![SettingsAction::ToggleSidebarGroup((*title).into()).into()];
+            }
+            KeyCode::Right => {
+                state.category_column_index =
+                    (state.category_column_index + 1).min(rows.len().saturating_sub(1));
+                return vec![];
+            }
+            _ => {}
+        }
+    }
     match key.code {
+        KeyCode::Left => {
+            if let Some((index, CategoryRow::Header(title))) = rows
+                .iter()
+                .enumerate()
+                .take(state.category_column_index)
+                .rev()
+                .find(|(_, row)| matches!(row, CategoryRow::Header(_)))
+            {
+                state.category_column_index = index;
+                return vec![SettingsAction::ToggleSidebarGroup((*title).into()).into()];
+            }
+            vec![]
+        }
         KeyCode::F(1) => vec![NavigationAction::SetView(View::Help).into()],
         KeyCode::F(2) => vec![SettingsAction::OpenSettings.into()],
 
         KeyCode::Up => {
-            // Walk back over Divider rows so navigation feels like
-            // there's nothing between the chunks. Auto-drill the
-            // rightward content to mirror the new section, but keep
-            // focus on the sections column so the user can keep
-            // arrow-keying.
+            // Keep sidebar focus while moving through destinations and disclosures.
             let mut idx = state.category_column_index;
             while idx > 0 {
                 idx -= 1;
-                if !matches!(rows.get(idx), Some(CategoryRow::Header(_))) {
+                if rows.get(idx).is_some() {
                     state.category_column_index = idx;
                     return drill_section_row(state, false);
                 }
@@ -388,7 +658,7 @@ fn handle_category_column_keys(key: event::KeyEvent, state: &mut AppState) -> Ve
             let mut idx = state.category_column_index;
             while idx + 1 < num_rows {
                 idx += 1;
-                if !matches!(rows.get(idx), Some(CategoryRow::Header(_))) {
+                if rows.get(idx).is_some() {
                     state.category_column_index = idx;
                     return drill_section_row(state, false);
                 }
@@ -413,10 +683,6 @@ fn handle_category_column_keys(key: event::KeyEvent, state: &mut AppState) -> Ve
             drill_section_row(state, false)
         }
 
-        // Right moves focus to the alphabet strip when it's
-        // visible, so Right/Right walks cat → strip → artists.
-        // When the strip isn't on screen, Right falls through to the
-        // drill behaviour shared with Enter.
         KeyCode::Right
             if state.alphabet_strip_visible()
                 && matches!(
@@ -425,7 +691,7 @@ fn handle_category_column_keys(key: event::KeyEvent, state: &mut AppState) -> Ve
                 ) =>
         {
             state.category_column_focused = false;
-            state.alphabet_strip_focused = true;
+            state.artist_nav.focused_column = 0;
             vec![]
         }
 
@@ -474,14 +740,21 @@ fn handle_category_column_keys(key: event::KeyEvent, state: &mut AppState) -> Ve
                 CategoryRow::NavidromeCollection(kind) => {
                     kind.label().to_ascii_lowercase().starts_with(lower)
                 }
+                CategoryRow::Station(i) => state
+                    .station_nav
+                    .columns
+                    .first()
+                    .and_then(|col| col.stations.get(*i))
+                    .is_some_and(|s| s.title.to_lowercase().starts_with(lower)),
                 CategoryRow::Playlist(i) => state
                     .library
                     .playlists
                     .get(*i)
                     .map(|p| p.title.to_lowercase().starts_with(lower))
                     .unwrap_or(false),
+                CategoryRow::Root(root) => root.label().to_lowercase().starts_with(lower),
                 CategoryRow::Search => lower == 's',
-                CategoryRow::Header(_) => false,
+                CategoryRow::Header(label) => label.to_lowercase().starts_with(lower),
             }) {
                 state.category_column_index = idx;
             }
@@ -530,6 +803,19 @@ fn drill_section_row(state: &mut AppState, take_focus: bool) -> Vec<Action> {
         return if take_focus {
             match row {
                 CategoryRow::Search => vec![SearchAction::OpenSearchPopup.into()],
+                CategoryRow::NavidromeCollection(
+                    crate::app::sources::navidrome::commands::CollectionKind::AudioMuse(
+                        crate::audiomuse::Feature::Describe,
+                    ),
+                ) => {
+                    state.tui_description_focused = true;
+                    vec![
+                        crate::app::sources::audiomuse::Command::BrowseDescriptions {
+                            take_focus: true,
+                        }
+                        .into(),
+                    ]
+                }
                 CategoryRow::NavidromeCollection(kind) => vec![kind.action()],
                 _ => vec![],
             }
@@ -540,17 +826,40 @@ fn drill_section_row(state: &mut AppState, take_focus: bool) -> Vec<Action> {
     let auto_drill = !take_focus;
     if auto_drill {
         note_motion_for_lazy_art(state);
-    } else {
+    } else if !matches!(row, CategoryRow::Header(_)) {
         state.category_column_focused = false;
     }
     match row {
+        CategoryRow::Station(i) => {
+            if take_focus {
+                crate::app::sidebar::station_actions(state, i)
+            } else {
+                vec![]
+            }
+        }
+        CategoryRow::Root(root) => {
+            if take_focus {
+                vec![NavigationAction::OpenLibraryRoot(root).into()]
+            } else {
+                vec![]
+            }
+        }
+        CategoryRow::Header(title) => {
+            if take_focus {
+                vec![SettingsAction::ToggleSidebarGroup(title.into()).into()]
+            } else {
+                vec![]
+            }
+        }
         CategoryRow::NavidromeCollection(kind) => vec![kind.action()],
         CategoryRow::Category(cat) => {
-            vec![NavigationAction::SetCategory {
-                category: cat,
-                preserve_sections_focus: auto_drill,
-            }
-            .into()]
+            vec![
+                NavigationAction::SetCategory {
+                    category: cat,
+                    preserve_sections_focus: auto_drill,
+                }
+                .into(),
+            ]
         }
         CategoryRow::Playlist(i) => {
             let Some(p) = state.library.playlists.get(i) else {
@@ -568,23 +877,25 @@ fn drill_section_row(state: &mut AppState, take_focus: bool) -> Vec<Action> {
             let row_idx = state.category_column_index;
             state.set_browse_category(BrowseCategory::Playlists, auto_drill);
             state.category_column_index = row_idx;
-            if let Some(col) = state.playlist_nav.columns.get_mut(0) {
-                if let Some(idx) = col.items.iter().position(|it| it.key() == key.as_str()) {
-                    col.selected_index = idx;
-                }
+            if let Some(col) = state.playlist_nav.columns.get_mut(0)
+                && let Some(idx) = col.items.iter().position(|it| it.key() == key.as_str())
+            {
+                col.selected_index = idx;
             }
             if take_focus {
                 state.playlist_nav.focused_column = 0;
             }
             state.playlist_nav.truncate_right();
             state.library.selected_album_title = title;
-            vec![MillerAction::LoadPlaylistTracksForMiller {
-                playlist_key: key,
-                replace_child: auto_drill,
-            }
-            .into()]
+            vec![
+                MillerAction::LoadPlaylistTracksForMiller {
+                    playlist_key: key,
+                    replace_child: auto_drill,
+                }
+                .into(),
+            ]
         }
-        CategoryRow::Search | CategoryRow::Header(_) => vec![],
+        CategoryRow::Search => vec![],
     }
 }
 
@@ -601,7 +912,7 @@ fn drill_section_row(state: &mut AppState, take_focus: bool) -> Vec<Action> {
 /// in the visual direction, so they flip relative to the natural
 /// alphabet index.
 fn handle_alphabet_strip_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
-    use crate::app::handlers::helpers::{alphabet_jump, ALPHABET_STRIP_LETTERS};
+    use crate::app::handlers::helpers::{ALPHABET_STRIP_LETTERS, alphabet_jump};
     let n = ALPHABET_STRIP_LETTERS.len();
     let descending = state
         .artist_nav
@@ -642,32 +953,21 @@ fn handle_alphabet_strip_keys(key: event::KeyEvent, state: &mut AppState) -> Vec
         }
 
         KeyCode::Enter | KeyCode::Right => {
-            // Transfer focus to the artist root column AND snap the
-            // selection to the first artist matching the highlighted
-            // letter. The previous "preserve selection" behaviour
-            // sent the user from "I picked D on the strip" straight
-            // back to whatever artist had been selected before
-            // (often row 0), which felt like the list was scrolling
-            // back to the top — what the user actually wanted is the
-            // highlight to land on the first D artist so they can
-            // immediately drill in or move down.
-            if let Some(&ch) = ALPHABET_STRIP_LETTERS.get(state.alphabet_strip_index) {
-                if let Some(target) =
+            // Select the first matching item and move focus into its column.
+            if let Some(&ch) = ALPHABET_STRIP_LETTERS.get(state.alphabet_strip_index)
+                && let Some(target) =
                     crate::app::handlers::helpers::alphabet_target_index(state, ch)
-                {
-                    if let Some(nav) = state.browse_nav_mut() {
-                        if let Some(col) = nav.columns.get_mut(0) {
-                            col.selected_index = target;
-                        }
-                    }
-                }
+                && let Some(nav) = state.browse_nav_mut()
+                && let Some(col) = nav.columns.get_mut(0)
+            {
+                col.selected_index = target;
             }
             state.alphabet_strip_focused = false;
             state.artist_nav.focused_column = 0;
         }
         KeyCode::Left | KeyCode::Esc | KeyCode::Backspace => {
             state.alphabet_strip_focused = false;
-            state.category_column_focused = true;
+            state.artist_nav.focused_column = 0;
         }
 
         // Letter typed while on the strip = quick jump to that letter
@@ -687,17 +987,15 @@ fn handle_alphabet_strip_keys(key: event::KeyEvent, state: &mut AppState) -> Vec
     }
 
     // Scroll the artist column to track the highlighted letter.
-    if moved {
-        if let Some(&ch) = ALPHABET_STRIP_LETTERS.get(state.alphabet_strip_index) {
-            let _ = alphabet_jump(state, ch);
-        }
+    if moved && let Some(&ch) = ALPHABET_STRIP_LETTERS.get(state.alphabet_strip_index) {
+        let _ = alphabet_jump(state, ch);
     }
     vec![]
 }
 
 /// Handle keys when the right-side track-details pane has keyboard
 /// focus. Up/Down moves between the Play button (index 0) and the
-/// Sonically-Similar rows (index 2..=N); Enter plays only on the
+/// Similar-track rows follow the three playback controls. Enter activates
 /// explicit playback actions, otherwise opens the adjacent details; Left, Esc, or Backspace returns focus to the focused
 /// Miller column.
 fn handle_track_pane_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
@@ -715,8 +1013,21 @@ fn handle_track_pane_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Act
         .and_then(|result| result.as_ref().ok())
         .map(|v| v.len())
         .unwrap_or(0);
-    let max_idx = similar_count + 1; // 0/1 = playback, 2..=N+1 = similar
+    let max_idx = similar_count + 2;
 
+    if state.track_pane_index < 3 {
+        match key.code {
+            KeyCode::Right if state.track_pane_index < 2 => {
+                state.track_pane_index += 1;
+                return vec![];
+            }
+            KeyCode::Left if state.track_pane_index > 0 => {
+                state.track_pane_index -= 1;
+                return vec![];
+            }
+            _ => {}
+        }
+    }
     match key.code {
         KeyCode::F(1) => return vec![NavigationAction::SetView(View::Help).into()],
         KeyCode::F(2) => return vec![SettingsAction::OpenSettings.into()],
@@ -736,16 +1047,16 @@ fn handle_track_pane_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Act
             }
         }
         KeyCode::Enter => {
-            if state.track_pane_index == 0 {
-                return vec![QueueAction::PlayTrack(Box::new(track)).into()];
+            if let Some(control) =
+                crate::app::column_controls::DetailControl::ALL.get(state.track_pane_index)
+            {
+                return control.activate(
+                    state,
+                    &track,
+                    crate::app::column_controls::track_range(key.modifiers),
+                );
             }
-            if state.track_pane_index == 1 {
-                if let Some((tracks, index)) = state.palette_track_list() {
-                    return vec![QueueAction::PlayTracksNow(tracks[index..].to_vec()).into()];
-                }
-                return vec![];
-            }
-            return crate::app::sonic_details::open(state, state.track_pane_index - 2, false);
+            return crate::app::sonic_details::open(state, state.track_pane_index - 3, false);
         }
 
         KeyCode::Left | KeyCode::Esc | KeyCode::Backspace => {
@@ -847,7 +1158,7 @@ pub(super) fn handle_folder_browse_keys(key: event::KeyEvent, state: &mut AppSta
             vec![]
         }
 
-        // Right/Enter - go into selected folder; only Enter plays tracks
+        // Right and Enter open the selected folder or track details.
         KeyCode::Enter | KeyCode::Right => {
             if let Some(ref mut folder_state) = state.folder_state {
                 // Check if there's a non-empty column to the right we can move to.
@@ -865,17 +1176,17 @@ pub(super) fn handle_folder_browse_keys(key: event::KeyEvent, state: &mut AppSta
                 if let Some(item) = folder_state.selected_item().cloned() {
                     match item.item_type {
                         FolderItemType::Folder => {
-                            return vec![FolderAction::NavigateIntoFolder {
-                                folder_key: item.key,
-                                replace_child: false,
-                            }
-                            .into()];
+                            return vec![
+                                FolderAction::NavigateIntoFolder {
+                                    folder_key: item.key,
+                                    replace_child: false,
+                                }
+                                .into(),
+                            ];
                         }
-                        FolderItemType::Track if key.code == KeyCode::Enter => {
-                            // Enter: play this track + all following tracks (replaces queue)
-                            return vec![FolderAction::PlayFolderTracks.into()];
+                        FolderItemType::Track => {
+                            return vec![BrowseAction::OpenTrackDetails.into()];
                         }
-                        _ => {}
                     }
                 }
             }
@@ -970,6 +1281,18 @@ pub(super) fn handle_folder_browse_keys(key: event::KeyEvent, state: &mut AppSta
 /// synthetic play row absorbs Enter/Up/Down before they reach the
 /// nav handler. Common to artist, genre, and playlist browse views.
 pub(super) fn handle_artist_browse_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
+    if key.code == KeyCode::Delete
+        && key.modifiers.is_empty()
+        && let Some(crate::app::state::BrowseItem::Description { query }) =
+            state.artist_nav.selected_item()
+    {
+        return vec![
+            crate::app::sources::audiomuse::Command::RemoveDescription {
+                query: query.clone(),
+            }
+            .into(),
+        ];
+    }
     if let Some(actions) = intercept_play_row(
         key,
         &mut state.artist_nav,
@@ -981,15 +1304,8 @@ pub(super) fn handle_artist_browse_keys(key: event::KeyEvent, state: &mut AppSta
     let is_up_down = matches!(key.code, KeyCode::Up | KeyCode::Down);
     let is_letter_jump = matches!(key.code, KeyCode::Char(c) if c.is_ascii_alphabetic())
         && !key.modifiers.contains(KeyModifiers::CONTROL);
-    // Left/Backspace at root column → step into the alphabet strip
-    // when it's visible (cat → strip → artists in either direction);
-    // otherwise return straight to the category column.
     if matches!(key.code, KeyCode::Left | KeyCode::Backspace) && !state.artist_nav.can_go_left() {
-        if state.alphabet_strip_visible() {
-            state.alphabet_strip_focused = true;
-        } else {
-            state.focus_category_column();
-        }
+        state.focus_category_column();
         return vec![];
     }
 
@@ -1017,7 +1333,7 @@ pub(super) fn handle_artist_browse_keys(key: event::KeyEvent, state: &mut AppSta
         return actions;
     }
 
-    // Handle Enter/Right - drill down into containers; Enter plays tracks
+    // Enter and Right open library content.
     if matches!(key.code, KeyCode::Enter | KeyCode::Right) {
         let allow_radio = key.code == KeyCode::Enter;
         return drill_actions_for_focused_artist_item(state, allow_radio, false);
@@ -1055,9 +1371,7 @@ fn had_open_dependent(_state: &AppState, nav: &crate::app::state::BrowseNavigati
 /// should produce. Used by both the Enter/Right handler AND the
 /// auto-drill-on-selection-change path that fires when a child column
 /// or the track-details pane is already open. `allow_radio` is true
-/// only for the Enter key — Right arrow / auto-drill skip ArtistRadio
-/// rows because starting a radio is a side-effect the user didn't ask
-/// for when they were just sweeping selection.
+/// only for the Enter key; selection alone does not open Artist Info.
 pub(super) fn drill_actions_for_focused_artist_item(
     state: &mut AppState,
     allow_radio: bool,
@@ -1075,42 +1389,50 @@ pub(super) fn drill_actions_for_focused_artist_item(
             }
             .into(),
         ],
-        BrowseItem::Genre { key, .. } => vec![MillerAction::LoadGenreAlbumsForMiller {
-            genre_key: key,
-            replace_child,
-        }
-        .into()],
-        BrowseItem::Artist { key, title, .. } => {
-            state.library.selected_artist_name = title;
-            vec![MillerAction::LoadArtistAlbumsForMiller {
-                artist_key: key,
+        BrowseItem::Genre { key, .. } => vec![
+            MillerAction::LoadGenreAlbumsForMiller {
+                genre_key: key,
                 replace_child,
             }
-            .into()]
+            .into(),
+        ],
+        BrowseItem::Artist { key, title, .. } => {
+            state.library.selected_artist_name = title;
+            vec![
+                MillerAction::LoadArtistAlbumsForMiller {
+                    artist_key: key,
+                    replace_child,
+                }
+                .into(),
+            ]
         }
         BrowseItem::Album { key, title, .. } => {
             state.library.selected_album_title = title;
-            vec![MillerAction::LoadAlbumTracksForMiller {
-                album_key: key,
-                replace_child,
-            }
-            .into()]
+            vec![
+                MillerAction::LoadAlbumTracksForMiller {
+                    album_key: key,
+                    replace_child,
+                }
+                .into(),
+            ]
         }
         BrowseItem::AllArtists => {
             vec![MillerAction::LoadAllAlbumsForMiller { replace_child }.into()]
         }
-        BrowseItem::ArtistRadio {
+        BrowseItem::ArtistInfo {
             artist_key,
             artist_name,
             ..
         } if allow_radio => {
-            vec![RadioAction::StartArtistRadio {
-                key: artist_key,
-                title: artist_name,
-            }
-            .into()]
+            vec![
+                crate::app::action::SearchAction::ShowArtistInfo {
+                    artist_key,
+                    artist_name,
+                }
+                .into(),
+            ]
         }
-        BrowseItem::ArtistRadio { .. } => vec![],
+        BrowseItem::ArtistInfo { .. } => vec![],
         BrowseItem::AllTracks { scope, .. } => {
             use crate::app::state::AllTracksScope;
             match scope {
@@ -1126,23 +1448,27 @@ pub(super) fn drill_actions_for_focused_artist_item(
                     artist_key,
                     artist_name,
                 } => {
-                    vec![MillerAction::LoadCompilationAllTracksForMiller {
-                        artist_key,
-                        artist_name,
-                        replace_child,
-                    }
-                    .into()]
+                    vec![
+                        MillerAction::LoadCompilationAllTracksForMiller {
+                            artist_key,
+                            artist_name,
+                            replace_child,
+                        }
+                        .into(),
+                    ]
                 }
                 AllTracksScope::Artist {
                     artist_key,
                     artist_name,
                 } => {
                     state.library.selected_album_title = format!("All tracks by {}", artist_name);
-                    vec![MillerAction::LoadArtistAllTracksForMiller {
-                        artist_key,
-                        replace_child,
-                    }
-                    .into()]
+                    vec![
+                        MillerAction::LoadArtistAllTracksForMiller {
+                            artist_key,
+                            replace_child,
+                        }
+                        .into(),
+                    ]
                 }
             }
         }
@@ -1153,12 +1479,14 @@ pub(super) fn drill_actions_for_focused_artist_item(
             artist_key,
             artist_name,
         } => {
-            vec![MillerAction::LoadCompilationAlbumsForMiller {
-                artist_key,
-                artist_name,
-                replace_child,
-            }
-            .into()]
+            vec![
+                MillerAction::LoadCompilationAlbumsForMiller {
+                    artist_key,
+                    artist_name,
+                    replace_child,
+                }
+                .into(),
+            ]
         }
         BrowseItem::Track { .. } => {
             // The pane is a passive viewer that follows the focused
@@ -1225,7 +1553,7 @@ pub(super) fn handle_genre_browse_keys(key: event::KeyEvent, state: &mut AppStat
         return actions;
     }
 
-    // Handle Enter/Right - drill into containers; Enter plays tracks
+    // Enter and Right open library content.
     if matches!(key.code, KeyCode::Enter | KeyCode::Right) {
         return drill_actions_for_focused_genre_item(state, false);
     }
@@ -1244,27 +1572,30 @@ pub(super) fn drill_actions_for_focused_genre_item(
     };
     match item {
         BrowseItem::Genre { key, .. } => {
-            vec![MillerAction::LoadGenreAlbumsForMiller {
-                genre_key: key,
-                replace_child,
-            }
-            .into()]
+            vec![
+                MillerAction::LoadGenreAlbumsForMiller {
+                    genre_key: key,
+                    replace_child,
+                }
+                .into(),
+            ]
         }
         BrowseItem::Album { key, title, .. } => {
-            if let Some(col) = state.tag_nav.focused() {
-                if col.grouped_by_album {
-                    if let Some(new_col) = helpers::drill_grouped_album(col, col.selected_index) {
-                        state.tag_nav.push_column(new_col);
-                        return vec![];
-                    }
-                }
+            if let Some(col) = state.tag_nav.focused()
+                && col.grouped_by_album
+                && let Some(new_col) = helpers::drill_grouped_album(col, col.selected_index)
+            {
+                state.tag_nav.push_column(new_col);
+                return vec![];
             }
             state.library.selected_album_title = title;
-            vec![MillerAction::LoadGenreTracksForMiller {
-                album_key: key,
-                replace_child,
-            }
-            .into()]
+            vec![
+                MillerAction::LoadGenreTracksForMiller {
+                    album_key: key,
+                    replace_child,
+                }
+                .into(),
+            ]
         }
         BrowseItem::Track { .. } => {
             // See artist drill helper — passive viewer; opens
@@ -1326,7 +1657,7 @@ pub(super) fn handle_playlist_browse_keys(
         return actions;
     }
 
-    // Handle Enter/Right - drill into containers; Enter plays tracks
+    // Enter and Right open library content.
     if matches!(key.code, KeyCode::Enter | KeyCode::Right) {
         return drill_actions_for_focused_playlist_item(state, false);
     }
@@ -1345,27 +1676,30 @@ pub(super) fn drill_actions_for_focused_playlist_item(
     };
     match item {
         BrowseItem::Playlist { key, .. } => {
-            vec![MillerAction::LoadPlaylistTracksForMiller {
-                playlist_key: key,
-                replace_child,
-            }
-            .into()]
+            vec![
+                MillerAction::LoadPlaylistTracksForMiller {
+                    playlist_key: key,
+                    replace_child,
+                }
+                .into(),
+            ]
         }
         BrowseItem::Album { key, title, .. } => {
-            if let Some(col) = state.playlist_nav.focused() {
-                if col.grouped_by_album {
-                    if let Some(new_col) = helpers::drill_grouped_album(col, col.selected_index) {
-                        state.playlist_nav.push_column(new_col);
-                        return vec![];
-                    }
-                }
+            if let Some(col) = state.playlist_nav.focused()
+                && col.grouped_by_album
+                && let Some(new_col) = helpers::drill_grouped_album(col, col.selected_index)
+            {
+                state.playlist_nav.push_column(new_col);
+                return vec![];
             }
             state.library.selected_album_title = title;
-            vec![MillerAction::LoadAlbumTracksForMiller {
-                album_key: key,
-                replace_child,
-            }
-            .into()]
+            vec![
+                MillerAction::LoadAlbumTracksForMiller {
+                    album_key: key,
+                    replace_child,
+                }
+                .into(),
+            ]
         }
         BrowseItem::Track { .. } => {
             // See artist drill helper — passive viewer; opens
@@ -1387,8 +1721,7 @@ pub(super) fn drill_actions_for_focused_playlist_item(
     }
 }
 
-/// Navigate pinned Play / Album Details actions, then the tracks below them.
-/// Album metadata columns scroll independently and never start playback.
+/// Scroll detail content independently of its explicit playback controls.
 /// Return None for normal column navigation and global shortcuts.
 fn intercept_play_row(
     key: event::KeyEvent,
@@ -1405,8 +1738,21 @@ fn intercept_play_row(
         .and_then(|r| r.details_max_scroll);
     let col = nav.focused_mut()?;
     use crate::app::state::ColumnHeaderSelection as Header;
-    if let Some(lines) = &col.album_details {
+    if let Some(lines) = col.detail_lines() {
         let max = max_scroll.unwrap_or_else(|| lines.len().saturating_sub(1));
+        drop(lines);
+        let artist_info = matches!(
+            col.details,
+            Some(crate::app::state::BrowseDetails::Artist(_))
+        );
+        if artist_info && matches!(key.code, KeyCode::Char('r' | 'R')) {
+            return Some(
+                col.play_all_row
+                    .as_ref()
+                    .map(|row| vec![play_row_action(row, col)])
+                    .unwrap_or_default(),
+            );
+        }
         match key.code {
             KeyCode::Down => col.selected_index = (col.selected_index + 1).min(max),
             KeyCode::Up => col.selected_index = col.selected_index.saturating_sub(1),
@@ -1414,81 +1760,21 @@ fn intercept_play_row(
             KeyCode::PageUp => col.selected_index = col.selected_index.saturating_sub(8),
             KeyCode::Home => col.selected_index = 0,
             KeyCode::End => col.selected_index = max,
-            KeyCode::Enter | KeyCode::Right => {}
+            KeyCode::Enter => return Some(vec![]),
+            KeyCode::Right => {}
             _ => return None,
         }
         return Some(vec![]);
     }
-    if col.header_selection == Header::AlbumDetails {
-        match key.code {
-            KeyCode::Enter | KeyCode::Right => {
-                return Some(vec![MillerAction::OpenAlbumDetails.into()])
-            }
-            KeyCode::Up | KeyCode::Home | KeyCode::PageUp => {
-                col.header_selection = Header::Play;
-                return Some(vec![]);
-            }
-            KeyCode::Down => {
-                col.header_selection = Header::Items;
-                col.selected_index = 0;
-                return Some(vec![]);
-            }
-            _ => col.header_selection = Header::Items,
-        }
+    if col.header_selection == Header::AlbumDetails && key.code == KeyCode::Down {
+        col.header_selection = Header::Items;
+        col.selected_index = 0;
+        return Some(vec![]);
     }
-    let play_row = col.play_all_row.clone()?;
-    if col.header_selection == crate::app::state::ColumnHeaderSelection::Play {
-        match key.code {
-            // Direct activation: Enter or Right plays the list.
-            KeyCode::Enter | KeyCode::Right => Some(vec![play_row_action(&play_row, col)]),
-            // Cursor moves off the play row down into the items.
-            // `selected_index` is reset to 0 so the cursor lands on
-            // the first track regardless of any prior position.
-            KeyCode::Down => {
-                col.header_selection = if col.has_album_details() {
-                    Header::AlbumDetails
-                } else {
-                    Header::Items
-                };
-                col.selected_index = 0;
-                Some(vec![])
-            }
-            // Up / PageUp / Home are no-ops — the play row IS the
-            // top of the column.
-            KeyCode::Up | KeyCode::PageUp | KeyCode::Home => Some(vec![]),
-            // PageDown / End / letter jumps all imply "move into
-            // the items" — release the action row and fall through so
-            // the common nav handler runs the actual jump.
-            KeyCode::PageDown | KeyCode::End => {
-                col.header_selection = crate::app::state::ColumnHeaderSelection::Items;
-                None
-            }
-            KeyCode::Char(c)
-                if c.is_ascii_alphabetic() && !key.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
-                col.header_selection = crate::app::state::ColumnHeaderSelection::Items;
-                None
-            }
-            // Left / Backspace / Esc back out of the column —
-            // clear the flag (so re-entering the col doesn't start
-            // back on the play row from stale state) and fall
-            // through to the nav handler.
-            KeyCode::Left | KeyCode::Backspace | KeyCode::Esc => {
-                col.header_selection = crate::app::state::ColumnHeaderSelection::Items;
-                None
-            }
-            _ => None,
-        }
-    } else if key.code == KeyCode::Up && col.selected_index == 0 {
-        col.header_selection = if col.has_album_details() {
-            Header::AlbumDetails
-        } else {
-            Header::Play
-        };
-        Some(vec![])
-    } else {
-        None
+    if col.header_selection != Header::Items {
+        col.header_selection = Header::Items;
     }
+    None
 }
 
 /// Translate a `PlayAllRow` into the `QueueAction` that should fire
@@ -1499,6 +1785,14 @@ fn play_row_action(
 ) -> Action {
     use crate::app::state::PlayAllRow;
     match row {
+        PlayAllRow::ArtistRadio {
+            artist_key,
+            artist_name,
+        } => RadioAction::StartArtistRadio {
+            key: artist_key.clone(),
+            title: artist_name.clone(),
+        }
+        .into(),
         PlayAllRow::Album { rating_key, title } => QueueAction::PlayAlbumNow {
             rating_key: rating_key.clone(),
             title: title.clone(),
@@ -1509,7 +1803,7 @@ fn play_row_action(
             title: title.clone(),
         }
         .into(),
-        PlayAllRow::AllTracks { .. } => QueueAction::PlayTracksNow(col.tracks.clone()).into(),
+        PlayAllRow::AllTracks { .. } => QueueAction::PlayTracksNow(col.ready_tracks()).into(),
     }
 }
 
@@ -1581,7 +1875,7 @@ pub fn handle_browse_nav_keys(
             Some(vec![])
         }
 
-        // Tab is NOT handled here - it's handled globally to cycle between views
+        // Pane traversal is handled before item navigation.
         // (Artists → Playlists → Genres → Folders → Now Playing)
 
         // Alphabet jumping in current column
@@ -1591,47 +1885,22 @@ pub fn handle_browse_nav_keys(
         KeyCode::Char(c)
             if c.is_ascii_alphabetic() && !key.modifiers.contains(KeyModifiers::CONTROL) =>
         {
-            // Use the same `sort_key` the list is sorted by — strips
-            // leading "The " etc., so "The Beatles" lives under "b" and
-            // pressing `b` actually finds it. Without this, pressing
-            // `b` searches for raw-title-starts-with-`b` and misses
-            // every "The X" artist that's visually under B.
-            use crate::app::handlers::helpers;
+            use crate::app::handlers::helpers::sort_letter;
             if let Some(col) = nav.focused_mut() {
-                let letter_lower = c.to_ascii_lowercase();
-                let use_second_char = key.modifiers.contains(KeyModifiers::SHIFT);
-                let sorted_first =
-                    |title: &str| -> Option<char> { helpers::sort_key(title).chars().next() };
-
-                if use_second_char {
-                    // Anchor on the section letter (sort-key-based) of
-                    // the currently selected item, then advance to the
-                    // first item whose second sort-key char matches.
-                    let first_letter = col
-                        .items
-                        .get(col.selected_index)
-                        .and_then(|item| sorted_first(item.title()))
-                        .map(|ch| ch.to_ascii_lowercase());
-
-                    if let Some(first_letter) = first_letter {
-                        if let Some(idx) = col.items.iter().position(|item| {
-                            let key = helpers::sort_key(item.title());
-                            let mut chars = key.chars();
-                            let first = chars.next().map(|ch| ch.to_ascii_lowercase());
-                            let second = chars.next().map(|ch| ch.to_ascii_lowercase());
-                            first == Some(first_letter) && second == Some(letter_lower)
-                        }) {
-                            col.selected_index = idx;
-                        }
-                    }
+                let second = key.modifiers.contains(KeyModifiers::SHIFT);
+                let anchor = if second {
+                    col.selected_item()
+                        .and_then(|item| sort_letter(item.title(), 0))
                 } else {
-                    if let Some(idx) = col.items.iter().position(|item| {
-                        sorted_first(item.title())
-                            .map(|ch| ch.to_ascii_lowercase() == letter_lower)
-                            .unwrap_or(false)
-                    }) {
-                        col.selected_index = idx;
-                    }
+                    None
+                };
+                if let Some(index) = col.items.iter().position(|item| {
+                    (!second
+                        || anchor.is_some_and(|first| sort_letter(item.title(), 0) == Some(first)))
+                        && sort_letter(item.title(), usize::from(second))
+                            .is_some_and(|letter| letter.eq_ignore_ascii_case(&c))
+                }) {
+                    col.selected_index = index;
                 }
             }
             nav.truncate_right();
@@ -1660,10 +1929,10 @@ pub fn update_filter_column_selection(state: &mut AppState, item_idx: usize) {
             }
         }
         BrowseCategory::Folders => {
-            if let Some(ref mut folder_state) = state.folder_state {
-                if let Some(col) = folder_state.columns.get_mut(column) {
-                    col.selected_index = item_idx;
-                }
+            if let Some(ref mut folder_state) = state.folder_state
+                && let Some(col) = folder_state.columns.get_mut(column)
+            {
+                col.selected_index = item_idx;
             }
         }
         cat if cat.is_tag_section() => {
@@ -1739,6 +2008,29 @@ pub fn get_filter_drilldown_actions(state: &mut AppState) -> Vec<Action> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn play_all_skips_pending_download_rows() {
+        use crate::app::state::{BrowseColumn, BrowseItem, PlayAllRow};
+        use crate::library::models::Track;
+        let tracks = vec![
+            Track::from_folder("fixture", "ready.wav"),
+            Track::from_folder("fixture", "pending.wav"),
+        ];
+        let mut items = BrowseItem::from_tracks(&tracks);
+        if let BrowseItem::Track { download_id, .. } = &mut items[1] {
+            *download_id = Some("transfer".into());
+        }
+        let column = BrowseColumn::new_with_tracks("Downloads", items, tracks);
+        let action = super::play_row_action(
+            &PlayAllRow::AllTracks {
+                label: "Downloads".into(),
+            },
+            &column,
+        );
+        assert!(
+            matches!(action, Action::Queue(QueueAction::PlayTracksNow(tracks)) if tracks.len() == 1 && tracks[0].title == "ready.wav")
+        );
+    }
     use super::*;
     use crate::app::state::{
         AppState, BrowseCategory, BrowseColumn, BrowseItem, BrowseNavigationState,

@@ -135,7 +135,7 @@ pub(super) fn decode_audio(
             Err(symphonia::core::errors::Error::IoError(ref e))
                 if e.kind() == std::io::ErrorKind::UnexpectedEof =>
             {
-                break
+                break;
             }
             Err(symphonia::core::errors::Error::ResetRequired) => {
                 // Handle reset by reinitializing decoder
@@ -445,13 +445,12 @@ impl WaveformCache {
                 }
 
                 // Try to read the file and check created_at
-                if let Ok(contents) = std::fs::read_to_string(&path) {
-                    if let Ok(data) = serde_json::from_str::<WaveformData>(&contents) {
-                        if data.created_at < cutoff {
-                            tracing::debug!("Pruning expired waveform: {}", data.track_key);
-                            let _ = std::fs::remove_file(&path);
-                        }
-                    }
+                if let Ok(contents) = std::fs::read_to_string(&path)
+                    && let Ok(data) = serde_json::from_str::<WaveformData>(&contents)
+                    && data.created_at < cutoff
+                {
+                    tracing::debug!("Pruning expired waveform: {}", data.track_key);
+                    let _ = std::fs::remove_file(&path);
                 }
             }
         }
@@ -520,11 +519,11 @@ impl WaveformCache {
         let mut total = 0u64;
         if let Ok(entries) = std::fs::read_dir(&self.cache_dir) {
             for entry in entries.flatten() {
-                if let Ok(metadata) = entry.metadata() {
-                    if metadata.is_file() {
-                        count += 1;
-                        total += metadata.len();
-                    }
+                if let Ok(metadata) = entry.metadata()
+                    && metadata.is_file()
+                {
+                    count += 1;
+                    total += metadata.len();
                 }
             }
         }
@@ -540,10 +539,10 @@ impl WaveformCache {
         let mut total = 0u64;
         if let Ok(entries) = std::fs::read_dir(&self.cache_dir) {
             for entry in entries.flatten() {
-                if let Ok(metadata) = entry.metadata() {
-                    if metadata.is_file() {
-                        total += metadata.len();
-                    }
+                if let Ok(metadata) = entry.metadata()
+                    && metadata.is_file()
+                {
+                    total += metadata.len();
                 }
             }
         }

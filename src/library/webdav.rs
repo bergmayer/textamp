@@ -33,7 +33,9 @@ fn endpoint(source: &FolderSource, path: &str, directory: bool) -> Result<Url> {
             .extend(path.split('/'));
     }
     if directory && !url.path().ends_with('/') {
-        url.path_segments_mut().unwrap().push("");
+        url.path_segments_mut()
+            .map_err(|_| anyhow::anyhow!("Invalid WebDAV base"))?
+            .push("");
     }
     Ok(url)
 }
@@ -59,11 +61,18 @@ fn authenticated_request(
     };
     // Redirects may cross credential/root boundaries. Require the configured
     // canonical folder URL instead of following them with authentication.
-    let client = Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .timeout(std::time::Duration::from_secs(120))
-        .build()?;
+    static CLIENT: std::sync::OnceLock<Client> = std::sync::OnceLock::new();
+    let client = if let Some(client) = CLIENT.get() {
+        client.clone()
+    } else {
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(120))
+            .build()?;
+        let _ = CLIENT.set(client.clone());
+        client
+    };
     let mut request = client.request(method, url);
     if let Some(username) = username {
         request = request.basic_auth(username, password);
@@ -72,6 +81,18 @@ fn authenticated_request(
 }
 
 pub(super) async fn list(source: &FolderSource, path: &str) -> Result<Vec<FolderEntry>> {
+    Ok(list_with_versions(source, path)
+        .await?
+        .into_iter()
+        .map(|(entry, _)| entry)
+        .collect())
+}
+
+/// Folder listings can validate a whole album without opening individual tracks.
+pub(crate) async fn list_with_versions(
+    source: &FolderSource,
+    path: &str,
+) -> Result<Vec<(FolderEntry, String)>> {
     let url = endpoint(source, path, true)?;
     let request = request(source, Method::from_bytes(b"PROPFIND")?, url.clone()).await?;
     list_request(request, url, path).await
@@ -107,10 +128,14 @@ async fn send(request: RequestBuilder, url: &Url) -> Result<reqwest::Response> {
     })
 }
 
-async fn list_request(request: RequestBuilder, url: Url, path: &str) -> Result<Vec<FolderEntry>> {
+async fn list_request(
+    request: RequestBuilder,
+    url: Url,
+    path: &str,
+) -> Result<Vec<(FolderEntry, String)>> {
     let request = request
         .header("Depth", "1").header("Content-Type", "application/xml; charset=utf-8")
-        .body(r#"<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/><d:displayname/></d:prop></d:propfind>"#);
+        .body(r#"<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/><d:getetag/><d:getlastmodified/><d:getcontentlength/></d:prop></d:propfind>"#);
     let response = send(request, &url).await?;
     match response.status().as_u16() {
         401 => bail!("WebDAV sign-in failed (HTTP 401); check username and password"),
@@ -145,7 +170,7 @@ pub(crate) fn parse_listing(
     request_url: &Url,
     parent: &str,
     xml: &str,
-) -> Result<Vec<FolderEntry>> {
+) -> Result<Vec<(FolderEntry, String)>> {
     let document = roxmltree::Document::parse(xml).context("Invalid WebDAV XML")?;
     if !dav(document.root_element(), "multistatus") {
         bail!("Expected WebDAV multistatus");
@@ -177,27 +202,41 @@ pub(crate) fn parse_listing(
             .context("WebDAV entry leaves the requested folder")?
             .trim_end_matches('/');
         let path = child_path(parent, name)?;
-        let prop = response
-            .children()
-            .filter(|n| dav(*n, "propstat"))
-            .find_map(|stat| {
-                let status = stat.children().find(|n| dav(*n, "status"))?.text()?;
-                if status.split_whitespace().nth(1) != Some("200") {
-                    return None;
-                }
-                stat.children().find(|n| dav(*n, "prop"))
-            })
-            .context("WebDAV could not read an entry's properties")?;
-        let resource = prop
-            .children()
+        let properties = || {
+            response
+                .children()
+                .filter(|node| dav(*node, "propstat"))
+                .filter_map(|stat| {
+                    let status = stat.children().find(|node| dav(*node, "status"))?.text()?;
+                    if status.split_whitespace().nth(1) != Some("200") {
+                        return None;
+                    }
+                    stat.children().find(|node| dav(*node, "prop"))
+                })
+                .flat_map(|prop| prop.children())
+        };
+        let resource = properties()
             .find(|n| dav(*n, "resourcetype"))
             .context("WebDAV entry lacks resource type")?;
         if seen.insert(path.clone()) {
-            entries.push(FolderEntry {
-                path,
-                name: name.to_string(),
-                directory: resource.children().any(|n| dav(n, "collection")),
-            });
+            let property = |name: &str| {
+                properties()
+                    .find(|node| dav(*node, name))
+                    .and_then(|node| node.text())
+            };
+            let version = file_version(
+                property("getetag"),
+                property("getlastmodified"),
+                property("getcontentlength").and_then(|n| n.parse().ok()),
+            );
+            entries.push((
+                FolderEntry {
+                    path,
+                    name: name.to_string(),
+                    directory: resource.children().any(|n| dav(n, "collection")),
+                },
+                version,
+            ));
         }
         if entries.len() > MAX_ENTRIES {
             bail!("WebDAV folder exceeds {MAX_ENTRIES} entries");
@@ -234,6 +273,104 @@ pub(super) async fn file(source: &FolderSource, path: &str, limit: u64) -> Resul
     Ok(MediaFile::temporary(temporary))
 }
 
+fn response_version(headers: &reqwest::header::HeaderMap, expected: Option<u64>) -> String {
+    let header = |name| headers.get(name).and_then(|value| value.to_str().ok());
+    file_version(
+        header(reqwest::header::ETAG),
+        header(reqwest::header::LAST_MODIFIED),
+        expected,
+    )
+}
+
+fn file_version(etag: Option<&str>, modified: Option<&str>, expected: Option<u64>) -> String {
+    if let Some(etag) = etag.filter(|value| !value.is_empty() && !value.starts_with("W/")) {
+        format!("etag:{etag}")
+    } else if let (Some(modified), Some(bytes)) = (modified, expected) {
+        format!("modified:{modified}:{bytes}")
+    } else {
+        String::new()
+    }
+}
+
+/// Read validators without transferring audio. Some WebDAV servers omit HEAD support.
+pub(crate) async fn version(
+    source: &FolderSource,
+    path: &str,
+) -> Result<Option<(String, Option<u64>)>> {
+    let url = endpoint(source, path, false)?;
+    let response = send(request(source, Method::HEAD, url.clone()).await?, &url).await?;
+    match response.status().as_u16() {
+        405 | 501 => return Ok(None),
+        200 => {}
+        code => bail!("WebDAV could not check the current file version (HTTP {code})"),
+    }
+    let headers = response.headers();
+    let expected = headers
+        .get(reqwest::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok());
+    Ok(Some((response_version(headers, expected), expected)))
+}
+
+/// Streams a WebDAV file directly into the caller's temporary destination.
+pub(crate) async fn transfer(
+    source: &FolderSource,
+    path: &str,
+    previous: Option<&str>,
+    destination: &Path,
+    mut progress: impl FnMut(u64, Option<u64>),
+) -> Result<Option<(u64, String, String)>> {
+    let url = endpoint(source, path, false)?;
+    let response = send(request(source, Method::GET, url.clone()).await?, &url).await?;
+    anyhow::ensure!(
+        response.status() == reqwest::StatusCode::OK,
+        "WebDAV download returned HTTP {}",
+        response.status()
+    );
+    let headers = response.headers();
+    anyhow::ensure!(
+        !headers
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value
+                .split(';')
+                .next()
+                .is_some_and(|v| v.eq_ignore_ascii_case("text/html"))),
+        "WebDAV returned a document instead of audio"
+    );
+    let expected = response.content_length();
+    let version = response_version(headers, expected);
+    if !version.is_empty() && previous == Some(version.as_str()) {
+        return Ok(None);
+    }
+    anyhow::ensure!(
+        expected.is_none_or(|bytes| bytes <= MAX_REMOTE_BYTES),
+        "Remote file exceeds the size limit"
+    );
+    let mut output = tokio::fs::File::create(destination).await?;
+    let mut stream = response.bytes_stream();
+    let mut hash = md5::Context::new();
+    let mut total = 0;
+    progress(total, expected);
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| error.without_url())?;
+        total += chunk.len() as u64;
+        anyhow::ensure!(
+            total <= MAX_REMOTE_BYTES,
+            "Remote file exceeds the size limit"
+        );
+        hash.consume(&chunk);
+        output.write_all(&chunk).await?;
+        progress(total, expected);
+    }
+    anyhow::ensure!(
+        total > 0 && expected.is_none_or(|bytes| bytes == total),
+        "WebDAV returned incomplete audio"
+    );
+    output.sync_all().await?;
+    Ok(Some((total, version, format!("{:x}", hash.finalize()))))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,6 +379,66 @@ mod tests {
             r#"<multistatus xmlns="DAV:"><response><href>{href}</href><propstat><prop><resourcetype/></prop><status>HTTP/1.1 {status}</status></propstat></response></multistatus>"#
         )
     }
+    #[tokio::test]
+    async fn consecutive_listings_reuse_the_http_connection() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/music/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            for _ in 0..2 {
+                let mut input = Vec::new();
+                loop {
+                    let mut chunk = [0; 2048];
+                    let read = socket.read(&mut chunk).await.unwrap();
+                    assert!(read > 0, "the next listing must reuse this connection");
+                    input.extend_from_slice(&chunk[..read]);
+                    if let Some(end) = input.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                        let head = String::from_utf8_lossy(&input[..end]);
+                        let length = head
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap_or(0);
+                        if input.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                let body = response("/music/a.flac", "200 OK");
+                socket.write_all(format!("HTTP/1.1 207 Multi-Status\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+            }
+        });
+        let source = FolderSource {
+            id: "pool-fixture".into(),
+            name: "Fixture".into(),
+            location: FolderLocation::Webdav {
+                url: base.clone(),
+                username: None,
+                password_env: None,
+            },
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            for _ in 0..2 {
+                let url = Url::parse(&base).unwrap();
+                let request = authenticated_request(
+                    &source,
+                    Method::from_bytes(b"PROPFIND").unwrap(),
+                    url.clone(),
+                    None,
+                )
+                .unwrap();
+                assert_eq!(list_request(request, url, "").await.unwrap().len(), 1);
+            }
+            server.await.unwrap();
+        })
+        .await
+        .expect("directory requests must share a live pooled connection");
+    }
+
     #[test]
     fn listing_rejects_out_of_root_cross_origin_nested_and_failed_entries() {
         let url = Url::parse("https://example.test/music/").unwrap();

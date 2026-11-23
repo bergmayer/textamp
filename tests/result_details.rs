@@ -1,10 +1,10 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::{backend::TestBackend, Terminal};
+use ratatui::{Terminal, backend::TestBackend};
 use textamp::app::{
-    action::{QueueAction, SearchAction},
+    Action, AppState,
+    action::{BrowseAction, QueueAction, SearchAction},
     handlers::{key_input, mouse_input},
     state::{SearchFocus, SearchTab, SimilarMode, View},
-    Action, AppState,
 };
 use textamp::{
     config::Config,
@@ -39,8 +39,7 @@ fn draw(state: &mut AppState, label: &str, width: u16, height: u16) {
         .iter()
         .map(|c| c.symbol())
         .collect();
-    assert!(text.contains("Play Track++"));
-    assert!(text.contains("Play Track"));
+    assert!(text.contains("Track Details"));
     if width >= 100 {
         assert!(text.contains("Second Artist"));
     }
@@ -64,118 +63,62 @@ fn assert_following(actions: &[Action]) {
         matches!(actions,[Action::Queue(QueueAction::PlayTracksNow(tracks))] if tracks.iter().map(|t|t.rating_key.as_str()).collect::<Vec<_>>()==["second","third"])
     );
 }
-fn verify_actions(state: &mut AppState) {
-    assert_single(&key(state, KeyCode::Enter));
-    key(state, KeyCode::Down);
-    assert_following(&key(state, KeyCode::Enter));
-    let pane = state.hit_regions.track_pane.clone().unwrap();
-    for (rect, following) in [(pane.play_button, false), (pane.following_button, true)] {
-        let actions = mouse_input::handle_mouse(
-            MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                column: rect.x,
-                row: rect.y,
-                modifiers: KeyModifiers::NONE,
-            },
-            state,
-        );
-        if following {
-            assert_following(&actions);
-        } else {
-            assert_single(&actions);
-        }
-    }
-    assert!(
-        state.queue.tracks.is_empty(),
-        "Selecting details must not replace the queue"
-    );
-}
 #[tokio::test]
-async fn search_enter_keeps_results_and_opens_explicit_playback_actions_for_missing_metadata_too() {
+async fn search_selection_opens_the_actual_library_detail_without_playing() {
     for tab in [SearchTab::Tracks, SearchTab::Global] {
         let mut state = AppState::new();
-        state.view = View::Queue;
         state.popups.set_search_active(true);
         state.search.tab = tab;
         state.search.focus = SearchFocus::Results;
-        state.search.query = "Search".into();
         state.search.results = Some(SearchResults {
             tracks: tracks(),
             ..Default::default()
         });
         state.list_state.search_item_index = 1;
-        let actions = key(&mut state, KeyCode::Enter);
-        assert!(matches!(
-            actions.as_slice(),
-            [Action::Search(SearchAction::SelectSearchResult)]
-        ));
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
-        let follow = textamp::app::handlers::dispatch_search::dispatch(
+        let actions = textamp::app::handlers::dispatch_search::dispatch(
             &tx,
             SearchAction::SelectSearchResult,
             &mut state,
         )
-        .await
         .unwrap();
-        assert!(follow.is_empty());
-        assert!(state.popups.search_active());
-        assert_eq!(state.view, View::Queue);
-        assert!(state.search.details.open && state.search.details.focused);
-        for (w, h) in [(100, 32), (80, 24)] {
-            draw(&mut state, "search-details", w, h);
-        }
-        verify_actions(&mut state);
-        assert!(key(&mut state, KeyCode::Left).is_empty());
-        assert!(!state.search.details.focused);
-        key(&mut state, KeyCode::Down);
-        assert_eq!(state.list_state.search_item_index, 2);
-        key(&mut state, KeyCode::Right);
-        assert!(state.search.details.focused);
         assert!(
-            matches!(key(&mut state,KeyCode::Enter).as_slice(),[Action::Queue(QueueAction::PlayTrack(track))] if track.rating_key=="third")
+            matches!(actions.as_slice(),[Action::Browse(textamp::app::action::BrowseAction::OpenDetailsInLibrary{track,destination:textamp::app::library_details::Destination::Track})] if track.rating_key=="second")
         );
+        assert!(state.queue.tracks.is_empty());
     }
 }
 #[test]
-fn similar_results_open_details_in_place_and_preserve_rank_for_play_following() {
+fn similar_selection_opens_the_actual_track_detail_without_playing() {
     let mut state = AppState::new();
-    state.view = View::Queue;
-    state.set_view(View::Similar);
+    state.view = View::Similar;
     state.similar.mode = SimilarMode::Tracks;
     state.similar.tracks = tracks();
     state.list_state.similar_index = 1;
-    assert!(key(&mut state, KeyCode::Enter).is_empty());
-    assert!(state.similar.details.open && state.similar.details.focused);
-    assert_eq!(state.previous_view, Some(View::Queue));
-    for (w, h) in [(100, 32), (80, 24)] {
-        draw(&mut state, "similar-details", w, h);
-    }
-    verify_actions(&mut state);
-    assert!(key(&mut state, KeyCode::Esc).is_empty());
-    assert!(!state.similar.details.focused);
-    assert!(matches!(
-        key(&mut state, KeyCode::Esc).as_slice(),
-        [Action::Navigation(
-            textamp::app::action::NavigationAction::SetView(View::Queue)
-        )]
-    ));
+    let actions = key(&mut state, KeyCode::Enter);
+    assert!(
+        matches!(actions.as_slice(),[Action::Browse(textamp::app::action::BrowseAction::OpenDetailsInLibrary{track,destination:textamp::app::library_details::Destination::Track})] if track.rating_key=="second")
+    );
+    assert!(state.queue.tracks.is_empty());
 }
 #[test]
-fn queue_enter_still_plays_without_opening_result_details() {
+fn queue_enter_opens_library_track_details_without_changing_playback() {
     let mut state = AppState::new();
     state.view = View::Queue;
     state.queue.tracks = tracks();
     state.list_state.queue_index = 1;
     assert!(matches!(
         key(&mut state, KeyCode::Enter).as_slice(),
-        [Action::Queue(QueueAction::JumpToQueueIndex(1))]
+        [Action::Browse(BrowseAction::OpenDetailsInLibrary {
+            destination: textamp::app::library_details::Destination::Track,
+            ..
+        })]
     ));
-    assert!(!state.search.details.open && !state.similar.details.open);
 }
 
 fn browse_state() -> AppState {
-    use textamp::app::sources::{navidrome::Session, ActiveSource};
-    use textamp::app::state::{BrowseColumn, BrowseItem, MillerLayoutMode};
+    use textamp::app::sources::{ActiveSource, navidrome::Session};
+    use textamp::app::state::{BrowseColumn, BrowseItem};
     let mut state = AppState::new();
     let source = textamp::navidrome::Source {
         id: "details-fixture".into(),
@@ -191,7 +134,7 @@ fn browse_state() -> AppState {
     }));
     state.view = View::Browse;
     state.category_column_focused = false;
-    state.miller_layout = MillerLayoutMode::Scrolling;
+
     let tracks = tracks();
     state.artist_nav.columns = vec![BrowseColumn::new_with_tracks(
         "Tracks",
@@ -200,7 +143,7 @@ fn browse_state() -> AppState {
     )];
     state.track_pane_open = true;
     state.track_pane_focused = true;
-    state.track_pane_index = 2;
+    state.track_pane_index = 3;
     state
         .track_pane_similar
         .insert("first".into(), Ok(tracks[1..].to_vec()));
@@ -225,35 +168,40 @@ fn related_details_reuse_one_column_and_keep_parent_and_ranked_playback() {
         sonic_details::visible(&state).unwrap().tracks[0].rating_key,
         "second"
     );
-    for layout in [
-        textamp::app::state::MillerLayoutMode::Scrolling,
-        textamp::app::state::MillerLayoutMode::Shrinking,
-    ] {
-        state.miller_layout = layout;
+    for _ in [()] {
         for (w, h) in [(140, 40), (100, 32), (80, 24)] {
-            draw(&mut state, &format!("adjacent-details-{layout:?}"), w, h);
-            let left = state.hit_regions.track_pane.as_ref().unwrap();
+            draw(&mut state, "adjacent-details-automatic", w, h);
             let right = state.hit_regions.sonic_details.as_ref().unwrap();
-            assert_eq!(left.outer.right(), right.outer.x);
+            if let Some(left) = state.hit_regions.track_pane.as_ref() {
+                assert_eq!(left.outer.right(), right.outer.x);
+            } else {
+                assert!(state.hit_regions.miller_h_scrollbar.is_some());
+            }
             assert!(right.outer.right() <= w);
         }
     }
-    state.miller_layout = textamp::app::state::MillerLayoutMode::Scrolling;
+
     assert_single(&key(&mut state, KeyCode::Enter));
-    key(&mut state, KeyCode::Down);
-    assert_following(&key(&mut state, KeyCode::Enter));
-    for _ in 0..12 {
-        key(&mut state, KeyCode::Down);
+    assert_following(&key_input::handle_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
+        &mut state,
+        &Config::default(),
+    ));
+    for expected in ["third", "second"] {
+        for _ in 0..3 {
+            key(&mut state, KeyCode::Down);
+        }
         assert!(key(&mut state, KeyCode::Enter).is_empty());
-        assert!(!state.palette.open);
-        assert_eq!(state.artist_nav.columns.len(), 1);
+        assert_eq!(
+            sonic_details::selected_track(&state).unwrap().rating_key,
+            expected
+        );
         assert_eq!(state.focused_track().unwrap().rating_key, "first");
-        assert_eq!(sonic_details::visible(&state).unwrap().parent_key, "first");
-        key(&mut state, KeyCode::Down);
+        assert_eq!(state.artist_nav.columns.len(), 1);
     }
     key(&mut state, KeyCode::Left);
     assert!(!sonic_details::focused(&state));
-    assert_eq!(state.track_pane_index, 2);
+    assert_eq!(state.track_pane_index, 3);
     key(&mut state, KeyCode::Right);
     assert!(sonic_details::focused(&state));
     assert!(state.queue.tracks.is_empty());
@@ -268,6 +216,7 @@ fn related_details_reuse_one_column_and_keep_parent_and_ranked_playback() {
 fn related_details_mouse_opens_replaces_and_closes_only_child() {
     let mut state = browse_state();
     key(&mut state, KeyCode::Enter);
+    key(&mut state, KeyCode::Down);
     key(&mut state, KeyCode::Down);
     key(&mut state, KeyCode::Down);
     draw(&mut state, "adjacent-selected", 100, 40);
@@ -343,17 +292,18 @@ fn jump_commands_target_queue_search_related_and_playback_fallback() {
         state.similar.tracks = tracks.clone();
         state.similar.mode = SimilarMode::Tracks;
         state.list_state.similar_index = 1;
-        for (label, album) in [("Jump to artist", false), ("Jump to album", true)] {
-            let cmd = command_palette::materialize_entries(&state)
-                .into_iter()
-                .find(|e| e.label == label)
-                .unwrap()
-                .command;
-            let actions = command_palette::run(cmd, &mut state);
-            assert!(
-                matches!(actions.as_slice(),[Action::Browse(BrowseAction::OpenInLibrary{artist_key,album_key,..})] if artist_key==&format!("{expected}-artist") && album_key==&album.then(||format!("{expected}-album")))
-            );
-        }
+        let cmd = command_palette::materialize_entries(&state)
+            .into_iter()
+            .find(|e| e.label == "Open in Library")
+            .unwrap()
+            .command;
+        let actions = command_palette::run(cmd, &mut state);
+        assert!(
+            matches!(actions.as_slice(), [Action::Browse(BrowseAction::OpenDetailsInLibrary {
+            track, destination: textamp::app::library_details::Destination::Track
+        })] if track.rating_key == expected),
+            "{view:?} {search}: {actions:?}"
+        );
     }
     state.view = View::Browse;
     state.popups.set_search_active(false);
@@ -363,11 +313,143 @@ fn jump_commands_target_queue_search_related_and_playback_fallback() {
     key(&mut state, KeyCode::Enter);
     let cmd = command_palette::materialize_entries(&state)
         .into_iter()
-        .find(|e| e.label == "Jump to album")
+        .find(|e| e.label == "Open in Library")
         .unwrap()
         .command;
     assert!(
-        matches!(command_palette::run(cmd,&mut state).as_slice(),[Action::Browse(BrowseAction::OpenInLibrary{album_key:Some(key),..})] if key=="second-album")
+        matches!(command_palette::run(cmd,&mut state).as_slice(), [Action::Browse(BrowseAction::OpenDetailsInLibrary { track, destination: textamp::app::library_details::Destination::Track })] if track.rating_key == "second")
     );
     assert_eq!(state.queue.index, Some(0));
+}
+
+#[test]
+fn related_track_jump_rebuilds_ancestors_and_back_restores_the_previous_view() {
+    use std::sync::Arc;
+    use textamp::{
+        app::{
+            action::{BrowseAction, MillerAction},
+            handlers::{dispatch_browse, dispatch_miller},
+            library_details, navigation_history,
+            state::BrowseItem,
+        },
+        audio::AudioPlayer,
+        library::models::{Album, Artist},
+    };
+    let mut state = browse_state();
+    let album = Album {
+        rating_key: "related-album".into(),
+        title: "Related Album".into(),
+        parent_rating_key: Some("related-artist".into()),
+        parent_title: Some("Related Artist".into()),
+        ..Default::default()
+    };
+    state.library.artists = Arc::new(vec![Artist {
+        rating_key: "related-artist".into(),
+        title: "Related Artist".into(),
+        ..Default::default()
+    }]);
+    state.library.albums = Arc::new(vec![album.clone()]);
+    let tracks: Vec<_> = tracks()
+        .into_iter()
+        .map(|mut track| {
+            track.parent_rating_key = Some(album.rating_key.clone());
+            track.parent_title = Some(album.title.clone());
+            track.grandparent_rating_key = album.parent_rating_key.clone();
+            track.grandparent_title = album.parent_title.clone();
+            track
+        })
+        .collect();
+    state
+        .track_pane_similar
+        .insert("first".into(), Ok(tracks[1..].to_vec()));
+    state
+        .track_pane_similar
+        .insert("second".into(), Ok(vec![tracks[2].clone()]));
+    state.list_filter.query = "First".into();
+    state.scroll.browse = Some((0, 2));
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    let mut audio = AudioPlayer::new_without_audio();
+    for (seed, target) in [("first", "second"), ("second", "third")] {
+        let actions = dispatch_browse::dispatch(
+            &tx,
+            BrowseAction::OpenSimilarTrack {
+                seed_key: seed.into(),
+                track_key: target.into(),
+            },
+            &mut state,
+        )
+        .unwrap();
+        assert!(
+            matches!(actions.as_slice(), [Action::Miller(MillerAction::LoadArtistAlbumsForMiller {artist_key,..})] if artist_key == "related-artist")
+        );
+        let request_id = state.artist_nav_request_id;
+        dispatch_miller::dispatch(
+            &tx,
+            MillerAction::ArtistAlbumsForMillerLoaded {
+                request_id,
+                artist_key: "related-artist".into(),
+                replace_child: false,
+                is_catalog_artist: true,
+                result: Ok(vec![album.clone()]),
+            },
+            &mut state,
+            &mut audio,
+        )
+        .unwrap();
+        dispatch_miller::dispatch(
+            &tx,
+            MillerAction::AlbumTracksForMillerLoaded {
+                request_id,
+                album_key: album.rating_key.clone(),
+                album_title: album.title.clone(),
+                replace_child: false,
+                result: Ok(tracks.clone()),
+            },
+            &mut state,
+            &mut audio,
+        )
+        .unwrap();
+        let actions = library_details::finish(&mut state);
+        assert!(matches!(
+            actions.as_slice(),
+            [Action::Browse(BrowseAction::OpenTrackDetails)]
+        ));
+        dispatch_browse::dispatch(&tx, BrowseAction::OpenTrackDetails, &mut state).unwrap();
+        assert_eq!(state.artist_nav.columns.len(), 3);
+        assert!(
+            matches!(state.artist_nav.columns[0].selected_item(), Some(BrowseItem::Artist {key,..}) if key == "related-artist")
+        );
+        assert!(
+            matches!(state.artist_nav.columns[1].selected_item(), Some(BrowseItem::Album {key,..}) if key == "related-album")
+        );
+        assert_eq!(state.focused_track().unwrap().rating_key, target);
+        assert!(state.track_pane_open);
+        let history = state.jump_history.head();
+        assert!(
+            dispatch_browse::dispatch(
+                &tx,
+                BrowseAction::OpenSimilarTrack {
+                    seed_key: seed.into(),
+                    track_key: target.into()
+                },
+                &mut state
+            )
+            .unwrap()
+            .is_empty()
+        );
+        assert_eq!(state.jump_history.head(), history);
+    }
+    navigation_history::back(&mut state);
+    assert_eq!(state.focused_track().unwrap().rating_key, "second");
+    assert_eq!(state.artist_nav.columns.len(), 3);
+    assert!(state.track_pane_open);
+    navigation_history::back(&mut state);
+    assert_eq!(state.focused_track().unwrap().rating_key, "first");
+    assert_eq!(state.artist_nav.columns.len(), 1);
+    assert_eq!(state.list_filter.query, "First");
+    assert_eq!(state.scroll.browse, Some((0, 2)));
+    assert!(state.track_pane_open);
+    assert!(state.jump_history.head().is_none());
+    assert!(state.queue.tracks.is_empty());
+    assert_eq!(audio.playback_id(), 0);
 }

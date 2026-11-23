@@ -1,7 +1,7 @@
 //! Atomic, directory-only index. Album file listings remain demand-loaded.
 use super::{FolderEntry, FolderSource};
 use anyhow::{Context, Result};
-use futures::{stream::FuturesUnordered, StreamExt};
+use futures::{StreamExt, stream::FuturesUnordered};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet, VecDeque};
 
@@ -54,7 +54,6 @@ pub async fn scan(source: &FolderSource) -> Result<Tree> {
                 tree.mixed.insert(path.clone());
             }
             for entry in &directories {
-                anyhow::ensure!(depth < 64, "Folder tree exceeds 64 levels");
                 // Providers confine paths to the root; enforce direct children
                 // here too so aliases/cycles cannot expand the crawl.
                 let parent = entry.path.rsplit_once('/').map_or("", |(parent, _)| parent);
@@ -64,7 +63,10 @@ pub async fn scan(source: &FolderSource) -> Result<Tree> {
                         seen.len() <= 100_000,
                         "Folder tree exceeds 100,000 directories"
                     );
-                    pending.push_back((entry.path.clone(), depth + 1));
+                    // List the root and two directory levels. Deeper branches load on demand.
+                    if depth < 2 {
+                        pending.push_back((entry.path.clone(), depth + 1));
+                    }
                 }
             }
             tree.directories.insert(path, directories);
@@ -83,6 +85,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(root.path().join("Artist/Album")).unwrap();
         std::fs::write(root.path().join("Artist/Album/01.flac"), b"not decoded").unwrap();
+        std::fs::create_dir_all(root.path().join("Box/Disc/Extras/Deeper")).unwrap();
         std::fs::write(root.path().join("loose.mp3"), b"not decoded").unwrap();
         let source = FolderSource {
             id: "tree-test".into(),
@@ -92,14 +95,17 @@ mod tests {
             },
         };
         let tree = scan(&source).await.unwrap();
+        assert_eq!(tree.listing("Box/Disc").unwrap()[0].path, "Box/Disc/Extras");
+        assert!(!tree.directories.contains_key("Box/Disc/Extras"));
         assert!(tree.listing("").is_none()); // loose track must remain visible
         assert_eq!(tree.listing("Artist").unwrap()[0].path, "Artist/Album");
         assert!(tree.listing("Artist/Album").is_none()); // album loaded on demand
-        assert!(tree
-            .directories
-            .values()
-            .flatten()
-            .all(|entry| entry.directory));
+        assert!(
+            tree.directories
+                .values()
+                .flatten()
+                .all(|entry| entry.directory)
+        );
         assert!(!serde_json::to_string(&tree).unwrap().contains("01.flac"));
     }
 }

@@ -1,12 +1,12 @@
 //! Command-palette rendering. Behavior lives in app::command_palette.
-use crate::ui::theme::theme;
 use crate::ui::RenderState as AppState;
+use crate::ui::theme::theme;
 use ratatui::{
+    Frame,
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
-    Frame,
 };
 pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     if !state.palette.open {
@@ -16,14 +16,17 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
 
     let popup_area = centered(area, 60, 20);
     frame.render_widget(Clear, popup_area);
+    crate::ui::widgets::register_popup_close(state, popup_area);
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(t.colors.title_focused))
         .title(if state.station_nav.loading {
-            " command — loading station choices… "
+            " command — loading station choices… ".to_owned()
+        } else if state.palette.path.is_empty() {
+            " command ".to_owned()
         } else {
-            " command "
+            format!(" command › {} ", state.palette.path.join(" › "))
         })
         .title_style(Style::default().fg(t.colors.title_focused))
         .style(
@@ -44,16 +47,27 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         .split(inner);
 
     let prompt = ":";
-    let input_line = Line::from(vec![
-        Span::styled(prompt, Style::default().fg(t.colors.fg_accent)),
-        Span::raw(" "),
-        Span::raw(state.palette.query.clone()),
-    ]);
-    frame.render_widget(Paragraph::new(input_line), chunks[0]);
-    let cursor_x = chunks[0].x + 2 + state.palette.cursor as u16;
-    if cursor_x < chunks[0].x + chunks[0].width {
-        frame.set_cursor_position((cursor_x, chunks[0].y));
-    }
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            prompt,
+            Style::default().fg(t.colors.fg_accent),
+        )),
+        chunks[0],
+    );
+    crate::ui::widgets::text_input::render(
+        frame,
+        state,
+        Rect::new(
+            chunks[0].x + 2,
+            chunks[0].y,
+            chunks[0].width.saturating_sub(2),
+            1,
+        ),
+        crate::app::terminal_text::Target::Palette,
+        Style::default()
+            .fg(t.colors.fg_primary)
+            .bg(t.colors.bg_primary),
+    );
 
     frame.render_widget(
         Paragraph::new("─".repeat(chunks[1].width as usize))
@@ -77,7 +91,16 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
             let label_display_len = label.chars().count();
             let pad = " ".repeat(label_w.saturating_sub(label_display_len));
             ListItem::new(Line::from(vec![
-                Span::raw(label),
+                Span::styled(
+                    label,
+                    if crate::app::command_catalog::disabled_reason(state, &e.command).is_some() {
+                        Style::default()
+                            .fg(t.colors.fg_muted)
+                            .add_modifier(Modifier::DIM)
+                    } else {
+                        Style::default()
+                    },
+                ),
                 Span::raw(pad),
                 Span::styled(e.hint.clone(), Style::default().fg(t.colors.fg_muted)),
             ]))

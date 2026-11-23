@@ -14,13 +14,14 @@ use tokio::sync::mpsc;
 use super::helpers;
 
 /// Dispatch data-loading actions. Returns follow-up actions.
-pub async fn dispatch(
+pub fn dispatch(
     _event_tx: &mpsc::Sender<Event>,
     _config: &Config,
     action: DataAction,
     state: &mut AppState,
 ) -> Result<Vec<Action>> {
     match action {
+        DataAction::PlaylistsLoaded(playlists) => state.replace_playlists(playlists),
         DataAction::GoBackInRightPanel => {
             // Go from tracks back to albums view (for artist drill-down)
             if state.library.right_panel_mode == RightPanelMode::AlbumTracks {

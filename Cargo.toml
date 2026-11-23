@@ -1,15 +1,24 @@
 [package]
 name = "textamp"
 version = "1.0.0"
-edition = "2021"
+edition = "2024"
 description = "A terminal music player for Subsonic, Navidrome, WebDAV and local files"
-license = "Unlicense AND GPL-3.0-only"
+license = "Unlicense"
 authors = ["John Bergmayer"]
 keywords = ["subsonic", "navidrome", "music", "tui", "webdav"]
 categories = ["command-line-utilities", "multimedia::audio"]
 exclude = ["**/.DS_Store"]
 
+[features]
+default = []
+mobile = []
+desktop = ["dep:gpui-kit", "dep:raw-window-handle"]
+desktop-tests = ["desktop", "dep:gpui-test-support"]
+
 [dependencies]
+raw-window-handle = { version = "=0.6.2", optional = true }
+gpui-kit = { version = "=0.9.0", optional = true }
+gpui-test-support = { package = "gpui-pre", version = "=0.3.11", optional = true, features = ["test-support"] }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -54,10 +63,9 @@ tracing-appender = "0.2"
 thiserror = "1"
 anyhow = "1"
 zeroize = "1"
-mdns-sd = "0.21" # Built-in AirPlay discovery on macOS, Linux and Windows.
 md5 = "0.8" # Subsonic's required salted-password authentication algorithm
 flate2 = "1" # Stream large metadata snapshots into compressed local caches.
-time = { version = "0.3", features = ["local-offset"] } # Calendar-based radio.
+time = { version = "0.3", features = ["local-offset", "parsing"] } # Calendar-based radio.
 
 # Directory paths
 dirs = "5"
@@ -67,6 +75,7 @@ futures = "0.3"
 
 # Plain folder libraries: bounded WebDAV XML and temporary media.
 roxmltree = "0.21"
+ego-tree = "0.10"
 scraper = "0.24"
 tempfile = "3"
 
@@ -75,6 +84,7 @@ rand = "0.9"
 
 # Unicode display width
 unicode-width = "0.2"
+unicode-segmentation = "1.12"
 
 # Open URLs in default browser
 open = "5"
@@ -100,11 +110,78 @@ path = "src/bin/textamp_tui.rs"
 [build-dependencies]
 cc = "1"
 
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Foundation", "System"] }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-openssl-sys = { version = "0.9", features = ["vendored"] }
+
+[profile.dev]
+debug = 0
+
+[profile.test]
+debug = 0
+
+[profile.dev.package.image]
+opt-level = 2
+
+[profile.dev.package.png]
+opt-level = 2
+
+[profile.dev.package.zune-jpeg]
+opt-level = 2
+
+[profile.dev.package.rustfft]
+opt-level = 3
+
+[profile.dev.package.symphonia-core]
+opt-level = 3
+
+[profile.dev.package.symphonia-bundle-mp3]
+opt-level = 3
+
+[profile.dev.package.symphonia-bundle-flac]
+opt-level = 3
+
+[profile.dev.package.symphonia-codec-aac]
+opt-level = 3
+
+[profile.dev.package.symphonia-codec-adpcm]
+opt-level = 3
+
+[profile.dev.package.symphonia-codec-alac]
+opt-level = 3
+
+[profile.dev.package.symphonia-codec-pcm]
+opt-level = 3
+
+[profile.dev.package.symphonia-codec-vorbis]
+opt-level = 3
+
+[profile.dev.package.symphonia-utils-xiph]
+opt-level = 3
+
+[profile.dev.package.serde_json]
+opt-level = 3
+
+[profile.dev.package.flate2]
+opt-level = 3
+
+[profile.dev.package.miniz_oxide]
+opt-level = 3
 
 [profile.release]
 lto = true
 strip = true
 opt-level = 3
+
+[patch.crates-io]
+# GPUI snapshot uses Option::map_or_default, unstable on Rust 1.95.
+gpui-pre-macos = { path = "vendor/gpui-pre-macos" }
+
+gpui-component = { path = "vendor/gpui-component" }
+
+[workspace]
+members = ["ios/core"]
+default-members = ["."]
+resolver = "3"

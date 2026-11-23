@@ -7,64 +7,11 @@
 //! The top-level `Event` enum in `crate::app::event` wraps these payloads
 //! and adds the terminal input variants (`Key`, `Mouse`, `Resize`).
 
-use crate::library::models::{Album, Artist, Playlist, Station, Track};
-use crate::services::WaveformData;
+use crate::library::models::{Album, Artist, Station, Track};
+use crate::media::WaveformData;
 
 #[derive(Debug, Clone)]
 pub enum DataEvent {
-    ArtistsLoaded {
-        library_key: String,
-        result: Result<Vec<Artist>, crate::app::action::AsyncError>,
-    },
-    ArtistsPageLoaded {
-        library_key: String,
-        selected_key: Option<String>,
-        artists: Vec<Artist>,
-        total: u32,
-    },
-    ArtistsPageFailed {
-        library_key: String,
-    },
-    AlbumsLoaded(Vec<Album>),
-    TracksLoaded(Vec<Track>),
-    PlaylistsLoaded {
-        server_url: Option<String>,
-        result: Result<Vec<Playlist>, crate::app::action::AsyncError>,
-    },
-
-    ArtistLoaded(Artist),
-    AlbumLoaded(Album),
-    AlbumTracksLoaded {
-        request_key: String,
-        tracks: Vec<Track>,
-    },
-    ArtistAlbumsLoaded {
-        request_key: String,
-        albums: Vec<Album>,
-    },
-    ArtistAllTracksLoaded {
-        request_key: String,
-        tracks: Vec<Track>,
-    },
-    CategoryTracksLoaded {
-        request_key: String,
-        tracks: Vec<Track>,
-    },
-    CategoryAlbumsLoaded {
-        albums: Vec<Album>,
-        status_message: String,
-    },
-    AllAlbumsForMillerLoaded {
-        library_key: String,
-        request_id: u64,
-        replace_child: bool,
-        albums: Vec<Album>,
-    },
-    AllAlbumsForMillerFailed {
-        library_key: String,
-        request_id: u64,
-        error: crate::app::action::AsyncError,
-    },
     SimilarLoadFailed {
         request_key: String,
         message: String,
@@ -96,17 +43,12 @@ pub enum DataEvent {
         request_key: String,
         message: String,
     },
-
-    ApiError(String),
 }
 
 #[derive(Debug, Clone)]
 pub enum PlaybackEvent {
-    TrackStarted,
     TrackEnded,
-    PlaybackPaused,
-    PlaybackResumed,
-    PlaybackStopped,
+
     PlaybackError {
         playback_id: Option<u64>,
         message: String,
@@ -115,8 +57,7 @@ pub enum PlaybackEvent {
         playback_id: u64,
         message: String,
     },
-    PositionUpdate(u64),
-    BufferingStart,
+
     BufferingEnd {
         playback_id: u64,
     },
@@ -128,13 +69,6 @@ pub enum PlaybackEvent {
 
 #[derive(Debug, Clone)]
 pub enum ArtworkEvent {
-    ImageLoaded {
-        key: String,
-    },
-    ImageFailed {
-        key: String,
-        error: String,
-    },
     ArtworkLoaded {
         generation: u64,
         thumb_path: String,
@@ -153,26 +87,19 @@ pub enum ArtworkEvent {
         generation: u64,
         key: String,
     },
-    ArtworkCacheStats {
-        count: usize,
-        total_bytes: u64,
-    },
 }
 
 #[derive(Debug, Clone)]
 pub enum CacheEvent {
-    LibraryCacheStats {
-        total_bytes: u64,
-        breakdown: Vec<(String, u64)>,
-    },
-    WaveformCacheStats {
-        count: usize,
-        total_bytes: u64,
-    },
+    WaveformCacheStats { count: usize, total_bytes: u64 },
 }
 
 #[derive(Debug, Clone)]
 pub enum VisualizerEvent {
+    AnalysisProgress {
+        track_key: String,
+        progress: crate::app::state::AnalysisProgress,
+    },
     WaveformGenerated {
         track_key: String,
         data: WaveformData,
@@ -189,6 +116,9 @@ pub enum VisualizerEvent {
     SpectrogramGenerated {
         track_key: String,
         data: crate::media::SpectrogramData,
+    },
+    SpectrogramCacheMiss {
+        track_key: String,
     },
     SpectrogramFailed {
         track_key: String,
@@ -242,58 +172,21 @@ pub enum PlaylistEvent {
         tracks: Vec<Track>,
         total: Option<u32>,
     },
-    /// Subsequent page appended to an already-built playlist column.
-    PlaylistMorePageLoaded {
-        library_key: String,
-        playlist_key: String,
-        offset: u32,
-        tracks: Vec<Track>,
-        total: Option<u32>,
-    },
-    PlaylistMorePageFailed {
-        library_key: String,
-        playlist_key: String,
-        offset: u32,
-        error: crate::app::action::AsyncError,
-    },
 }
 
 #[derive(Debug, Clone)]
 pub enum UiEvent {
-    AdventureLauncherAlbumsLoaded {
-        server_url: Option<String>,
-        request_id: u64,
-        artist_key: String,
-        artist_name: String,
-        result: Result<Vec<Album>, crate::app::action::AsyncError>,
-    },
-    AdventureLauncherTracksLoaded {
-        server_url: Option<String>,
-        request_id: u64,
-        album_key: String,
-        album_title: String,
-        artist_name: String,
-        result: Result<Vec<Track>, crate::app::action::AsyncError>,
-    },
     ListFilterCompleted {
         version: u64,
-        column_results: Vec<crate::app::state::ListFilterResults>,
+        generation: u64,
+        results: crate::app::state::ListFilterResults,
     },
-    DjTracksReady {
-        result: Result<Vec<Track>, crate::app::action::AsyncError>,
-        insert_next: bool,
-    },
-    DjBatchReady {
-        inserts: Vec<(usize, Vec<Track>)>,
-    },
-    RemixBatchReady {
-        outcome: crate::app::action::AsyncBatchOutcome<Vec<(usize, Vec<Track>)>>,
-    },
-    RemixDoppelgangerReady {
-        outcome: crate::app::action::AsyncBatchOutcome<Vec<(usize, Track)>>,
-    },
-    ArtistRadioComplete {
-        outcome: crate::app::action::AsyncBatchOutcome<Vec<Track>>,
+
+    ArtistInfoLoaded {
+        generation: u64,
+        request_id: u64,
+        artist_key: String,
+        result: Result<crate::services::biography::Biography, String>,
     },
     ArtistBioLoaded {
         generation: u64,

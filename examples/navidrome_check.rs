@@ -346,11 +346,11 @@ async fn check_catalog(
 ) -> Result<()> {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use textamp::app::{
+        AppState,
         action::*,
         dispatch::{dispatch_action, handle_core_event},
-        sources::{navidrome::Session, ActiveSource},
+        sources::{ActiveSource, navidrome::Session},
         state::{BrowseCategory, BrowseItem, RefreshCategory, View},
-        AppState,
     };
     let mut state = AppState::new();
     state.active_library = Some(format!("navidrome:{}:all", source.id));

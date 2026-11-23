@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use textamp::app::action::*;
 use textamp::app::dispatch::{dispatch_action, handle_core_event};
@@ -10,7 +10,113 @@ use textamp::audio::AudioPlayer;
 use textamp::config::Config;
 use textamp::navidrome::{Client, Source};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn first_import_allows_album_browsing_before_track_index_finishes() {
+    let (release, waiting) = std::sync::mpsc::channel();
+    let waiting = std::sync::Mutex::new(waiting);
+    let (url, _, task) = server(move |method, params| {
+        if method == "search3" && params.get("query").is_none_or(String::is_empty) {
+            waiting
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap();
+        }
+        (200, envelope(fixture(method, params)))
+    })
+    .await;
+    let session = session(url);
+    let mut app = App::new(session.clone());
+    textamp::app::sources::navidrome::open(&mut app.state, &app.tx);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while app.state.library.artists.is_empty() {
+            app.receive().await;
+        }
+    })
+    .await
+    .expect("browse metadata must not wait for the track index");
+    assert!(app.state.library_loading);
+    assert!(app.state.library.all_tracks.is_empty());
+    assert!(
+        session
+            .cache_store()
+            .unwrap()
+            .ticket("catalog")
+            .read::<serde_json::Value>(Duration::from_secs(60))
+            .unwrap()
+            .is_none()
+    );
+    app.send(MillerAction::LoadAlbumTracksForMiller {
+        album_key: session.key("album"),
+        replace_child: false,
+    })
+    .await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while app.state.artist_nav.columns.last().is_none_or(|column| {
+            !column
+                .items
+                .iter()
+                .any(|item| matches!(item, BrowseItem::Track { .. }))
+        }) {
+            app.receive().await;
+        }
+    })
+    .await
+    .expect("album browsing must remain independent of indexing");
+    assert!(app.state.library_loading);
+    let selected = app.state.artist_nav.columns.last().unwrap().title.clone();
+    release.send(()).unwrap();
+    while app.state.library_loading {
+        app.receive().await;
+    }
+    assert_eq!(app.state.library.all_tracks.len(), 3);
+    assert_eq!(app.state.artist_nav.columns.last().unwrap().title, selected);
+    task.abort();
+}
+
+#[tokio::test]
+async fn random_album_radio_uses_full_source_tracks_even_before_the_track_index_loads() {
+    let (url, requests, task) =
+        server(|method, params| (200, envelope(fixture(method, params)))).await;
+    let session = session(url);
+    let mut app = App::new(session.clone());
+    app.state.library.albums = std::sync::Arc::new(vec![textamp::library::models::Album {
+        rating_key: session.key("album"),
+        title: "Album".into(),
+        ..Default::default()
+    }]);
+    assert!(app.state.library.all_tracks.is_empty());
+    app.send(RadioAction::StartStation(
+        textamp::app::state::ActiveStation {
+            source: textamp::library::models::RadioSource::Station("nav-radio/randomAlbum".into()),
+            title: "Play Random Albums".into(),
+        },
+    ))
+    .await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while app.state.station_starting.is_some() {
+            app.receive().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        app.state.playback_mode,
+        textamp::app::state::PlaybackMode::Radio
+    );
+    assert_eq!(app.state.radio.tracks.len(), 3);
+    assert!(app.state.radio.tracks.iter().all(|track|matches!(&track.origin,textamp::library::track::TrackOrigin::Navidrome{source_id,song_id} if source_id==&session.source.id && !song_id.is_empty())));
+    assert!(
+        requests
+            .lock()
+            .await
+            .iter()
+            .any(|(method, _)| method == "getAlbum")
+    );
+    task.abort();
+}
 
 #[test]
 fn opensubsonic_artist_identity_survives_mapping_and_older_caches_remain_readable() {
@@ -39,19 +145,22 @@ async fn compilations_browse_from_server_and_offline_cache_and_reset_on_refresh(
         let albums = json!([
             {"id":"solo","name":"Solo","artist":"A","artistId":"a","songCount":1},
             {"id":"comp","name":"Compilation","artist":"A","artistId":"a","songCount":3,"isCompilation":true},
-            {"id":"hits","name":"Greatest Hits","artist":"Various Artists","artistId":"va","songCount":2}
+            {"id":"hits","name":"Greatest Hits","artist":"C","artistId":"va","songCount":2,"isCompilation":true},
+            {"id":"excerpt","name":"Mutant Pop: 78/79","artist":"Various Artists","artistId":"va","songCount":1}
         ]);
         let songs = json!([
             {"id":"solo1","title":"Solo","albumId":"solo","artist":"A","artistId":"a","albumArtist":"A","track":1},
             {"id":"comp1","title":"A song","albumId":"comp","artist":"A","artistId":"a","albumArtist":"A","track":1},
             {"id":"comp2","title":"B song","albumId":"comp","artist":"B","artistId":"b","albumArtist":"A","track":2},
             {"id":"comp3","title":"D song","albumId":"comp","artist":"D","artistId":"d","albumArtist":"A","track":3},
-            {"id":"hits1","title":"C one","albumId":"hits","artist":"C","artistId":"va","albumArtist":"Various Artists","track":1},
-            {"id":"hits2","title":"C two","albumId":"hits","artist":"C","artistId":"va","albumArtist":"Various Artists","track":2}
+            {"id":"hits1","title":"C one","albumId":"hits","artist":"C","artistId":"va","albumArtist":"C","track":1},
+            {"id":"hits2","title":"C two","albumId":"hits","artist":"C","artistId":"va","albumArtist":"C","track":2},
+            {"id":"excerpt1","title":"All Time Low","albumId":"excerpt","artist":"2.3","artistId":"two-three","albumArtist":"Various Artists","track":1}
         ]);
         let payload = match method {
             "getArtists" => json!({"artists":{"index":[{"name":"A","artist":[
-                {"id":"a","name":"A"},{"id":"b","name":"B"},{"id":"va","name":"Various Artists"}
+                {"id":"a","name":"A"},{"id":"b","name":"B"},{"id":"va","name":"Various Artists"},
+                {"id":"two-three","name":"2.3"}
             ]}]}}),
             "getAlbumList2" => json!({"albumList2":{"album":albums}}),
             "search3" => json!({"searchResult3":{"song":songs}}),
@@ -70,14 +179,34 @@ async fn compilations_browse_from_server_and_offline_cache_and_reset_on_refresh(
         app.receive().await;
     }
     let root = &app.state.artist_nav.columns[0].items;
-    assert!(root
-        .iter()
-        .any(|item| matches!(item, BrowseItem::Compilations)));
+    assert!(
+        root.iter()
+            .any(|item| matches!(item, BrowseItem::Compilations))
+    );
     assert!(root.iter().any(|item| item.key() == session.key("a")));
     assert!(root.iter().any(|item| item.key() == "track_artist:c"));
-    assert!(!root
-        .iter()
-        .any(|item| item.key() == session.key("b") || item.key() == session.key("va")));
+    assert!(
+        !root
+            .iter()
+            .any(|item| item.key() == session.key("b") || item.key() == session.key("va"))
+    );
+    assert!(
+        !root
+            .iter()
+            .any(|item| item.key() == session.key("two-three"))
+    );
+    assert_eq!(app.state.library.compilations.albums.len(), 2);
+    assert_eq!(
+        app.state.library.compilations.artist_map[&session.key("two-three")],
+        [session.key("excerpt")]
+    );
+    assert!(
+        app.state
+            .library
+            .artists
+            .iter()
+            .any(|artist| artist.rating_key == session.key("two-three"))
+    );
 
     app.send(MillerAction::LoadArtistAlbumsForMiller {
         artist_key: session.key("a"),
@@ -85,26 +214,30 @@ async fn compilations_browse_from_server_and_offline_cache_and_reset_on_refresh(
     })
     .await;
     let items = &app.state.artist_nav.columns.last().unwrap().items;
+    assert!(matches!(items.first(), Some(BrowseItem::ArtistInfo { .. })));
+    assert!(matches!(items.get(1), Some(BrowseItem::AllTracks { .. })));
     assert!(items.iter().any(|item| item.key() == session.key("solo")));
     assert!(!items.iter().any(|item| item.key() == session.key("comp")));
-    assert!(items
-        .iter()
-        .any(|item| matches!(item, BrowseItem::CompilationTracks { .. })));
+    assert!(matches!(
+        items.get(2),
+        Some(BrowseItem::CompilationTracks { .. })
+    ));
     // A compilation-only artist, reached by search, needs no getArtist fallback.
     app.send(MillerAction::LoadArtistAlbumsForMiller {
         artist_key: session.key("b"),
         replace_child: true,
     })
     .await;
-    assert!(app
-        .state
-        .artist_nav
-        .columns
-        .last()
-        .unwrap()
-        .items
-        .iter()
-        .any(|item| matches!(item, BrowseItem::CompilationTracks { .. })));
+    assert!(
+        app.state
+            .artist_nav
+            .columns
+            .last()
+            .unwrap()
+            .items
+            .iter()
+            .any(|item| matches!(item, BrowseItem::CompilationTracks { .. }))
+    );
     assert!(!app.state.sources.nav_tasks.contains_key("artist-browse"));
     app.send(MillerAction::LoadCompilationAlbumsForMiller {
         artist_key: session.key("b"),
@@ -112,15 +245,16 @@ async fn compilations_browse_from_server_and_offline_cache_and_reset_on_refresh(
         replace_child: true,
     })
     .await;
-    assert!(app
-        .state
-        .artist_nav
-        .columns
-        .last()
-        .unwrap()
-        .items
-        .iter()
-        .any(|item| item.key() == session.key("comp")));
+    assert!(
+        app.state
+            .artist_nav
+            .columns
+            .last()
+            .unwrap()
+            .items
+            .iter()
+            .any(|item| item.key() == session.key("comp"))
+    );
     app.send(MillerAction::LoadCompilationAllTracksForMiller {
         artist_key: session.key("b"),
         artist_name: "B".into(),
@@ -160,33 +294,37 @@ async fn compilations_browse_from_server_and_offline_cache_and_reset_on_refresh(
     assert_eq!(requests.lock().await.len(), calls);
     app.state.search.query = "D".into();
     app.send(SearchAction::ExecuteLocalSearch).await;
-    assert!(app
-        .state
-        .search
-        .results
-        .as_ref()
-        .unwrap()
-        .artists
-        .iter()
-        .any(|a| a.rating_key == "track_artist:d"));
-    assert!(!app.state.artist_nav.columns[0]
-        .items
-        .iter()
-        .any(|item| item.key() == "track_artist:d"));
+    assert!(
+        app.state
+            .search
+            .results
+            .as_ref()
+            .unwrap()
+            .artists
+            .iter()
+            .any(|a| a.rating_key == "track_artist:d")
+    );
+    assert!(
+        !app.state.artist_nav.columns[0]
+            .items
+            .iter()
+            .any(|item| item.key() == "track_artist:d")
+    );
     app.send(MillerAction::LoadArtistAlbumsForMiller {
         artist_key: "track_artist:d".into(),
         replace_child: true,
     })
     .await;
-    assert!(app
-        .state
-        .artist_nav
-        .columns
-        .last()
-        .unwrap()
-        .items
-        .iter()
-        .any(|item| matches!(item, BrowseItem::CompilationTracks { .. })));
+    assert!(
+        app.state
+            .artist_nav
+            .columns
+            .last()
+            .unwrap()
+            .items
+            .iter()
+            .any(|item| matches!(item, BrowseItem::CompilationTracks { .. }))
+    );
     assert!(!app.state.sources.nav_tasks.contains_key("artist-browse"));
     assert!(
         app.state.notifications.last_error.is_none(),
@@ -202,6 +340,7 @@ async fn compilations_browse_from_server_and_offline_cache_and_reset_on_refresh(
         .prepare()
     };
     app.send(NavAction::Catalog {
+        from_cache: true,
         generation: app.state.library_generation.wrapping_add(1),
         request_id: app.state.sources.list_id,
         refreshing: false,
@@ -209,8 +348,9 @@ async fn compilations_browse_from_server_and_offline_cache_and_reset_on_refresh(
         result: Ok(empty()),
     })
     .await;
-    assert_eq!(app.state.library.compilations.albums.len(), 1);
+    assert_eq!(app.state.library.compilations.albums.len(), 2);
     app.send(NavAction::Catalog {
+        from_cache: true,
         generation: app.state.library_generation,
         request_id: app.state.sources.list_id,
         refreshing: false,
@@ -222,10 +362,12 @@ async fn compilations_browse_from_server_and_offline_cache_and_reset_on_refresh(
     assert!(app.state.library.compilations.artist_map.is_empty());
     assert!(app.state.library.compilations.single_artist.is_empty());
     assert!(app.state.library.track_artists.is_empty());
-    assert!(!app.state.artist_nav.columns[0]
-        .items
-        .iter()
-        .any(|item| matches!(item, BrowseItem::Compilations)));
+    assert!(
+        !app.state.artist_nav.columns[0]
+            .items
+            .iter()
+            .any(|item| matches!(item, BrowseItem::Compilations))
+    );
 }
 
 #[test]
@@ -255,19 +397,20 @@ async fn selected_album_uses_the_same_index_as_the_shared_album_list() {
     let session = session(url);
     let mut app = App::new(session.clone());
     app.catalog().await;
-    app.state.library.selected_artist_albums = app.state.library.albums.clone();
+    app.state.library.selected_artist_albums = app.state.library.albums.as_ref().clone();
     app.state.list_state.right_albums_index = 1; // Row zero is All Tracks.
     app.send(DataAction::LoadSelectedAlbumTracks).await;
     assert_eq!(app.state.artist_nav.columns.last().unwrap().tracks.len(), 3);
-    assert!(app
-        .state
-        .artist_nav
-        .columns
-        .last()
-        .unwrap()
-        .tracks
-        .iter()
-        .all(|t| t.parent_rating_key.as_deref() == Some(session.key("album").as_str())));
+    assert!(
+        app.state
+            .artist_nav
+            .columns
+            .last()
+            .unwrap()
+            .tracks
+            .iter()
+            .all(|t| t.parent_rating_key.as_deref() == Some(session.key("album").as_str()))
+    );
     task.abort();
 }
 
@@ -292,6 +435,19 @@ async fn radio_playlist_save_uses_active_tracks_and_rejects_blank_names() {
     while app.state.sources.nav_tasks.contains_key("playlist-write") {
         app.receive().await;
     }
+    assert!(
+        app.state
+            .library
+            .playlists
+            .iter()
+            .any(|playlist| playlist.title == "Station fixture")
+    );
+    assert!(
+        app.state.playlist_nav.columns[0]
+            .items
+            .iter()
+            .any(|item| item.title() == "Station fixture")
+    );
     let calls = requests.lock().await;
     let (_, params) = calls.iter().find(|(m, _)| m == "createPlaylist").unwrap();
     assert_eq!(params["songId"], "radio-song");
@@ -399,12 +555,13 @@ async fn shared_navidrome_actions_use_the_selected_catalog() {
         while !app.state.sources.nav_tasks.is_empty() || app.state.radio_task.is_some() {
             app.receive().await;
         }
-        assert!(app
-            .state
-            .notifications
-            .last_error
-            .as_deref()
-            .is_none_or(|error| !error.contains("has no Navidrome handler")));
+        assert!(
+            app.state
+                .notifications
+                .last_error
+                .as_deref()
+                .is_none_or(|error| !error.contains("has no Navidrome handler"))
+        );
     }
     app.state.clear_error();
     app.state.set_view(View::Browse);
@@ -427,6 +584,15 @@ async fn shared_navidrome_actions_use_the_selected_catalog() {
         .focused_mut()
         .unwrap()
         .selected_index = 1;
+    let folder = app.state.folder_state.as_ref().unwrap().focused().unwrap();
+    assert_eq!(folder.tracks.len(), folder.items.len());
+    for item in &folder.items {
+        let track = folder
+            .tracks
+            .get(item.rating_key.as_ref().unwrap())
+            .unwrap();
+        assert_eq!(track.title, item.title);
+    }
     app.send(FolderAction::PlayFolderTracks).await;
     assert_eq!(app.state.queue.tracks.len(), 2);
     assert_eq!(app.state.queue.tracks[0].rating_key, session.key("second"));
@@ -435,7 +601,7 @@ async fn shared_navidrome_actions_use_the_selected_catalog() {
     // Enqueue must report that absence, not try a Plex folder endpoint.
     app.state.set_view(View::Browse);
     app.state.set_playback_mode(PlaybackMode::Queue);
-    app.state.library.all_tracks.clear();
+    std::sync::Arc::make_mut(&mut app.state.library.all_tracks).clear();
     app.state.category_column_focused = false;
     for action in [
         QueueAction::EnqueueSelection,
@@ -443,12 +609,13 @@ async fn shared_navidrome_actions_use_the_selected_catalog() {
     ] {
         app.state.clear_error();
         app.send(action).await;
-        assert!(app
-            .state
-            .notifications
-            .last_error
-            .as_deref()
-            .is_some_and(|error| error.contains("refresh with F5")));
+        assert!(
+            app.state
+                .notifications
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains("Refresh Library"))
+        );
         assert_eq!(app.state.queue.tracks.len(), 2);
     }
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -456,7 +623,7 @@ async fn shared_navidrome_actions_use_the_selected_catalog() {
 }
 
 #[tokio::test]
-async fn remix_completion_survives_playback_advancing_but_keeps_the_current_song() {
+async fn remix_completion_applies_to_the_whole_unchanged_queue_after_playback_advances() {
     use textamp::app::state::PlaybackMode;
     let session = session("http://127.0.0.1:1".into());
     let mut app = App::new(session.clone());
@@ -475,7 +642,6 @@ async fn remix_completion_survives_playback_advancing_but_keeps_the_current_song
             .iter()
             .map(|t| t.rating_key.clone())
             .collect(),
-        index: Some(0),
         action: Box::new(
             QueueAction::RemixDoppelgangerReady(AsyncBatchOutcome::new(
                 vec![
@@ -489,13 +655,112 @@ async fn remix_completion_survives_playback_advancing_but_keeps_the_current_song
         ),
     })
     .await;
-    assert_eq!(app.state.queue.tracks[0].rating_key, session.key("first"));
-    assert_eq!(app.state.queue.tracks[1].rating_key, session.key("second"));
-    assert_eq!(
-        app.state.queue.tracks[2].rating_key,
-        session.key("replacement")
+    assert!(
+        app.state
+            .queue
+            .tracks
+            .iter()
+            .all(|track| track.rating_key == session.key("replacement"))
     );
-    assert_eq!(app.state.playback.status, PlayStatus::Playing);
+    assert_eq!(app.state.playback.status, PlayStatus::Stopped);
+}
+
+#[tokio::test]
+async fn opposite_day_refreshes_artwork_without_resuming_paused_playback() {
+    use textamp::app::event::{ArtworkEvent, PlaybackEvent};
+    use textamp::app::state::{ArtworkFetch, PlaybackMode};
+
+    let (url, requests, server) = server(|method, params| {
+        assert_eq!(
+            method, "getCoverArt",
+            "Remixing and loading artwork must not stream audio"
+        );
+        assert_eq!(params["id"], "replacement-cover");
+        (200, "replacement cover".into())
+    })
+    .await;
+    let session = session(url);
+    let mut app = App::new(session.clone());
+    let track = |id: &str, cover: &str, duration: u32| {
+        let mut data = song(id, 1, 1);
+        data["coverArt"] = json!(cover);
+        data["duration"] = json!(duration);
+        session.track(serde_json::from_value(data).unwrap())
+    };
+    app.state.set_playback_mode(PlaybackMode::Queue);
+    let original = track("original", "old-cover", 60);
+    let replacement = track("replacement", "replacement-cover", 140);
+    app.state.queue.tracks = vec![original.clone()];
+    app.state.queue.index = Some(0);
+    app.state.playback.status = PlayStatus::Paused;
+    app.state.playback.position_ms = 25_000;
+    app.state.playback.duration_ms = original.duration_ms();
+    app.state.consecutive_playback_errors = 4;
+    app.state.waveform.track_key = Some(original.rating_key.clone());
+    app.state.artwork.current_thumb = original.thumb.clone();
+    app.state.artwork.current_data = Some(b"old cover".to_vec());
+    let old_id = app.state.playback.request_id;
+    let old_thumb = original.thumb.clone().unwrap();
+    app.state.artwork.fetch = ArtworkFetch::Loading {
+        thumb: old_thumb.clone(),
+    };
+
+    app.send(NavAction::QueueEdit {
+        expected: vec![original.rating_key],
+        action: Box::new(
+            QueueAction::RemixOppositeDayReady(AsyncBatchOutcome::new(
+                vec![(0, replacement.clone())],
+                1,
+            ))
+            .into(),
+        ),
+    })
+    .await;
+    assert_eq!(
+        app.state.current_track().unwrap().rating_key,
+        replacement.rating_key
+    );
+    assert_eq!(app.state.playback.status, PlayStatus::Stopped);
+    assert_eq!(app.state.playback.position_ms, 0);
+    assert_eq!(app.state.playback.duration_ms, replacement.duration_ms());
+    assert_eq!(app.state.consecutive_playback_errors, 0);
+    assert!(app.state.waveform.track_key.is_none());
+    assert!(app.state.current_artwork_bytes().is_none());
+    assert_eq!(
+        app.state.artwork.fetch.pending_thumb(),
+        replacement.thumb.as_deref()
+    );
+
+    for stale in [
+        Event::Artwork(ArtworkEvent::ArtworkLoaded {
+            generation: app.state.artwork.grid_generation,
+            thumb_path: old_thumb,
+            data: b"late old cover".to_vec(),
+        }),
+        PlaybackEvent::RetryAfterDelay {
+            playback_id: old_id,
+        }
+        .into(),
+        PlaybackEvent::PlaybackError {
+            playback_id: Some(old_id),
+            message: "late decoder failure".into(),
+        }
+        .into(),
+    ] {
+        assert!(handle_core_event(stale, &mut app.state, &app.tx).is_empty());
+    }
+    assert_eq!(app.state.consecutive_playback_errors, 0);
+    assert!(app.state.current_artwork_bytes().is_none());
+    while app.state.artwork.fetch.is_loading() {
+        app.receive().await;
+    }
+    assert_eq!(
+        app.state.current_artwork_bytes(),
+        Some(b"replacement cover".as_slice())
+    );
+    assert_eq!(app.state.playback.status, PlayStatus::Stopped);
+    assert_eq!(requests.lock().await.len(), 1);
+    server.abort();
 }
 
 #[tokio::test]
@@ -504,12 +769,23 @@ async fn twofer_handles_single_tracks_and_does_not_sample_already_queued_tracks(
     let session = session("http://127.0.0.1:1".into()); // Twofer must not need a server.
     for queued in [1, 30] {
         let mut app = App::new(session.clone());
+        // Explicit Twofer overrides the general same-artist preference.
+        app.state.remix_allow_same_artist = false;
         app.state.set_playback_mode(PlaybackMode::Queue);
-        app.state.library.all_tracks = (0..queued + 1)
-            .map(|i| session.track(serde_json::from_value(song(&i.to_string(), 1, 1)).unwrap()))
-            .collect();
+        app.state.library.all_tracks = std::sync::Arc::new(
+            (0..queued + 1)
+                .map(|i| {
+                    let mut item = song(&i.to_string(), 1, 1);
+                    if i == queued {
+                        item["albumId"] = json!("another-album");
+                        item["album"] = json!("Another Album");
+                    }
+                    session.track(serde_json::from_value(item).unwrap())
+                })
+                .collect(),
+        );
         app.state.queue.tracks = app.state.library.all_tracks[..queued].to_vec();
-        app.state.queue.index = Some(0);
+        app.state.queue.index = Some(queued - 1);
         app.send(QueueAction::RemixTwofer).await;
         while app.state.sources.nav_tasks.contains_key("remix") {
             app.receive().await;
@@ -519,6 +795,10 @@ async fn twofer_handles_single_tracks_and_does_not_sample_already_queued_tracks(
             app.state.queue.tracks[1].rating_key,
             session.key(&queued.to_string()),
             "insert after the first seed even when its neighbor has the same artist"
+        );
+        assert_eq!(
+            app.state.current_track().unwrap().rating_key,
+            session.key(&(queued - 1).to_string())
         );
         assert!(app.state.notifications.last_error.is_none());
     }
@@ -551,6 +831,254 @@ async fn doppelganger_replacing_only_later_tracks_does_not_stop_playback() {
 }
 
 #[tokio::test]
+async fn gemini_obeys_album_and_artist_policy_and_adds_actual_recommendations() {
+    use textamp::app::state::PlaybackMode;
+    for allow_artist in [false, true] {
+        let make = |id: &str, artist: &str, album: &str| {
+            let mut row = song(id, 1, 1);
+            row["artistId"] = json!(artist);
+            row["artist"] = json!(artist);
+            row["albumArtist"] = json!(artist);
+            row["albumId"] = json!(album);
+            row["album"] = json!(album);
+            row
+        };
+        let rows = vec![
+            make("seed", "A", "queued"),
+            make("same-album", "B", "queued"),
+            make("same-artist", "A", "different"),
+            make("good", "C", "third"),
+        ];
+        let response_rows = rows.clone();
+        let (url, requests, task) = server(move |method, params| {
+            let body = if method == "getSonicSimilarTracks" {
+                json!({"sonicMatch": response_rows[1..].iter().map(|row| json!({"entry":row,"similarity":0.9})).collect::<Vec<_>>()})
+            } else {fixture(method, params)};
+            (200, envelope(body))
+        }).await;
+        let mut session = session(url);
+        session.extensions.insert("sonicSimilarity".into());
+        let mut app = App::new(session.clone());
+        app.state.remix_allow_same_artist = allow_artist;
+        app.state.library.all_tracks = std::sync::Arc::new(
+            rows.into_iter()
+                .map(|row| session.track(serde_json::from_value(row).unwrap()))
+                .collect(),
+        );
+        app.state.set_playback_mode(PlaybackMode::Queue);
+        app.state.queue.tracks = vec![app.state.library.all_tracks[0].clone()];
+        app.state.queue.index = Some(0);
+        app.send(QueueAction::RemixGemini).await;
+        while app.state.sources.nav_tasks.contains_key("remix") {
+            app.receive().await;
+        }
+        assert_eq!(
+            app.state.queue.tracks.len(),
+            2,
+            "Twins must actually add a track"
+        );
+        assert_eq!(
+            app.state.queue.tracks[1].rating_key,
+            session.key(if allow_artist { "same-artist" } else { "good" })
+        );
+        assert_ne!(
+            app.state.queue.tracks[1].parent_rating_key,
+            app.state.queue.tracks[0].parent_rating_key
+        );
+        assert!(app.state.notifications.last_error.is_none());
+        assert!(
+            requests
+                .lock()
+                .await
+                .iter()
+                .any(|(method, _)| method == "getSonicSimilarTracks")
+        );
+        assert!(app.state.queue.undo_snapshot.is_some());
+        task.abort();
+    }
+}
+
+#[tokio::test]
+async fn gemini_excludes_duplicate_recommendation_albums_across_seed_requests() {
+    use textamp::app::state::PlaybackMode;
+    let mut rows = Vec::new();
+    for (id, artist, album) in [
+        ("seed1", "A", "original"),
+        ("seed2", "A", "original"),
+        ("pick1", "B", "new-album"),
+        ("duplicate-album", "C", "new-album"),
+        ("pick2", "D", "another-album"),
+    ] {
+        let mut row = song(id, 1, 1);
+        row["artistId"] = json!(artist);
+        row["artist"] = json!(artist);
+        row["albumArtist"] = json!(artist);
+        row["albumId"] = json!(album);
+        row["album"] = json!(album);
+        rows.push(row);
+    }
+    let candidates = rows[2..].to_vec();
+    let (url, _, task) = server(move |method, params| (200,envelope(if method == "getSonicSimilarTracks" {
+        json!({"sonicMatch":candidates.iter().map(|row|json!({"entry":row,"similarity":0.9})).collect::<Vec<_>>()})
+    } else {fixture(method,params)}))).await;
+    let mut session = session(url);
+    session.extensions.insert("sonicSimilarity".into());
+    let mut app = App::new(session.clone());
+    app.state.library.all_tracks = std::sync::Arc::new(
+        rows.into_iter()
+            .map(|row| session.track(serde_json::from_value(row).unwrap()))
+            .collect(),
+    );
+    app.state.set_playback_mode(PlaybackMode::Queue);
+    app.state.queue.tracks = app.state.library.all_tracks[..2].to_vec();
+    app.state.queue.index = Some(0);
+    app.send(QueueAction::RemixGemini).await;
+    while app.state.sources.nav_tasks.contains_key("remix") {
+        app.receive().await;
+    }
+    assert_eq!(
+        app.state
+            .queue
+            .tracks
+            .iter()
+            .map(|track| track.rating_key.clone())
+            .collect::<Vec<_>>(),
+        ["seed1", "pick1", "seed2", "pick2"].map(|id| session.key(id))
+    );
+    task.abort();
+}
+
+#[tokio::test]
+async fn changing_queue_contents_cancels_pending_edits_but_playback_progress_does_not() {
+    for mutation in [
+        QueueAction::EnqueueTracksNext(vec![textamp::library::models::Track {
+            rating_key: "extra".into(),
+            ..Default::default()
+        }]),
+        QueueAction::ReorderSelection { from: 0, to: 2 },
+        QueueAction::RemoveFromQueue(0),
+    ] {
+        let session = session("http://127.0.0.1:1".into());
+        let mut app = App::new(session.clone());
+        app.state.queue.tracks = ["first", "second"]
+            .map(|id| session.track(serde_json::from_value(song(id, 1, 1)).unwrap()))
+            .to_vec();
+        app.state.library.all_tracks = std::sync::Arc::new(app.state.queue.tracks.clone());
+        app.state.queue.index = Some(0);
+        app.send(QueueAction::RemixTwofer).await;
+        let request_id = app.state.sources.nav_tasks["remix"].0;
+        app.state.queue.index = Some(1);
+        app.state.playback.position_ms = 1200;
+        app.send(QueueAction::SetRepeat(
+            textamp::app::state::RepeatMode::Track,
+        ))
+        .await;
+        assert_eq!(app.state.sources.nav_tasks["remix"].0, request_id);
+        app.send(mutation).await;
+        assert!(!app.state.sources.nav_tasks.contains_key("remix"));
+        let expected: Vec<_> = app
+            .state
+            .queue
+            .tracks
+            .iter()
+            .map(|track| track.rating_key.clone())
+            .collect();
+        app.send(NavAction::Completed {
+            generation: app.state.library_generation,
+            request_id,
+            slot: "remix",
+            result: Ok(vec![QueueAction::ClearQueue.into()]),
+        })
+        .await;
+        assert_eq!(
+            app.state
+                .queue
+                .tracks
+                .iter()
+                .map(|track| track.rating_key.clone())
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+}
+
+#[tokio::test]
+async fn new_queue_edit_replaces_inflight_work_and_rejects_its_late_completion() {
+    use textamp::app::{presentation::NpSidebarButton, queue_controls};
+    let session = session("http://127.0.0.1:1".into());
+    let mut app = App::new(session.clone());
+    let seed = session.track(serde_json::from_value(song("first", 1, 1)).unwrap());
+    app.state.library.all_tracks = std::sync::Arc::new(vec![seed.clone()]);
+    app.state.queue.tracks = vec![seed];
+    app.state.queue.index = Some(0);
+    app.send(QueueAction::RemixTwofer).await;
+    let old_id = app.state.sources.nav_tasks["remix"].0;
+    assert!(
+        queue_controls::definition(&app.state, NpSidebarButton::Twofer)
+            .disabled_reason
+            .is_none()
+    );
+    app.send(QueueAction::RemixTwofer).await;
+    let new_id = app.state.sources.nav_tasks["remix"].0;
+    assert_ne!(old_id, new_id);
+    app.send(NavAction::Completed {
+        generation: app.state.library_generation,
+        request_id: old_id,
+        slot: "remix",
+        result: Ok(vec![
+            QueueAction::RemixBatchReady(AsyncBatchOutcome::new(
+                vec![(
+                    0,
+                    vec![session.track(serde_json::from_value(song("stale", 2, 2)).unwrap())],
+                )],
+                1,
+            ))
+            .into(),
+        ]),
+    })
+    .await;
+    assert_eq!(app.state.sources.nav_tasks["remix"].0, new_id);
+    assert_eq!(app.state.queue.tracks.len(), 1);
+    while app.state.sources.nav_tasks.contains_key("remix") {
+        app.receive().await;
+    }
+    assert_eq!(app.state.queue.tracks.len(), 1);
+}
+
+#[tokio::test]
+async fn remix_policy_change_cancels_work_and_rejects_old_completion() {
+    use textamp::app::state::PlaybackMode;
+    let session = session("http://127.0.0.1:1".into());
+    let mut app = App::new(session.clone());
+    app.state.remix_allow_same_artist = true;
+    app.state.set_playback_mode(PlaybackMode::Queue);
+    let seed = session.track(serde_json::from_value(song("first", 1, 1)).unwrap());
+    app.state.library.all_tracks = std::sync::Arc::new(vec![seed.clone()]);
+    app.state.queue.tracks = vec![seed];
+    app.state.queue.index = Some(0);
+    app.send(QueueAction::RemixTwofer).await;
+    let request_id = app.state.sources.nav_tasks["remix"].0;
+    app.send(SettingsAction::SetRemixAllowSameArtist(false))
+        .await;
+    assert!(!app.state.sources.nav_tasks.contains_key("remix"));
+    assert!(!app.config.ui.remix_allow_same_artist);
+    app.send(NavAction::Completed {
+        generation: app.state.library_generation,
+        request_id,
+        slot: "remix",
+        result: Ok(vec![
+            QueueAction::RemixBatchReady(AsyncBatchOutcome::new(
+                vec![(0, vec![Default::default()])],
+                1,
+            ))
+            .into(),
+        ]),
+    })
+    .await;
+    assert_eq!(app.state.queue.tracks.len(), 1);
+}
+
+#[tokio::test]
 async fn all_navidrome_remixes_use_scoped_candidates_and_keep_undo() {
     use textamp::app::state::PlaybackMode;
     for remix in [
@@ -562,6 +1090,10 @@ async fn all_navidrome_remixes_use_scoped_candidates_and_keep_undo() {
         let (url, _, server) = server(|method, params| {
             let mut candidate = song("second", 2, 1);
             candidate["artistId"] = json!("other-artist");
+            candidate["artist"] = json!("Other Artist");
+            candidate["albumArtist"] = json!("Other Artist");
+            candidate["albumId"] = json!("another-album");
+            candidate["album"] = json!("Another Album");
             let result = match method {
                 "getOpenSubsonicExtensions" => {
                     json!({"openSubsonicExtensions":[{"name":"sonicSimilarity","versions":[1]}]})
@@ -582,6 +1114,13 @@ async fn all_navidrome_remixes_use_scoped_candidates_and_keep_undo() {
         let session = session(url);
         let mut app = App::new(session.clone());
         app.catalog().await;
+        app.state.remix_allow_same_artist = true;
+        for track in std::sync::Arc::make_mut(&mut app.state.library.all_tracks) {
+            if track.rating_key == session.key("second") {
+                track.parent_rating_key = Some(session.key("another-album"));
+                track.parent_title = Some("Another Album".into());
+            }
+        }
         app.state.set_playback_mode(PlaybackMode::Queue);
         app.state.queue.tracks = vec![
             session.track(serde_json::from_value(song("first", 1, 1)).unwrap()),
@@ -594,12 +1133,13 @@ async fn all_navidrome_remixes_use_scoped_candidates_and_keep_undo() {
             app.receive().await;
         }
         assert!(app.state.queue.undo_snapshot.is_some());
-        assert!(app
-            .state
-            .queue
-            .tracks
-            .iter()
-            .any(|t| t.rating_key == session.key("second")));
+        assert!(
+            app.state
+                .queue
+                .tracks
+                .iter()
+                .any(|t| t.rating_key == session.key("second"))
+        );
         assert_eq!(app.state.queue.tracks.len(), if replacing { 2 } else { 3 });
         server.abort();
     }
@@ -611,14 +1151,28 @@ async fn navidrome_station_list_and_random_album_work_without_sonic_or_plex() {
         server(|method, params| (200, envelope(fixture(method, params)))).await;
     let mut app = App::new(session(url));
     app.catalog().await;
-    assert!(app.state.station_nav.columns[0]
-        .stations
-        .iter()
-        .any(|s| s.title == "Random Artist Radio"));
-    assert!(app.state.station_nav.columns[0]
-        .stations
-        .iter()
-        .any(|s| s.title == "Random Album Radio"));
+    assert!(
+        app.state.station_nav.columns[0]
+            .stations
+            .iter()
+            .any(|s| s.title == "Random Artist Mix")
+    );
+    assert!(
+        app.state.station_nav.columns[0]
+            .stations
+            .iter()
+            .any(|s| s.title == "Play Random Albums")
+    );
+    // Isolate station requests from the catalog's background cache fill.
+    while app
+        .state
+        .settings_state
+        .cache_scans
+        .values()
+        .any(|scan| matches!(scan.work, textamp::app::sources::cache::Work::Warm(_)))
+    {
+        app.receive().await;
+    }
     seen.lock().await.clear();
     // A drilled category replaces the current list; root stations remain in
     // station_nav and must still supply the shortcut's key and title.
@@ -649,7 +1203,7 @@ async fn navidrome_station_list_and_random_album_work_without_sonic_or_plex() {
     // Station creation succeeds; the silent fixture deliberately has no output device.
     assert_eq!(
         app.state.radio.active_station.as_ref().unwrap().title,
-        "Random Album Radio"
+        "Play Random Albums"
     );
     assert_eq!(
         app.state.notifications.last_error.as_deref(),
@@ -673,61 +1227,21 @@ async fn navidrome_station_list_and_random_album_work_without_sonic_or_plex() {
             .collect::<Vec<_>>(),
         [1, 1, 2]
     );
-    assert!(seen
-        .lock()
-        .await
-        .iter()
-        .all(|(method, _)| method == "scrobble" || method == "getCoverArt" || method == "stream"));
-    server.abort();
-}
-#[tokio::test]
-async fn navidrome_dj_uses_sonic_api_and_rejects_stale_results() {
-    use textamp::app::state::{DjMode, PlaybackMode};
-    let (url, seen, server) = server(|method, params| {
-        let result = match method {
-            "getOpenSubsonicExtensions" => json!({"openSubsonicExtensions":[{"name":"sonicSimilarity","versions":[1]}]}),
-            "getSonicSimilarTracks" => json!({"sonicMatch":[{"entry":song("second",2,1),"similarity":0.9},{"entry":song("outside-library",1,1),"similarity":0.8}]}),
-            _ => fixture(method, params),
-        };
-        (200, envelope(result))
-    }).await;
-    let session = session(url);
-    let mut app = App::new(session.clone());
-    app.catalog().await;
-    app.state.set_playback_mode(PlaybackMode::Queue);
-    let first = session.track(serde_json::from_value(song("first", 1, 1)).unwrap());
-    let last = session.track(serde_json::from_value(song("disc2", 1, 2)).unwrap());
-    app.state.queue.tracks = vec![first, last];
-    app.state.queue.index = Some(0);
-    app.send(RadioAction::ToggleDjMode(DjMode::Gemini)).await;
-    while app.state.dj.inserting {
-        app.receive().await;
-    }
-    assert_eq!(app.state.queue.tracks[1].rating_key, session.key("second"));
-    assert_eq!(app.state.queue.tracks.len(), 3);
-    assert!(seen
-        .lock()
-        .await
-        .iter()
-        .any(|(m, _)| m == "getSonicSimilarTracks"));
-    let before = app.state.queue.tracks.len();
-    app.send(NavAction::DjReady {
-        playback_id: app.state.playback.request_id.wrapping_add(1),
-        track: session.key("first"),
-        mode: DjMode::Gemini,
-        result: Ok(vec![
-            session.track(serde_json::from_value(song("stale", 1, 1)).unwrap())
-        ]),
-    })
-    .await;
-    assert_eq!(app.state.queue.tracks.len(), before);
-    app.send(NavAction::QueueEdit {
-        expected: vec!["old-queue".into()],
-        index: Some(0),
-        action: Box::new(QueueAction::ClearQueue.into()),
-    })
-    .await;
-    assert_eq!(app.state.queue.tracks.len(), before);
+    let requests = seen.lock().await;
+    assert!(
+        requests
+            .iter()
+            .all(|(method, params)| match method.as_str() {
+                "scrobble" | "getCoverArt" | "stream" => true,
+                "getAlbum" => params.get("id").is_some_and(|id| id == "album"),
+                _ => false,
+            }),
+        "{:?}",
+        requests
+            .iter()
+            .map(|(method, _)| method)
+            .collect::<Vec<_>>()
+    );
     server.abort();
 }
 
@@ -749,10 +1263,12 @@ async fn navidrome_sonic_station_and_track_action_share_continuation_and_scoped_
         session.extensions.insert("sonicSimilarity".into());
         let mut app = App::new(session.clone());
         // No catalog fetch or real audio: isolate the station's API requests.
-        app.state.library.all_tracks = ["first", "second", "disc2"]
-            .iter()
-            .map(|id| session.track(serde_json::from_value(song(id, 1, 1)).unwrap()))
-            .collect();
+        app.state.library.all_tracks = std::sync::Arc::new(
+            ["first", "second", "disc2"]
+                .iter()
+                .map(|id| session.track(serde_json::from_value(song(id, 1, 1)).unwrap()))
+                .collect(),
+        );
         app.state.set_playback_mode(PlaybackMode::Queue);
         let seed = app.state.library.all_tracks[0].clone();
         app.state.queue.tracks = vec![seed.clone()];
@@ -798,9 +1314,11 @@ async fn navidrome_sonic_station_and_track_action_share_continuation_and_scoped_
             2,
             "no playback, Plex, or catalog requests: {requests:?}"
         );
-        assert!(requests
-            .iter()
-            .all(|(method, _)| method == "getSonicSimilarTracks"));
+        assert!(
+            requests
+                .iter()
+                .all(|(method, _)| method == "getSonicSimilarTracks")
+        );
         assert_eq!(requests[0].1["id"], "first");
         assert_eq!(requests[1].1["id"], "second");
     }
@@ -812,14 +1330,13 @@ async fn random_artist_radio_uses_twenty_five_track_catalog_minimum() {
     let mut app = App::new(session("http://127.0.0.1:1".into()));
     for (artist, count) in [("small", 24), ("large", 25)] {
         for i in 0..count {
-            app.state
-                .library
-                .all_tracks
-                .push(textamp::library::models::Track {
+            std::sync::Arc::make_mut(&mut app.state.library.all_tracks).push(
+                textamp::library::models::Track {
                     rating_key: format!("navidrome:account-one:{artist}-{i}"),
                     grandparent_rating_key: Some(artist.into()),
                     ..Default::default()
-                });
+                },
+            );
         }
     }
     {
@@ -829,28 +1346,28 @@ async fn random_artist_radio_uses_twenty_five_track_catalog_minimum() {
             app.receive().await;
         }
         assert_eq!(app.state.radio.tracks.len(), 25);
-        assert!(app
-            .state
-            .radio
-            .tracks
-            .iter()
-            .all(|t| t.grandparent_rating_key.as_deref() == Some("large")));
+        assert!(
+            app.state
+                .radio
+                .tracks
+                .iter()
+                .all(|t| t.grandparent_rating_key.as_deref() == Some("large"))
+        );
         let catalog = app.state.library.all_tracks.clone();
-        app.state
-            .library
-            .all_tracks
+        std::sync::Arc::make_mut(&mut app.state.library.all_tracks)
             .retain(|t| t.grandparent_rating_key.as_deref() == Some("small"));
         app.send(RadioAction::PlayStation(station.into())).await;
         while app.state.station_starting.is_some() {
             app.receive().await;
         }
-        assert!(app
-            .state
-            .notifications
-            .last_error
-            .as_ref()
-            .unwrap()
-            .contains("at least 25 tracks"));
+        assert!(
+            app.state
+                .notifications
+                .last_error
+                .as_ref()
+                .unwrap()
+                .contains("at least 25 tracks")
+        );
         assert_eq!(
             app.state.radio.tracks.len(),
             25,
@@ -870,111 +1387,6 @@ fn source(url: String) -> Source {
     }
 }
 
-#[tokio::test]
-async fn every_dj_mode_uses_the_shared_queue_reducer() {
-    use textamp::app::state::DjMode;
-    let (url, _, task) = server(|m, p| {
-        let body = match m {
-            "getOpenSubsonicExtensions" => json!({"openSubsonicExtensions":[{"name":"sonicSimilarity"}]}),
-            "getSonicSimilarTracks" => json!({"sonicMatch":[{"entry":song("disc2",1,2)}]}),
-            "findSonicPath" => json!({"sonicMatch":[{"entry":song("first",1,1)},{"entry":song("disc2",1,2)},{"entry":song("second",2,1)}]}),
-            "getSimilarSongs2" => json!({"similarSongs2":{"song":[song("disc2",1,2)]}}),
-            _ => fixture(m, p),
-        };
-        (200, envelope(body))
-    }).await;
-    let mut session = session(url);
-    session.extensions.insert("sonicSimilarity".into());
-    for mode in [
-        DjMode::Twofer,
-        DjMode::Contempo,
-        DjMode::Groupie,
-        DjMode::Gemini,
-        DjMode::Freeze,
-        DjMode::Stretch,
-    ] {
-        let mut app = App::new(session.clone());
-        app.catalog().await;
-        for track in &mut app.state.library.all_tracks {
-            track.year = Some(1975);
-        }
-        let mut first = session.track(serde_json::from_value(song("first", 1, 1)).unwrap());
-        first.year = Some(1971);
-        let mut next = session.track(serde_json::from_value(song("second", 2, 1)).unwrap());
-        next.grandparent_rating_key = Some(session.key("another-artist"));
-        app.state.queue.tracks = vec![first, next];
-        app.state.queue.index = Some(0);
-        app.send(RadioAction::ToggleDjMode(mode)).await;
-        while app.state.sources.nav_tasks.contains_key("dj") {
-            app.receive().await;
-        }
-        assert_eq!(app.state.dj.active_mode, Some(mode));
-        assert_eq!(
-            app.state.queue.tracks[1].rating_key,
-            session.key("disc2"),
-            "{mode:?}: {:?}",
-            app.state.notifications.last_error
-        );
-        assert_eq!(app.state.queue.tracks.len(), 3, "{mode:?}");
-        assert_eq!(
-            app.state.queue.index,
-            Some(0),
-            "DJ insertion must not skip the playing song"
-        );
-        assert!(!app.state.dj.inserting);
-    }
-    task.abort();
-}
-
-#[tokio::test]
-async fn groupie_keeps_same_artist_radio_when_related_service_is_unavailable() {
-    use textamp::app::state::DjMode;
-    let (url, requests, task) = server(|m, p| {
-        if m == "getSimilarSongs2" {
-            return (200, json!({"subsonic-response":{"status":"failed","error":{"code":70,"message":"Related service unavailable"}}}).to_string());
-        }
-        (200, envelope(fixture(m, p)))
-    }).await;
-    let session = session(url);
-    let mut app = App::new(session);
-    app.catalog().await;
-    app.state.queue.tracks = vec![app.state.library.all_tracks[0].clone()];
-    app.state.queue.index = Some(0);
-    app.send(RadioAction::ToggleDjMode(DjMode::Groupie)).await;
-    while app.state.sources.nav_tasks.contains_key("dj") {
-        app.receive().await;
-    }
-    assert!(app.state.queue.tracks.len() > 1);
-    let artist = &app.state.queue.tracks[0].grandparent_rating_key;
-    assert!(app
-        .state
-        .queue
-        .tracks
-        .iter()
-        .all(|t| &t.grandparent_rating_key == artist));
-    let artist = artist.clone().unwrap();
-    app.send(RadioAction::StartArtistRadio {
-        key: artist.clone(),
-        title: "Artist Radio".into(),
-    })
-    .await;
-    while app.state.radio_task.is_some() {
-        app.receive().await;
-    }
-    assert!(!app.state.radio.tracks.is_empty());
-    assert!(app
-        .state
-        .radio
-        .tracks
-        .iter()
-        .all(|t| t.grandparent_rating_key.as_ref() == Some(&artist)));
-    assert!(!requests
-        .lock()
-        .await
-        .iter()
-        .any(|(m, _)| m == "getSonicSimilarTracks"));
-    task.abort();
-}
 fn session(url: String) -> Session {
     let source = source(url);
     Session {
@@ -1008,6 +1420,9 @@ fn fixture(method: &str, _params: &HashMap<String, String>) -> Value {
         "getArtist" => json!({"artist":{"id":"artist","name":"Artist","album":[album()]}}),
         "search3" => {
             json!({"searchResult3":{"song":[song("disc2",1,2),song("second",2,1),song("first",1,1)]}})
+        }
+        "createPlaylist" => {
+            json!({"playlist":{"id":"saved-playlist","name":_params.get("name").cloned().unwrap_or_default(),"songCount":1}})
         }
         "getPlaylists" => {
             json!({"playlists":{"playlist":[{"id":"playlist","name":"Playlist","songCount":2}]}})
@@ -1077,6 +1492,17 @@ async fn server(
                     .query_pairs()
                     .map(|(k, v)| (k.into_owned(), v.into_owned()))
                     .collect();
+                if method == "getLyricsBySongId" {
+                    params.insert("_url_query".into(), url.query().unwrap_or_default().into());
+                    params.insert(
+                        "_content_type".into(),
+                        header
+                            .lines()
+                            .find(|line| line.to_ascii_lowercase().starts_with("content-type:"))
+                            .unwrap_or_default()
+                            .to_ascii_lowercase(),
+                    );
+                }
                 if len > 0 {
                     let form = reqwest::Url::parse(&format!(
                         "http://localhost/?{}",
@@ -1088,6 +1514,24 @@ async fn server(
                         .filter(|(k, _)| k == "songId")
                         .map(|(_, v)| v.into_owned())
                         .collect();
+                    let removals: Vec<_> = form
+                        .query_pairs()
+                        .filter(|(k, _)| k == "songIndexToRemove")
+                        .map(|(_, v)| v.parse::<usize>().unwrap())
+                        .collect();
+                    params.insert(
+                        "_removedIndices".into(),
+                        serde_json::to_string(&removals).unwrap(),
+                    );
+                    let additions: Vec<_> = form
+                        .query_pairs()
+                        .filter(|(k, _)| k == "songIdToAdd")
+                        .map(|(_, v)| v.into_owned())
+                        .collect();
+                    params.insert(
+                        "_additions".into(),
+                        serde_json::to_string(&additions).unwrap(),
+                    );
                     params.insert("_songIds".into(), serde_json::to_string(&song_ids).unwrap());
                     params.extend(
                         form.query_pairs()
@@ -1100,7 +1544,10 @@ async fn server(
                 if status == 0 {
                     return;
                 } // interrupted connection, before any response
-                let response = format!("HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len());
+                let response = format!(
+                    "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
                 let _ = stream.write_all(response.as_bytes()).await;
             });
         }
@@ -1119,14 +1566,17 @@ fn system_collections_are_separate_from_saved_playlists_without_name_guessing() 
     use textamp::app::state::CategoryRow;
     let session = session("http://example.test".into());
     let mut app = App::new(session.clone());
-    app.state.library.playlists = ["Recently Played", "All Music", "My ❤️ mix"]
-        .iter()
-        .enumerate()
-        .map(|(i, name)| {
-            session
-                .playlist(serde_json::from_value(json!({"id":i.to_string(),"name":name})).unwrap())
-        })
-        .collect();
+    app.state.library.playlists = std::sync::Arc::new(
+        ["Recently Played", "All Music", "My ❤️ mix"]
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                session.playlist(
+                    serde_json::from_value(json!({"id":i.to_string(),"name":name})).unwrap(),
+                )
+            })
+            .collect(),
+    );
     let rows = app.state.category_rows();
     let system: Vec<_> = rows
         .iter()
@@ -1144,16 +1594,19 @@ fn system_collections_are_separate_from_saved_playlists_without_name_guessing() 
         .position(|r| matches!(r, CategoryRow::Playlist(_)))
         .unwrap();
     assert_eq!(rows[first_playlist - 1], CategoryRow::Header("Playlists"));
-    assert!(rows[first_playlist..]
-        .iter()
-        .all(|r| matches!(r, CategoryRow::Playlist(_))));
+    assert!(
+        rows[first_playlist..]
+            .iter()
+            .all(|r| matches!(r, CategoryRow::Playlist(_)))
+    );
     assert_eq!(rows[first_playlist..].len(), 3);
     app.state.sources.active = ActiveSource::None;
-    assert!(!app
-        .state
-        .category_rows()
-        .iter()
-        .any(|r| matches!(r, CategoryRow::NavidromeCollection(_))));
+    assert!(
+        !app.state
+            .category_rows()
+            .iter()
+            .any(|r| matches!(r, CategoryRow::NavidromeCollection(_)))
+    );
 }
 
 #[test]
@@ -1161,22 +1614,26 @@ fn system_sidebar_keyboard_mouse_and_overflow_use_the_rendered_rows() {
     use crossterm::event::{
         KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
-    use ratatui::{backend::TestBackend, Terminal};
+    use ratatui::{Terminal, backend::TestBackend};
     use textamp::app::handlers::{key_input, mouse_input};
     use textamp::app::sources::navidrome::commands::CollectionKind;
     use textamp::app::state::{BrowseNavigationState, CategoryRow};
     let session = session("http://example.test".into());
     let mut app = App::new(session.clone());
-    app.state.tall_mode = true;
+    app.state.desktop_split_view = true;
     app.state.category_column_focused = true;
-    app.state.library.playlists = (0..40)
-        .map(|i| {
-            session.playlist(
-                serde_json::from_value(json!({"id":i.to_string(),"name":format!("Saved {i:02}")}))
+    app.state.library.playlists = std::sync::Arc::new(
+        (0..40)
+            .map(|i| {
+                session.playlist(
+                    serde_json::from_value(
+                        json!({"id":i.to_string(),"name":format!("Saved {i:02}")}),
+                    )
                     .unwrap(),
-            )
-        })
-        .collect();
+                )
+            })
+            .collect(),
+    );
     app.state.playlist_nav = BrowseNavigationState::with_root(
         "playlists",
         BrowseItem::from_playlists(&app.state.library.playlists),
@@ -1272,7 +1729,7 @@ fn system_sidebar_keyboard_mouse_and_overflow_use_the_rendered_rows() {
 
 #[tokio::test]
 async fn system_collections_use_scoped_native_endpoints_and_preserve_server_order() {
-    use textamp::app::sources::navidrome::commands::{load_collection, Collection, CollectionKind};
+    use textamp::app::sources::navidrome::commands::{Collection, CollectionKind, load_collection};
     let (url, seen, task) = server(|method, _| {
         let response = match method {
             "getStarred2" => json!({"starred2":{"song":[song("second",2,1),song("first",1,1)],"album":[album()],"artist":[{"id":"artist","name":"Artist"}]}}),
@@ -1413,6 +1870,7 @@ async fn refreshed_catalog_drops_deleted_playlist_tracks_without_overwriting_sys
     )
     .unwrap();
     app.send(NavAction::Catalog {
+        from_cache: true,
         generation: app.state.library_generation,
         request_id: app.state.sources.list_id,
         refreshing: false,
@@ -1435,10 +1893,12 @@ async fn audiomuse_browse_uses_existing_tracks_and_normal_navigation_without_pla
     use textamp::audiomuse::{Feature, Snapshot};
     let session = session("http://example.test".into());
     let mut app = App::new(session.clone());
-    app.state.library.all_tracks = ["one", "two"]
-        .iter()
-        .map(|id| session.track(serde_json::from_value(song(id, 1, 1)).unwrap()))
-        .collect();
+    app.state.library.all_tracks = std::sync::Arc::new(
+        ["one", "two"]
+            .iter()
+            .map(|id| session.track(serde_json::from_value(song(id, 1, 1)).unwrap()))
+            .collect(),
+    );
     let library_key = audiomuse::key(&session);
     app.state.sources.audiomuse.connections.insert(
         library_key.clone(),
@@ -1510,7 +1970,7 @@ async fn sidebar_headings_are_skipped_and_search_requires_explicit_activation_fo
     use crossterm::event::{
         KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
-    use ratatui::{backend::TestBackend, Terminal};
+    use ratatui::{Terminal, backend::TestBackend};
     use textamp::app::handlers::{key_input, mouse_input};
     use textamp::app::state::CategoryRow;
     for source in [
@@ -1655,7 +2115,7 @@ async fn clearing_search_invalidates_old_results_and_requests() {
 #[test]
 fn audiomuse_form_has_masked_fields_buttons_and_cancel_without_saving() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use ratatui::{backend::TestBackend, Terminal};
+    use ratatui::{Terminal, backend::TestBackend};
     use textamp::app::sources::{audiomuse, dialogs};
     let mut app = App::new(session("http://example.test".into()));
     app.state
@@ -1865,11 +2325,120 @@ async fn interrupted_reads_retry_once_but_writes_never_retry() {
     let client = session(url).client;
     assert!(client.artists().await.is_err());
     assert_eq!(requests.lock().await.len(), 2);
-    assert!(client
-        .call("scrobble", &[("id", "test".into())])
-        .await
-        .is_err());
+    assert!(
+        client
+            .call("scrobble", &[("id", "test".into())])
+            .await
+            .is_err()
+    );
     assert_eq!(requests.lock().await.len(), 3);
+    task.abort();
+}
+
+#[tokio::test]
+async fn catalog_pages_overlap_in_a_bounded_window_and_keep_offset_order() {
+    async fn read_offset(socket: &mut tokio::net::TcpStream) -> usize {
+        let mut bytes = Vec::new();
+        let mut chunk = [0; 4096];
+        while !bytes.windows(4).any(|w| w == b"\r\n\r\n") {
+            let n = socket.read(&mut chunk).await.unwrap();
+            assert!(n > 0);
+            bytes.extend_from_slice(&chunk[..n]);
+        }
+        let text = String::from_utf8(bytes).unwrap();
+        let path = text.split_whitespace().nth(1).unwrap();
+        reqwest::Url::parse(&format!("http://fixture{path}"))
+            .unwrap()
+            .query_pairs()
+            .find(|(key, _)| key == "offset")
+            .unwrap()
+            .1
+            .parse()
+            .unwrap()
+    }
+    async fn reply(mut socket: tokio::net::TcpStream, offset: usize) {
+        let count = if offset == 2000 { 1 } else { 500 };
+        let body = envelope(json!({"albumList2":{"album":(offset..offset+count)
+            .map(|id|json!({"id":id.to_string(),"name":"Album"})).collect::<Vec<_>>()}}));
+        socket
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = session(format!("http://{}", listener.local_addr().unwrap())).client;
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        assert_eq!(read_offset(&mut socket).await, 0);
+        reply(socket, 0).await;
+        let mut pending = Vec::new();
+        // Replies are withheld until the complete four-page window arrives.
+        for _ in 0..4 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let offset = read_offset(&mut socket).await;
+            pending.push((socket, offset));
+        }
+        let mut offsets: Vec<_> = pending.iter().map(|(_, offset)| *offset).collect();
+        offsets.sort_unstable();
+        assert_eq!(offsets, [500, 1000, 1500, 2000]);
+        for (socket, offset) in pending.into_iter().rev() {
+            reply(socket, offset).await;
+        }
+    });
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.albums("alphabeticalByName", &[]),
+    )
+    .await;
+    if result.is_err() {
+        server.abort();
+    }
+    let albums = result
+        .expect("pages must overlap instead of waiting for earlier replies")
+        .unwrap();
+    assert_eq!(
+        albums
+            .iter()
+            .map(|album| album.id.parse::<usize>().unwrap())
+            .collect::<Vec<_>>(),
+        (0..2001).collect::<Vec<_>>()
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn failed_catalog_page_rejects_partial_results_and_stops_pagination() {
+    let (url, requests, task) = server(|method, params| {
+        assert_eq!(method, "getAlbumList2");
+        let offset = params["offset"].parse::<usize>().unwrap();
+        if offset == 500 {
+            return (503, String::new());
+        }
+        (
+            200,
+            envelope(json!({"albumList2":{"album":(offset..offset + 500)
+            .map(|id| json!({"id": id.to_string(), "name": "Album"})).collect::<Vec<_>>()}})),
+        )
+    })
+    .await;
+    let result = session(url).client.albums("alphabeticalByName", &[]).await;
+    let error = format!("{:#}", result.unwrap_err());
+    assert!(error.contains("503"), "{error}");
+    let seen = requests.lock().await;
+    assert!(
+        seen.len() <= 5,
+        "only the initial page and one window may start"
+    );
+    assert!(
+        seen.iter()
+            .all(|(_, params)| params["offset"].parse::<usize>().unwrap() <= 2000)
+    );
     task.abort();
 }
 
@@ -1908,15 +2477,16 @@ async fn catalog_browse_search_playlist_order_and_library_scope() {
         replace_child: false,
     })
     .await;
-    assert!(app
-        .state
-        .artist_nav
-        .columns
-        .last()
-        .unwrap()
-        .items
-        .iter()
-        .any(|i| matches!(i,BrowseItem::Album { title,.. } if title == "Album")));
+    assert!(
+        app.state
+            .artist_nav
+            .columns
+            .last()
+            .unwrap()
+            .items
+            .iter()
+            .any(|i| matches!(i,BrowseItem::Album { title,.. } if title == "Album"))
+    );
     app.send(MillerAction::LoadAlbumTracksForMiller {
         album_key: session.key("album"),
         replace_child: false,
@@ -1953,9 +2523,11 @@ async fn catalog_browse_search_playlist_order_and_library_scope() {
             "{method}"
         );
     }
-    assert!(requests
-        .iter()
-        .all(|(_, p)| !p.contains_key("X-Plex-Token")));
+    assert!(
+        requests
+            .iter()
+            .all(|(_, p)| !p.contains_key("X-Plex-Token"))
+    );
     task.abort();
 }
 
@@ -2043,16 +2615,63 @@ async fn failures_leave_cached_catalog_and_loading_state_recoverable() {
     app.catalog().await;
     assert_eq!(app.state.library.all_tracks.len(), 3);
     assert!(!app.state.library.artists_loading);
-    assert!(app
-        .state
-        .notifications
-        .last_error
-        .as_ref()
-        .unwrap()
-        .contains("existing data is unchanged"));
+    assert!(
+        app.state
+            .notifications
+            .last_error
+            .as_deref()
+            .is_some_and(|message| message.contains("503"))
+    );
+    assert_eq!(
+        app.state.notifications.error_target,
+        Some(textamp::app::state::NotificationTarget::RefreshLibrary)
+    );
     fail.store(false, std::sync::atomic::Ordering::Relaxed);
     app.catalog().await;
     assert_eq!(app.state.library.artists.len(), 1);
+    task.abort();
+}
+
+#[tokio::test]
+async fn failed_catalog_retry_keeps_cached_tracks_and_recovers() {
+    use textamp::app::state::{NotificationTarget, RefreshCategory};
+    let fail = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let check = fail.clone();
+    let (url, _, task) = server(move |method, params| {
+        if check.load(std::sync::atomic::Ordering::Relaxed) {
+            (503, "offline".into())
+        } else {
+            (200, envelope(fixture(method, params)))
+        }
+    })
+    .await;
+    let mut app = App::new(session(url));
+    app.catalog().await;
+    assert_eq!(app.state.library.all_tracks.len(), 3);
+    fail.store(true, std::sync::atomic::Ordering::Relaxed);
+    app.catalog().await;
+    assert_eq!(app.state.library.all_tracks.len(), 3);
+    assert_eq!(
+        app.state.notifications.error_target,
+        Some(NotificationTarget::RefreshLibrary)
+    );
+    assert!(
+        !app.state
+            .notifications
+            .last_error
+            .as_deref()
+            .unwrap()
+            .contains("F5")
+    );
+    fail.store(false, std::sync::atomic::Ordering::Relaxed);
+    app.send(SystemAction::RefreshCategory(RefreshCategory::Artists))
+        .await;
+    assert!(app.state.notifications.last_error.is_none());
+    while app.state.library_loading {
+        app.receive().await;
+    }
+    assert!(app.state.notifications.error_target.is_none());
+    assert_eq!(app.state.library.all_tracks.len(), 3);
     task.abort();
 }
 
@@ -2089,7 +2708,7 @@ async fn disk_catalog_opens_without_server_requests_and_force_refresh_retains_it
     assert_eq!(reopened.state.library.all_tracks.len(), 3);
     assert_eq!(reopened.state.library.album_genres[0].title, "Ambient");
     assert_eq!(reopened.state.library.playlists.len(), 1);
-    reopened.state.library.playlists.clear();
+    std::sync::Arc::make_mut(&mut reopened.state.library.playlists).clear();
     for action in [
         DataAction::LoadInitialData,
         DataAction::LoadArtists,
@@ -2124,13 +2743,15 @@ async fn disk_catalog_opens_without_server_requests_and_force_refresh_retains_it
     let original = reopened.state.sources.active.navidrome().unwrap().clone();
     let mut changed = original.clone();
     changed.source.name = "New display label".into();
-    assert!(changed
-        .cache_store()
-        .unwrap()
-        .ticket("catalog")
-        .read::<Value>(Duration::ZERO)
-        .unwrap()
-        .is_some());
+    assert!(
+        changed
+            .cache_store()
+            .unwrap()
+            .ticket("catalog")
+            .read::<Value>(Duration::ZERO)
+            .unwrap()
+            .is_some()
+    );
     for field in 0..4 {
         let mut changed = original.clone();
         match field {
@@ -2139,13 +2760,15 @@ async fn disk_catalog_opens_without_server_requests_and_force_refresh_retains_it
             2 => changed.source.url.push_str("/different-server"),
             _ => changed.client.folder = Some("another-library".into()),
         }
-        assert!(changed
-            .cache_store()
-            .unwrap()
-            .ticket("catalog")
-            .read::<Value>(Duration::ZERO)
-            .unwrap()
-            .is_none());
+        assert!(
+            changed
+                .cache_store()
+                .unwrap()
+                .ticket("catalog")
+                .read::<Value>(Duration::ZERO)
+                .unwrap()
+                .is_none()
+        );
     }
     reopened
         .state
@@ -2228,7 +2851,7 @@ async fn sonic_extension_uses_native_similarity_and_validates_path_endpoints() {
     let invalid = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let check = invalid.clone();
     let (url, requests, task) = server(move |m, p| {
-        let response = match m {
+        let mut response = match m {
             "getOpenSubsonicExtensions" => json!({"openSubsonicExtensions":[{"name":"sonicSimilarity"}]}),
             "getSonicSimilarTracks" => {
                 json!({"sonicMatch":[{"entry":song("second",2,1),"similarity":0.9}]})
@@ -2243,6 +2866,22 @@ async fn sonic_extension_uses_native_similarity_and_validates_path_endpoints() {
             }
             _ => fixture(m, p),
         };
+        fn distinct_artists(value: &mut Value) {
+            match value {
+                Value::Object(object) => {
+                    if let Some(id) = object.get("id").and_then(Value::as_str).map(str::to_owned) {
+                        if ["first", "second", "disc2"].contains(&id.as_str()) {
+                            object.insert("artist".into(), json!(format!("Artist {id}")));
+                            object.insert("artistId".into(), json!(format!("artist-{id}")));
+                        }
+                    }
+                    for child in object.values_mut() { distinct_artists(child); }
+                }
+                Value::Array(items) => for child in items { distinct_artists(child); },
+                _ => {}
+            }
+        }
+        distinct_artists(&mut response);
         (200, envelope(response))
     })
     .await;
@@ -2255,7 +2894,7 @@ async fn sonic_extension_uses_native_similarity_and_validates_path_endpoints() {
         title: "First".into(),
     })
     .await;
-    while app.state.similar.loading {
+    while app.state.similar.request.is_loading() {
         app.receive().await;
     }
     assert_eq!(app.state.similar.tracks[0].title, "Song second");
@@ -2274,17 +2913,20 @@ async fn sonic_extension_uses_native_similarity_and_validates_path_endpoints() {
     while app.state.adventure.generating {
         app.receive().await;
     }
-    assert!(app
-        .state
-        .notifications
-        .last_error
-        .as_ref()
-        .is_some_and(|e| e.contains("invalid sonic path")));
-    assert!(!requests
-        .lock()
-        .await
-        .iter()
-        .any(|(m, _)| m == "getSimilarSongs2"));
+    assert!(
+        app.state
+            .notifications
+            .last_error
+            .as_ref()
+            .is_some_and(|e| e.contains("invalid sonic path"))
+    );
+    assert!(
+        !requests
+            .lock()
+            .await
+            .iter()
+            .any(|(m, _)| m == "getSimilarSongs2")
+    );
     task.abort();
 }
 
@@ -2328,7 +2970,7 @@ async fn provider_biography_and_recommendations_are_scoped() {
         artist_name: "Artist".into(),
     })
     .await;
-    while app.state.popups.artist_bio().unwrap().loading {
+    while app.state.popups.artist_bio().unwrap().task.is_some() {
         app.receive().await;
     }
     let text = &app.state.popups.artist_bio().unwrap().document.text;
@@ -2339,7 +2981,7 @@ async fn provider_biography_and_recommendations_are_scoped() {
         title: "Second".into(),
     })
     .await;
-    while app.state.similar.loading {
+    while app.state.similar.request.is_loading() {
         app.receive().await;
     }
     assert_eq!(app.state.similar.tracks.len(), 1);
@@ -2352,7 +2994,7 @@ async fn writes_use_post_and_no_audio_device_is_a_recoverable_failure() {
     let (url, requests, task) = server(|m, p| (200, envelope(fixture(m, p)))).await;
     let mut app = App::new(session(url));
     app.catalog().await;
-    app.state.queue.tracks = app.state.library.all_tracks.clone();
+    app.state.queue.tracks = app.state.library.all_tracks.as_ref().clone();
     app.state.queue.index = Some(0);
     app.send(QueueAction::SaveQueueAsPlaylist("A playlist & name".into()))
         .await;
@@ -2383,9 +3025,11 @@ async fn live_navidrome_catalog_and_playlist_round_trip() {
         2,
         "Only run against the dedicated two-song fixture"
     );
-    assert!(songs
-        .iter()
-        .all(|s| s.artist.as_deref() == Some("Fixture Artist")));
+    assert!(
+        songs
+            .iter()
+            .all(|s| s.artist.as_deref() == Some("Fixture Artist"))
+    );
     let mut app = App::new(s.clone());
     app.catalog().await;
     assert_eq!(app.state.library.all_tracks.len(), 2);
@@ -2449,13 +3093,14 @@ async fn live_navidrome_catalog_and_playlist_round_trip() {
         .call("deletePlaylist", &[("id", playlist_id)])
         .await
         .unwrap();
-    assert!(!s
-        .client
-        .playlists()
-        .await
-        .unwrap()
-        .iter()
-        .any(|p| p.name == name || p.name == "Renamed"));
+    assert!(
+        !s.client
+            .playlists()
+            .await
+            .unwrap()
+            .iter()
+            .any(|p| p.name == name || p.name == "Renamed")
+    );
 }
 
 #[tokio::test]
@@ -2468,7 +3113,7 @@ async fn live_native_navidrome_stream_seek_and_visualizers() {
     assert_eq!(app.state.library.all_tracks.len(), 2);
     let tracks = app.state.library.all_tracks.clone();
     assert!(tracks.iter().all(|t| t.artist_name() == "Fixture Artist"));
-    app.send(QueueAction::PlayTracksNow(tracks)).await;
+    app.send(QueueAction::PlayTracksNow(tracks.to_vec())).await;
     while app.state.playback.status == PlayStatus::Buffering {
         app.receive().await;
     }
@@ -2492,18 +3137,18 @@ async fn live_native_navidrome_stream_seek_and_visualizers() {
     assert_eq!(app.state.playback.status, PlayStatus::Paused);
     assert!(app.audio.is_paused());
     app.send(SystemAction::LoadWaveform).await;
-    while app.state.waveform.generating || app.state.spectrogram.generating {
+    while app.state.waveform.generating() || app.state.spectrogram.generating() {
         app.receive().await;
     }
     assert!(
-        app.state.waveform.data.is_some(),
+        app.state.waveform.data().is_some(),
         "{:?}",
-        app.state.waveform.error
+        app.state.waveform.error()
     );
     assert!(
-        app.state.spectrogram.data.is_some(),
+        app.state.spectrogram.data().is_some(),
         "{:?}",
-        app.state.spectrogram.error
+        app.state.spectrogram.error()
     );
     use textamp::app::sources::navidrome::commands::Command;
     app.send(NavAction::Command(Command::SaveQueue)).await;
@@ -2606,6 +3251,14 @@ async fn inactive_library_rescan_populates_complete_catalog_without_playback_or_
         app.receive().await;
     }
     assert_eq!(cache::status(&choice, &app.state), "Library up to date");
+    assert!(
+        store
+            .ticket("browse-catalog-v1")
+            .read::<Value>(textamp::library::cache::REFRESH_INTERVAL)
+            .unwrap()
+            .is_some(),
+        "inactive scans must also prepare compact browsing metadata"
+    );
     let catalog = store
         .ticket("catalog")
         .read::<Value>(textamp::library::cache::REFRESH_INTERVAL)
@@ -2622,16 +3275,21 @@ async fn inactive_library_rescan_populates_complete_catalog_without_playback_or_
     );
     assert_eq!(app.state.playback.position_ms, 65432);
     assert_eq!(app.state.playback.status, PlayStatus::Paused);
-    assert!(requests.lock().await.iter().all(|(method, _)| [
-        "ping",
-        "getMusicFolders",
-        "getOpenSubsonicExtensions",
-        "getArtists",
-        "getAlbumList2",
-        "search3",
-        "getPlaylists"
-    ]
-    .contains(&method.as_str())));
+    assert!(requests.lock().await.iter().all(|(method, _)| {
+        [
+            "ping",
+            "getMusicFolders",
+            "getOpenSubsonicExtensions",
+            "getArtists",
+            "getAlbumList2",
+            "search3",
+            "getPlaylists",
+            "getPlaylist",
+            "getAlbum",
+            "getCoverArt",
+        ]
+        .contains(&method.as_str())
+    }));
     // Reopening from the saved full catalog needs no server.
     server_task.abort();
     app.state.sources.active = ActiveSource::Navidrome(Box::new(session));
@@ -2668,11 +3326,13 @@ async fn sole_folder_startup_migrates_aggregate_cache_without_network() {
         app.receive().await;
     }
     assert!(app.state.notifications.last_error.is_none());
-    assert!(current
-        .ticket("catalog")
-        .read::<Value>(textamp::library::cache::REFRESH_INTERVAL)
-        .unwrap()
-        .is_some());
+    assert!(
+        current
+            .ticket("catalog")
+            .read::<Value>(textamp::library::cache::REFRESH_INTERVAL)
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -2680,7 +3340,7 @@ async fn description_playlist_save_uses_snapshot_order_and_does_not_touch_queue(
     use crossterm::event::{
         KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
-    use ratatui::{backend::TestBackend, Terminal};
+    use ratatui::{Terminal, backend::TestBackend};
     use textamp::app::sources::navidrome::commands::CollectionKind;
     use textamp::app::{
         command_palette,
@@ -2791,32 +3451,37 @@ async fn description_playlist_save_uses_snapshot_order_and_does_not_touch_queue(
     assert_eq!(app.state.queue.tracks[0].rating_key, tracks[1].rating_key);
     assert_eq!(app.state.queue.index, Some(0));
     assert_eq!(app.state.playback.position_ms, 1200);
-    assert!(app
-        .state
-        .notifications
-        .status_message
-        .as_deref()
-        .unwrap()
-        .contains("3 tracks"));
+    assert!(
+        app.state
+            .notifications
+            .status_message
+            .as_deref()
+            .unwrap()
+            .contains("3 tracks")
+    );
     // A pending dialog cannot write into a different library.
     let action = audiomuse::Command::SavePlaylist {
         library_key: "different library".into(),
         name: "Wrong".into(),
         tracks: tracks.clone(),
     };
-    assert!(dispatch_action(
-        action.into(),
-        &mut app.state,
-        &mut app.audio,
-        &mut app.config,
-        &app.tx
-    )
-    .await
-    .is_err());
+    assert!(
+        dispatch_action(
+            action.into(),
+            &mut app.state,
+            &mut app.audio,
+            &mut app.config,
+            &app.tx
+        )
+        .await
+        .is_err()
+    );
     app.state.artist_nav.columns[1].tracks.clear();
-    assert!(!command_palette::materialize_entries(&app.state)
-        .iter()
-        .any(|e| e.label == "Save as playlist"));
+    assert!(
+        !command_palette::materialize_entries(&app.state)
+            .iter()
+            .any(|e| e.label == "Save as playlist")
+    );
     task.abort();
 }
 
@@ -2844,12 +3509,13 @@ async fn description_playlist_failure_preserves_results_and_reports_error() {
         app.receive().await;
     }
     assert!(app.state.notifications.last_error.is_some());
-    assert!(!app
-        .state
-        .notifications
-        .status_message
-        .as_deref()
-        .is_some_and(|s| s.starts_with("Saved")));
+    assert!(
+        !app.state
+            .notifications
+            .status_message
+            .as_deref()
+            .is_some_and(|s| s.starts_with("Saved"))
+    );
     assert_eq!(
         requests
             .lock()
@@ -2896,11 +3562,25 @@ async fn jump_to_artist_and_album_leave_overlays_and_analysis_for_real_library_c
         assert!(app.state.search.pending_album_key.is_none());
         assert_eq!(
             app.state.artist_nav.columns.len(),
-            if album { 3 } else { 2 }
+            if album { 4 } else { 3 }
         );
         assert_eq!(
             app.state.artist_nav.focused_column,
-            if album { 2 } else { 1 }
+            if album { 3 } else { 2 }
+        );
+        assert!(
+            matches!(app.state.artist_nav.columns.last().unwrap().details.as_ref(),
+            Some(textamp::app::state::BrowseDetails::Album {..}) if album)
+                || matches!(
+                    app.state
+                        .artist_nav
+                        .columns
+                        .last()
+                        .unwrap()
+                        .details
+                        .as_ref(),
+                    Some(textamp::app::state::BrowseDetails::Artist(_))
+                ) && !album
         );
         assert!(app.state.queue.tracks.is_empty());
     }
@@ -2934,7 +3614,7 @@ async fn similarity_failure_stays_in_results_and_retry_recovers_without_changing
     let mut app = App::new(session);
     app.catalog().await;
     app.state.view = View::Queue;
-    app.state.queue.tracks = app.state.library.all_tracks.clone();
+    app.state.queue.tracks = app.state.library.all_tracks.as_ref().clone();
     app.state.queue.index = Some(0);
     app.state.list_state.queue_index = 1;
     let queue = app.state.queue.tracks.clone();
@@ -2943,16 +3623,18 @@ async fn similarity_failure_stays_in_results_and_retry_recovers_without_changing
         title: "First".into(),
     })
     .await;
-    while app.state.similar.loading {
+    while app.state.similar.request.is_loading() {
         app.receive().await;
     }
-    assert!(app
-        .state
-        .similar
-        .error
-        .as_ref()
-        .unwrap()
-        .contains("getSonicSimilarTracks"));
+    assert!(
+        app.state
+            .similar
+            .request
+            .error()
+            .as_ref()
+            .unwrap()
+            .contains("getSonicSimilarTracks")
+    );
     assert!(app.state.notifications.last_error.is_none());
     assert_eq!(app.state.previous_view, Some(View::Queue));
     assert_eq!(app.state.similar.source_key.as_deref(), Some(seed.as_str()));
@@ -3017,11 +3699,11 @@ async fn similarity_failure_stays_in_results_and_retry_recovers_without_changing
     for action in keys {
         app.send(action).await;
     }
-    assert!(app.state.similar.error.is_none());
-    while app.state.similar.loading {
+    assert!(app.state.similar.request.error().is_none());
+    while app.state.similar.request.is_loading() {
         app.receive().await;
     }
-    assert!(app.state.similar.error.is_none());
+    assert!(app.state.similar.request.error().is_none());
     assert_eq!(app.state.similar.tracks[0].title, "Song second");
     handle_core_event(
         Event::Data(DataEvent::SimilarLoadFailed {
@@ -3031,7 +3713,7 @@ async fn similarity_failure_stays_in_results_and_retry_recovers_without_changing
         &mut app.state,
         &app.tx,
     );
-    assert!(app.state.similar.error.is_none());
+    assert!(app.state.similar.request.error().is_none());
     assert_eq!(
         app.state
             .queue
@@ -3043,10 +3725,1445 @@ async fn similarity_failure_stays_in_results_and_retry_recovers_without_changing
     );
     assert_eq!(app.state.queue.index, Some(0));
     assert_eq!(app.state.list_state.queue_index, 1);
-    assert!(!requests
+    assert!(
+        !requests
+            .lock()
+            .await
+            .iter()
+            .any(|r| r.0 == "getSimilarSongs2")
+    );
+    task.abort();
+}
+
+#[tokio::test]
+async fn inline_similar_music_excludes_seed_and_same_artist() {
+    let (url, _, task) = server(|method, params| {
+        let mut other = song("other", 1, 1);
+        other["artist"] = json!("Another Artist");
+        other["albumArtist"] = json!("Another Artist");
+        other["artistId"] = json!("other-artist");
+        other["albumId"] = json!("other-album");
+        let payload = match method {
+            "search3" => {
+                json!({"searchResult3":{"song":[song("first",1,1),song("second",2,1),other]}})
+            }
+            "getSimilarSongs2" => {
+                json!({"similarSongs2":{"song":[song("first",1,1),song("second",2,1),other]}})
+            }
+            _ => fixture(method, params),
+        };
+        (200, envelope(payload))
+    })
+    .await;
+    let session = session(url);
+    let mut app = App::new(session.clone());
+    app.catalog().await;
+    let key = session.key("first");
+    app.send(DataAction::LoadTrackPaneSimilar {
+        rating_key: key.clone(),
+    })
+    .await;
+    while app.state.track_pane_similar_loading.contains(&key) {
+        app.receive().await;
+    }
+    let matches = app.state.track_pane_similar[&key].as_ref().unwrap();
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].rating_key, session.key("other"));
+    assert_eq!(app.state.view, View::Browse);
+    assert!(app.state.queue.tracks.is_empty());
+    task.abort();
+}
+
+#[tokio::test]
+async fn miller_artist_info_loads_in_adjacent_column_without_modal_or_playback() {
+    use textamp::app::state::{AllTracksScope, BrowseColumn, BrowseDetails};
+    let (url, _, task) = server(|method, params| (200, envelope(fixture(method, params)))).await;
+    let session = session(url);
+    let mut app = App::new(session.clone());
+    app.catalog().await;
+    let key = session.key("artist");
+    app.state.artist_nav.columns = vec![BrowseColumn::new(
+        "albums",
+        vec![
+            BrowseItem::ArtistInfo {
+                artist_key: key.clone(),
+                artist_name: "Artist".into(),
+                thumb: None,
+            },
+            BrowseItem::AllTracks {
+                scope: AllTracksScope::Artist {
+                    artist_key: key.clone(),
+                    artist_name: "Artist".into(),
+                },
+                thumb: None,
+            },
+        ],
+    )];
+    app.send(SearchAction::ShowArtistInfo {
+        artist_key: key.clone(),
+        artist_name: "Artist".into(),
+    })
+    .await;
+    assert_eq!(app.state.artist_nav.focused_column, 0);
+    assert_eq!(app.state.artist_nav.columns.len(), 2);
+    assert!(app.state.popups.artist_bio().is_none());
+    while matches!(&app.state.artist_nav.columns[1].details,Some(BrowseDetails::Artist(info)) if info.task.is_some())
+    {
+        app.receive().await;
+    }
+    assert!(
+        matches!(&app.state.artist_nav.columns[1].details,Some(BrowseDetails::Artist(info)) if info.document.text.contains("An artist biography") && info.task.is_none())
+    );
+    assert!(app.state.queue.tracks.is_empty());
+    assert_eq!(app.state.playback.status, PlayStatus::Stopped);
+    assert_eq!(app.state.artist_info_column_index(), Some(1));
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+    terminal
+        .draw(|frame| {
+            app.state
+                .apply_render_feedback(textamp::ui::render(frame, &app.state))
+        })
+        .unwrap();
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(text.contains("Artist Info"));
+    assert!(text.contains("artist biography"));
+    assert!(text.contains("Artist Mix"));
+    task.abort();
+}
+
+#[tokio::test]
+async fn fresh_catalog_prunes_deleted_playlist_views_without_changing_playback() {
+    use textamp::config::settings::PlaylistView;
+    let (url, _, task) = server(|method, params| (200, envelope(fixture(method, params)))).await;
+    let session = session(url);
+    let mut app = App::new(session.clone());
+    let library = app.state.active_library.clone().unwrap();
+    let live = session.key("playlist");
+    let deleted = session.key("deleted-playlist");
+    let view = PlaylistView {
+        group_by_album: true,
+    };
+    for key in [&live, &deleted] {
+        app.config
+            .ui
+            .library_view_settings
+            .entry(library.clone())
+            .or_default()
+            .playlists
+            .insert(key.clone(), view);
+        app.state
+            .playlist_views
+            .entry(library.clone())
+            .or_default()
+            .insert(key.clone(), view);
+    }
+    app.catalog().await;
+    assert_eq!(
+        app.config.ui.library_view_settings[&library]
+            .playlists
+            .len(),
+        1
+    );
+    assert_eq!(
+        app.config.ui.library_view_settings[&library].playlists[&live],
+        view
+    );
+    assert_eq!(app.state.playlist_views[&library].len(), 1);
+    assert_eq!(app.state.playback.status, PlayStatus::Stopped);
+    assert!(app.state.queue.tracks.is_empty());
+    task.abort();
+}
+
+#[tokio::test]
+async fn catalog_scan_precaches_playlist_covers_and_ordered_tracks_and_rescan_reuses_images() {
+    let (url, requests, server) = server(|method,params| {
+        let payload = match method {
+            "getPlaylist" => {
+                let mut entries:Vec<_>=(0..105).map(|index| {
+                    let mut entry=song(&format!("song-{index}"),1,1);
+                    entry["albumId"]=json!(format!("outside-{index}"));
+                    entry
+                }).collect();
+                entries.push(entries[0].clone());
+                json!({"playlist":{"id":"playlist","name":"Large playlist","songCount":106,"entry":entries}})
+            },
+            "getAlbum" => json!({"album":{"id":params["id"],"name":"Outside folder","coverArt":format!("art-{}",params["id"])}}),
+            _=>fixture(method,params),
+        };
+        (200,envelope(payload))
+    }).await;
+    let mut session = session(url);
+    session.source.id = format!("art-fixture-{}", uuid::Uuid::new_v4());
+    let mut app = App::new(session.clone());
+    app.state.active_library = Some(format!("navidrome:{}:1", session.source.id));
+    app.catalog().await;
+    textamp::library::credentials::save_source(
+        "navidrome",
+        &session.source.id,
+        "fixture-password".into(),
+    )
+    .unwrap();
+    let choice = LibraryChoice::Navidrome {
+        source: session.source.clone(),
+        folder: session.client.folder.clone(),
+        name: "Fixture".into(),
+    };
+    assert!(textamp::app::sources::cache::running(&choice, &app.state));
+    while textamp::app::sources::cache::running(&choice, &app.state) {
+        app.receive().await;
+    }
+    assert_eq!(
+        requests
+            .lock()
+            .await
+            .iter()
+            .filter(|(method, _)| method == "getCoverArt")
+            .count(),
+        106
+    );
+    textamp::app::sources::cache::start(choice.clone(), true, &mut app.state, &app.tx);
+    while textamp::app::sources::cache::running(&choice, &app.state) {
+        app.receive().await;
+    }
+    let art = textamp::media::ArtworkCache::for_library(app.state.active_library.as_ref().unwrap());
+    for index in 0..105 {
+        assert!(
+            art.load(&session.key(&format!("outside-{index}")), 0)
+                .is_some(),
+            "album {index}: {:?}; {:?}",
+            app.state.notifications.status_message,
+            requests
+                .lock()
+                .await
+                .iter()
+                .map(|(m, _)| m)
+                .collect::<Vec<_>>()
+        );
+    }
+    assert_eq!(
+        requests
+            .lock()
+            .await
+            .iter()
+            .filter(|(method, _)| method == "getCoverArt")
+            .count(),
+        106
+    );
+    let calls = requests.lock().await.len();
+    server.abort();
+    app.state.browse_category = BrowseCategory::Playlists;
+    app.send(MillerAction::LoadPlaylistTracksForMiller {
+        playlist_key: session.key("playlist"),
+        replace_child: false,
+    })
+    .await;
+    while app.state.playlist_nav.loading {
+        app.receive().await;
+    }
+    let tracks = &app.state.playlist_nav.columns.last().unwrap().tracks;
+    assert_eq!(tracks.len(), 106);
+    assert_eq!(
+        tracks.first().unwrap().rating_key,
+        tracks.last().unwrap().rating_key
+    );
+    assert_eq!(tracks[1].rating_key, session.key("song-1"));
+    assert_eq!(requests.lock().await.len(), calls);
+}
+
+#[tokio::test]
+async fn failed_playlist_refresh_preserves_the_last_ordered_snapshot() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let fail = Arc::new(AtomicBool::new(false));
+    let failure = fail.clone();
+    let (url, requests, server) = server(move |method, params| {
+        if method == "getPlaylist" && failure.load(Ordering::SeqCst) {
+            (503, "Unavailable".into())
+        } else {
+            (200, envelope(fixture(method, params)))
+        }
+    })
+    .await;
+    let session = session(url);
+    let mut app = App::new(session.clone());
+    app.catalog().await;
+    app.state.browse_category = BrowseCategory::Playlists;
+    app.send(MillerAction::LoadPlaylistTracksForMiller {
+        playlist_key: session.key("playlist"),
+        replace_child: false,
+    })
+    .await;
+    while app.state.playlist_nav.loading {
+        app.receive().await;
+    }
+    fail.store(true, Ordering::SeqCst);
+    app.catalog().await;
+    std::sync::Arc::make_mut(&mut app.state.library.playlists)[0].updated_at = Some(1);
+    app.state.browse_category = BrowseCategory::Playlists;
+    app.send(MillerAction::LoadPlaylistTracksForMiller {
+        playlist_key: session.key("playlist"),
+        replace_child: false,
+    })
+    .await;
+    while app.state.playlist_nav.loading {
+        app.receive().await;
+    }
+    let tracks = &app.state.playlist_nav.columns.last().unwrap().tracks;
+    assert_eq!(
+        tracks
+            .iter()
+            .map(|t| t.rating_key.clone())
+            .collect::<Vec<_>>(),
+        vec![session.key("second"), session.key("first")]
+    );
+    assert_eq!(
+        requests
+            .lock()
+            .await
+            .iter()
+            .filter(|(method, _)| method == "getPlaylist")
+            .count(),
+        2
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn recently_added_date_sort_restores_server_order_after_title_sort_and_reverse() {
+    use textamp::app::sources::navidrome::commands::{CollectionKind, Command};
+    use textamp::app::state::{ColumnSortMode, SortColumnType};
+    let (url, _, task) = server(|method, params| {
+        if method == "getAlbumList2" && params.get("type").is_some_and(|kind| kind == "newest") {
+            (
+                200,
+                envelope(json!({"albumList2":{"album":[
+                    {"id":"newest","name":"Zulu","year":1990},
+                    {"id":"middle","name":"Alpha","year":2026},
+                    {"id":"oldest","name":"Mike","year":2020}
+                ]}})),
+            )
+        } else {
+            (200, envelope(fixture(method, params)))
+        }
+    })
+    .await;
+    let mut app = App::new(session(url));
+    app.send(NavAction::Command(Command::Collection(
+        CollectionKind::RecentlyAdded,
+    )))
+    .await;
+    while app.state.artist_nav.loading {
+        app.receive().await;
+    }
+    assert_eq!(
+        app.state.column_options_type(0),
+        Some(SortColumnType::RecentAlbums)
+    );
+    let titles = |state: &AppState| {
+        state.artist_nav.columns[0]
+            .items
+            .iter()
+            .map(|i| i.title().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(titles(&app.state), ["Zulu", "Alpha", "Mike"]);
+    app.send(SearchAction::ApplyFocusedSortMode(ColumnSortMode::ByTitle))
+        .await;
+    assert_eq!(titles(&app.state), ["Alpha", "Mike", "Zulu"]);
+    app.send(SearchAction::ApplyFocusedSortMode(
+        ColumnSortMode::ByDateAdded,
+    ))
+    .await;
+    assert_eq!(titles(&app.state), ["Zulu", "Alpha", "Mike"]);
+    assert!(!app.state.artist_nav.columns[0].sort_ascending);
+    app.send(SearchAction::ReverseFocusedSortDirection).await;
+    assert_eq!(titles(&app.state), ["Mike", "Alpha", "Zulu"]);
+    assert!(app.state.artist_nav.columns[0].sort_ascending);
+    app.send(SearchAction::ApplyFocusedSortMode(ColumnSortMode::ByTitle))
+        .await;
+    assert_eq!(titles(&app.state), ["Alpha", "Mike", "Zulu"]);
+    assert!(app.state.artist_nav.columns[0].sort_ascending);
+    assert!(app.state.queue.tracks.is_empty());
+    task.abort();
+}
+
+#[tokio::test]
+async fn unified_account_catalog_and_search_include_both_music_folders_without_scope_parameters() {
+    let (url,requests,task)=server(|method,params| {
+        assert!(!params.contains_key("musicFolderId"));
+        let value=match method {
+            "getMusicFolders"=>json!({"musicFolders":{"musicFolder":[{"id":"1","name":"Main"},{"id":"2","name":"Collections"}]}}),
+            "getArtists"=>json!({"artists":{"index":[{"name":"U","artist":[{"id":"one","name":"Unified One"},{"id":"two","name":"Unified Two"}]}]}}),
+            "getAlbumList2"=>json!({"albumList2":{"album":[{"id":"album-one","name":"Album One","artist":"Unified One","artistId":"one"},{"id":"album-two","name":"Album Two","artist":"Unified Two","artistId":"two"}]}}),
+            "search3"=>json!({"searchResult3":{"song":[{"id":"track-one","title":"First","albumId":"album-one","artistId":"one","artist":"Unified One"},{"id":"track-two","title":"Second","albumId":"album-two","artistId":"two","artist":"Unified Two"}]}}),
+            "getPlaylists"=>json!({"playlists":{"playlist":[]}}),
+            _=>fixture(method,params),
+        };
+        (200,envelope(value))
+    }).await;
+    let mut source = source(url);
+    source.libraries = vec![
+        textamp::navidrome::MusicFolder {
+            id: "1".into(),
+            name: "Main".into(),
+        },
+        textamp::navidrome::MusicFolder {
+            id: "2".into(),
+            name: "Collections".into(),
+        },
+    ];
+    let session = Session {
+        client: Client::new(&source, "fixture-password".into(), None).unwrap(),
+        source,
+        extensions: Default::default(),
+    };
+    assert!(session.client.folder.is_none());
+    let mut app = App::new(session);
+    app.state.active_library = Some("navidrome:account-one:all".into());
+    app.catalog().await;
+    assert_eq!(app.state.library.albums.len(), 2);
+    assert_eq!(app.state.library.all_tracks.len(), 2);
+    app.send(SearchAction::SetSearchQuery("Unified".into()))
+        .await;
+    let artists = &app.state.search.results.as_ref().unwrap().artists;
+    assert_eq!(artists.len(), 2);
+    assert!(artists.iter().any(|a| a.title == "Unified One"));
+    assert!(artists.iter().any(|a| a.title == "Unified Two"));
+    assert!(
+        requests
+            .lock()
+            .await
+            .iter()
+            .filter(|(m, _)| matches!(m.as_str(), "getArtists" | "getAlbumList2" | "search3"))
+            .all(|(_, p)| !p.contains_key("musicFolderId"))
+    );
+    assert!(app.state.queue.tracks.is_empty());
+    task.abort();
+}
+
+#[tokio::test]
+async fn random_search_and_name_jumps_select_the_same_artist_and_album_ancestors() {
+    use textamp::app::{
+        command_palette,
+        state::{PaletteCommandKind, SearchTab},
+    };
+    let (url, _, task) = server(|m, p| (200, envelope(fixture(m, p)))).await;
+    let session = session(url);
+    let mut app = App::new(session.clone());
+    app.catalog().await;
+    for route in 0..4 {
+        app.state.view = View::Browse;
+        let actions = match route {
+            0 => command_palette::run(PaletteCommandKind::GoToRandomAlbum, &mut app.state),
+            1 => {
+                app.state.popups.set_search_active(true);
+                app.state.search.tab = SearchTab::Albums;
+                app.state.search.results = Some(textamp::library::models::SearchResults {
+                    albums: app.state.library.albums.as_ref().clone(),
+                    ..Default::default()
+                });
+                app.state.list_state.search_item_index = 0;
+                vec![SearchAction::SelectSearchResult.into()]
+            }
+            2 => command_palette::run(
+                PaletteCommandKind::JumpToAlbum(Box::new(
+                    session.track(serde_json::from_value(song("song", 1, 1)).unwrap()),
+                )),
+                &mut app.state,
+            ),
+            _ => vec![
+                BrowseAction::OpenInLibrary {
+                    artist_key: session.key("artist"),
+                    artist_name: "Artist".into(),
+                    album_key: Some(session.key("album")),
+                    album_title: Some("Album".into()),
+                }
+                .into(),
+            ],
+        };
+        for action in actions {
+            app.send(action).await;
+        }
+        while !app.state.sources.nav_tasks.is_empty() {
+            app.receive().await;
+        }
+        assert!(
+            matches!(app.state.artist_nav.columns[0].selected_item(),Some(BrowseItem::Artist{key,..}) if key==&session.key("artist")),
+            "route {route}"
+        );
+        assert!(
+            matches!(app.state.artist_nav.columns[1].selected_item(),Some(BrowseItem::Album{key,..}) if key==&session.key("album")),
+            "route {route}"
+        );
+        if route != 3 {
+            assert!(
+                matches!(app.state.artist_nav.focused().and_then(|col| col.details.as_ref()),
+                Some(textamp::app::state::BrowseDetails::Album { artwork_key, .. }) if artwork_key == &session.key("album")),
+                "route {route}"
+            );
+        } else {
+            assert_eq!(app.state.artist_nav.columns.len(), 3);
+        }
+        assert!(app.state.queue.tracks.is_empty());
+    }
+    task.abort();
+}
+
+#[tokio::test]
+async fn seeded_radio_uses_one_chooser_and_refills_from_evolving_or_fixed_seed() {
+    use textamp::app::state::{PlayStatus, PlaybackMode, RadioRefill, TrackPickerPurpose};
+    let (url, seen, server) = server(|method, params| {
+        let payload = if method == "getSonicSimilarTracks" {
+            let matches: Vec<_> = ["first", "second", "disc2"]
+                .into_iter()
+                .filter(|id| params.get("id").map(String::as_str) != Some(*id))
+                .map(|id| json!({"entry":song(id,1,1),"similarity":0.9}))
+                .collect();
+            json!({"sonicMatch":matches})
+        } else {
+            fixture(method, params)
+        };
+        (200, envelope(payload))
+    })
+    .await;
+    for fixed in [false, true] {
+        let mut session = session(url.clone());
+        session.extensions.insert("sonicSimilarity".into());
+        let mut app = App::new(session.clone());
+        app.state.library.all_tracks = std::sync::Arc::new(
+            ["first", "second", "disc2"]
+                .iter()
+                .map(|id| session.track(serde_json::from_value(song(id, 1, 1)).unwrap()))
+                .collect(),
+        );
+        let seed = app.state.library.all_tracks[0].clone();
+        app.state.queue.tracks = vec![seed.clone()];
+        app.state.queue.index = Some(0);
+        app.state.set_playback_mode(PlaybackMode::Queue);
+        app.state.playback.status = PlayStatus::Paused;
+        app.state.playback.request_id = 7;
+        app.send(BrowseAction::LoadStations).await;
+        seen.lock().await.clear();
+        app.send(RadioAction::PlayStation(
+            if fixed {
+                "nav-radio/stayClose"
+            } else {
+                "nav-radio/sonic"
+            }
+            .into(),
+        ))
+        .await;
+        let picker = app
+            .state
+            .popups
+            .adventure_launcher()
+            .expect("station opens a single seed chooser");
+        assert_eq!(
+            picker.purpose,
+            if fixed {
+                TrackPickerPurpose::StayCloseRadio
+            } else {
+                TrackPickerPurpose::SonicRadio
+            }
+        );
+        assert_eq!(
+            picker.start_track.as_ref().unwrap().rating_key,
+            seed.rating_key
+        );
+        assert!(seen.lock().await.is_empty());
+        app.send(SearchAction::StartPickedTrackRadio).await;
+        while app.state.station_starting.is_some() {
+            app.receive().await;
+        }
+        assert_eq!(app.state.playback.status, PlayStatus::Paused);
+        assert_eq!(app.state.playback.request_id, 7);
+        assert_eq!(app.state.radio.tracks[0].rating_key, seed.rating_key);
+        assert_eq!(app.state.radio.tracks.len(), 3);
+        app.state.radio.track_index = Some(2);
+        let current = app.state.current_track().unwrap().clone();
+        textamp::app::sources::radio::refill(&app.tx, &mut app.state);
+        while app.state.radio.refill != RadioRefill::Idle {
+            app.receive().await;
+        }
+        assert!(
+            app.state.radio.tracks.len() > 3,
+            "radio continues beyond its initial batch"
+        );
+        assert_eq!(
+            app.state.current_track().unwrap().rating_key,
+            current.rating_key
+        );
+        let requests = seen.lock().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].1["id"], "first");
+        assert_eq!(
+            requests[1].1["id"],
+            if fixed {
+                "first".to_owned()
+            } else {
+                session.id(&current.rating_key).unwrap()
+            }
+        );
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn saved_playlist_appears_immediately_and_refreshes_only_playlists() {
+    let saved = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let server_saved = saved.clone();
+    let (url, requests, task) = server(move |method, params| {
+        let playlist = json!({"id":"new-playlist","name":"A Saved Queue","songCount":1});
+        let result = match method {
+            "createPlaylist" => {
+                server_saved.store(true, std::sync::atomic::Ordering::SeqCst);
+                json!({"playlist":playlist})
+            }
+            "getPlaylists" if server_saved.load(std::sync::atomic::Ordering::SeqCst) => {
+                json!({"playlists":{"playlist":[playlist]}})
+            }
+            _ => fixture(method, params),
+        };
+        (200, envelope(result))
+    })
+    .await;
+    let session = session(url);
+    let mut app = App::new(session.clone());
+    app.catalog().await;
+    app.state.queue.tracks =
+        vec![session.track(serde_json::from_value(song("first", 1, 1)).unwrap())];
+    requests.lock().await.clear();
+    app.send(QueueAction::SaveQueueAsPlaylist("A Saved Queue".into()))
+        .await;
+    while app.state.sources.nav_tasks.contains_key("playlist-write") {
+        app.receive().await;
+    }
+    assert!(
+        app.state
+            .library
+            .playlists
+            .iter()
+            .any(|playlist| playlist.title == "A Saved Queue")
+    );
+    assert!(
+        app.state.playlist_nav.columns[0]
+            .items
+            .iter()
+            .any(|item| item.title() == "A Saved Queue")
+    );
+    while app.state.sources.nav_tasks.contains_key("playlist-list") {
+        app.receive().await;
+    }
+    assert!(
+        app.state
+            .library
+            .playlists
+            .iter()
+            .any(|playlist| playlist.title == "A Saved Queue")
+    );
+    let calls = requests.lock().await;
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|(method, _)| method == "createPlaylist")
+            .count(),
+        1
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|(method, _)| method == "getPlaylists")
+            .count(),
+        1
+    );
+    assert!(
+        !calls.iter().any(|(method, _)| matches!(
+            method.as_str(),
+            "getArtists" | "getAlbumList2" | "search3"
+        ))
+    );
+    assert_eq!(app.state.queue.tracks.len(), 1);
+    task.abort();
+}
+
+#[tokio::test]
+async fn random_albums_load_on_demand_once_and_refresh_explicitly() {
+    use textamp::app::sources::navidrome::{
+        commands::{CollectionKind, Command},
+        random_albums::State,
+    };
+    let (url, seen, task) = server(|method, params| {
+        let response = if method == "getAlbumList2" && params.get("type").is_some_and(|kind|kind == "random") {
+            json!({"albumList2":{"album":(0..100).map(|index|json!({"id":format!("random-{index}"),"name":format!("Random {index}")})).collect::<Vec<_>>()}})
+        } else { fixture(method, params) };
+        (200, envelope(response))
+    }).await;
+    let mut app = App::new(session(url));
+    textamp::app::sources::navidrome::open(&mut app.state, &app.tx);
+    textamp::app::sources::navidrome::open(&mut app.state, &app.tx);
+    while app.state.library_loading {
+        app.receive().await;
+    }
+    assert!(matches!(app.state.sources.random_albums, State::Idle));
+    assert!(
+        !seen
+            .lock()
+            .await
+            .iter()
+            .any(|(method, params)| method == "getAlbumList2"
+                && params.get("type").is_some_and(|kind| kind == "random"))
+    );
+    assert_eq!(app.state.sources.nav_collection, None);
+    assert!(app.state.queue.tracks.is_empty());
+    assert_eq!(app.state.view, View::Browse);
+    for _ in 0..2 {
+        app.send(NavAction::Command(Command::Collection(
+            CollectionKind::RandomAlbums,
+        )))
+        .await;
+        while app.state.artist_nav.loading {
+            app.receive().await;
+        }
+        assert_eq!(app.state.artist_nav.columns[0].items.len(), 100);
+        assert_eq!(app.state.artist_nav.columns[0].items[0].title(), "Random 0");
+    }
+    let requests = seen.lock().await;
+    let random: Vec<_> = requests
+        .iter()
+        .filter(|(method, params)| {
+            method == "getAlbumList2" && params.get("type").is_some_and(|kind| kind == "random")
+        })
+        .collect();
+    assert_eq!(random.len(), 1);
+    assert_eq!(random[0].1["size"], "100");
+    assert_eq!(random[0].1["musicFolderId"], "1");
+    drop(requests);
+    let actions = textamp::app::handlers::helpers::refresh_current_view(&mut app.state);
+    for action in actions {
+        app.send(action).await;
+    }
+    while app.state.artist_nav.loading {
+        app.receive().await;
+    }
+    let requests = seen.lock().await;
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|(method, params)| method == "getAlbumList2"
+                && params.get("type").is_some_and(|kind| kind == "random"))
+            .count(),
+        2
+    );
+    drop(requests);
+    let generation = app.state.library_generation;
+    app.state.advance_library_generation();
+    app.send(NavAction::RandomAlbumsLoaded {
+        generation,
+        result: Ok(vec![]),
+    })
+    .await;
+    assert!(matches!(app.state.sources.random_albums, State::Idle));
+    task.abort();
+}
+
+#[tokio::test]
+async fn large_cached_track_search_is_replaceable_and_keeps_catalog_shared() {
+    let mut app = App::new(session("http://127.0.0.1:1".into()));
+    app.state.library.all_tracks = std::sync::Arc::new(
+        (0..1024)
+            .map(|i| textamp::library::models::Track {
+                rating_key: format!("song-{i}"),
+                title: if i == 1023 {
+                    "Newest Result".into()
+                } else {
+                    "Other Song".into()
+                },
+                ..Default::default()
+            })
+            .collect(),
+    );
+    app.state.library.artists = std::sync::Arc::new(
+        (0..1024)
+            .map(|i| textamp::library::models::Artist {
+                rating_key: format!("artist-{i}"),
+                title: if i == 1023 {
+                    "Newest Artist".into()
+                } else {
+                    "Other Artist".into()
+                },
+                ..Default::default()
+            })
+            .collect(),
+    );
+    app.state.library.albums = std::sync::Arc::new(
+        (0..1024)
+            .map(|i| textamp::library::models::Album {
+                rating_key: format!("album-{i}"),
+                title: if i == 1023 {
+                    "Newest Album".into()
+                } else {
+                    "Other Album".into()
+                },
+                ..Default::default()
+            })
+            .collect(),
+    );
+    let catalog = app.state.library.all_tracks.clone();
+    app.send(SearchAction::SetSearchQuery("Other".into())).await;
+    assert!(app.state.sources.nav_tasks.contains_key("catalog-search"));
+    assert!(std::sync::Arc::strong_count(&catalog) >= 3);
+    app.send(SearchAction::SetSearchQuery("Newest".into()))
+        .await;
+    while app.state.sources.nav_tasks.contains_key("catalog-search") {
+        app.receive().await;
+    }
+    let found = &app.state.search.results.as_ref().unwrap().tracks;
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].title, "Newest Result");
+    assert_eq!(
+        app.state.search.results.as_ref().unwrap().artists[0].title,
+        "Newest Artist"
+    );
+    assert_eq!(
+        app.state.search.results.as_ref().unwrap().albums[0].title,
+        "Newest Album"
+    );
+    app.send(NavAction::SearchReady {
+        query: "Other".into(),
+        catalog_id: app.state.sources.list_id,
+        results: Default::default(),
+    })
+    .await;
+    app.send(NavAction::SearchReady {
+        query: "Newest".into(),
+        catalog_id: app.state.sources.list_id.wrapping_sub(1),
+        results: Default::default(),
+    })
+    .await;
+    assert_eq!(app.state.search.results.as_ref().unwrap().tracks.len(), 1);
+
+    assert!(std::sync::Arc::ptr_eq(
+        &catalog,
+        &app.state.library.all_tracks
+    ));
+    app.send(SearchAction::SetSearchQuery("Other".into())).await;
+    app.send(SearchAction::SetSearchQuery(String::new())).await;
+    assert!(!app.state.sources.nav_tasks.contains_key("catalog-search"));
+    assert!(app.state.search.results.is_none());
+}
+
+#[tokio::test]
+async fn cached_startup_opens_track_navigation_after_full_metadata_arrives() {
+    let (url, requests, server) =
+        server(|method, params| (200, envelope(fixture(method, params)))).await;
+    let session = session(url);
+    let mut imported = App::new(session.clone());
+    imported.catalog().await;
+    let before = requests
         .lock()
         .await
         .iter()
-        .any(|r| r.0 == "getSimilarSongs2"));
+        .filter(|(method, _)| method == "search3")
+        .count();
+    let mut app = App::new(session);
+    app.state.view = View::Browse;
+    textamp::app::sources::navidrome::open(&mut app.state, &app.tx);
+    while app.state.library.artists.is_empty() {
+        app.receive().await;
+    }
+    assert!(matches!(
+        app.state.library.catalog_loading,
+        textamp::app::catalog_loading::State::Browsing { .. }
+    ));
+    assert_eq!(app.state.library.all_tracks.len(), 3);
+    app.send(MillerAction::LoadAllLibraryTracksForMiller {
+        replace_child: false,
+    })
+    .await;
+    assert_eq!(app.state.artist_nav.columns.last().unwrap().tracks.len(), 3);
+    while app.state.library_loading {
+        app.receive().await;
+    }
+    assert!(matches!(
+        app.state.library.catalog_loading,
+        textamp::app::catalog_loading::State::Ready
+    ));
+    assert_eq!(app.state.artist_nav.columns.last().unwrap().tracks.len(), 3);
+    assert_eq!(
+        requests
+            .lock()
+            .await
+            .iter()
+            .filter(|(method, _)| method == "search3")
+            .count(),
+        before
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn empty_split_album_cache_retries_and_restores_both_performers() {
+    let (url, requests, task) = server(|method, params| {
+        let value = match method {
+            "getAlbum" => json!({"album":{"id":"split","name":"Split 7 inch","songCount":2,"song":[]}}),
+            "search3" => json!({"searchResult3":{"song":[
+                {"id":"side-a","title":"Side A","albumId":"split","album":"Split 7 inch","artist":"Artist A"},
+                {"id":"side-b","title":"Side B","albumId":"split","album":"Split 7 inch","artist":"Artist B"}
+            ]}}),
+            _ => fixture(method, params),
+        };
+        (200, envelope(value))
+    }).await;
+    let session = session(url);
+    let key = session.key("split");
+    let ticket = session
+        .cache_store()
+        .unwrap()
+        .ticket(&format!("album-tracks:{key}"));
+    ticket
+        .write(&Vec::<textamp::library::models::Track>::new())
+        .unwrap();
+    let tracks = session.album_tracks(&key).await.unwrap();
+    assert_eq!(tracks.len(), 2);
+    assert_eq!(tracks[0].track_artist(), "Artist A");
+    assert_eq!(tracks[1].track_artist(), "Artist B");
+    assert!(
+        requests
+            .lock()
+            .await
+            .iter()
+            .any(|(method, _)| method == "getAlbum")
+    );
+    task.abort();
+}
+
+#[tokio::test]
+async fn artwork_batch_publishes_ready_images_without_cancelling_inflight_work() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let (finish, release) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = [0; 4096];
+        socket.read(&mut request).await.unwrap();
+        release.await.unwrap();
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nslow")
+            .await
+            .unwrap();
+    });
+    let session = session(url);
+    let fast = session.key("fast-artwork-progress");
+    let slow = session.key("slow-artwork-progress");
+    let mut app = App::new(session);
+    assert!(
+        textamp::media::ArtworkCache::for_library(app.state.active_library.as_deref().unwrap())
+            .save(&fast, b"fast")
+    );
+    app.send(SystemAction::LoadAlbumArt(vec![
+        (fast.clone(), fast.clone()),
+        (slow.clone(), slow.clone()),
+    ]))
+    .await;
+    let request_id = app.state.sources.nav_tasks["art-grid"].0;
+    while !app.state.artwork.grid_cache.contains_key(&fast) {
+        app.receive().await;
+    }
+    assert!(
+        app.state.sources.nav_tasks.contains_key("art-grid"),
+        "fast art must publish before the slow image finishes"
+    );
+    app.send(SystemAction::LoadAlbumArt(vec![(
+        slow.clone(),
+        slow.clone(),
+    )]))
+    .await;
+    assert_eq!(
+        app.state.sources.nav_tasks["art-grid"].0, request_id,
+        "new viewport requests must not cancel blocking image jobs"
+    );
+    assert!(app.state.artwork.grid_pending.contains(&slow));
+    app.send(NavAction::Progress {
+        generation: app.state.library_generation,
+        request_id: request_id + 1,
+        slot: "art-grid",
+        actions: vec![SystemAction::SetStatus("stale-artwork".into()).into()],
+    })
+    .await;
+    assert_ne!(
+        app.state.notifications.status_message.as_deref(),
+        Some("stale-artwork")
+    );
+    finish.send(()).unwrap();
+    while app.state.sources.nav_tasks.contains_key("art-grid") {
+        app.receive().await;
+    }
+    assert_eq!(app.state.artwork.grid_cache[&slow], b"slow");
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn composed_artwork_is_cached_independently_of_source_covers() {
+    let session = session("http://127.0.0.1:9".into());
+    let thumb = session.key("mosaic-cache-source");
+    let mut app = App::new(session);
+    let cache =
+        textamp::media::ArtworkCache::for_library(app.state.active_library.as_deref().unwrap());
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::RgbaImage::from_pixel(8, 8, image::Rgba([1, 2, 3, 255]))
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+    assert!(cache.save(&thumb, png.get_ref()));
+    let key = "mosaic:test-persistent".to_string();
+    let spec = format!("mosaic:{}", serde_json::to_string(&vec![&thumb]).unwrap());
+    app.send(SystemAction::LoadAlbumArt(vec![(
+        key.clone(),
+        spec.clone(),
+    )]))
+    .await;
+    while app.state.sources.nav_tasks.contains_key("art-grid") {
+        app.receive().await;
+    }
+    let first = app
+        .state
+        .artwork
+        .grid_cache
+        .get(&key)
+        .expect("composed mosaic")
+        .clone();
+    assert!(cache.save(&thumb, b"invalid cover"));
+    app.state.artwork.grid_cache.remove(&key);
+    app.send(SystemAction::LoadAlbumArt(vec![(key.clone(), spec)]))
+        .await;
+    while app.state.sources.nav_tasks.contains_key("art-grid") {
+        app.receive().await;
+    }
+    assert_eq!(
+        app.state.artwork.grid_cache[&key], first,
+        "reopening must use the composed mosaic without decoding its covers again"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cached_album_destinations_open_without_waiting_for_the_server() {
+    use textamp::app::sources::navidrome::commands::{Collection, CollectionKind};
+    let (release, waiting) = std::sync::mpsc::channel();
+    let waiting = std::sync::Mutex::new(waiting);
+    let (url, requests, task) = server(move |method, params| {
+        if method == "getAlbumList2" {
+            waiting
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap();
+        }
+        (200, envelope(fixture(method, params)))
+    })
+    .await;
+    let session = session(url);
+    let albums = vec![session.album(
+        serde_json::from_value(json!({"id":"cached-album","name":"Cached Album"})).unwrap(),
+    )];
+    session
+        .cache_store()
+        .unwrap()
+        .ticket("albums-recently-added")
+        .write(&Collection::Albums(albums))
+        .unwrap();
+    let mut app = App::new(session.clone());
+    app.send(CollectionKind::RecentlyAdded.action()).await;
+    while app.state.artist_nav.loading {
+        app.receive().await;
+    }
+    assert_eq!(
+        app.state.artist_nav.columns[0].items[0].key(),
+        session.key("cached-album")
+    );
+    assert!(app.state.artist_nav.columns[0].artwork_visible);
+    assert!(app.state.sources.nav_tasks.contains_key("collection"));
+    release.send(()).unwrap();
+    while app.state.sources.nav_tasks.contains_key("collection") {
+        app.receive().await;
+    }
+    assert_eq!(requests.lock().await.len(), 1);
+    task.abort();
+}
+
+#[tokio::test]
+async fn enhanced_lyrics_use_authenticated_post_and_follow_toggle_preserves_text() {
+    let (url,requests,server)=server(|method,params| {
+        assert_eq!(method,"getLyricsBySongId");
+        assert_eq!(params["_verb"],"POST");assert_eq!(params["_url_query"],"");
+        assert!(params["_content_type"].contains("application/x-www-form-urlencoded"));
+        for (key,value) in [("id","song"),("enhanced","true"),("u","fixture"),("v","1.16.1"),("f","json")] {assert_eq!(params[key],value);}
+        assert!(params.contains_key("t") && params.contains_key("s") && params.contains_key("c"));
+        (200,envelope(json!({"lyricsList":{"structuredLyrics":[{"lang":"en","synced":true,"line":[{"start":0,"value":"Fixture opening"},{"start":1000,"value":"Fixture next"}]}]}})))
+    }).await;
+    let session = session(url);
+    let mut app = App::new(session.clone());
+    let track = session.track(serde_json::from_value(song("song", 1, 1)).unwrap());
+    app.state.queue.tracks = vec![track];
+    app.state.queue.index = Some(0);
+    app.send(PlaybackAction::ShowLyrics).await;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while app
+            .state
+            .popups
+            .lyrics()
+            .is_some_and(|panel| matches!(panel.content, textamp::app::lyrics::Content::Loading))
+        {
+            app.receive().await;
+        }
+    })
+    .await
+    .unwrap();
+    app.state.playback.position_ms = 1500;
+    assert_eq!(
+        textamp::app::lyrics::view(&app.state).unwrap().active,
+        Some(1)
+    );
+    app.send(PlaybackAction::ToggleLyricsSync).await;
+    let view = textamp::app::lyrics::view(&app.state).unwrap();
+    assert_eq!(view.active, None);
+    assert_eq!(view.lines.len(), 2);
+    assert_eq!(requests.lock().await.len(), 1);
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn playlist_edits_append_albums_and_preserve_duplicate_occurrences_on_server() {
+    use textamp::app::sources::navidrome::{
+        commands::Command,
+        playlist_edit::{self, Addition, Edit},
+    };
+    use textamp::app::state::{BrowseColumn, PaletteCommandKind, PlayAllRow};
+    let order = Arc::new(std::sync::Mutex::new(vec!["first".to_string()]));
+    let stored = order.clone();
+    let (url,requests,server)=server(move |method,params|{
+        let mut songs=stored.lock().unwrap();
+        let playlist=json!({"id":"playlist","name":"Favorites","songCount":songs.len(),"entry":songs.iter().map(|s|song(s,1,1)).collect::<Vec<_>>()});
+        let result=match method{
+            "getPlaylists"=>json!({"playlists":{"playlist":[playlist]}}),
+            "getPlaylist"=>json!({"playlist":playlist}),
+            "updatePlaylist"=>{assert_eq!(params["playlistId"],"playlist");for index in serde_json::from_str::<Vec<usize>>(&params["_removedIndices"]).unwrap(){songs.remove(index);}
+                songs.extend(serde_json::from_str::<Vec<String>>(&params["_additions"]).unwrap());json!({})},
+            "createPlaylist"=>{assert_eq!(params["playlistId"],"playlist");*songs=serde_json::from_str(&params["_songIds"]).unwrap();json!({})},
+            _=>fixture(method,params),
+        };
+        (200,envelope(result))
+    }).await;
+    let session = session(url);
+    let mut app = App::new(session.clone());
+    let playlist = session.key("playlist");
+    let metadata = session.playlist(session.client.playlist("playlist").await.unwrap());
+    app.state.replace_playlists(vec![metadata]);
+    let first = session.track(serde_json::from_value(song("first", 1, 1)).unwrap());
+    let mut col = BrowseColumn::new_with_tracks(
+        "Favorites",
+        BrowseItem::from_tracks(std::slice::from_ref(&first)),
+        vec![first],
+    );
+    col.play_all_row = Some(PlayAllRow::Playlist {
+        rating_key: playlist.clone(),
+        title: "Favorites".into(),
+    });
+    app.state.playlist_nav.push_column(col);
+    app.state.browse_category = BrowseCategory::Playlists;
+    async fn perform(app: &mut App, command: Command) {
+        app.send(NavAction::Command(command)).await;
+        while app.state.sources.nav_tasks.contains_key("playlist-write")
+            || app.state.sources.nav_tasks.contains_key("playlist-list")
+        {
+            app.receive().await;
+        }
+    }
+    for addition in [
+        Addition::Track(session.key("second")),
+        Addition::Album(session.key("album")),
+    ] {
+        app.send(NavAction::Command(Command::ChoosePlaylist(addition)))
+            .await;
+        assert!(app.state.palette.open);
+        let entry = app
+            .state
+            .palette
+            .entries
+            .iter()
+            .find(|e| e.label == "Favorites")
+            .unwrap();
+        let PaletteCommandKind::Navidrome(command) = entry.command.clone() else {
+            panic!("Missing playlist choice")
+        };
+        app.state.palette.close();
+        perform(&mut app, command).await;
+    }
+    assert_eq!(
+        *order.lock().unwrap(),
+        ["first", "second", "first", "second", "disc2"]
+    );
+    for (index, edit, expected) in [
+        (
+            2,
+            Edit::Up,
+            vec!["first", "first", "second", "second", "disc2"],
+        ),
+        (
+            1,
+            Edit::Down,
+            vec!["first", "second", "first", "second", "disc2"],
+        ),
+        (2, Edit::Remove, vec!["first", "second", "second", "disc2"]),
+    ] {
+        let command =
+            playlist_edit::row_command(&app.state, &app.state.playlist_nav.columns[1], index, edit)
+                .unwrap();
+        perform(&mut app, command).await;
+        assert_eq!(*order.lock().unwrap(), expected);
+        assert_eq!(
+            session
+                .playlist_tracks(&playlist)
+                .await
+                .unwrap()
+                .iter()
+                .map(|t| session.id(&t.rating_key).unwrap())
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+    let command = playlist_edit::row_command(
+        &app.state,
+        &app.state.playlist_nav.columns[1],
+        1,
+        Edit::Remove,
+    )
+    .unwrap();
+    order.lock().unwrap().reverse();
+    requests.lock().await.clear();
+    perform(&mut app, command).await;
+    assert!(
+        requests
+            .lock()
+            .await
+            .iter()
+            .all(|(method, _)| method != "updatePlaylist" && method != "createPlaylist")
+    );
+    assert_eq!(
+        app.state.playlist_nav.columns[1].tracks[0].rating_key,
+        session.key("disc2")
+    );
+    // Select both occurrences of "second" and append them in one request.
+    let col = &mut app.state.playlist_nav.columns[1];
+    col.selected_set = [1, 2].into();
+    col.selected_index = 0; // Keyboard focus may be outside the marked set.
+    col.header_selection = textamp::app::state::ColumnHeaderSelection::Items;
+    app.state.playlist_nav.focused_column = 1;
+    app.state.category_column_focused = false;
+    let entry = textamp::app::command_palette::materialize_entries(&app.state)
+        .into_iter()
+        .find(|e| e.label == "Add Selected Tracks to Playlist…")
+        .expect("batch palette action");
+    let PaletteCommandKind::Navidrome(Command::ChoosePlaylist(addition)) = entry.command else {
+        panic!("batch selection lost")
+    };
+    app.state.playlist_nav.columns[1].selected_set.clear();
+    perform(
+        &mut app,
+        Command::Append {
+            playlist: playlist.clone(),
+            addition,
+        },
+    )
+    .await;
+    assert_eq!(
+        *order.lock().unwrap(),
+        ["disc2", "second", "second", "first", "second", "second"]
+    );
+    let col = &mut app.state.playlist_nav.columns[1];
+    col.selected_set = [1, 3].into();
+    // A context click outside the selection must only target that occurrence.
+    assert!(
+        matches!(playlist_edit::row_command(&app.state,&app.state.playlist_nav.columns[1],2,Edit::Remove),Some(Command::EditEntry{entries,..}) if entries.len()==1 && entries[0].0==2)
+    );
+    for (index, edit, after, marked) in [
+        (
+            3,
+            Edit::Up,
+            vec!["second", "disc2", "first", "second", "second", "second"],
+            vec![0, 2],
+        ),
+        (
+            2,
+            Edit::Down,
+            vec!["disc2", "second", "second", "first", "second", "second"],
+            vec![1, 3],
+        ),
+        (
+            3,
+            Edit::Remove,
+            vec!["disc2", "second", "second", "second"],
+            vec![],
+        ),
+    ] {
+        let col = &app.state.playlist_nav.columns[1];
+        let c = playlist_edit::row_command(&app.state, col, index, edit).unwrap();
+        requests.lock().await.clear();
+        perform(&mut app, c).await;
+        assert_eq!(*order.lock().unwrap(), after);
+        assert_eq!(
+            app.state.playlist_nav.columns[1]
+                .selected_set
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            marked
+        );
+        assert_eq!(
+            requests
+                .lock()
+                .await
+                .iter()
+                .filter(|(m, _)| m == "createPlaylist" || m == "updatePlaylist")
+                .count(),
+            1
+        );
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn create_new_playlist_from_chooser_keeps_selected_occurrences_and_allows_first_playlist() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use textamp::app::sources::navidrome::{commands::Command, playlist_edit::Addition};
+    use textamp::app::{command_palette, handlers::key_input};
+    let (url, requests, task) = server(|method, _| {
+        let playlist = json!({"id":"new","name":"Road trip","songCount":3});
+        let content = match method {
+            "createPlaylist" => json!({"playlist":playlist}),
+            "getPlaylists" => json!({"playlists":{"playlist":[playlist]}}),
+            _ => panic!("unexpected call {method}"),
+        };
+        (200, envelope(content))
+    })
+    .await;
+    let session = session(url);
+    let mut app = App::new(session.clone());
+    let addition = Addition::Tracks(
+        ["second", "first", "second"]
+            .map(|id| session.key(id))
+            .into(),
+    );
+    for cancel in [true, false] {
+        app.send(NavAction::Command(Command::ChoosePlaylist(
+            addition.clone(),
+        )))
+        .await;
+        assert!(app.state.palette.open);
+        app.state.palette.query = "no such playlist".into();
+        command_palette::refresh_matches(&mut app.state);
+        assert_eq!(app.state.palette.matches.len(), 1);
+        let choice = &app.state.palette.entries[app.state.palette.matches[0]];
+        assert_eq!(choice.label, "Create New Playlist…");
+        let command = choice.command.clone();
+        app.state.palette.close();
+        for action in command_palette::run(command, &mut app.state) {
+            app.send(action).await;
+        }
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(key_input::handle_key(enter, &mut app.state, &app.config).is_empty());
+        let dialog = app
+            .state
+            .popups
+            .input_dialog_mut()
+            .expect("Blank names keep the form open");
+        dialog.input = "  Road trip  ".into();
+        let key = if cancel {
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
+        } else {
+            enter
+        };
+        for action in key_input::handle_key(key, &mut app.state, &app.config) {
+            app.send(action).await;
+        }
+        if cancel {
+            assert!(requests.lock().await.is_empty());
+        }
+    }
+    while app.state.sources.nav_tasks.contains_key("playlist-write")
+        || app.state.sources.nav_tasks.contains_key("playlist-list")
+    {
+        app.receive().await;
+    }
+    let calls = requests.lock().await;
+    let mut writes = calls
+        .iter()
+        .filter(|(method, _)| method == "createPlaylist");
+    let (_, params) = writes.next().unwrap();
+    assert_eq!(params["name"], "Road trip");
+    assert_eq!(params["_songIds"], r#"["second","first","second"]"#);
+    assert!(writes.next().is_none());
+    assert_eq!(
+        app.state.library.playlists[0].rating_key,
+        session.key("new")
+    );
+    assert!(app.state.queue.tracks.is_empty());
+    task.abort();
+}
+
+#[tokio::test]
+async fn create_new_playlist_from_file_creates_an_empty_server_playlist() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use textamp::app::{command_catalog, command_palette, handlers::key_input};
+
+    let (url, requests, task) = server(|method, _| {
+        let playlist = json!({"id":"empty","name":"Weekend","songCount":0});
+        let content = match method {
+            "createPlaylist" => json!({"playlist":playlist}),
+            "getPlaylists" => json!({"playlists":{"playlist":[playlist]}}),
+            _ => panic!("unexpected call {method}"),
+        };
+        (200, envelope(content))
+    })
+    .await;
+    let session = session(url);
+    let mut app = App::new(session.clone());
+    let entry = command_palette::materialize_entries(&app.state)
+        .into_iter()
+        .find(|e| e.label == "Create New Playlist…")
+        .unwrap();
+    assert_eq!(command_catalog::path(&entry.command), ["File"]);
+    for action in command_palette::run(entry.command, &mut app.state) {
+        app.send(action).await;
+    }
+    app.state.popups.input_dialog_mut().unwrap().input = " Weekend ".into();
+    for action in key_input::handle_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut app.state,
+        &app.config,
+    ) {
+        app.send(action).await;
+    }
+    while app.state.sources.nav_tasks.contains_key("playlist-write")
+        || app.state.sources.nav_tasks.contains_key("playlist-list")
+    {
+        app.receive().await;
+    }
+    let calls = requests.lock().await;
+    let writes: Vec<_> = calls
+        .iter()
+        .filter(|(method, _)| method == "createPlaylist")
+        .collect();
+    assert_eq!(writes.len(), 1);
+    assert_eq!(writes[0].1["name"], "Weekend");
+    assert!(!writes[0].1.contains_key("songId"));
+    assert_eq!(
+        app.state.library.playlists[0].rating_key,
+        session.key("empty")
+    );
     task.abort();
 }

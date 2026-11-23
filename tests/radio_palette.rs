@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::{backend::TestBackend, Terminal};
+use ratatui::{Terminal, backend::TestBackend};
 use textamp::app::action::RadioAction;
 use textamp::app::command_palette;
 use textamp::app::handlers::{key_input, mouse_input};
@@ -15,19 +15,21 @@ fn station_state() -> AppState {
     state.station_nav.columns = vec![StationColumn::new(
         None,
         "stations".into(),
-        vec![serde_json::from_value(serde_json::json!({
-            "key": "/library/sections/5/stations/randomAlbum",
-            "title": "Random Album Radio",
-            "type": "station",
-            "identifier": "randomAlbum"
-        }))
-        .unwrap()],
+        vec![
+            serde_json::from_value(serde_json::json!({
+                "key": "/library/sections/5/stations/randomAlbum",
+                "title": "Play Random Albums",
+                "type": "station",
+                "identifier": "randomAlbum"
+            }))
+            .unwrap(),
+        ],
     )];
     state
 }
 
 fn select_random_album_radio(state: &mut AppState) -> Vec<Action> {
-    command_palette::open_with_query(state, "Random Album Radio");
+    command_palette::open_with_query(state, "Play Random Albums");
     let command_palette::PaletteOutcome::Execute(command) =
         command_palette::handle_key(state, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
     else {
@@ -68,16 +70,17 @@ fn palette_and_alt_r_use_the_same_station_action() {
             );
         }
 
-        // The Now Playing Radio button opens this same palette. Exercise its
-        // keyboard entry and a real rendered row click, not just palette::run.
-        state.now_playing_focus = NowPlayingFocus::Sidebar;
-        state.now_playing_sidebar_index = 0;
-        assert!(key_input::handle_key(
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-            &mut state,
-            &config
-        )
-        .is_empty());
+        // Queue Type opens the same station choices through its header.
+        state.now_playing_focus = NowPlayingFocus::Tracks;
+        state.tui_queue_type_focused = true;
+        assert!(
+            key_input::handle_key(
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                &mut state,
+                &config
+            )
+            .is_empty()
+        );
         assert!(state.palette.open);
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
         terminal
@@ -140,12 +143,14 @@ fn random_album_shortcut_is_unavailable_without_a_station_for_every_source() {
         let mut state = station_state();
         state.sources.active = source;
         state.station_nav.columns.clear();
-        assert!(key_input::handle_key(
-            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT),
-            &mut state,
-            &Config::default()
-        )
-        .is_empty());
+        assert!(
+            key_input::handle_key(
+                KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT),
+                &mut state,
+                &Config::default()
+            )
+            .is_empty()
+        );
         assert!(
             !key_input::available_alt_commands(&state)
                 .iter()
@@ -179,20 +184,25 @@ fn folder_palette_keeps_shared_controls_but_hides_server_only_commands() {
         [Action::Queue(textamp::app::action::QueueAction::ClearQueue)]
     ));
     let entries = command_palette::materialize_entries(&state);
-    assert!(entries
-        .iter()
-        .any(|e| matches!(e.command, PaletteCommandKind::OpenSearch)));
-    assert!(entries
-        .iter()
-        .any(|e| matches!(e.command, PaletteCommandKind::GotoNowPlaying)));
-    assert!(entries
-        .iter()
-        .any(|e| matches!(e.command, PaletteCommandKind::PlayPause)));
+    assert!(
+        entries
+            .iter()
+            .any(|e| matches!(e.command, PaletteCommandKind::OpenSearch))
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|e| matches!(e.command, PaletteCommandKind::GotoNowPlaying))
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|e| matches!(e.command, PaletteCommandKind::PlayPause))
+    );
     assert!(!entries.iter().any(|e| matches!(
         e.command,
         PaletteCommandKind::SaveQueue
             | PaletteCommandKind::ArtistRadio
-            | PaletteCommandKind::ToggleDj(_)
             | PaletteCommandKind::RemixTwofer
             | PaletteCommandKind::GotoGenres
             | PaletteCommandKind::GotoLibrary

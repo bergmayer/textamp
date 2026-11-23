@@ -2,6 +2,54 @@ use super::*;
 use crate::app::state::{AllTracksScope, BrowseColumn, BrowseItem};
 
 pub fn album_tracks(state: &AppState, key: &str) -> Vec<Track> {
+    let key = state
+        .library
+        .compilations
+        .complete_releases
+        .get(key)
+        .map_or(key, String::as_str);
+    if let Some(members) = state.library.compilations.release_members.get(key) {
+        let mut tracks: Vec<_> = members
+            .iter()
+            .flat_map(|member| indexed_album_tracks(state, member))
+            .collect();
+        tracks.sort_by_key(|track| {
+            (
+                track.parent_index.unwrap_or(1),
+                track.index.unwrap_or(u32::MAX),
+                track.title.clone(),
+                track.rating_key.clone(),
+            )
+        });
+        let mut seen = std::collections::HashSet::new();
+        tracks.retain(|track| seen.insert(track.rating_key.clone()));
+        return tracks;
+    }
+    indexed_album_tracks(state, key)
+}
+fn indexed_album_tracks(state: &AppState, key: &str) -> Vec<Track> {
+    if let Some(tracks) = state
+        .library
+        .visited_album_tracks
+        .get(key)
+        .filter(|tracks| !tracks.is_empty())
+    {
+        return tracks.clone();
+    }
+    if matches!(
+        state.library.catalog_loading,
+        crate::app::catalog_loading::State::Browsing { .. }
+    ) {
+        return vec![];
+    }
+    if state.library.track_lookup.len == state.library.all_tracks.len()
+        && let Some(rows) = state.library.track_lookup.albums.get(key)
+    {
+        return rows
+            .iter()
+            .filter_map(|row| state.library.all_tracks.get(*row).cloned())
+            .collect();
+    }
     state
         .library
         .all_tracks
@@ -11,6 +59,17 @@ pub fn album_tracks(state: &AppState, key: &str) -> Vec<Track> {
         .collect()
 }
 pub fn artist_tracks(state: &AppState, key: &str) -> Vec<Track> {
+    artist_track_refs(state, key).into_iter().cloned().collect()
+}
+fn artist_track_refs<'a>(state: &'a AppState, key: &str) -> Vec<&'a Track> {
+    if state.library.track_lookup.len == state.library.all_tracks.len()
+        && let Some(rows) = state.library.track_lookup.artists.get(key)
+    {
+        return rows
+            .iter()
+            .filter_map(|row| state.library.all_tracks.get(*row))
+            .collect();
+    }
     let name = state
         .library
         .artists
@@ -40,7 +99,6 @@ pub fn artist_tracks(state: &AppState, key: &str) -> Vec<Track> {
                     )
                 })
         })
-        .cloned()
         .collect()
 }
 fn album_name(state: &AppState, key: &str) -> String {
@@ -59,6 +117,9 @@ pub fn intercept(
     tx: &mpsc::Sender<Event>,
     session: &Session,
 ) -> Option<Vec<Action>> {
+    if crate::app::catalog_loading::defer(state, action) {
+        return Some(vec![]);
+    }
     let mut follow = vec![];
     match action.clone() {
         Action::Miller(MillerAction::LoadArtistAlbumsForMiller {
@@ -74,7 +135,7 @@ pub fn intercept(
                 .find(|a| a.rating_key == artist_key)
                 .map(|a| a.title.clone())
                 .unwrap_or_default();
-            let tracks = artist_tracks(state, &artist_key);
+            let tracks = artist_track_refs(state, &artist_key);
             let keys: std::collections::HashSet<_> = tracks
                 .iter()
                 .filter_map(|t| t.parent_rating_key.as_deref())
@@ -145,8 +206,24 @@ pub fn intercept(
             let request_id = state.artist_nav_request_id;
             let tracks = album_tracks(state, &album_key);
             let album_title = album_name(state, &album_key);
-            let fetch_key = album_key.clone();
-            let completion = move |result| {
+            let fetch_key = state
+                .library
+                .compilations
+                .complete_releases
+                .get(&album_key)
+                .cloned()
+                .unwrap_or_else(|| album_key.clone());
+            let completion = move |result: Result<Vec<Track>, crate::app::action::AsyncError>| {
+                let album_title = if album_title.is_empty() {
+                    result
+                        .as_ref()
+                        .ok()
+                        .and_then(|tracks| tracks.first())
+                        .map(|track| track.album_name().to_owned())
+                        .unwrap_or_default()
+                } else {
+                    album_title
+                };
                 MillerAction::AlbumTracksForMillerLoaded {
                     request_id,
                     album_title,
@@ -202,17 +279,19 @@ pub fn intercept(
                 thumb: None,
             });
             let mut col = BrowseColumn::new("all albums", items);
-            col.artwork_visible = state.artwork.default_visible;
+            state.initialize_column_artwork(&mut col);
             state.artist_nav.drill_column(col, replace_child);
+            state.miller_reveal_right = true;
         }
         Action::Miller(MillerAction::LoadAllLibraryTracksForMiller { replace_child }) => {
-            let tracks = state.library.all_tracks.clone();
+            let tracks = state.library.all_tracks.as_ref().clone();
             let col = BrowseColumn::new_with_tracks(
                 "all tracks",
                 BrowseItem::from_tracks(&tracks),
                 tracks,
             );
             state.artist_nav.drill_column(col, replace_child);
+            state.miller_reveal_right = true;
         }
         Action::Miller(MillerAction::LoadGenreTracksForMiller {
             album_key,
@@ -323,18 +402,16 @@ pub fn intercept(
             state.playlist_nav.loading = true;
             let library_key = state.active_library.clone().unwrap_or_default();
             let session = session.clone();
+            let playlist = state
+                .library
+                .playlists
+                .iter()
+                .find(|playlist| playlist.rating_key == playlist_key)
+                .cloned();
             spawn(state, tx, "playlist-browse", async move {
-                let result = async {
-                    Ok(session
-                        .client
-                        .playlist(&session.id(&playlist_key)?)
-                        .await?
-                        .entry
-                        .into_iter()
-                        .map(|t| session.track(t))
-                        .collect::<Vec<_>>())
-                }
-                .await;
+                let result =
+                    super::super::playlists::tracks(&session, &playlist_key, playlist.as_ref())
+                        .await;
                 let completion = match result {
                     Ok(tracks) => PlaylistEvent::PlaylistFirstPageLoaded {
                         library_key,
@@ -366,21 +443,32 @@ pub fn intercept(
             };
             let session = session.clone();
             spawn(state, tx, "album-browse", async move {
-                Ok(vec![MillerAction::AlbumTracksRefreshed {
-                    request_id,
-                    tag_section,
-                    column_index,
-                    result: session.album_tracks(&album_key).await.map_err(failure),
-                }
-                .into()])
+                Ok(vec![
+                    MillerAction::AlbumTracksRefreshed {
+                        request_id,
+                        tag_section,
+                        column_index,
+                        result: session
+                            .fetch_album_tracks(&album_key)
+                            .await
+                            .map_err(failure),
+                    }
+                    .into(),
+                ])
             });
         }
         Action::Browse(BrowseAction::RefreshTagView) => {
-            // The catalog owns Navidrome tags. An empty list is legitimate,
-            // not a signal to synchronously load and refresh it again.
+            let section = state.browse_category;
+            if !section.is_tag_section() {
+                return Some(vec![]);
+            }
+            if section == BrowseCategory::Decades {
+                state.library.decades =
+                    crate::services::release_dates::decades(&state.library.albums);
+            }
             state.tag_nav.reset(
-                BrowseCategory::AlbumGenres.name(),
-                BrowseItem::from_genres(&state.library.album_genres),
+                section.name(),
+                BrowseItem::from_genres(state.tag_list_for(section)),
             );
             state.tag_nav.loading = false;
         }
@@ -389,7 +477,7 @@ pub fn intercept(
                 BrowseAction::TagListLoaded {
                     library_key: state.active_library.clone().unwrap_or_default(),
                     section,
-                    result: Ok(state.library.album_genres.clone()),
+                    result: Ok(state.library.album_genres.as_ref().clone()),
                 }
                 .into(),
             );
@@ -448,13 +536,27 @@ fn folders(action: FolderAction, state: &mut AppState) -> Vec<Action> {
     });
     match action {
         FolderAction::LoadFolderRoot => {
+            let owners: std::collections::HashSet<_> = state
+                .library
+                .albums
+                .iter()
+                .filter_map(|album| album.parent_rating_key.as_deref())
+                .collect();
             nav.columns = vec![FolderColumn::new(
                 None,
-                "artists (virtual folders)".into(),
+                "Artists".into(),
                 state
                     .library
                     .artists
                     .iter()
+                    .filter(|artist| {
+                        owners.contains(artist.rating_key.as_str())
+                            && !state
+                                .library
+                                .compilations
+                                .artist_keys
+                                .contains(&artist.rating_key)
+                    })
                     .map(|a| FolderItem::folder(a.rating_key.clone(), a.title.clone()))
                     .collect(),
             )];
@@ -464,27 +566,39 @@ fn folders(action: FolderAction, state: &mut AppState) -> Vec<Action> {
             folder_key,
             replace_child,
         } => {
-            let (title, items) = if let Some(artist) = state
+            let (title, items, tracks) = if let Some(artist) = state
                 .library
                 .artists
                 .iter()
                 .find(|a| a.rating_key == folder_key)
             {
+                let compilation_keys: std::collections::HashSet<_> = state
+                    .library
+                    .compilations
+                    .albums
+                    .iter()
+                    .map(|album| album.rating_key.as_str())
+                    .collect();
                 (
                     artist.title.clone(),
                     state
                         .library
                         .albums
                         .iter()
-                        .filter(|a| a.parent_rating_key.as_deref() == Some(&folder_key))
+                        .filter(|a| {
+                            a.parent_rating_key.as_deref() == Some(&folder_key)
+                                && !compilation_keys.contains(a.rating_key.as_str())
+                        })
                         .map(|a| FolderItem::folder(a.rating_key.clone(), a.title.clone()))
                         .collect(),
+                    Vec::new(),
                 )
             } else {
+                let tracks = album_tracks(state, &folder_key);
                 (
                     album_name(state, &folder_key),
-                    album_tracks(state, &folder_key)
-                        .into_iter()
+                    tracks
+                        .iter()
                         .map(|t| {
                             FolderItem::track(
                                 t.rating_key.clone(),
@@ -496,12 +610,17 @@ fn folders(action: FolderAction, state: &mut AppState) -> Vec<Action> {
                             )
                         })
                         .collect(),
+                    tracks,
                 )
             };
             let target = nav.focused_column + 1;
             nav.columns.truncate(target);
-            nav.columns
-                .push(FolderColumn::new(Some(folder_key), title, items));
+            let mut column = FolderColumn::new(Some(folder_key), title, items);
+            column.tracks = tracks
+                .into_iter()
+                .map(|track| (track.rating_key.clone(), track))
+                .collect();
+            nav.columns.push(column);
             if !replace_child {
                 nav.focused_column = target;
             }
@@ -518,11 +637,9 @@ fn folders(action: FolderAction, state: &mut AppState) -> Vec<Action> {
                         .iter()
                         .skip(index)
                         .filter_map(|i| {
-                            state
-                                .library
-                                .all_tracks
-                                .iter()
-                                .find(|t| Some(&t.rating_key) == i.rating_key.as_ref())
+                            i.rating_key
+                                .as_ref()
+                                .and_then(|key| col.tracks.get(key))
                                 .cloned()
                         })
                         .collect()
@@ -532,8 +649,140 @@ fn folders(action: FolderAction, state: &mut AppState) -> Vec<Action> {
             return vec![QueueAction::PlayTracksNow(tracks).into()];
         }
         FolderAction::RefreshSubfolder(_) => {}
-        _ => {}
     }
     state.folder_state = Some(nav);
     vec![]
+}
+
+#[cfg(test)]
+mod folder_catalog_tests {
+    use super::*;
+    #[test]
+    fn folders_exclude_empty_and_compilation_only_artist_directories() {
+        let mut state = AppState::new();
+        state.library.artists = std::sync::Arc::new(
+            ["owner", "orphan", "guest"]
+                .map(|key| crate::library::models::Artist {
+                    rating_key: key.into(),
+                    title: key.into(),
+                    ..Default::default()
+                })
+                .to_vec(),
+        );
+        state.library.albums = std::sync::Arc::new(
+            [("album", "owner"), ("compilation", "guest")]
+                .map(|(key, owner)| crate::library::models::Album {
+                    rating_key: key.into(),
+                    parent_rating_key: Some(owner.into()),
+                    title: key.into(),
+                    ..Default::default()
+                })
+                .to_vec(),
+        );
+        state
+            .library
+            .compilations
+            .artist_keys
+            .insert("guest".into());
+        folders(FolderAction::LoadFolderRoot, &mut state);
+        let items = &state.folder_state.as_ref().unwrap().columns[0].items;
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].key, "owner");
+    }
+}
+
+#[cfg(test)]
+mod complete_release_tests {
+    use super::*;
+    #[test]
+    fn disjoint_compilation_parts_browse_every_performer_from_any_part() {
+        let mut state = AppState::new();
+        state
+            .library
+            .compilations
+            .complete_releases
+            .insert("a".into(), "va".into());
+        state
+            .library
+            .compilations
+            .complete_releases
+            .insert("b".into(), "va".into());
+        state
+            .library
+            .compilations
+            .release_members
+            .insert("va".into(), vec!["a".into(), "b".into(), "va".into()]);
+        state.library.all_tracks = std::sync::Arc::new(
+            [("a", "A"), ("b", "B"), ("va", "C")]
+                .into_iter()
+                .map(|(album, artist)| Track {
+                    rating_key: format!("song-{artist}"),
+                    parent_rating_key: Some(album.into()),
+                    original_title: Some(artist.into()),
+                    ..Default::default()
+                })
+                .collect(),
+        );
+        state.library.track_lookup = crate::services::catalog_lookup::TrackLookup::build(
+            &[],
+            &[],
+            &[],
+            &state.library.all_tracks,
+        );
+        for key in ["a", "b", "va"] {
+            let tracks = album_tracks(&state, key);
+            assert_eq!(tracks.len(), 3);
+            let performers: std::collections::HashSet<_> =
+                tracks.iter().map(Track::track_artist).collect();
+            assert_eq!(performers, std::collections::HashSet::from(["A", "B", "C"]));
+        }
+    }
+    #[test]
+    fn compilation_excerpt_opens_every_performer_in_the_complete_release() {
+        let mut state = AppState::new();
+        state
+            .library
+            .compilations
+            .complete_releases
+            .insert("excerpt".into(), "whole".into());
+        state.library.all_tracks = std::sync::Arc::new(vec![
+            Track {
+                rating_key: "a".into(),
+                parent_rating_key: Some("whole".into()),
+                original_title: Some("Artist A".into()),
+                ..Default::default()
+            },
+            Track {
+                rating_key: "b".into(),
+                parent_rating_key: Some("whole".into()),
+                original_title: Some("Artist B".into()),
+                ..Default::default()
+            },
+            Track {
+                rating_key: "excerpt-song".into(),
+                parent_rating_key: Some("excerpt".into()),
+                original_title: Some("Artist A".into()),
+                ..Default::default()
+            },
+        ]);
+        state.library.track_lookup = crate::services::catalog_lookup::TrackLookup::build(
+            &[],
+            &[],
+            &[],
+            &state.library.all_tracks,
+        );
+        state
+            .library
+            .visited_album_tracks
+            .insert("whole".into(), vec![]);
+        let tracks = album_tracks(&state, "excerpt");
+        assert_eq!(
+            tracks
+                .iter()
+                .map(|t| t.rating_key.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+        assert_ne!(tracks[0].track_artist(), tracks[1].track_artist());
+    }
 }

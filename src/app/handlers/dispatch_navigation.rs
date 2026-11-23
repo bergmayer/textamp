@@ -9,7 +9,7 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 
 /// Dispatch navigation actions. Returns follow-up actions.
-pub async fn dispatch(
+pub fn dispatch(
     _event_tx: &mpsc::Sender<Event>,
     action: NavigationAction,
     state: &mut AppState,
@@ -26,21 +26,52 @@ pub async fn dispatch(
     }
 
     match action {
-        NavigationAction::ToggleFullscreen | NavigationAction::FullscreenArtwork => {
-            state.fullscreen_active = if matches!(action, NavigationAction::FullscreenArtwork) {
-                state.fullscreen_artwork = true;
-                true
+        NavigationAction::SwitchPresentation(mode) => {
+            if state.windowed_presentation.can_activate(mode) {
+                state.windowed_presentation.request(mode);
             } else {
-                !state.fullscreen_active
+                state.set_status("This presentation is unavailable in the current host".into());
+            }
+        }
+        NavigationAction::OpenRadioStation(key) => {
+            return Ok(crate::app::radio_navigation::configure(state, &key));
+        }
+        NavigationAction::OpenLibraryRoot(root) => {
+            return Ok(crate::app::sidebar::open_root(root, state));
+        }
+        NavigationAction::ToggleSidebar => {
+            state.tui_sidebar_visible = !state.tui_sidebar_visible;
+            if !state.tui_sidebar_visible {
+                state.category_column_focused = false;
+            }
+        }
+        NavigationAction::ToggleQueuePanel => {
+            state.tui_queue_visible = !state.tui_queue_visible;
+            if !state.tui_queue_visible && state.view == View::Queue {
+                state.set_view(state.tui_queue_workspace.view());
+            }
+        }
+
+        NavigationAction::Back => return Ok(crate::app::navigation_history::back(state)),
+        NavigationAction::Undo => return Ok(crate::app::navigation_history::undo(state)),
+        NavigationAction::ResetDesktopPanels => {}
+
+        NavigationAction::DesktopFullscreen(_) => {}
+        NavigationAction::ToggleFullscreen | NavigationAction::FullscreenArtwork => {
+            use crate::app::state::FullscreenView;
+            state.fullscreen = match (action, state.fullscreen) {
+                (NavigationAction::FullscreenArtwork, _) => FullscreenView::Artwork,
+                (_, FullscreenView::Closed) => FullscreenView::Visualizer,
+                _ => FullscreenView::Closed,
             };
-            if state.fullscreen_active {
+            if state.fullscreen.is_open() {
                 state.popups.close_all();
                 state.palette.close();
                 state.seek_drag = None;
                 state.volume_drag = false;
                 state.scroll.scrollbar_drag = None;
                 state.miller_h_drag_grab = None;
-                if !state.fullscreen_artwork {
+                if !state.fullscreen.is_artwork() {
                     follow_ups.push(SystemAction::LoadWaveform.into());
                     follow_ups.push(SystemAction::LoadSpectrogram.into());
                 }
@@ -48,6 +79,9 @@ pub async fn dispatch(
         }
         NavigationAction::SetView(view) => {
             state.set_view(view);
+            if view == View::Queue {
+                state.tui_queue_visible = true;
+            }
             // Load stations when entering Queue view if not already loaded
             if view == View::Queue
                 && state.station_nav.columns.is_empty()
@@ -91,12 +125,24 @@ pub async fn dispatch(
             category,
             preserve_sections_focus,
         } => {
+            if category == BrowseCategory::Library
+                && matches!(
+                    state.desktop_library_root,
+                    crate::app::state::LibraryRoot::Singles
+                        | crate::app::state::LibraryRoot::Mp3Players
+                )
+            {
+                state.desktop_library_root = crate::app::state::LibraryRoot::Artists;
+                state
+                    .artist_nav
+                    .reset("artists", state.build_artist_root_items());
+            }
             // Picking a category implies "show me that part of the
             // library", so always switch to the Browse view too.
             // Without this, the View menu / Ctrl+L|P|G|O shortcuts
             // would silently change the category state but leave the
             // user stuck on Queue/Now Playing/Help/etc.
-            if state.view != View::Browse || state.fullscreen_active {
+            if state.view != View::Browse || state.fullscreen.is_open() {
                 state.set_view(View::Browse);
             }
 
@@ -112,12 +158,11 @@ pub async fn dispatch(
 
             if state.browse_category != category {
                 // Unshuffle Library root when leaving, so "All Artists" is in correct position
-                if state.browse_category == BrowseCategory::Library {
-                    if let Some(col) = state.artist_nav.columns.first_mut() {
-                        if col.is_shuffled() {
-                            col.unshuffle();
-                        }
-                    }
+                if state.browse_category == BrowseCategory::Library
+                    && let Some(col) = state.artist_nav.columns.first_mut()
+                    && col.is_shuffled()
+                {
+                    col.unshuffle();
                 }
                 state.set_browse_category(category, preserve_sections_focus);
                 state.focus = Focus::Left;
@@ -178,129 +223,114 @@ mod tests {
         (tx, rx, state)
     }
 
-    #[tokio::test]
-    async fn toggle_focus_left_to_right() {
+    #[test]
+    fn toggle_focus_left_to_right() {
         let (tx, _rx, mut state) = setup();
         state.focus = Focus::Left;
 
-        dispatch(&tx, NavigationAction::ToggleFocus, &mut state)
-            .await
-            .unwrap();
+        dispatch(&tx, NavigationAction::ToggleFocus, &mut state).unwrap();
         assert_eq!(state.focus, Focus::Right);
     }
 
-    #[tokio::test]
-    async fn toggle_focus_right_to_left() {
+    #[test]
+    fn toggle_focus_right_to_left() {
         let (tx, _rx, mut state) = setup();
         state.focus = Focus::Right;
 
-        dispatch(&tx, NavigationAction::ToggleFocus, &mut state)
-            .await
-            .unwrap();
+        dispatch(&tx, NavigationAction::ToggleFocus, &mut state).unwrap();
         assert_eq!(state.focus, Focus::Left);
     }
 
-    #[tokio::test]
-    async fn set_view_changes_state() {
+    #[test]
+    fn set_view_changes_state() {
         let (tx, _rx, mut state) = setup();
 
-        dispatch(&tx, NavigationAction::SetView(View::Queue), &mut state)
-            .await
-            .unwrap();
+        dispatch(&tx, NavigationAction::SetView(View::Queue), &mut state).unwrap();
         assert_eq!(state.view, View::Queue);
 
-        dispatch(&tx, NavigationAction::SetView(View::Help), &mut state)
-            .await
-            .unwrap();
+        dispatch(&tx, NavigationAction::SetView(View::Help), &mut state).unwrap();
         assert_eq!(state.view, View::Help);
     }
 
-    #[tokio::test]
-    async fn set_view_queue_requests_load_stations() {
+    #[test]
+    fn set_view_queue_requests_load_stations() {
         let (tx, _rx, mut state) = setup();
 
-        let follow_ups = dispatch(&tx, NavigationAction::SetView(View::Queue), &mut state)
-            .await
-            .unwrap();
-        assert!(follow_ups
-            .iter()
-            .any(|a| matches!(a, Action::Browse(BrowseAction::LoadStations))));
+        let follow_ups = dispatch(&tx, NavigationAction::SetView(View::Queue), &mut state).unwrap();
+        assert!(
+            follow_ups
+                .iter()
+                .any(|a| matches!(a, Action::Browse(BrowseAction::LoadStations)))
+        );
     }
 
-    #[tokio::test]
-    async fn set_view_now_playing_requests_waveform() {
+    #[test]
+    fn set_view_now_playing_requests_waveform() {
         let (tx, _rx, mut state) = setup();
 
-        let follow_ups = dispatch(&tx, NavigationAction::SetView(View::NowPlaying), &mut state)
-            .await
-            .unwrap();
-        assert!(follow_ups
-            .iter()
-            .any(|a| matches!(a, Action::System(SystemAction::LoadWaveform))));
-        assert!(follow_ups
-            .iter()
-            .any(|a| matches!(a, Action::System(SystemAction::LoadSpectrogram))));
+        let follow_ups =
+            dispatch(&tx, NavigationAction::SetView(View::NowPlaying), &mut state).unwrap();
+        assert!(
+            follow_ups
+                .iter()
+                .any(|a| matches!(a, Action::System(SystemAction::LoadWaveform)))
+        );
+        assert!(
+            follow_ups
+                .iter()
+                .any(|a| matches!(a, Action::System(SystemAction::LoadSpectrogram)))
+        );
     }
 
-    #[tokio::test]
-    async fn next_view_browse_to_queue() {
+    #[test]
+    fn next_view_browse_to_queue() {
         let (tx, _rx, mut state) = setup();
         state.view = View::Browse;
         state.set_browse_category(BrowseCategory::Library, false);
 
-        dispatch(&tx, NavigationAction::NextView, &mut state)
-            .await
-            .unwrap();
+        dispatch(&tx, NavigationAction::NextView, &mut state).unwrap();
         assert_eq!(state.view, View::Queue);
     }
 
-    #[tokio::test]
-    async fn next_view_queue_to_now_playing() {
+    #[test]
+    fn next_view_queue_to_now_playing() {
         let (tx, _rx, mut state) = setup();
         state.view = View::Queue;
 
-        dispatch(&tx, NavigationAction::NextView, &mut state)
-            .await
-            .unwrap();
+        dispatch(&tx, NavigationAction::NextView, &mut state).unwrap();
         assert_eq!(state.view, View::NowPlaying);
     }
 
-    #[tokio::test]
-    async fn next_view_now_playing_to_browse() {
+    #[test]
+    fn next_view_now_playing_to_browse() {
         let (tx, _rx, mut state) = setup();
         state.view = View::NowPlaying;
 
-        dispatch(&tx, NavigationAction::NextView, &mut state)
-            .await
-            .unwrap();
+        dispatch(&tx, NavigationAction::NextView, &mut state).unwrap();
         assert_eq!(state.view, View::Browse);
     }
 
-    #[tokio::test]
-    async fn prev_view_library_to_now_playing() {
+    #[test]
+    fn prev_view_library_to_now_playing() {
         let (tx, _rx, mut state) = setup();
         state.view = View::Browse;
         state.set_browse_category(BrowseCategory::Library, false);
 
-        dispatch(&tx, NavigationAction::PrevView, &mut state)
-            .await
-            .unwrap();
+        dispatch(&tx, NavigationAction::PrevView, &mut state).unwrap();
         assert_eq!(state.view, View::NowPlaying);
     }
 
-    #[tokio::test]
-    async fn prev_view_now_playing_to_queue() {
+    #[test]
+    fn prev_view_now_playing_to_queue() {
         let (tx, _rx, mut state) = setup();
         state.view = View::NowPlaying;
 
-        dispatch(&tx, NavigationAction::PrevView, &mut state)
-            .await
-            .unwrap();
+        dispatch(&tx, NavigationAction::PrevView, &mut state).unwrap();
         assert_eq!(state.view, View::Queue);
     }
 
-    #[tokio::test]
-    async fn set_category_changes_and_resets_focus() {
+    #[test]
+    fn set_category_changes_and_resets_focus() {
         let (tx, _rx, mut state) = setup();
         state.view = View::Browse;
         state.set_browse_category(BrowseCategory::Library, false);
@@ -311,14 +341,13 @@ mod tests {
             NavigationAction::set_category(BrowseCategory::AlbumGenres),
             &mut state,
         )
-        .await
         .unwrap();
         assert_eq!(state.browse_category, BrowseCategory::AlbumGenres);
         assert_eq!(state.focus, Focus::Left);
     }
 
-    #[tokio::test]
-    async fn set_category_same_is_noop() {
+    #[test]
+    fn set_category_same_is_noop() {
         let (tx, _rx, mut state) = setup();
         state.view = View::Browse;
         state.set_browse_category(BrowseCategory::Library, false);
@@ -329,7 +358,6 @@ mod tests {
             NavigationAction::set_category(BrowseCategory::Library),
             &mut state,
         )
-        .await
         .unwrap();
         // Category didn't change, so focus should remain Right
         assert_eq!(state.focus, Focus::Right);

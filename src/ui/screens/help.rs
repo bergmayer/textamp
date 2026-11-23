@@ -1,12 +1,12 @@
 //! Help screen: keys, source-aware sidebar visibility, library/AudioMuse settings,
-//! weekly source caches, shared analysis-load progress and capability-based radio/DJ
-//! controls, track-seeded Sonic Radio and the random-artist catalog minimum
+//! weekly source caches, shared analysis-load progress and capability-based radio/queue edit
+//! controls, track-seeded Sonic Mix and the random-artist catalog minimum
 //! — browse collections stay in the sidebar, selection actions in the palette
 //! — Ctrl+F / sidebar Search and arrow-key theme-logo previews (no `?` binding)
 //! — shared `util::help_text`.
 
-use crate::ui::theme::theme;
 use crate::ui::RenderState as AppState;
+use crate::ui::theme::theme;
 use crate::util::help_text::for_library;
 
 use ratatui::prelude::*;

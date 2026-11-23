@@ -3,7 +3,7 @@
 //! Dispatch functions receive state and the resources needed for their actions.
 //!
 //! `key_input` holds the crossterm-fed dispatcher plus pure action-builder
-//! helpers (e.g. `navigate_to_album`, `get_similar_action`,
+//! helpers (e.g. `navigate_to_album`,
 //! `truncate_filter_right_columns`) that the `dispatch_*` modules call.
 //!
 //! `mouse_input` handles ratatui-layout hit regions stored on `AppState`.

@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::{backend::TestBackend, Terminal};
-use textamp::app::action::{NavigationAction, SearchAction};
+use ratatui::{Terminal, backend::TestBackend};
+use textamp::app::action::SearchAction;
 use textamp::app::handlers::{key_input, mouse_input};
 use textamp::app::state::{BrowseCategory, InputDialog, InputDialogAction, NowPlayingFocus, View};
 use textamp::app::{Action, AppState};
@@ -38,7 +38,7 @@ fn mouse(state: &mut AppState, kind: MouseEventKind, x: u16, y: u16) -> Vec<Acti
 fn queue_state(view: View, tall: bool) -> AppState {
     let mut state = AppState::new();
     state.view = view;
-    state.tall_mode = tall;
+    state.desktop_split_view = tall;
     state.queue.tracks = (0..10)
         .map(|i| textamp::library::models::Track {
             title: format!("Track {i}"),
@@ -50,46 +50,22 @@ fn queue_state(view: View, tall: bool) -> AppState {
 }
 
 #[test]
-fn tab_uses_navigation_dispatch_in_both_directions_in_every_browse_category() {
-    for tall in [false, true] {
-        for category in BrowseCategory::all() {
-            let mut state = AppState::new();
-            state.view = View::Browse;
-            state.browse_category = *category;
-            state.tall_mode = tall;
-            for code in [KeyCode::Tab, KeyCode::BackTab] {
-                assert!(matches!(
-                    key(&mut state, code).as_slice(),
-                    [Action::Navigation(NavigationAction::SetView(
-                        View::NowPlaying
-                    ))]
-                ));
-            }
-            for view in [View::Queue, View::NowPlaying] {
-                state.view = view;
-                assert!(matches!(
-                    key(&mut state, KeyCode::Tab).as_slice(),
-                    [Action::Navigation(NavigationAction::SetView(View::Browse))]
-                ));
-            }
+fn terminal_tab_traverses_panels_without_changing_the_workspace() {
+    for category in BrowseCategory::all() {
+        let mut state = AppState::new();
+        state.view = View::Browse;
+        state.browse_category = *category;
+        render(&mut state);
+        for code in [KeyCode::Tab, KeyCode::BackTab] {
+            assert!(key(&mut state, code).is_empty());
+            let workspace = if state.view == View::Queue {
+                state.tui_queue_workspace.view()
+            } else {
+                state.view
+            };
+            assert_eq!(workspace, View::Browse);
         }
     }
-}
-
-#[test]
-fn split_library_loses_its_focus_border_when_now_playing_is_active() {
-    let mut state = queue_state(View::Browse, true);
-    state.category_column_focused = true;
-    let before = render(&mut state);
-    let area = state.hit_regions.tall_mode_split.as_ref().unwrap().top;
-    let focused = textamp::ui::theme::theme().colors.title_focused;
-    assert!((area.y..area.bottom()).any(|y| before.backend().buffer()[(area.x, y)].fg == focused));
-    state.set_view(View::NowPlaying);
-    let after = render(&mut state);
-    assert!(
-        !(area.y..area.bottom()).any(|y| after.backend().buffer()[(area.x, y)].fg == focused),
-        "inactive library still looks focused"
-    );
 }
 
 #[test]
@@ -118,6 +94,7 @@ fn clicking_queue_in_now_playing_routes_following_arrow_keys_to_tracks() {
 #[test]
 fn clicking_artwork_never_selects_or_plays_a_queue_row() {
     let mut state = queue_state(View::Queue, true);
+    state.tui_queue_workspace = textamp::app::state::TuiWorkspace::NowPlaying;
     render(&mut state);
     let rect = state.hit_regions.queue_content.as_ref().unwrap().art_area;
     let actions = mouse(
@@ -134,6 +111,7 @@ fn clicking_artwork_never_selects_or_plays_a_queue_row() {
 #[test]
 fn clicking_visualizer_tabs_moves_keyboard_focus_out_of_queue() {
     let mut state = queue_state(View::Queue, true);
+    state.tui_queue_workspace = textamp::app::state::TuiWorkspace::NowPlaying;
     render(&mut state);
     let rect = state
         .hit_regions
@@ -218,74 +196,6 @@ fn text_dialog_blocks_clicks_drags_wheels_and_right_clicks_on_underlying_player(
     }
 }
 
-#[tokio::test]
-async fn dispatched_tab_round_trips_all_providers_and_clears_old_filter_capture() {
-    use textamp::app::sources::{navidrome::Session, ActiveSource};
-    for provider in ["none", "navidrome", "local", "webdav"] {
-        for tall in [false, true] {
-            let mut state = queue_state(View::Browse, tall);
-            state.queue.tracks.clear(); // Switching focus must not need any media or network.
-            state.browse_category = BrowseCategory::Folders;
-            state.category_column_focused = false;
-            if provider == "navidrome" {
-                let source = textamp::navidrome::Source {
-                    id: "fixture".into(),
-                    name: "Fixture".into(),
-                    username: "fixture".into(),
-                    url: "http://example.test/".into(),
-                    libraries: vec![],
-                };
-                state.sources.active = ActiveSource::Navidrome(Box::new(Session {
-                    client: textamp::navidrome::Client::new(&source, "fixture".into(), None)
-                        .unwrap(),
-                    source,
-                    extensions: Default::default(),
-                }));
-            } else if provider != "none" {
-                state.sources.active = ActiveSource::Folder(provider.into());
-                state.sources.folders.push(textamp::library::FolderSource {
-                    id: provider.into(),
-                    name: provider.into(),
-                    location: if provider == "local" {
-                        textamp::library::FolderLocation::Local {
-                            path: "/fixture".into(),
-                        }
-                    } else {
-                        textamp::library::FolderLocation::Webdav {
-                            url: "http://example.test/".into(),
-                            username: None,
-                            password_env: None,
-                        }
-                    },
-                });
-            }
-
-            let mut audio = textamp::audio::AudioPlayer::new_without_audio();
-            let (tx, _rx) = tokio::sync::mpsc::channel(32);
-            let mut config = Config::default();
-            for code in [KeyCode::Tab, KeyCode::BackTab] {
-                state.list_filter.active = true;
-                state.select_mode = true;
-                for expected in [View::NowPlaying, View::Browse] {
-                    for action in key(&mut state, code) {
-                        textamp::app::dispatch::dispatch_action(
-                            action,
-                            &mut state,
-                            &mut audio,
-                            &mut config,
-                            &tx,
-                        )
-                        .await
-                        .unwrap();
-                    }
-                    assert_eq!(state.view, expected, "{provider}, split={tall}");
-                    assert!(!state.list_filter.active && !state.select_mode);
-                }
-            }
-        }
-    }
-}
-
 #[test]
 fn right_click_uses_two_row_queue_geometry_and_preserves_viewport() {
     let mut state = queue_state(View::Browse, true);
@@ -318,7 +228,7 @@ fn browse_album_row_boundaries_match_mouse_targets() {
                 for row in 0..4 {
                     let mut state = AppState::new();
                     state.view = View::Browse;
-                    state.tall_mode = tall;
+                    state.desktop_split_view = tall;
                     state.browse_category = category;
                     let mut column = BrowseColumn::new(
                         "Albums",
@@ -383,7 +293,13 @@ fn library_switcher_remains_usable_from_authentication_screen() {
 fn authentication_and_inline_filter_capture_layout_punctuation() {
     let mut state = AppState::new();
     state.view = View::Browse;
-    state.list_filter.active = true;
+    let (tx, _) = tokio::sync::mpsc::channel(8);
+    textamp::app::handlers::dispatch_search::dispatch(
+        &tx,
+        SearchAction::ActivateListFilter,
+        &mut state,
+    )
+    .unwrap();
     for c in "?:/|,<>\\".chars() {
         assert!(matches!(
             key(&mut state, KeyCode::Char(c)).as_slice(),
@@ -429,7 +345,7 @@ fn help_end_reaches_wrapped_bottom_and_scrolling_is_bounded_in_split_mode() {
     for tall in [false, true] {
         let mut state = AppState::new();
         state.view = View::Help;
-        state.tall_mode = tall;
+        state.desktop_split_view = tall;
         state.terminal_height = 30;
         state.terminal_width = 55;
         let mut terminal = Terminal::new(TestBackend::new(55, 30)).unwrap();

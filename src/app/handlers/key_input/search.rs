@@ -3,20 +3,14 @@
 use crate::app::action::*;
 use crossterm::event::{self, KeyCode, KeyModifiers};
 
-use crate::app::state::{SearchFocus, SearchTab};
 use crate::app::Action;
 use crate::app::AppState;
+use crate::app::state::{SearchFocus, SearchTab};
 
 /// Handle search popup keys (Ctrl+F floating dialog).
 pub(super) fn handle_search_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
-    if let Some(actions) = crate::app::result_details::key(key, state) {
-        return actions;
-    }
-    if key.code == KeyCode::Right
-        && state.search.focus == SearchFocus::Results
-        && crate::app::result_details::open(state)
-    {
-        return vec![];
+    if key.code == KeyCode::Right && state.search.focus == SearchFocus::Results {
+        return crate::app::library_details::search_result_actions(state);
     }
     // Clear mouse scroll pin on any keyboard navigation
     state.scroll.search = None;
@@ -30,15 +24,15 @@ pub(super) fn handle_search_keys(key: event::KeyEvent, state: &mut AppState) -> 
     }
 
     // Handle Ctrl+E / Ctrl+Shift+E before other keys
-    if key.modifiers.contains(KeyModifiers::CONTROL) {
-        if let KeyCode::Char('e') = key.code {
-            if key.modifiers.contains(KeyModifiers::SHIFT) {
-                // Ctrl+Shift+E: insert NEXT in queue after current track
-                return vec![QueueAction::EnqueueSearchResultNext.into()];
-            } else {
-                // Ctrl+E: add to END of queue
-                return vec![QueueAction::EnqueueSearchResult.into()];
-            }
+    if key.modifiers.contains(KeyModifiers::CONTROL)
+        && let KeyCode::Char('e') = key.code
+    {
+        if key.modifiers.contains(KeyModifiers::SHIFT) {
+            // Ctrl+Shift+E: insert NEXT in queue after current track
+            return vec![QueueAction::EnqueueSearchResultNext.into()];
+        } else {
+            // Ctrl+E: add to END of queue
+            return vec![QueueAction::EnqueueSearchResult.into()];
         }
     }
 
@@ -53,11 +47,16 @@ pub(super) fn handle_search_keys(key: event::KeyEvent, state: &mut AppState) -> 
             match state.search.focus {
                 SearchFocus::Input => {
                     // Move focus to results if we have any
-                    if let Some(ref results) = state.search.results {
-                        if !results.is_empty() {
-                            state.search.focus = SearchFocus::Results;
-                            state.list_state.search_item_index = 0;
-                        }
+                    if let Some(ref results) = state.search.results
+                        && !results.is_empty()
+                    {
+                        state.search.focus = SearchFocus::Results;
+                        state.list_state.search_item_index = 0;
+                    }
+                    if crate::app::handlers::dispatch_search::search_pending(state)
+                        && state.search.results.is_none()
+                    {
+                        return vec![SearchAction::SubmitSearch.into()];
                     }
                     vec![]
                 }
@@ -71,11 +70,11 @@ pub(super) fn handle_search_keys(key: event::KeyEvent, state: &mut AppState) -> 
             match state.search.focus {
                 SearchFocus::Input => {
                     // Move focus to results if we have any
-                    if let Some(ref results) = state.search.results {
-                        if !results.is_empty() {
-                            state.search.focus = SearchFocus::Results;
-                            state.list_state.search_item_index = 0;
-                        }
+                    if let Some(ref results) = state.search.results
+                        && !results.is_empty()
+                    {
+                        state.search.focus = SearchFocus::Results;
+                        state.list_state.search_item_index = 0;
                     }
                     vec![]
                 }
@@ -107,53 +106,39 @@ pub(super) fn handle_search_keys(key: event::KeyEvent, state: &mut AppState) -> 
             state.search.tab = state.search.tab.next();
             state.search.focus = SearchFocus::Input;
             state.list_state.search_item_index = 0;
-            if !state.search.query.is_empty() {
-                return vec![SearchAction::ExecuteLocalSearch.into()];
-            }
             vec![]
         }
         KeyCode::BackTab => {
             state.search.tab = state.search.tab.prev();
             state.search.focus = SearchFocus::Input;
             state.list_state.search_item_index = 0;
-            if !state.search.query.is_empty() {
-                return vec![SearchAction::ExecuteLocalSearch.into()];
-            }
             vec![]
         }
         KeyCode::Left => {
             state.search.tab = state.search.tab.prev();
             state.search.focus = SearchFocus::Input;
             state.list_state.search_item_index = 0;
-            if !state.search.query.is_empty() {
-                return vec![SearchAction::ExecuteLocalSearch.into()];
-            }
             vec![]
         }
         KeyCode::Right => {
             state.search.tab = state.search.tab.next();
             state.search.focus = SearchFocus::Input;
             state.list_state.search_item_index = 0;
-            if !state.search.query.is_empty() {
-                return vec![SearchAction::ExecuteLocalSearch.into()];
-            }
             vec![]
         }
         KeyCode::Backspace => {
-            state.search.query.pop();
-            state.search.focus = SearchFocus::Input;
-            state.list_state.search_item_index = 0;
-            vec![SearchAction::ExecuteLocalSearch.into()]
+            let mut query = state.search.query.clone();
+            query.pop();
+            vec![SearchAction::SetSearchQuery(query).into()]
         }
         KeyCode::Char(c)
             if !key
                 .modifiers
                 .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER) =>
         {
-            state.search.query.push(c);
-            state.search.focus = SearchFocus::Input;
-            state.list_state.search_item_index = 0;
-            vec![SearchAction::ExecuteLocalSearch.into()]
+            let mut query = state.search.query.clone();
+            query.push(c);
+            vec![SearchAction::SetSearchQuery(query).into()]
         }
         _ => vec![],
     }

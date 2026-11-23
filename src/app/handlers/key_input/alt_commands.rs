@@ -1,8 +1,8 @@
 //! Contextual command availability — single source of truth for both the shortcut bar
 //! display and the key handler dispatch.
 
-use crate::app::state::{BrowseCategory, BrowseItem, Focus, PlaybackMode, RightPanelMode, View};
 use crate::app::AppState;
+use crate::app::state::{BrowseCategory, BrowseItem, Focus, PlaybackMode, RightPanelMode, View};
 
 /// Modifier key for a shortcut command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,7 +34,6 @@ pub fn available_alt_commands(state: &AppState) -> Vec<AltCommand> {
 
     let has_track = has_track_context(state);
     let has_album = has_album_context(state);
-    let has_playing = state.current_track().is_some();
 
     // --- Top row: function keys (always present) ---
 
@@ -98,27 +97,6 @@ pub fn available_alt_commands(state: &AppState) -> Vec<AltCommand> {
         enabled: enqueue_enabled,
     });
 
-    // Ctrl+M similar
-    let related_enabled = state.sources.active.folder().is_none()
-        && (has_artist_context(state) || has_track || has_album || has_playing);
-    let similar_enabled = related_enabled && crate::app::sources::sonic::enabled(state);
-    cmds.push(AltCommand {
-        modifier: CommandModifier::Ctrl,
-        key: 'm',
-        label: "similar",
-        display_key: None,
-        enabled: similar_enabled,
-    });
-
-    // Ctrl+R related artists
-    cmds.push(AltCommand {
-        modifier: CommandModifier::Ctrl,
-        key: 'r',
-        label: "related",
-        display_key: None,
-        enabled: related_enabled,
-    });
-
     // Ctrl+J jump to album
     // In Library view, only useful when now-playing track is from a different album
     // than the one currently viewed in Miller columns.
@@ -134,7 +112,7 @@ pub fn available_alt_commands(state: &AppState) -> Vec<AltCommand> {
     cmds.push(AltCommand {
         modifier: CommandModifier::Ctrl,
         key: 'j',
-        label: "jump to album",
+        label: "go to album",
         display_key: None,
         enabled: album_enabled,
     });
@@ -193,23 +171,6 @@ pub fn is_action_command_available(state: &AppState, key: char) -> bool {
         .any(|cmd| cmd.modifier == CommandModifier::Ctrl && cmd.key == key && cmd.enabled)
 }
 
-// --- Context helpers ---
-
-/// Is there an artist highlighted in the current view?
-fn has_artist_context(state: &AppState) -> bool {
-    if state.view == View::Browse {
-        if let Some(nav) = state.browse_nav() {
-            if let Some(item) = nav.selected_item() {
-                if matches!(item, BrowseItem::Artist { .. }) {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
-/// Is there a track highlighted/selected in the current view?
 fn has_track_context(state: &AppState) -> bool {
     match state.view {
         View::NowPlaying | View::Queue => {
@@ -230,12 +191,11 @@ fn has_track_context(state: &AppState) -> bool {
                 return true;
             }
             // Folder view: any track item in the focused column
-            if state.browse_category == BrowseCategory::Folders {
-                if let Some(ref fs) = state.folder_state {
-                    if let Some(col) = fs.focused() {
-                        return col.items.iter().any(|item| item.rating_key.is_some());
-                    }
-                }
+            if state.browse_category == BrowseCategory::Folders
+                && let Some(ref fs) = state.folder_state
+                && let Some(col) = fs.focused()
+            {
+                return col.items.iter().any(|item| item.rating_key.is_some());
             }
             // Right-panel tracks
             matches!(
@@ -342,19 +302,16 @@ fn has_track_with_album(state: &AppState) -> bool {
         }
         View::Browse => {
             // Check Miller columns for a Track item with album info
-            if let Some(nav) = state.browse_nav() {
-                if let Some(col) = nav.columns.get(nav.focused_column) {
-                    if matches!(
-                        col.items.get(col.selected_index),
-                        Some(BrowseItem::Track { .. })
-                    ) {
-                        if let Some(track) = col.tracks.get(col.selected_index) {
-                            if track.parent_rating_key.is_some() {
-                                return true;
-                            }
-                        }
-                    }
-                }
+            if let Some(nav) = state.browse_nav()
+                && let Some(col) = nav.columns.get(nav.focused_column)
+                && matches!(
+                    col.items.get(col.selected_index),
+                    Some(BrowseItem::Track { .. })
+                )
+                && let Some(track) = col.tracks.get(col.selected_index)
+                && track.parent_rating_key.is_some()
+            {
+                return true;
             }
             // Right-panel tracks
             match state.library.right_panel_mode {

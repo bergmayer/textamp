@@ -8,7 +8,7 @@ use super::{Action, AppState, Event};
 use crate::audio::AudioPlayer;
 use crate::config::Config;
 use crate::library::models::{FolderColumn, FolderItem, FolderNavigationState};
-use crate::library::{track::Track, FolderEntry, FolderLocation, FolderSource, MediaFile};
+use crate::library::{FolderEntry, FolderLocation, FolderSource, MediaFile, track::Track};
 
 use tokio::sync::mpsc;
 
@@ -22,7 +22,7 @@ pub mod options;
 pub mod radio;
 mod routing;
 pub mod sonic;
-pub use files::{folders, play, FileAction};
+pub use files::{FileAction, folders, play};
 
 pub fn refresh_due_caches(state: &mut AppState, tx: &mpsc::Sender<Event>) {
     if cache::maintenance_paused(state) {
@@ -51,14 +51,14 @@ pub fn refresh_due_caches(state: &mut AppState, tx: &mpsc::Sender<Event>) {
         }
         // The directory tree and the visible album listing share the weekly
         // policy. Album file listings are never eagerly scanned into the tree.
-        if let Some(nav) = &state.folder_state {
-            if let Some(column) = nav.columns.len().checked_sub(1) {
-                if nav.columns[column].is_shuffled() {
-                    return;
-                }
-                let path = nav.columns[column].key.clone().unwrap_or_default();
-                files::load(state, tx, path, column);
+        if let Some(nav) = &state.folder_state
+            && let Some(column) = nav.columns.len().checked_sub(1)
+        {
+            if nav.columns[column].is_shuffled() {
+                return;
             }
+            let path = nav.columns[column].key.clone().unwrap_or_default();
+            files::load(state, tx, path, column);
         }
     }
 }
@@ -75,8 +75,39 @@ pub fn route(
     if matches!(action, Action::Radio(_)) {
         return None;
     }
+    // Release-date browsing uses the cached catalog, independent of its provider.
+    use super::action::{BrowseAction, MillerAction, NavigationAction};
+    let release_dates = matches!(
+        action,
+        Action::Browse(
+            BrowseAction::LoadTagList(BrowseCategory::Decades)
+                | BrowseAction::TagListLoaded {
+                    section: BrowseCategory::Decades,
+                    ..
+                }
+                | BrowseAction::TagAlbumsLoaded {
+                    section: BrowseCategory::Decades,
+                    ..
+                }
+        ) | Action::Navigation(NavigationAction::SetCategory {
+            category: BrowseCategory::Decades,
+            ..
+        })
+    ) || (state.browse_category == BrowseCategory::Decades
+        && matches!(
+            action,
+            Action::Browse(BrowseAction::RefreshTagView | BrowseAction::LoadTagAlbums { .. })
+                | Action::Miller(
+                    MillerAction::LoadGenreAlbumsForMiller { .. }
+                        | MillerAction::GenreAlbumsForMillerLoaded { .. }
+                )
+        ));
+    if release_dates {
+        return None;
+    }
+
     match state.sources.active {
-        ActiveSource::None => routing::navidrome_fallback(action),
+        ActiveSource::None => routing::without_source(action, state.library_loading),
         ActiveSource::Navidrome(_) => navidrome::intercept(action, state, tx),
         ActiveSource::Folder(_) => {
             if let Action::Folders(action) = action {
@@ -109,8 +140,28 @@ impl MediaPreparation {
     }
 }
 
+/// One speculative waveform request, replaced when the next queue identity changes.
+#[derive(Debug, Clone, Default)]
+pub enum NextWaveform {
+    #[default]
+    Idle,
+    Loading(String),
+    Ready(String),
+    Failed(String),
+}
+impl NextWaveform {
+    pub fn key(&self) -> Option<&str> {
+        match self {
+            Self::Idle => None,
+            Self::Loading(key) | Self::Ready(key) | Self::Failed(key) => Some(key),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SourceState {
+    pub album_notes: Option<navidrome::album_notes::Notes>,
+    pub next_waveform: NextWaveform,
     /// Saved connection edits take effect on explicit activation, not on Save.
     pub reconnect_sources: std::collections::HashSet<String>,
     pub nav_connection_task: Option<TaskLease>,
@@ -123,6 +174,7 @@ pub struct SourceState {
     pub nav_tasks: std::collections::HashMap<&'static str, (u64, TaskLease)>,
     pub nav_request_id: u64,
     pub nav_collection: Option<navidrome::commands::CollectionKind>,
+    pub random_albums: navidrome::random_albums::State,
     pub list_id: u64,
     pub listing: Option<TaskLease>,
     pub media: MediaPreparation,
@@ -280,12 +332,13 @@ async fn reset_source(
     audio: &mut AudioPlayer,
     tx: &mpsc::Sender<Event>,
 ) -> anyhow::Result<()> {
-    dispatch_playback::dispatch(tx, PlaybackAction::Stop, state, audio).await?;
-    dispatch_playback::dispatch(tx, PlaybackAction::ResetForAccountChange, state, audio).await?;
+    dispatch_playback::dispatch(tx, PlaybackAction::Stop, state, audio)?;
+    dispatch_playback::dispatch(tx, PlaybackAction::ResetForAccountChange, state, audio)?;
     state.advance_connection_generation();
     state.advance_library_generation();
     events::reset_account_scoped_state(state);
     state.sources.nav_tasks.clear();
+    state.sources.next_waveform = NextWaveform::Idle;
     state.sources.nav_collection = None;
     state.sources.listing = None;
     state.sources.media = crate::app::sources::MediaPreparation::Idle;
@@ -296,9 +349,15 @@ async fn reset_source(
 /// Apply the selected library's saved artwork choices after a source switch.
 fn restore_library_artwork(state: &mut AppState, config: &Config) {
     if let Some(key) = state.active_library.as_deref() {
-        let (mode, visible) = config.artwork_preferences(key);
-        state.artwork.mode = mode;
-        state.artwork.default_visible = visible;
+        state.artwork.column_visibility = config
+            .ui
+            .library_view_settings
+            .get(key)
+            .map(|view| view.columns.clone())
+            .unwrap_or_default();
+        state.artwork.mode = config.artwork_mode(key, crate::app::launch::WindowedMode::Text);
+        state.artwork.graphical_mode =
+            config.artwork_mode(key, crate::app::launch::WindowedMode::Gui);
     }
 }
 
@@ -366,7 +425,7 @@ pub async fn dispatch(
     }
     match action {
         SourceAction::AudioMuse(command) => {
-            return audiomuse::dispatch(*command, state, config, tx).await
+            return audiomuse::dispatch(*command, state, config, tx).await;
         }
         action @ (SourceAction::CheckWebdav(_) | SourceAction::WebdavChecked { .. }) => {
             return dialogs::dispatch(action, state, audio, config, tx).await;
@@ -406,7 +465,7 @@ pub async fn dispatch(
         }
 
         SourceAction::Navidrome(action) => {
-            return navidrome::dispatch(*action, state, audio, config, tx).await
+            return navidrome::dispatch(*action, state, audio, config, tx).await;
         }
         SourceAction::Choose(
             choice @ (LibraryChoice::Navidrome { .. } | LibraryChoice::AddNavidrome),
@@ -414,7 +473,7 @@ pub async fn dispatch(
             cache::resume(&choice, state);
             return navidrome::choose(choice, state, audio, config, tx).await;
         }
-        SourceAction::Files(action) => return files::dispatch(action, state, audio).await,
+        SourceAction::Files(action) => return files::dispatch(action, state, audio),
         SourceAction::Choose(LibraryChoice::Folder(source)) => {
             cache::resume(&LibraryChoice::Folder(source.clone()), state);
             config.default_navidrome = None;
@@ -534,6 +593,10 @@ pub async fn dispatch(
                     .position(|choice| matches!(choice, LibraryChoice::Folder(s) if s.id == id))
                     .unwrap_or(0);
                 dispatch_settings::save_config_in_background(tx, config, "rename library");
+                if matches!(state.popups.library_dialog(),Some(dialogs::Dialog::Local(form)) if form.existing_id.as_deref()==Some(id.as_str()))
+                {
+                    dialogs::close(state);
+                }
             }
         }
         SourceAction::Remove(id) => {
@@ -584,7 +647,7 @@ pub async fn dispatch(
 }
 
 pub fn source_from_location(location: &str) -> anyhow::Result<FolderSource> {
-    use anyhow::{bail, Context};
+    use anyhow::{Context, bail};
     let location = location.trim();
     let (name, location) = if location.starts_with('/') || location.starts_with("~/") {
         let path = if let Some(rest) = location.strip_prefix("~/") {
@@ -645,15 +708,24 @@ pub fn source_from_location(location: &str) -> anyhow::Result<FolderSource> {
 pub fn command_visible(state: &AppState, command: &super::state::PaletteCommandKind) -> bool {
     use super::state::PaletteCommandKind::*;
     use crate::library::capabilities::Feature;
+    if matches!(command, CycleApplicationMode) {
+        return state
+            .windowed_presentation
+            .can_activate(super::launch::WindowedMode::Text);
+    }
+    if let SetApplicationMode(mode) = command {
+        return state
+            .windowed_presentation
+            .can_activate(mode.presentation());
+    }
     let requirement = match command {
-        GotoLibrary | OpenInLibrary | PlayFocusedAlbum => Some(Feature::Catalog),
+        GotoLibrary | OpenInLibrary | PlayFocusedAlbum | GoToRandomAlbum => Some(Feature::Catalog),
         GotoGenres => Some(Feature::Genres),
-        OpenRelated => Some(Feature::RelatedArtists),
-        SaveQueue => Some(Feature::SavePlaylist),
+        SaveQueue | Navidrome(navidrome::commands::Command::PromptNewPlaylist(None)) => {
+            Some(Feature::SavePlaylist)
+        }
         ArtistRadio | RemixTwofer => Some(Feature::ArtistRadio),
-        RandomAlbum => Some(Feature::AlbumRadio),
-        ToggleDj(mode) => Some(sonic::dj_feature(*mode)),
-        OpenSimilar | RemixGemini | RemixDoppelganger => Some(Feature::SonicSimilarity),
+        RemixGemini | RemixDoppelganger => Some(Feature::SonicSimilarity),
         SonicAdventure | SonicAdventureFromFocusedTrack | RemixStretch => Some(Feature::SonicPaths),
         _ => None,
     };

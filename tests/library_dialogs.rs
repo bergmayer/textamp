@@ -1,10 +1,9 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::{backend::TestBackend, Terminal};
+use ratatui::{Terminal, backend::TestBackend};
 use textamp::app::handlers::key_input;
 use textamp::app::sources::{
-    self,
+    self, ActiveSource, LibraryChoice, SourceAction,
     dialogs::{Dialog, WebdavForm},
-    ActiveSource, LibraryChoice, SourceAction,
 };
 use textamp::app::{Action, AppState, Event};
 use textamp::config::Config;
@@ -268,11 +267,13 @@ async fn webdav_checks_real_listing_and_reports_auth_and_protocol_errors() {
     assert!(task.await.unwrap().starts_with(b"PROPFIND / HTTP/1.1"));
     let (url, task) = server("401 Unauthorized", "").await;
     let source = sources::source_from_location(&url).unwrap();
-    assert!(textamp::library::check_webdav(&source, "")
-        .await
-        .unwrap_err()
-        .to_string()
-        .contains("username and password"));
+    assert!(
+        textamp::library::check_webdav(&source, "")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("username and password")
+    );
     task.await.unwrap();
     let (url, task) = server("400 Bad Request", "plain HTTP endpoint").await;
     let source = sources::source_from_location(&url.replacen("http:", "https:", 1)).unwrap();
@@ -414,11 +415,13 @@ async fn verified_save_worker() {
         &tx,
     )
     .await;
-    assert!(form(&mut state)
-        .error
-        .as_ref()
-        .unwrap()
-        .contains("Save credentials"));
+    assert!(
+        form(&mut state)
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("Save credentials")
+    );
     assert_eq!(config.folder_sources.len(), 1);
     assert_eq!(
         std::fs::read_to_string(credential_path).unwrap(),

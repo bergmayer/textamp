@@ -1,13 +1,13 @@
 //! One station lifecycle for every library: prepare, fetch, commit, and refill.
 //! Providers return tracks; only the shared event reducer changes playback.
-use super::{navidrome, ActiveSource};
+use super::{ActiveSource, navidrome};
 use crate::app::action::{AsyncError, SystemAction};
 use crate::app::event::{LibraryEventSender, RadioEvent};
 use crate::app::state::{ActiveStation, PlayStatus, RadioRefill, View};
 use crate::app::tasks::TaskLease;
 use crate::app::{Action, AppState, Event};
 use crate::library::station::{RadioSource, Station};
-use crate::library::{radio::Recipe, track::Track, FolderSource};
+use crate::library::{FolderSource, radio::Recipe, track::Track};
 
 use rand::prelude::IndexedRandom;
 use std::collections::HashSet;
@@ -29,7 +29,12 @@ impl Batch {
 }
 
 enum Request {
-    Navidrome(Box<navidrome::radio::Request>),
+    Navidrome(navidrome::radio::Request),
+    Related {
+        seed: Box<Track>,
+        catalog: std::sync::Arc<Vec<Track>>,
+        excluded: HashSet<String>,
+    },
     Folder {
         source: FolderSource,
         recipe: Recipe,
@@ -43,8 +48,8 @@ impl Request {
         station: &ActiveStation,
         refill: bool,
     ) -> Result<Self, AsyncError> {
-        // Refill follows the currently audible song, not the original seed forever.
-        let source = match (&station.source, refill, state.current_track()) {
+        // Sonic Mix follows the buffer tail; fixed-seed modes retain their chosen seed.
+        let source = match (&station.source, refill, state.radio.tracks.last()) {
             (RadioSource::Sonic(_), true, Some(track)) => {
                 RadioSource::Sonic(track.rating_key.clone())
             }
@@ -54,12 +59,12 @@ impl Request {
             ActiveSource::None => {
                 return Err(AsyncError {
                     message: "Select a library first".into(),
-                })
+                });
             }
 
-            ActiveSource::Navidrome(session) => Self::Navidrome(Box::new(
-                navidrome::radio::Request::prepare(state, session, &source, refill),
-            )),
+            ActiveSource::Navidrome(session) => Self::Navidrome(
+                navidrome::radio::Request::prepare(state, session, &source, refill)?,
+            ),
             ActiveSource::Folder(id) => {
                 let source = state
                     .sources
@@ -68,13 +73,33 @@ impl Request {
                     .find(|s| &s.id == id)
                     .cloned()
                     .ok_or_else(|| failure("The folder library has been removed"))?;
+                if let RadioSource::Related(key) = &station.source {
+                    let seed = state
+                        .radio
+                        .tracks
+                        .iter()
+                        .find(|track| &track.rating_key == key)
+                        .cloned()
+                        .ok_or_else(|| failure("Choose a track first"))?;
+                    return Ok(Self::Related {
+                        seed: Box::new(seed),
+                        catalog: state.library.all_tracks.clone(),
+                        excluded: state
+                            .radio
+                            .tracks
+                            .iter()
+                            .skip(state.radio.track_index.unwrap_or(0))
+                            .map(|t| t.rating_key.clone())
+                            .collect(),
+                    });
+                }
                 let recipe = match station.source.station_key() {
                     Some("folder-radio/randomAlbum") => Recipe::RandomAlbum,
                     Some("folder-radio/library") => Recipe::Library,
                     _ => {
                         return Err(failure(
                             "This station is not available for folder libraries",
-                        ))
+                        ));
                     }
                 };
                 let excluded = if refill {
@@ -82,6 +107,7 @@ impl Request {
                         .radio
                         .tracks
                         .iter()
+                        .skip(state.radio.track_index.unwrap_or(0))
                         .map(|t| t.rating_key.clone())
                         .collect()
                 } else {
@@ -98,6 +124,27 @@ impl Request {
     async fn fetch(self) -> Result<Batch, AsyncError> {
         match self {
             Self::Navidrome(request) => request.fetch().await,
+            Self::Related {
+                seed,
+                catalog,
+                excluded,
+            } => {
+                let mut tracks: Vec<_> = catalog
+                    .iter()
+                    .filter(|t| !excluded.contains(&t.rating_key))
+                    .cloned()
+                    .collect();
+                tracks.sort_by_key(|t| {
+                    std::cmp::Reverse(
+                        t.genres
+                            .iter()
+                            .filter(|genre| seed.genres.contains(genre))
+                            .count(),
+                    )
+                });
+                tracks.truncate(20);
+                Ok(Batch::tracks(tracks))
+            }
             Self::Folder {
                 source,
                 recipe,
@@ -120,6 +167,32 @@ fn failure(message: &str) -> AsyncError {
 }
 
 pub fn start(tx: &mpsc::Sender<Event>, state: &mut AppState, station: ActiveStation) {
+    if matches!(station.source, RadioSource::SonicFixed(_)) {
+        if !super::sonic::enabled(state) {
+            state.set_error("Stay Close Mix requires enabled sonic analysis".into());
+            return;
+        }
+        let seed = match &station.source {
+            RadioSource::SonicFixed(key) => state
+                .current_track()
+                .filter(|track| &track.rating_key == key)
+                .or_else(|| {
+                    state
+                        .library
+                        .all_tracks
+                        .iter()
+                        .find(|track| &track.rating_key == key)
+                })
+                .cloned(),
+            _ => None,
+        };
+        if seed.is_none() {
+            state.set_error("Choose a track from the active library".into());
+            return;
+        }
+        begin(tx, state, station, seed);
+        return;
+    }
     let sonic_seed = match &station.source {
         RadioSource::Sonic(key) => Some(
             state
@@ -150,7 +223,7 @@ pub fn start(tx: &mpsc::Sender<Event>, state: &mut AppState, station: ActiveStat
         if let Some(seed) = seed {
             start_sonic(tx, state, seed);
         } else {
-            state.set_error("Choose a track to start Sonic Radio".into());
+            state.set_error("Choose a track to start Sonic Mix".into());
         }
         return;
     }
@@ -159,7 +232,7 @@ pub fn start(tx: &mpsc::Sender<Event>, state: &mut AppState, station: ActiveStat
 
 pub fn start_sonic(tx: &mpsc::Sender<Event>, state: &mut AppState, seed: Track) {
     if !super::sonic::enabled(state) {
-        state.set_status("Sonic Radio requires enabled sonic analysis".into());
+        state.set_status("Sonic Mix requires enabled sonic analysis".into());
         return;
     }
     let valid = match &state.sources.active {
@@ -172,7 +245,7 @@ pub fn start_sonic(tx: &mpsc::Sender<Event>, state: &mut AppState, seed: Track) 
     }
     let station = ActiveStation {
         source: RadioSource::Sonic(seed.rating_key.clone()),
-        title: "Sonic Radio".into(),
+        title: "Sonic Mix".into(),
     };
     begin(tx, state, station, Some(seed));
 }
@@ -300,34 +373,7 @@ pub fn children(
     }
 }
 
-/// Validate before shared DJ state changes, then let the provider supply tracks.
-pub fn dj_available(state: &AppState, mode: crate::app::state::DjMode) -> bool {
-    if !state
-        .sources
-        .active
-        .capabilities()
-        .supports(super::sonic::dj_feature(mode))
-    {
-        return false;
-    }
-    if !super::sonic::dj_requires_sonic(mode) {
-        return true;
-    }
-    match &state.sources.active {
-        ActiveSource::Navidrome(_) => navidrome::recommendations::available(state),
-        ActiveSource::Folder(_) | ActiveSource::None => false,
-    }
-}
-pub fn process_dj(tx: &mpsc::Sender<Event>, state: &mut AppState) {
-    match state.sources.active {
-        ActiveSource::Navidrome(_) => navidrome::dj::process(state, tx),
-        ActiveSource::Folder(_) | ActiveSource::None => {
-            state.dj.inserting = false;
-            state.set_status("DJ modes need artist metadata or sonic analysis".into());
-        }
-    }
-}
-
+/// Folder stations depend on directory listings rather than tag metadata.
 pub fn folder_stations() -> Vec<Station> {
     crate::library::station::standard_stations(
         "folder-radio",

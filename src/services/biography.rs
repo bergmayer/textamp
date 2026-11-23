@@ -1,6 +1,6 @@
 //! On-demand Wikipedia biographies, resolved through musical-artist identities.
 //! No library credentials, paths, or playback history are sent to Wikimedia.
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use scraper::{ElementRef, Html, Selector};
 use serde_json::Value;
 use std::time::Duration;
@@ -23,6 +23,7 @@ pub struct Biography {
     pub text: String,
     pub source_url: Option<String>,
     pub images: Vec<BioImage>,
+    pub related_artists: Vec<crate::library::models::Artist>,
 }
 
 #[derive(Debug, Clone)]
@@ -398,6 +399,7 @@ async fn lookup(
             text,
             source_url: Some(source_url),
             images: Vec::new(),
+            related_artists: Vec::new(),
         },
         photos,
     ))
@@ -596,7 +598,7 @@ async fn load_images(
         text.push_str("\n\nArticle images could not be loaded.");
         return images;
     };
-    use futures::{stream, StreamExt};
+    use futures::{StreamExt, stream};
     // Validate rights and URLs before downloading; retain article order for
     // image numbering and attribution even if downloads finish out of order.
     let downloads: Vec<_> = photos
@@ -685,10 +687,12 @@ mod tests {
         );
         assert!(select_artist(&values, "Tools").is_err());
         values["Q3"] = artist("Tool", "Another Tool");
-        assert!(select_artist(&values, "Tool")
-            .unwrap_err()
-            .to_string()
-            .contains("Several"));
+        assert!(
+            select_artist(&values, "Tool")
+                .unwrap_err()
+                .to_string()
+                .contains("Several")
+        );
     }
     #[test]
     fn aliases_work_but_disambiguation_and_deprecated_claims_do_not() {
@@ -713,13 +717,15 @@ mod tests {
             select_artist_identity(&values, "Tool", Some(id), None).unwrap(),
             ("Q1", "Tool (band)")
         );
-        assert!(select_artist_identity(
-            &values,
-            "Tool",
-            valid_mbid("0c1b4ffb-85cb-4ce9-8d1b-c1aee93893cc"),
-            None
-        )
-        .is_err());
+        assert!(
+            select_artist_identity(
+                &values,
+                "Tool",
+                valid_mbid("0c1b4ffb-85cb-4ce9-8d1b-c1aee93893cc"),
+                None
+            )
+            .is_err()
+        );
         assert_eq!(
             select_artist_identity(&values, "Old name", Some(id), Some("Q1"))
                 .unwrap()
@@ -728,9 +734,11 @@ mod tests {
         );
         assert!(select_artist_identity(&values, "Tool", Some(id), Some("Q2")).is_err());
         values["Q2"]["sitelinks"] = json!({});
-        assert!(select_artist(&values, "Tool")
-            .unwrap_err()
-            .is::<AmbiguousArtist>());
+        assert!(
+            select_artist(&values, "Tool")
+                .unwrap_err()
+                .is::<AmbiguousArtist>()
+        );
         assert!(valid_mbid("not an ID").is_none());
         assert!(valid_mbid("00000000-0000-0000-0000-000000000000").is_none());
     }

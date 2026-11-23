@@ -1,300 +1,249 @@
-//! Adventure launcher popup key handling.
+//! Keyboard and pointer activation for the single Journey form.
+use crate::app::{
+    Action, AppState,
+    action::*,
+    journey::{self, JourneyControl as Control},
+    state::*,
+};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::app::action::*;
-use crossterm::event::{self, KeyCode};
-
-use crate::app::state::{AdventureDrillLevel, AdventureStep, SearchFocus, SearchTab};
-use crate::app::Action;
-use crate::app::AppState;
-
-/// Handle adventure launcher popup keys.
-pub(super) fn handle_adventure_launcher_keys(
-    key: event::KeyEvent,
-    state: &mut AppState,
-) -> Vec<Action> {
-    let launcher = match state.popups.adventure_launcher_mut() {
-        Some(l) => l,
-        None => return vec![],
+/// Focus and activate a Journey field or command through shared actions.
+pub(in crate::app::handlers) fn activate(control: Control, state: &mut AppState) -> Vec<Action> {
+    let Some(launcher) = state.popups.adventure_launcher_mut() else {
+        return vec![];
     };
-
-    match launcher.step {
-        AdventureStep::FindStartTrack | AdventureStep::FindEndTrack => {
-            handle_track_finder_keys(key, state)
-        }
-        AdventureStep::EnterTrackCount => handle_track_count_keys(key, state),
+    if matches!(launcher.stage, JourneyStage::Generating) && control != Control::Cancel {
+        return vec![];
     }
-}
-
-/// Handle keys for step 1/3 (find start/end track with search + drill-down).
-fn handle_track_finder_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
-    let launcher = match state.popups.adventure_launcher_mut() {
-        Some(l) => l,
-        None => return vec![],
-    };
-
-    match key.code {
-        KeyCode::Esc => {
-            vec![SearchAction::AdventureLauncherBack.into()]
-        }
-        KeyCode::Left => {
-            // Left arrow: same as Esc in drill levels, ignored in Search
-            match &launcher.drill {
-                AdventureDrillLevel::ArtistAlbums { .. }
-                | AdventureDrillLevel::AlbumTracks { .. } => {
-                    vec![SearchAction::AdventureLauncherBack.into()]
-                }
-                AdventureDrillLevel::Search => vec![],
-            }
-        }
-        KeyCode::Enter => {
-            match launcher.focus {
-                SearchFocus::Input => {
-                    // Move focus to results if we have any
-                    let count = result_count(launcher);
-                    if count > 0 {
-                        launcher.focus = SearchFocus::Results;
-                        launcher.item_index = 0;
-                    }
-                    vec![]
-                }
-                SearchFocus::Results => handle_enter_on_result(launcher),
-            }
-        }
-        KeyCode::Down => {
-            launcher.scroll_pin = None;
-            match launcher.focus {
-                SearchFocus::Input => {
-                    let count = result_count(launcher);
-                    if count > 0 {
-                        launcher.focus = SearchFocus::Results;
-                        launcher.item_index = 0;
-                    }
-                    vec![]
-                }
-                SearchFocus::Results => {
-                    let total = result_count(launcher);
-                    if total > 0 && launcher.item_index + 1 < total {
-                        launcher.item_index += 1;
-                    }
-                    vec![]
-                }
-            }
-        }
-        KeyCode::Up => {
-            launcher.scroll_pin = None;
-            match launcher.focus {
-                SearchFocus::Input => vec![],
-                SearchFocus::Results => {
-                    if launcher.item_index == 0 {
-                        // Only go back to input in search mode
-                        if matches!(launcher.drill, AdventureDrillLevel::Search) {
-                            launcher.focus = SearchFocus::Input;
-                        }
-                    } else {
-                        launcher.item_index -= 1;
-                    }
-                    vec![]
-                }
-            }
-        }
-        KeyCode::Tab => {
-            if matches!(launcher.drill, AdventureDrillLevel::Search) {
-                launcher.search_tab = launcher.search_tab.next();
-                launcher.item_index = 0;
-                launcher.scroll_pin = None;
-            }
-            vec![]
-        }
-        KeyCode::BackTab => {
-            if matches!(launcher.drill, AdventureDrillLevel::Search) {
-                launcher.search_tab = launcher.search_tab.prev();
-                launcher.item_index = 0;
-                launcher.scroll_pin = None;
-            }
-            vec![]
-        }
-        KeyCode::Backspace => {
-            match &launcher.drill {
-                AdventureDrillLevel::Search => {
-                    launcher.query.pop();
-                    launcher.focus = SearchFocus::Input;
-                    launcher.item_index = 0;
-                    if !launcher.query.is_empty() {
-                        vec![SearchAction::AdventureLauncherSearch.into()]
-                    } else {
-                        launcher.results = None;
-                        vec![]
-                    }
-                }
-                _ => {
-                    // In drill mode, backspace goes back
-                    vec![SearchAction::AdventureLauncherBack.into()]
-                }
-            }
-        }
-        KeyCode::Char(c) => {
-            match &launcher.drill {
-                AdventureDrillLevel::Search => {
-                    launcher.query.push(c);
-                    launcher.focus = SearchFocus::Input;
-                    launcher.item_index = 0;
-                    vec![SearchAction::AdventureLauncherSearch.into()]
-                }
-                _ => vec![], // No typing in drill mode
-            }
-        }
-        _ => vec![],
-    }
-}
-
-/// Handle Enter on a result item — drill or select depending on type and tab.
-fn handle_enter_on_result(launcher: &mut crate::app::state::AdventureLauncherState) -> Vec<Action> {
-    match &launcher.drill {
-        AdventureDrillLevel::Search => {
-            if let Some(ref results) = launcher.results {
-                let idx = launcher.item_index;
-
-                // Tab-aware Enter behavior
-                match launcher.search_tab {
-                    SearchTab::Artists => {
-                        if let Some(artist) = results.artists.get(idx) {
-                            return vec![SearchAction::AdventureLauncherDrillArtist {
-                                key: artist.rating_key.clone(),
-                                name: artist.title.clone(),
-                            }
-                            .into()];
-                        }
-                    }
-                    SearchTab::Albums => {
-                        if let Some(album) = results.albums.get(idx) {
-                            return vec![SearchAction::AdventureLauncherDrillAlbum {
-                                key: album.rating_key.clone(),
-                                title: album.title.clone(),
-                                artist_name: album.artist_name().to_string(),
-                            }
-                            .into()];
-                        }
-                    }
-                    SearchTab::Tracks => {
-                        return vec![SearchAction::AdventureLauncherSelectTrack.into()];
-                    }
-                    SearchTab::Playlists | SearchTab::Genres => {
-                        // Not actionable in adventure mode
-                        return vec![];
-                    }
-                    SearchTab::Global => {
-                        // Global tab: determine type by index offset
-                        let artist_count = results.artists.len();
-                        let album_count = results.albums.len();
-
-                        if idx < artist_count {
-                            let artist = &results.artists[idx];
-                            return vec![SearchAction::AdventureLauncherDrillArtist {
-                                key: artist.rating_key.clone(),
-                                name: artist.title.clone(),
-                            }
-                            .into()];
-                        } else if idx < artist_count + album_count {
-                            let album = &results.albums[idx - artist_count];
-                            return vec![SearchAction::AdventureLauncherDrillAlbum {
-                                key: album.rating_key.clone(),
-                                title: album.title.clone(),
-                                artist_name: album.artist_name().to_string(),
-                            }
-                            .into()];
-                        } else {
-                            return vec![SearchAction::AdventureLauncherSelectTrack.into()];
-                        }
-                    }
-                }
-            }
-            vec![]
-        }
-        AdventureDrillLevel::ArtistAlbums {
-            albums,
-            artist_name,
-            ..
-        } => {
-            if let Some(album) = albums.get(launcher.item_index) {
-                vec![SearchAction::AdventureLauncherDrillAlbum {
-                    key: album.rating_key.clone(),
-                    title: album.title.clone(),
-                    artist_name: artist_name.clone(),
-                }
-                .into()]
+    launcher.terminal_focus = control;
+    match control {
+        Control::Start | Control::End => {
+            let step = if control == Control::Start {
+                AdventureStep::FindStartTrack
             } else {
-                vec![]
+                AdventureStep::FindEndTrack
+            };
+            let edit = !matches!(launcher.stage, JourneyStage::Choosing);
+            let mut actions = Vec::new();
+            if edit {
+                actions.push(SearchAction::AdventureLauncherEdit.into());
             }
+            actions.push(SearchAction::AdventureLauncherSetStep(step).into());
+            actions
         }
-        AdventureDrillLevel::AlbumTracks { .. } => {
-            vec![SearchAction::AdventureLauncherSelectTrack.into()]
-        }
-    }
-}
-
-/// Handle keys for step 2 (enter track count).
-fn handle_track_count_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
-    let launcher = match state.popups.adventure_launcher_mut() {
-        Some(l) => l,
-        None => return vec![],
-    };
-
-    match key.code {
-        KeyCode::Esc => {
-            // Go back to FindStartTrack
-            vec![SearchAction::AdventureLauncherBack.into()]
-        }
-        KeyCode::Enter => {
-            // Parse count and advance to FindEndTrack
-            let count = launcher
-                .track_count_input
-                .parse::<usize>()
-                .unwrap_or(20)
-                .clamp(5, 100);
-            launcher.track_count_input = count.to_string();
-            launcher.step = AdventureStep::FindEndTrack;
-            launcher.query.clear();
-            launcher.drill = AdventureDrillLevel::Search;
-            launcher.item_index = 0;
-            launcher.focus = SearchFocus::Input;
-            launcher.results = None;
-            launcher.search_tab = SearchTab::default();
-            vec![]
-        }
-        KeyCode::Backspace => {
-            launcher.track_count_input.pop();
-            vec![]
-        }
-        KeyCode::Char(c) if c.is_ascii_digit() => {
-            if launcher.track_count_input.len() < 3 {
-                launcher.track_count_input.push(c);
-            }
-            vec![]
-        }
-        _ => vec![],
-    }
-}
-
-/// Count total selectable items for the current drill level (tab-aware).
-fn result_count(launcher: &crate::app::state::AdventureLauncherState) -> usize {
-    match &launcher.drill {
-        AdventureDrillLevel::Search => {
-            if let Some(ref results) = launcher.results {
-                match launcher.search_tab {
-                    SearchTab::Global => {
-                        results.artists.len() + results.albums.len() + results.tracks.len()
-                    }
-                    SearchTab::Artists => results.artists.len(),
-                    SearchTab::Albums => results.albums.len(),
-                    SearchTab::Tracks => results.tracks.len(),
-                    SearchTab::Playlists => results.playlists.len(),
-                    SearchTab::Genres => results.genres.len(),
+        Control::Swap => vec![
+            SearchAction::AdventureLauncherEdit.into(),
+            SearchAction::AdventureLauncherReverse.into(),
+        ],
+        Control::Cancel => vec![SearchAction::CloseAdventureLauncher.into()],
+        Control::Preview => vec![
+            match launcher.stage {
+                JourneyStage::Ready(_) => SearchAction::AdventureLauncherPlay,
+                _ if launcher.purpose != TrackPickerPurpose::Journey => {
+                    SearchAction::StartPickedTrackRadio
                 }
-            } else {
-                0
+                _ => SearchAction::AdventureLauncherGenerate,
+            }
+            .into(),
+        ],
+        Control::Results => {
+            launcher.focus = SearchFocus::Results;
+            match launcher.stage {
+                JourneyStage::Ready(_) => vec![],
+                _ => journey::select(launcher),
             }
         }
-        AdventureDrillLevel::ArtistAlbums { albums, .. } => albums.len(),
-        AdventureDrillLevel::AlbumTracks { tracks, .. } => tracks.len(),
+        Control::Count if !matches!(launcher.stage, JourneyStage::Choosing) => {
+            vec![SearchAction::AdventureLauncherEdit.into()]
+        }
+        Control::Count | Control::Types => vec![],
     }
+}
+
+/// Every form field, result and command is reachable with Tab and arrows.
+pub(super) fn handle_adventure_launcher_keys(key: KeyEvent, state: &mut AppState) -> Vec<Action> {
+    let desktop = state.desktop_frontend;
+    let Some(launcher) = state.popups.adventure_launcher_mut() else {
+        return vec![];
+    };
+    if desktop
+        && launcher.focus == SearchFocus::Results
+        && key.code == KeyCode::Enter
+        && matches!(launcher.stage, JourneyStage::Choosing)
+    {
+        return journey::select(launcher);
+    }
+    if key.code == KeyCode::Esc {
+        return vec![
+            if matches!(
+                launcher.stage,
+                JourneyStage::Ready(_) | JourneyStage::Failed(_)
+            ) {
+                SearchAction::AdventureLauncherEdit
+            } else {
+                SearchAction::CloseAdventureLauncher
+            }
+            .into(),
+        ];
+    }
+    if matches!(launcher.stage, JourneyStage::Generating) {
+        return vec![];
+    }
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Enter {
+        return activate(Control::Preview, state);
+    }
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        let control = match key.code {
+            KeyCode::Char('s') => Some(Control::Start),
+            KeyCode::Char('e') => Some(Control::End),
+            KeyCode::Char('m') => Some(Control::Count),
+            KeyCode::Char('p') => Some(Control::Preview),
+            KeyCode::Char('w') => Some(Control::Swap),
+            _ => None,
+        };
+        return control
+            .map(|control| activate(control, state))
+            .unwrap_or_default();
+    }
+    if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
+        let controls = journey::controls(launcher.purpose);
+        let index = controls
+            .iter()
+            .position(|control| *control == launcher.terminal_focus)
+            .unwrap_or(0);
+        let next = if key.code == KeyCode::Tab {
+            (index + 1) % controls.len()
+        } else {
+            (index + controls.len() - 1) % controls.len()
+        };
+        let control = controls[next];
+        launcher.terminal_focus = control;
+        if matches!(control, Control::Start | Control::End | Control::Count) {
+            return activate(control, state);
+        }
+        return vec![];
+    }
+    if desktop && launcher.focus == SearchFocus::Results {
+        launcher.terminal_focus = Control::Results;
+    }
+    let control = launcher.terminal_focus;
+    if matches!(control, Control::Start | Control::End | Control::Count) {
+        let step = if control == Control::Start {
+            AdventureStep::FindStartTrack
+        } else {
+            AdventureStep::FindEndTrack
+        };
+        match key.code {
+            KeyCode::Enter | KeyCode::Down => {
+                launcher.terminal_focus = Control::Results;
+                launcher.focus = SearchFocus::Results;
+                return vec![];
+            }
+            KeyCode::Char(_) | KeyCode::Backspace => {
+                let selected = if step == AdventureStep::FindStartTrack {
+                    &launcher.start_track
+                } else {
+                    &launcher.end_track
+                };
+                let mut query = if launcher.step == step && !launcher.query.is_empty() {
+                    launcher.query.clone()
+                } else if key.code == KeyCode::Backspace {
+                    selected
+                        .as_ref()
+                        .map(|track| track.title.clone())
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                match key.code {
+                    KeyCode::Char(character) => query.push(character),
+                    KeyCode::Backspace => {
+                        query.pop();
+                    }
+                    _ => {}
+                }
+                launcher.focus = SearchFocus::Input;
+                return vec![
+                    SearchAction::AdventureLauncherSetEndpointQuery { step, query }.into(),
+                ];
+            }
+            _ => return vec![],
+        }
+    }
+    if control == Control::Count {
+        let mut value = launcher.track_count_input.clone();
+        match key.code {
+            KeyCode::Char(c) if c.is_ascii_digit() => value.push(c),
+            KeyCode::Backspace => {
+                value.pop();
+            }
+            KeyCode::Enter => {
+                launcher.terminal_focus = Control::Preview;
+                return vec![];
+            }
+            _ => return vec![],
+        }
+        return vec![SearchAction::AdventureLauncherSetTrackCount(value).into()];
+    }
+    if control == Control::Types && matches!(key.code, KeyCode::Left | KeyCode::Right) {
+        let tabs = [
+            SearchTab::Global,
+            SearchTab::Artists,
+            SearchTab::Albums,
+            SearchTab::Tracks,
+        ];
+        let index = tabs
+            .iter()
+            .position(|tab| *tab == launcher.search_tab)
+            .unwrap_or(0);
+        launcher.search_tab = tabs[if key.code == KeyCode::Right {
+            (index + 1) % tabs.len()
+        } else {
+            (index + tabs.len() - 1) % tabs.len()
+        }];
+        launcher.item_index = 0;
+        launcher.scroll_pin = None;
+        return vec![];
+    }
+    if control == Control::Results {
+        let count = if let JourneyStage::Ready(tracks) = &launcher.stage {
+            tracks.len()
+        } else {
+            journey::choices(launcher).len()
+        };
+        launcher.scroll_pin = None;
+        match key.code {
+            KeyCode::Up if launcher.item_index == 0 => {
+                launcher.terminal_focus = if launcher.step == AdventureStep::FindStartTrack {
+                    Control::Start
+                } else {
+                    Control::End
+                };
+                launcher.focus = SearchFocus::Input;
+            }
+            KeyCode::Up => launcher.item_index = launcher.item_index.saturating_sub(1),
+            KeyCode::Down => {
+                launcher.item_index = (launcher.item_index + 1).min(count.saturating_sub(1))
+            }
+            KeyCode::Home => launcher.item_index = 0,
+            KeyCode::End => launcher.item_index = count.saturating_sub(1),
+            KeyCode::PageUp => launcher.item_index = launcher.item_index.saturating_sub(8),
+            KeyCode::PageDown => {
+                launcher.item_index = (launcher.item_index + 8).min(count.saturating_sub(1))
+            }
+            KeyCode::Left if !matches!(launcher.drill, AdventureDrillLevel::Search) => {
+                return vec![SearchAction::AdventureLauncherBack.into()];
+            }
+            KeyCode::Enter if matches!(launcher.stage, JourneyStage::Ready(_)) => {
+                launcher.terminal_focus = Control::Preview;
+            }
+            KeyCode::Enter => return journey::select(launcher),
+            _ => {}
+        }
+        return vec![];
+    }
+    if matches!(key.code, KeyCode::Enter | KeyCode::Char(' ')) {
+        return activate(control, state);
+    }
+    vec![]
 }

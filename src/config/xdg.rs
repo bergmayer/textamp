@@ -40,24 +40,9 @@ impl XdgPaths {
         self.config_dir.join("config.toml")
     }
 
-    /// Path to the auth token storage.
-    pub fn token_file(&self) -> PathBuf {
-        self.data_dir.join("auth.toml")
-    }
-
     /// Path to the log directory (state dir).
     pub fn log_dir(&self) -> PathBuf {
         self.state_dir.clone()
-    }
-
-    /// Path to the log file (legacy, used for migration).
-    pub fn log_file(&self) -> PathBuf {
-        self.state_dir.join("textamp.log")
-    }
-
-    /// Path to the image cache directory.
-    pub fn image_cache_dir(&self) -> PathBuf {
-        self.cache_dir.join("images")
     }
 
     /// Ensure all directories exist.

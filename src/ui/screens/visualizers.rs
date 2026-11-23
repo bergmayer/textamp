@@ -1,12 +1,12 @@
 //! Optional landscape and studio displays; pure render-from-state.
+use crate::app::AppState;
 use crate::app::meters::dbfs;
 use crate::app::state::PlayStatus;
-use crate::app::AppState;
 use crate::ui::theme::theme;
 use ratatui::prelude::*;
 use ratatui::widgets::{
-    canvas::{Canvas, Line as CanvasLine},
     Paragraph, Sparkline,
+    canvas::{Canvas, Line as CanvasLine},
 };
 
 fn message(frame: &mut Frame, area: Rect, text: &str) {
@@ -26,17 +26,16 @@ pub fn landscape(frame: &mut Frame, state: &AppState, area: Rect) {
     }
     let Some(data) = state
         .spectrogram
-        .data
-        .as_ref()
+        .data()
         .filter(|data| data.frame_count > 0 && data.bins_per_frame > 0)
     else {
         message(
             frame,
             area,
-            if state.spectrogram.generating {
+            if state.spectrogram.generating() {
                 "Preparing spectral landscape…"
             } else {
-                "No spectral data — play a track to generate"
+                ""
             },
         );
         return;
@@ -104,7 +103,6 @@ pub fn meters(frame: &mut Frame, state: &AppState, area: Rect) {
 
     let meters = &state.studio_meters;
     if !meters.available || state.playback.status == PlayStatus::Stopped {
-        message(frame, area, "No live PCM");
         return;
     }
     let row = |offset, height| Rect::new(area.x, area.y + offset, area.width, height);

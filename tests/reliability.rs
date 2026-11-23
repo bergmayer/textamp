@@ -1,7 +1,7 @@
+use textamp::app::AppState;
 use textamp::app::action::SearchAction;
 use textamp::app::handlers::dispatch_search;
 use textamp::app::state::{RefreshCategory, SearchTab, View};
-use textamp::app::AppState;
 
 use tokio::sync::mpsc;
 mod common;
@@ -9,32 +9,24 @@ mod common;
 #[tokio::test]
 async fn search_and_reopened_adventure_use_current_cached_tracks() {
     let mut state = common::navidrome_state();
-    state.library.all_tracks = vec![textamp::library::models::Track {
+    state.library.all_tracks = std::sync::Arc::new(vec![textamp::library::models::Track {
         rating_key: "fixture".into(),
         title: "Music".into(),
         ..Default::default()
-    }];
+    }]);
     let (tx, mut rx) = mpsc::channel(8);
     state.search.tab = SearchTab::Tracks;
     state.search.query = "music".into();
-    dispatch_search::dispatch(&tx, SearchAction::ExecuteLocalSearch, &mut state)
-        .await
-        .unwrap();
+    dispatch_search::dispatch(&tx, SearchAction::ExecuteLocalSearch, &mut state).unwrap();
     assert_eq!(state.search.results.as_ref().unwrap().tracks.len(), 1);
     state.search.query.clear();
-    dispatch_search::dispatch(&tx, SearchAction::ExecuteLocalSearch, &mut state)
-        .await
-        .unwrap();
+    dispatch_search::dispatch(&tx, SearchAction::ExecuteLocalSearch, &mut state).unwrap();
     assert!(state.search.results.is_none());
 
     for query in ["music", "no match"] {
-        dispatch_search::dispatch(&tx, SearchAction::OpenAdventureLauncher, &mut state)
-            .await
-            .unwrap();
+        dispatch_search::dispatch(&tx, SearchAction::OpenAdventureLauncher, &mut state).unwrap();
         state.popups.adventure_launcher_mut().unwrap().query = query.into();
-        dispatch_search::dispatch(&tx, SearchAction::AdventureLauncherSearch, &mut state)
-            .await
-            .unwrap();
+        dispatch_search::dispatch(&tx, SearchAction::AdventureLauncherSearch, &mut state).unwrap();
         let launcher = state.popups.adventure_launcher().unwrap();
         assert!(!launcher.loading);
         assert_eq!(
@@ -50,7 +42,7 @@ async fn search_and_reopened_adventure_use_current_cached_tracks() {
 
 #[test]
 fn principal_views_render_at_small_and_normal_terminal_sizes() {
-    use ratatui::{backend::TestBackend, Terminal};
+    use ratatui::{Terminal, backend::TestBackend};
     for (width, height) in [(40, 10), (80, 24), (120, 40)] {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         let mut state = AppState::new();
@@ -99,4 +91,25 @@ async fn changing_library_cancels_owned_work_and_discards_old_progress() {
 
 fn pending_lease() -> textamp::app::tasks::TaskLease {
     textamp::app::tasks::TaskLease::new(&tokio::spawn(std::future::pending::<()>()))
+}
+
+#[tokio::test]
+async fn queue_edit_progress_lasts_for_the_task_lease() {
+    let mut state = textamp::app::AppState::new();
+    let task = tokio::spawn(std::future::pending::<()>());
+    state
+        .sources
+        .nav_tasks
+        .insert("remix", (1, textamp::app::tasks::TaskLease::new(&task)));
+    state.set_status("A short-lived message".into());
+    assert_eq!(state.operation_progress(), Some("Generating queue edit…"));
+    let notification = state.current_notification().unwrap();
+    assert_eq!(notification.message, "Generating queue edit…");
+    assert!(matches!(
+        notification.notification_type,
+        textamp::app::state::NotificationType::Ongoing
+    ));
+    state.sources.nav_tasks.remove("remix");
+    assert_eq!(state.operation_progress(), None);
+    assert!(task.await.unwrap_err().is_cancelled());
 }

@@ -2,7 +2,7 @@
 //! Availability is separate from server readiness: enabling permits an attempt.
 use super::{ActiveSource, LibraryChoice};
 use crate::app::action::*;
-use crate::app::state::{DjMode, PaletteCommandKind, PlaybackMode, View};
+use crate::app::state::{PaletteCommandKind, PlaybackMode, View};
 use crate::app::{Action, AppState};
 use crate::library::station::{Station, StationKind};
 
@@ -37,18 +37,6 @@ pub fn enabled(state: &AppState) -> bool {
     };
     !state.sources.sonic_disabled_libraries.contains(&key)
 }
-pub fn dj_requires_sonic(mode: DjMode) -> bool {
-    matches!(mode, DjMode::Gemini | DjMode::Freeze | DjMode::Stretch)
-}
-pub fn dj_feature(mode: DjMode) -> crate::library::capabilities::Feature {
-    use crate::library::capabilities::Feature;
-    match mode {
-        DjMode::Stretch => Feature::SonicPaths,
-        DjMode::Gemini | DjMode::Freeze => Feature::SonicSimilarity,
-        DjMode::Contempo => Feature::ReleaseYears,
-        DjMode::Twofer | DjMode::Groupie => Feature::ArtistRadio,
-    }
-}
 pub fn station_requires_sonic(station: &Station) -> bool {
     key_requires_sonic(&station.key) || matches!(station.kind(), StationKind::AlbumMix)
 }
@@ -63,7 +51,12 @@ fn key_requires_sonic(key: &str) -> bool {
             | "remix:doppelganger"
     ) || matches!(
         key.split('?').next(),
-        Some("nav-radio/sonic" | "nav-radio/albumMix" | "nav-radio/audioMood")
+        Some(
+            "nav-radio/sonic"
+                | "nav-radio/stayClose"
+                | "nav-radio/albumMix"
+                | "nav-radio/audioMood"
+        )
     ) || key.ends_with("/stations/sonic")
 }
 fn station_blocked(state: &AppState, key: &str) -> bool {
@@ -103,9 +96,12 @@ pub fn action_blocked(state: &AppState, action: &Action) -> bool {
         ) => true,
         Action::Search(
             SearchAction::OpenAdventureLauncher
-            | SearchAction::OpenAdventureLauncherWithStart { .. }
-            | SearchAction::AdventureLauncherGenerate,
-        ) => true,
+            | SearchAction::OpenTrackRadioPicker
+            | SearchAction::OpenStayCloseRadioPicker
+            | SearchAction::StartPickedTrackRadio
+            | SearchAction::OpenAdventureLauncherWithStart { .. },
+        ) => !state.desktop_frontend,
+        Action::Search(SearchAction::AdventureLauncherGenerate) => true,
         Action::Settings(
             SettingsAction::SetAdventureLength(_)
             | SettingsAction::AdventureComplete(_)
@@ -114,10 +110,6 @@ pub fn action_blocked(state: &AppState, action: &Action) -> bool {
         Action::Queue(
             QueueAction::RemixGemini | QueueAction::RemixStretch | QueueAction::RemixDoppelganger,
         ) => true,
-        Action::Radio(RadioAction::ToggleDjMode(mode)) => dj_requires_sonic(*mode),
-        Action::Radio(RadioAction::DjModeProcess) => {
-            state.dj.active_mode.is_some_and(dj_requires_sonic)
-        }
         Action::Radio(RadioAction::PlayStation(key) | RadioAction::DrillIntoStation(key, _)) => {
             station_blocked(state, key)
         }
@@ -126,6 +118,7 @@ pub fn action_blocked(state: &AppState, action: &Action) -> bool {
             matches!(
                 station.source,
                 crate::library::station::RadioSource::Sonic(_)
+                    | crate::library::station::RadioSource::SonicFixed(_)
             ) || station
                 .source
                 .station_key()
@@ -134,32 +127,20 @@ pub fn action_blocked(state: &AppState, action: &Action) -> bool {
         _ => false,
     }
 }
-pub fn context_visible(
-    state: &AppState,
-    kind: &crate::services::track_context::ContextKind,
-) -> bool {
-    use crate::services::track_context::ContextKind;
-    enabled(state)
-        || !matches!(
-            kind,
-            ContextKind::SonicAdventure
-                | ContextKind::SonicRadio
-                | ContextKind::ShowSimilarTracks { .. }
-                | ContextKind::ShowSimilarAlbums { .. }
-        )
+pub fn context_visible(state: &AppState, kind: &crate::app::track_context::ContextKind) -> bool {
+    use crate::app::track_context::ContextKind;
+    enabled(state) || !matches!(kind, ContextKind::SonicAdventure | ContextKind::SonicRadio)
 }
 pub fn command_visible(state: &AppState, command: &PaletteCommandKind) -> bool {
     if enabled(state) {
         return true;
     }
     match command {
-        PaletteCommandKind::OpenSimilar
-        | PaletteCommandKind::SonicAdventure
+        PaletteCommandKind::SonicAdventure
         | PaletteCommandKind::SonicAdventureFromFocusedTrack
         | PaletteCommandKind::RemixGemini
         | PaletteCommandKind::RemixStretch
         | PaletteCommandKind::RemixDoppelganger => false,
-        PaletteCommandKind::ToggleDj(mode) => !dj_requires_sonic(*mode),
         PaletteCommandKind::FromTrackContext { kind, .. } => context_visible(state, kind),
         PaletteCommandKind::PlayStation(key) | PaletteCommandKind::BrowseStations { key, .. } => {
             !station_blocked(state, key)
@@ -171,7 +152,7 @@ pub fn command_visible(state: &AppState, command: &PaletteCommandKind) -> bool {
 pub fn radio_blocked(state: &AppState) -> bool {
     !enabled(state) && (state.radio.seed.is_some() || state.radio.active_station.as_ref().is_some_and(|s| {
         let title = s.title.to_lowercase();
-        matches!(s.source, crate::library::station::RadioSource::Sonic(_))
+        matches!(s.source, crate::library::station::RadioSource::Sonic(_) | crate::library::station::RadioSource::SonicFixed(_))
             || matches!(title.as_str(), "album mix" | "album mix builder" | "sonic radio")
             || matches!(&s.source, crate::library::models::RadioSource::Station(key) if station_blocked(state, key))
     }))
@@ -193,9 +174,6 @@ pub fn reconcile(state: &mut AppState) {
         state.set_browse_category(crate::app::state::BrowseCategory::Library, true);
     }
 
-    if state.dj.active_mode.is_some_and(dj_requires_sonic) {
-        state.dj = Default::default();
-    }
     // Undo can restore a previous radio snapshot; preserve its songs, not its AI refills.
     if state.playback_mode == PlaybackMode::Radio && radio_blocked(state) {
         state.convert_radio_to_queue("Sonic features disabled");
@@ -212,7 +190,6 @@ pub fn reconcile(state: &mut AppState) {
 }
 pub fn cancel_pending(state: &mut AppState) {
     state.sources.sonic_tasks.clear();
-    state.dj.inserting = false;
     state.adventure_request_id = state.adventure_request_id.wrapping_add(1);
     state.adventure_launcher_request_id = state.adventure_launcher_request_id.wrapping_add(1);
     state.adventure = Default::default();
@@ -222,15 +199,11 @@ pub fn cancel_pending(state: &mut AppState) {
         state.set_view(View::Browse);
     }
     // Keep current playback and its queued music; stop only future AI additions.
-    if state.dj.active_mode.is_some_and(dj_requires_sonic) {
-        state.dj = Default::default();
-    }
     state.radio_generation = state.radio_generation.wrapping_add(1);
     state.radio_task = None;
     state.station_starting = None;
     state.radio.refill = crate::app::state::RadioRefill::Idle;
     for slot in [
-        "dj",
         "remix",
         "similar",
         "similar-pane",

@@ -1,5 +1,5 @@
 //! Small private credential store; secrets never enter library config or track IDs.
-use crate::util::{private_file::write_private_file, SecretString};
+use crate::util::{SecretString, private_file::write_private_file};
 use anyhow::Result;
 use std::collections::BTreeMap;
 use std::path::Path;

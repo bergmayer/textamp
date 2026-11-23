@@ -4,9 +4,9 @@ use crate::app::action::*;
 use crossterm::event::{self, KeyCode};
 
 use super::super::helpers::navigation::related_flat_resolve;
-use crate::app::state::View;
 use crate::app::Action;
 use crate::app::AppState;
+use crate::app::state::View;
 
 /// Handle Related view keys.
 pub(in crate::app::handlers) fn handle_related_keys(
@@ -75,7 +75,7 @@ pub(in crate::app::handlers) fn handle_related_keys(
 
 /// Activate the currently highlighted related item (Enter or second click).
 /// Artists: navigate to artist in library. Albums: navigate to album in library.
-pub(in crate::app::handlers) fn activate_related_item(state: &mut AppState) -> Vec<Action> {
+pub(crate) fn activate_related_item(state: &mut AppState) -> Vec<Action> {
     let idx = state.list_state.related_index;
     let resolved = related_flat_resolve(&state.related.groups, idx);
     let Some((group_idx, is_header, album_idx)) = resolved else {
@@ -119,29 +119,21 @@ pub(in crate::app::handlers) fn activate_related_item(state: &mut AppState) -> V
         artist_key
     };
 
-    state.set_view(View::Browse);
-    state.set_browse_category(crate::app::state::BrowseCategory::Library, false);
-    state.library.selected_artist_name = artist_name;
-
-    if let Some(album_key_val) = album_key {
-        state.search.pending_album_key = Some(album_key_val);
-        state.library.selected_album_title = album_title.unwrap_or_default();
-    }
-
-    if let Some(pos) = state.artist_nav.columns.first().and_then(|col| {
-        col.items
-            .iter()
-            .position(|i| i.key() == nav_artist_key.as_str())
-    }) {
-        if let Some(col) = state.artist_nav.columns.first_mut() {
-            col.selected_index = pos;
+    vec![
+        BrowseAction::OpenDetailsInLibrary {
+            track: Box::new(crate::library::models::Track {
+                grandparent_rating_key: Some(nav_artist_key),
+                grandparent_title: Some(artist_name),
+                parent_rating_key: album_key.clone(),
+                parent_title: album_title,
+                ..Default::default()
+            }),
+            destination: if album_key.is_some() {
+                crate::app::library_details::Destination::Album
+            } else {
+                crate::app::library_details::Destination::Artist
+            },
         }
-    }
-    state.artist_nav.focused_column = 0;
-    state.artist_nav.truncate_right();
-    vec![MillerAction::LoadArtistAlbumsForMiller {
-        artist_key: nav_artist_key,
-        replace_child: false,
-    }
-    .into()]
+        .into(),
+    ]
 }

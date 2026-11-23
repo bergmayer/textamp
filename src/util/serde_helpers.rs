@@ -3,7 +3,7 @@
 //! The server API sometimes returns numbers as strings, so we need
 //! flexible deserializers that can handle both.
 
-use serde::{de, Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, de};
 use std::fmt;
 use std::marker::PhantomData;
 use std::str::FromStr;

@@ -17,10 +17,17 @@ fn collect_tracks_from_column(
     track_index: usize,
     single_track: bool,
 ) -> Vec<Track> {
+    if col
+        .items
+        .get(track_index)
+        .is_some_and(|item| item.pending_download().is_some())
+    {
+        return vec![];
+    }
     if single_track {
         col.tracks.get(track_index).cloned().into_iter().collect()
     } else {
-        col.tracks[track_index..].to_vec()
+        col.ready_tracks_from(track_index)
     }
 }
 
@@ -69,10 +76,11 @@ pub(crate) fn collect_art_to_load(
                 scope,
                 thumb: Some(thumb),
             } => {
-                if let Some(artist_key) = scope.artist_key() {
-                    if !cache.contains_key(artist_key) && !pending.contains(artist_key) {
-                        to_load.push((artist_key.to_string(), thumb.clone()));
-                    }
+                if let Some(artist_key) = scope.artist_key()
+                    && !cache.contains_key(artist_key)
+                    && !pending.contains(artist_key)
+                {
+                    to_load.push((artist_key.to_string(), thumb.clone()));
                 }
             }
             _ => {}
@@ -148,10 +156,11 @@ pub(crate) fn collect_all_art_to_load(
                 scope,
                 thumb: Some(thumb),
             } => {
-                if let Some(artist_key) = scope.artist_key() {
-                    if !cache.contains_key(artist_key) && !pending.contains(artist_key) {
-                        to_load.push((artist_key.to_string(), thumb.clone()));
-                    }
+                if let Some(artist_key) = scope.artist_key()
+                    && !cache.contains_key(artist_key)
+                    && !pending.contains(artist_key)
+                {
+                    to_load.push((artist_key.to_string(), thumb.clone()));
                 }
             }
             _ => {}
@@ -161,7 +170,7 @@ pub(crate) fn collect_all_art_to_load(
 }
 
 /// Dispatch Miller column actions. Returns follow-up actions.
-pub async fn dispatch(
+pub fn dispatch(
     event_tx: &mpsc::Sender<Event>,
     action: MillerAction,
     state: &mut AppState,
@@ -169,7 +178,30 @@ pub async fn dispatch(
     audio: &mut AudioPlayer,
 ) -> Result<Vec<Action>> {
     match action {
+        MillerAction::LoadGenreAlbumsForMiller {
+            genre_key,
+            replace_child,
+        } if state.browse_category == crate::app::state::BrowseCategory::Decades => {
+            state.tag_nav_request_id = state.tag_nav_request_id.wrapping_add(1);
+            let albums = state
+                .library
+                .albums
+                .iter()
+                .filter(|album| crate::services::release_dates::matches_decade(album, &genre_key))
+                .cloned()
+                .collect();
+            return Ok(vec![
+                MillerAction::GenreAlbumsForMillerLoaded {
+                    request_id: state.tag_nav_request_id,
+                    genre_name: format!("{genre_key}s"),
+                    replace_child,
+                    result: Ok(albums),
+                }
+                .into(),
+            ]);
+        }
         MillerAction::OpenAlbumDetails => {
+            let in_downloads = crate::app::downloads::is_root_column(state, 0);
             let mut artwork = None;
             if let Some(nav) = state.browse_nav_mut() {
                 let Some(col) = nav.focused() else {
@@ -196,26 +228,28 @@ pub async fn dispatch(
                                 _ => None,
                             })
                     });
-                artwork = thumb.map(|thumb| (art_key.clone(), thumb));
+                artwork = thumb
+                    .or_else(|| in_downloads.then(String::new))
+                    .map(|thumb| (art_key.clone(), thumb));
                 let mut lines = vec![title.clone(), String::new()];
                 let mut artists = Vec::new();
                 let mut genres = Vec::new();
                 let mut years = Vec::new();
                 for track in &col.tracks {
-                    if let Some(artist) = &track.grandparent_title {
-                        if !artists.contains(artist) {
-                            artists.push(artist.clone());
-                        }
+                    if let Some(artist) = &track.grandparent_title
+                        && !artists.contains(artist)
+                    {
+                        artists.push(artist.clone());
                     }
                     for genre in &track.genres {
                         if !genres.contains(genre) {
                             genres.push(genre.clone());
                         }
                     }
-                    if let Some(year) = track.parent_year.or(track.year) {
-                        if !years.contains(&year) {
-                            years.push(year);
-                        }
+                    if let Some(year) = track.parent_year.or(track.year)
+                        && !years.contains(&year)
+                    {
+                        years.push(year);
                     }
                 }
                 if !artists.is_empty() {
@@ -242,9 +276,14 @@ pub async fn dispatch(
                     duration / 1_000 % 60
                 ));
                 let mut details = BrowseColumn::new("Album Details", vec![]);
-                details.album_details = Some(lines);
-                details.album_details_art_key = Some(art_key);
+                details.play_all_row = col.play_all_row.clone();
+                details.header_selection = crate::app::state::ColumnHeaderSelection::Play;
+                details.details = Some(crate::app::state::BrowseDetails::Album {
+                    lines,
+                    artwork_key: art_key,
+                });
                 nav.drill_column(details, false);
+                state.miller_reveal_right = true;
             }
             if let Some((key, thumb)) = artwork {
                 // Opening details is an explicit cover request, even after rapid browsing.
@@ -272,15 +311,6 @@ pub async fn dispatch(
             }
             match result {
                 Ok(albums) => {
-                    // Albums first, then pinned action rows at the
-                    // bottom. Order: Albums → ArtistRadio → AllTracks
-                    // → CompilationTracks. Action rows carry no thumb
-                    // since they aren't albums.
-                    let artist_radio = BrowseItem::ArtistRadio {
-                        artist_key: artist_key.clone(),
-                        artist_name: state.library.selected_artist_name.clone(),
-                        thumb: None,
-                    };
                     let all_tracks = BrowseItem::AllTracks {
                         scope: crate::app::state::AllTracksScope::Artist {
                             artist_key: artist_key.clone(),
@@ -306,7 +336,11 @@ pub async fn dispatch(
                             .cloned()
                             .collect();
                         if !missing.is_empty() {
-                            tracing::debug!("Merging {} albums from preload that API didn't return for artist {}", missing.len(), artist_key);
+                            tracing::debug!(
+                                "Merging {} albums from preload that API didn't return for artist {}",
+                                missing.len(),
+                                artist_key
+                            );
                             all_albums.extend(missing);
                         }
                     }
@@ -334,42 +368,50 @@ pub async fn dispatch(
                         }
                     }
 
-                    // Pinned action rows go at the bottom, after all
-                    // album rows.
-                    items.push(artist_radio);
-                    items.push(all_tracks);
+                    // Keep the whole-artist track list pinned before albums.
+                    items.insert(0, all_tracks);
+                    items.insert(
+                        0,
+                        BrowseItem::ArtistInfo {
+                            artist_key: artist_key.clone(),
+                            artist_name: state.library.selected_artist_name.clone(),
+                            thumb: None,
+                        },
+                    );
                     if state
                         .library
                         .compilations
                         .artist_map
                         .contains_key(&artist_key)
                     {
-                        items.push(BrowseItem::CompilationTracks {
-                            artist_key: artist_key.clone(),
-                            artist_name: state.library.selected_artist_name.clone(),
-                        });
+                        items.insert(
+                            2,
+                            BrowseItem::CompilationTracks {
+                                artist_key: artist_key.clone(),
+                                artist_name: state.library.selected_artist_name.clone(),
+                            },
+                        );
                     }
 
                     let title = format!("albums \u{2014} {}", state.library.selected_artist_name);
                     let mut col = BrowseColumn::new(title, items);
-                    col.artwork_visible = state.artwork.default_visible;
+                    state.initialize_column_artwork(&mut col);
                     state.artist_nav.drill_column(col, replace_child);
+                    state.miller_reveal_right = true;
 
                     // Preload all album art for the newly pushed column
-                    let art_batch = if state.artwork.default_visible {
+                    let art_batch = {
                         collect_art_to_load(
                             state.artist_nav.columns.last(),
                             &state.artwork.grid_cache,
                             &state.artwork.grid_pending,
                         )
-                    } else {
-                        vec![]
                     };
 
                     // Auto-select album and drill into tracks if pending_album_key is set (Alt+B)
-                    if let Some(album_key) = state.search.pending_album_key.take() {
-                        if let Some(col) = state.artist_nav.columns.last_mut() {
-                            if let Some(idx) = col.items.iter().position(|item| {
+                    if let Some(album_key) = state.search.pending_album_key.take()
+                        && let Some(col) = state.artist_nav.columns.last_mut()
+                            && let Some(idx) = col.items.iter().position(|item| {
                                 matches!(item, BrowseItem::Album { key, .. } if *key == album_key)
                             }) {
                                 col.selected_index = idx;
@@ -383,8 +425,6 @@ pub async fn dispatch(
                                 state.artist_nav.loading = false;
                                 return Ok(actions);
                             }
-                        }
-                    }
 
                     if !art_batch.is_empty() {
                         state.artist_nav.loading = false;
@@ -410,24 +450,29 @@ pub async fn dispatch(
             }
             match result {
                 Ok(tracks) => {
+                    state
+                        .library
+                        .visited_album_tracks
+                        .insert(album_key.clone(), tracks.clone());
                     let items = BrowseItem::from_tracks(&tracks);
                     let title = format!("tracks \u{2014} {}", album_title);
                     // Store full tracks for playback (includes media info)
                     let mut col = BrowseColumn::new_with_tracks(title, items, tracks);
+                    state.initialize_column_artwork(&mut col);
                     col.play_all_row = Some(crate::app::state::PlayAllRow::Album {
                         rating_key: album_key.clone(),
                         title: album_title,
                     });
                     col.header_selection = crate::app::state::ColumnHeaderSelection::Play;
                     state.artist_nav.drill_column(col, replace_child);
+                    state.miller_reveal_right = true;
 
                     // Auto-select track if pending from search navigation
                     if let Some(ref tk) = state.search.pending_track_key {
-                        if let Some(col) = state.artist_nav.columns.last_mut() {
-                            if let Some(pos) = col.items.iter().position(|i| i.key() == tk.as_str())
-                            {
-                                col.selected_index = pos;
-                            }
+                        if let Some(col) = state.artist_nav.columns.last_mut()
+                            && let Some(pos) = col.items.iter().position(|i| i.key() == tk.as_str())
+                        {
+                            col.selected_index = pos;
                         }
                         state.search.pending_track_key = None;
                     }
@@ -458,6 +503,7 @@ pub async fn dispatch(
                     });
                     col.header_selection = crate::app::state::ColumnHeaderSelection::Play;
                     state.artist_nav.drill_column(col, replace_child);
+                    state.miller_reveal_right = true;
                 }
                 Err(error) => {
                     state.set_error(error.message);
@@ -499,11 +545,12 @@ pub async fn dispatch(
                         format!("albums \u{2014} {}", genre_name)
                     };
                     let mut col = BrowseColumn::new(title, items);
-                    col.artwork_visible = state.artwork.default_visible;
+                    state.initialize_column_artwork(&mut col);
                     state.tag_nav.drill_column(col, replace_child);
+                    state.miller_reveal_right = true;
 
                     // Preload all album art for the newly pushed column
-                    if state.artwork.default_visible {
+                    {
                         let art_batch = collect_art_to_load(
                             state.tag_nav.columns.last(),
                             &state.artwork.grid_cache,
@@ -542,12 +589,14 @@ pub async fn dispatch(
                     };
                     // Store full tracks for playback (includes media info)
                     let mut col = BrowseColumn::new_with_tracks(title, items, tracks);
+                    state.initialize_column_artwork(&mut col);
                     col.play_all_row = Some(crate::app::state::PlayAllRow::Album {
                         rating_key: album_key.clone(),
                         title: album_name.clone(),
                     });
                     col.header_selection = crate::app::state::ColumnHeaderSelection::Play;
                     state.tag_nav.drill_column(col, replace_child);
+                    state.miller_reveal_right = true;
                 }
                 Err(error) => {
                     state.set_error(error.message);
@@ -595,8 +644,9 @@ pub async fn dispatch(
                 thumb: None,
             });
             let mut col = BrowseColumn::new("compilations", items);
-            col.artwork_visible = state.artwork.default_visible;
+            state.initialize_column_artwork(&mut col);
             state.artist_nav.drill_column(col, auto_drill);
+            state.miller_reveal_right = true;
 
             // Batch load album art for visible items
             let art_batch = collect_viewport_art(state);
@@ -650,18 +700,17 @@ pub async fn dispatch(
 
                 let title = format!("compilations \u{2014} {}", artist_name);
                 let mut col = BrowseColumn::new(title, items);
-                col.artwork_visible = state.artwork.default_visible;
+                state.initialize_column_artwork(&mut col);
                 state.artist_nav.drill_column(col, auto_drill);
+                state.miller_reveal_right = true;
 
                 // Preload album art
-                let art_batch = if state.artwork.default_visible {
+                let art_batch = {
                     collect_art_to_load(
                         state.artist_nav.columns.last(),
                         &state.artwork.grid_cache,
                         &state.artwork.grid_pending,
                     )
-                } else {
-                    vec![]
                 };
                 if !art_batch.is_empty() {
                     return Ok(vec![SystemAction::LoadAlbumArt(art_batch).into()]);
@@ -698,6 +747,7 @@ pub async fn dispatch(
                 });
                 col.header_selection = crate::app::state::ColumnHeaderSelection::Play;
                 state.artist_nav.drill_column(col, auto_drill);
+                state.miller_reveal_right = true;
             }
         }
 
@@ -730,6 +780,7 @@ pub async fn dispatch(
             });
             col.header_selection = crate::app::state::ColumnHeaderSelection::Play;
             state.artist_nav.drill_column(col, auto_drill);
+            state.miller_reveal_right = true;
         }
 
         MillerAction::AlbumTracksRefreshed {
@@ -748,6 +799,15 @@ pub async fn dispatch(
             }
             match result {
                 Ok(tracks) => {
+                    if let Some(key) = tracks
+                        .first()
+                        .and_then(|track| track.parent_rating_key.clone())
+                    {
+                        state
+                            .library
+                            .visited_album_tracks
+                            .insert(key, tracks.clone());
+                    }
                     let items = BrowseItem::from_tracks(&tracks);
 
                     // Determine which nav owns the focused track column

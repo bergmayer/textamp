@@ -14,10 +14,10 @@ pub mod radio;
 pub mod station;
 pub mod track;
 pub mod tree;
-mod webdav;
+pub(crate) mod webdav;
 pub use webdav::check as check_webdav;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::path::{Component, Path, PathBuf};

@@ -8,8 +8,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rustfft::num_complex::Complex;
 use rustfft::FftPlanner;
+use rustfft::num_complex::Complex;
 
 use super::waveform::WaveformError;
 
@@ -29,8 +29,7 @@ const HOP_SIZE: usize = FFT_SIZE / 2;
 const NUM_BINS: usize = 96;
 
 /// Spectrogram data version for cache invalidation.
-/// Bumped to 6 when overlap + windowed normalisation + power averaging
-/// + extended dB range were introduced (v5 caches are not reusable).
+/// Format 6 stores overlapping, window-normalized power with extended dB range.
 pub const SPECTROGRAM_VERSION: u8 = 6;
 
 /// Computed spectrogram data for a track.
@@ -184,15 +183,9 @@ fn log_frequency_mapping(
 /// - 50% overlap (HOP_SIZE = FFT_SIZE / 2) for COLA reconstruction
 /// - Window-corrected magnitude normalisation (2 / sum(window)) so a
 ///   full-scale sine reads as 0 dBFS regardless of windowing
-/// - Power averaging within each log-spaced output bin (preserves
-///   broadband energy correctly; previous max-magnitude biased toward
-///   isolated tones)
-/// - dB scale with -80 dB floor and 80 dB dynamic range (typical for
-///   music spectrograms; the old 35 dB range clipped the lowest 45 dB
-///   into solid background)
-/// - sqrt visual lift (gamma 0.5) so quieter spectral content is still
-///   visible — gamma > 1.0 (the previous setting) pushed it BELOW the
-///   colour ramp's perceptible threshold.
+/// - Power averaging within each log-spaced output bin to preserve broadband energy
+/// - dB scale with an -80 dB floor and 80 dB dynamic range
+/// - Square-root visual scaling to make quieter spectral content visible
 fn compute_spectrogram(samples: &[f32], sample_rate: u32) -> SpectrogramData {
     if samples.len() < FFT_SIZE {
         return SpectrogramData {

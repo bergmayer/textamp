@@ -68,11 +68,11 @@ pub fn compute_aliases(
         let mut track_artist_names: HashSet<&str> = HashSet::new();
         let mut with_original_title = 0usize;
         for track in tracks {
-            if let Some(ref s) = track.original_title {
-                if !s.is_empty() {
-                    track_artist_names.insert(s.as_str());
-                    with_original_title += 1;
-                }
+            if let Some(ref s) = track.original_title
+                && !s.is_empty()
+            {
+                track_artist_names.insert(s.as_str());
+                with_original_title += 1;
             }
         }
 
@@ -140,11 +140,6 @@ pub fn build_artist_lookup(
     }
 
     lookup
-}
-
-/// Resolve a track artist name to a real server artist key.
-pub fn resolve_artist_key(track_artist: &str, lookup: &HashMap<String, String>) -> Option<String> {
-    lookup.get(&normalize_artist_name(track_artist)).cloned()
 }
 
 #[cfg(test)]
@@ -329,27 +324,5 @@ mod tests {
         assert_eq!(lookup.get("ramones").unwrap(), "k1");
         assert_eq!(lookup.get("u2").unwrap(), "k2");
         assert_eq!(lookup.get("guided by voices").unwrap(), "k3");
-    }
-
-    #[test]
-    fn test_resolve_artist_key() {
-        let artists = vec![Artist {
-            rating_key: "k1".to_string(),
-            title: "The Ramones".to_string(),
-            ..Artist::default()
-        }];
-        let aliases = HashMap::new();
-        let lookup = build_artist_lookup(&artists, &aliases);
-
-        // "Ramones" resolves to "The Ramones" key because both normalize to "ramones"
-        assert_eq!(
-            resolve_artist_key("Ramones", &lookup),
-            Some("k1".to_string())
-        );
-        assert_eq!(
-            resolve_artist_key("The Ramones", &lookup),
-            Some("k1".to_string())
-        );
-        assert_eq!(resolve_artist_key("Unknown Band", &lookup), None);
     }
 }

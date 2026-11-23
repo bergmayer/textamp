@@ -21,6 +21,8 @@ impl Genre {
 
 #[derive(Debug, Clone, Default)]
 pub struct SearchResults {
+    /// Combined-view order, indexing artists, albums, playlists, genres, then tracks.
+    pub global_order: Vec<usize>,
     pub artists: Vec<Artist>,
     pub albums: Vec<Album>,
     pub tracks: Vec<Track>,

@@ -1,10 +1,10 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::{backend::TestBackend, style::Color, Terminal};
+use ratatui::{Terminal, backend::TestBackend, style::Color};
 use textamp::app::{
+    Action, AppState,
     action::NavigationAction,
     handlers::{dispatch_navigation, key_input, mouse_input},
     state::{NowPlayingFocus, PaletteCommandKind, PlayStatus, View, VisualizerTab},
-    Action, AppState,
 };
 use textamp::config::Config;
 
@@ -39,7 +39,12 @@ async fn shortcut_palette_and_escape_preserve_navigation_and_playback() {
     ] {
         let mut state = AppState::new();
         state.view = view;
-        state.now_playing_focus = NowPlayingFocus::Sidebar;
+        assert!(
+            textamp::app::command_palette::materialize_entries(&state)
+                .iter()
+                .any(|entry| matches!(entry.command, PaletteCommandKind::ToggleFullscreen))
+        );
+        state.now_playing_focus = NowPlayingFocus::Tools;
         state.playback.status = PlayStatus::Playing;
         state.playback.position_ms = 1234;
         state.visualizer_tab_focused = true;
@@ -52,20 +57,18 @@ async fn shortcut_palette_and_escape_preserve_navigation_and_playback() {
                 [Action::Navigation(NavigationAction::ToggleFullscreen)]
             ));
             dispatch_navigation::dispatch(&tx, NavigationAction::ToggleFullscreen, &mut state)
-                .await
                 .unwrap();
-            assert!(state.fullscreen_active);
+            assert!(state.fullscreen.is_open());
             assert_eq!(state.view, view);
             assert!(matches!(
                 key(KeyCode::Esc, &mut state).as_slice(),
                 [Action::Navigation(NavigationAction::ToggleFullscreen)]
             ));
             dispatch_navigation::dispatch(&tx, NavigationAction::ToggleFullscreen, &mut state)
-                .await
                 .unwrap();
-            assert!(!state.fullscreen_active);
+            assert!(!state.fullscreen.is_open());
             assert_eq!(state.view, view);
-            assert_eq!(state.now_playing_focus, NowPlayingFocus::Sidebar);
+            assert_eq!(state.now_playing_focus, NowPlayingFocus::Tools);
             assert_eq!(state.playback.status, PlayStatus::Playing);
             assert_eq!(state.playback.position_ms, 1234);
             assert!(state.visualizer_tab_focused);
@@ -74,20 +77,25 @@ async fn shortcut_palette_and_escape_preserve_navigation_and_playback() {
             assert_eq!(state.scroll.queue, Some(8));
         }
         state.view = View::Browse;
-        state.fullscreen_active = true;
+        state.fullscreen = textamp::app::state::FullscreenView::Visualizer;
         dispatch_navigation::dispatch(
             &tx,
             NavigationAction::set_category(state.browse_category),
             &mut state,
         )
-        .await
         .unwrap();
-        assert!(!state.fullscreen_active);
+        assert!(!state.fullscreen.is_open());
         dispatch_navigation::dispatch(&tx, NavigationAction::FullscreenArtwork, &mut state)
-            .await
             .unwrap();
         assert_eq!(textamp::app::fullscreen::mode(&state), 0);
-        assert!(state.fullscreen_artwork);
+        assert!(state.fullscreen.is_artwork());
+        dispatch_navigation::dispatch(&tx, NavigationAction::ToggleFullscreen, &mut state).unwrap();
+        dispatch_navigation::dispatch(&tx, NavigationAction::ToggleFullscreen, &mut state).unwrap();
+        assert!(state.fullscreen.is_open());
+        assert!(
+            !state.fullscreen.is_artwork(),
+            "the visualizer command must open a visualizer after artwork"
+        );
         let entries = textamp::app::command_palette::materialize_entries(&state);
         assert_eq!(
             entries
@@ -106,12 +114,12 @@ async fn shortcut_palette_and_escape_preserve_navigation_and_playback() {
 #[test]
 fn modes_resize_missing_art_and_mouse_never_seek() {
     let mut state = AppState::new();
-    state.fullscreen_active = true;
+    state.fullscreen = textamp::app::state::FullscreenView::Visualizer;
     for size in [(0, 0), (1, 1), (20, 3), (80, 24), (160, 48), (40, 10)] {
-        for i in 0..7 {
+        for i in 0..=VisualizerTab::ALL.len() as u8 {
             key(KeyCode::Char((b'1' + i) as char), &mut state);
             assert_eq!(textamp::app::fullscreen::mode(&state), i as usize);
-            assert_eq!(state.fullscreen_artwork, i == 0);
+            assert_eq!(state.fullscreen.is_artwork(), i == 0);
             if i > 0 {
                 assert_eq!(state.visualizer_tab, VisualizerTab::ALL[i as usize - 1]);
             }
@@ -119,23 +127,28 @@ fn modes_resize_missing_art_and_mouse_never_seek() {
             if i == 0 && size.0 >= 40 && size.1 >= 10 {
                 assert!(text(&buffer).contains("No artwork"));
             }
-            assert!(mouse_input::handle_mouse(
-                MouseEvent {
-                    kind: MouseEventKind::Down(MouseButton::Left),
-                    column: 10,
-                    row: 5,
-                    modifiers: KeyModifiers::NONE
-                },
-                &mut state
-            )
-            .is_empty());
+            assert!(
+                mouse_input::handle_mouse(
+                    MouseEvent {
+                        kind: MouseEventKind::Down(MouseButton::Left),
+                        column: 10,
+                        row: 5,
+                        modifiers: KeyModifiers::NONE
+                    },
+                    &mut state
+                )
+                .is_empty()
+            );
             assert!(state.seek_drag.is_none());
         }
     }
     key(KeyCode::Right, &mut state);
     assert_eq!(textamp::app::fullscreen::mode(&state), 0);
     key(KeyCode::Left, &mut state);
-    assert_eq!(textamp::app::fullscreen::mode(&state), 6);
+    assert_eq!(
+        textamp::app::fullscreen::mode(&state),
+        VisualizerTab::ALL.len()
+    );
     draw(&mut state, 120, 30);
     let (area, index) = state.hit_regions.fullscreen_modes[1];
     mouse_input::handle_mouse(
@@ -150,18 +163,14 @@ fn modes_resize_missing_art_and_mouse_never_seek() {
     assert_eq!(textamp::app::fullscreen::mode(&state), index);
 }
 #[test]
-fn palette_cancel_returns_to_viewer_and_sound_output_remains_available() {
+fn palette_cancel_returns_to_viewer() {
     let mut state = AppState::new();
-    state.fullscreen_active = true;
+    state.fullscreen = textamp::app::state::FullscreenView::Visualizer;
     key(KeyCode::Char(':'), &mut state);
     assert!(state.palette.open);
     key(KeyCode::Esc, &mut state);
     assert!(!state.palette.open);
-    assert!(state.fullscreen_active);
-    assert!(matches!(
-        key(KeyCode::F(8), &mut state).as_slice(),
-        [Action::Playback(_)]
-    ));
+    assert!(state.fullscreen.is_open());
 }
 #[test]
 fn nord_focus_borders_match_including_sidebar_and_errors_keep_their_color() {
@@ -169,9 +178,12 @@ fn nord_focus_borders_match_including_sidebar_and_errors_keep_their_color() {
     state.theme = textamp::ui::ThemeName::Nord;
     state.view = View::Queue;
     let pink = Color::Rgb(196, 145, 162);
-    assert_ne!(textamp::ui::theme::ThemeColors::nord().error, pink);
+    assert_ne!(
+        textamp::ui::theme::ThemeColors::for_theme(textamp::app::theme::ThemeName::Nord).error,
+        pink
+    );
     for focus in [
-        NowPlayingFocus::Sidebar,
+        NowPlayingFocus::Tools,
         NowPlayingFocus::Tracks,
         NowPlayingFocus::Artwork,
     ] {
@@ -187,40 +199,23 @@ fn nord_focus_borders_match_including_sidebar_and_errors_keep_their_color() {
         );
     }
     state.view = View::NowPlaying;
+    state.visualizer_tab_focused = true;
     let buffer = draw(&mut state, 120, 40);
-    assert!(buffer
-        .content
-        .iter()
-        .any(|c| c.fg == pink && c.symbol() == "┌"));
+    assert!(
+        buffer
+            .content
+            .iter()
+            .any(|c| c.fg == pink && ["┌", "╭", "╔"].contains(&c.symbol()))
+    );
 }
-#[test]
-fn live_airplay_visualizers_explain_the_missing_sample_feed() {
-    let mut state = AppState::new();
-    state.fullscreen_active = true;
-    state.sound_output.current =
-        textamp::audio::AudioOutput::AirPlay(textamp::audio::airplay::AirplayDestination {
-            name: "fixture".into(),
-            address: "127.0.0.1".parse().unwrap(),
-            port: 7000,
-            airplay2: true,
-            txt: vec![],
-        });
-    for tab in [VisualizerTab::Meters, VisualizerTab::Vectorscope] {
-        state.visualizer_tab = tab;
-        assert!(
-            text(&draw(&mut state, 100, 25)).contains("Live audio samples unavailable on AirPlay")
-        );
-    }
-}
-
 #[test]
 fn artwork_canvas_reuses_decoding_and_analysis_survives_resize() {
     textamp::ui::screens::now_playing::init_artwork_renderer(
         ratatui_image::picker::Picker::halfblocks(),
     );
     let mut state = AppState::new();
-    state.fullscreen_active = true;
-    state.fullscreen_artwork = true;
+    state.fullscreen = textamp::app::state::FullscreenView::Visualizer;
+    state.fullscreen = textamp::app::state::FullscreenView::Artwork;
     state.artwork.mode = textamp::app::state::ArtworkMode::Halfblocks;
     let image = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(96, 96, |x, y| {
         image::Rgb([(x * 2) as u8, (y * 2) as u8, 130])
@@ -243,21 +238,25 @@ fn artwork_canvas_reuses_decoding_and_analysis_survives_resize() {
             buffer[(size.0 / 2, middle)].bg,
             textamp::ui::theme().colors.bg_primary
         );
-        assert!(buffer
-            .content
-            .iter()
-            .any(|cell| cell.symbol() == "▀" || cell.symbol() == "▄"));
+        assert!(
+            buffer
+                .content
+                .iter()
+                .any(|cell| cell.symbol() == "▀" || cell.symbol() == "▄")
+        );
     }
-    state.fullscreen_artwork = false;
-    state.waveform.data = Some(textamp::media::generate_waveform_from_pcm(
-        "fixture".into(),
-        60000,
-        &[0.1, 0.5, 0.3, 1.0],
-    ));
+    state.fullscreen = textamp::app::state::FullscreenView::Visualizer;
+    state
+        .waveform
+        .succeed(textamp::media::generate_waveform_from_pcm(
+            "fixture".into(),
+            60000,
+            &[0.1, 0.5, 0.3, 1.0],
+        ));
     for size in [(80, 24), (120, 40), (40, 12)] {
         draw(&mut state, size.0, size.1);
     }
-    assert!(state.waveform.data.is_some());
+    assert!(state.waveform.data().is_some());
 }
 
 // Optional render evidence uses actual Ratatui cells; tests require no screenshots.

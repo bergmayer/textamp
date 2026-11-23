@@ -2,7 +2,7 @@
 //! application state, authentication, or assumptions about a complete scan.
 use crate::library::catalog::Album;
 use crate::library::track::Track;
-use anyhow::{ensure, Result};
+use anyhow::{Result, ensure};
 use rand::prelude::{IndexedRandom, IteratorRandom};
 use rand::seq::SliceRandom;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -104,13 +104,12 @@ pub fn select(
                     .grandparent_rating_key
                     .as_deref()
                     .filter(|k| !k.is_empty())
+                    && !track.rating_key.is_empty()
                 {
-                    if !track.rating_key.is_empty() {
-                        catalogs
-                            .entry(artist)
-                            .or_default()
-                            .insert(&track.rating_key);
-                    }
+                    catalogs
+                        .entry(artist)
+                        .or_default()
+                        .insert(&track.rating_key);
                 }
             }
             let eligible: Vec<_> = available
@@ -133,7 +132,7 @@ pub fn select(
             let mut counts: Vec<_> = available.iter().filter_map(|t| t.view_count).collect();
             ensure!(
                 !counts.is_empty(),
-                "Play counts unavailable; refresh the library with F5"
+                "Play counts unavailable; choose Refresh Library"
             );
             counts.sort_unstable();
             let cutoff = counts[counts.len() / 4];
@@ -165,7 +164,7 @@ pub fn select(
     };
     ensure!(
         !candidates.is_empty(),
-        "No matching music for this station (check library tags or refresh with F5)"
+        "No matching music for this station (check library tags or choose Refresh Library)"
     );
     let tracks = if ordered {
         candidates.sort_by(|a, b| {
@@ -191,9 +190,52 @@ pub fn select(
     })
 }
 
+/// Insert one discovery after every two seed tracks. Input order represents
+/// the provider's shuffled candidates. A batch always starts with its seed.
+pub(crate) fn artist_mix(primary: Vec<Track>, related: Vec<Track>) -> Vec<Track> {
+    let mut seen = HashSet::new();
+    let primary: Vec<_> = primary
+        .into_iter()
+        .filter(|track| seen.insert(track.rating_key.clone()))
+        .collect();
+    let mut related = related
+        .into_iter()
+        .filter(|track| seen.insert(track.rating_key.clone()));
+    let mut mix = Vec::new();
+    for (index, track) in primary.into_iter().enumerate() {
+        mix.push(track);
+        if mix.len() == 100 {
+            break;
+        }
+        if index % 2 == 1
+            && let Some(track) = related.next()
+        {
+            mix.push(track);
+            if mix.len() == 100 {
+                break;
+            }
+        }
+    }
+    mix
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn artist_mix_starts_with_the_chosen_artist_and_keeps_a_unique_majority() {
+        let track = |id: &str| Track {
+            rating_key: id.into(),
+            ..Default::default()
+        };
+        let primary = ["a", "b", "c", "c", "d"].map(track).to_vec();
+        let related = ["b", "e", "e", "f", "g"].map(track).to_vec();
+        let ids: Vec<_> = artist_mix(primary, related)
+            .into_iter()
+            .map(|t| t.rating_key)
+            .collect();
+        assert_eq!(ids, ["a", "b", "e", "c", "d", "f"]);
+    }
     #[test]
     fn random_artist_counts_unique_catalog_tracks_before_excluding_played_tracks() {
         let mut tracks = Vec::new();
@@ -210,10 +252,12 @@ mod tests {
         };
         let result = select(&tracks, &[], recipe(), &HashSet::new()).unwrap();
         assert_eq!(result.tracks.len(), 25);
-        assert!(result
-            .tracks
-            .iter()
-            .all(|t| t.grandparent_rating_key.as_deref() == Some("eligible")));
+        assert!(
+            result
+                .tracks
+                .iter()
+                .all(|t| t.grandparent_rating_key.as_deref() == Some("eligible"))
+        );
         let played = tracks
             .iter()
             .filter(|t| t.rating_key != "eligible-24")
@@ -222,11 +266,13 @@ mod tests {
         let result = select(&tracks, &[], recipe(), &played).unwrap();
         assert_eq!(result.tracks.len(), 1);
         assert_eq!(result.tracks[0].rating_key, "eligible-24");
-        assert!(select(&tracks[..24], &[], recipe(), &HashSet::new())
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("25"));
+        assert!(
+            select(&tracks[..24], &[], recipe(), &HashSet::new())
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("25")
+        );
         // Explicit artist selection is not subject to the random-station minimum.
         assert_eq!(
             select(
@@ -249,13 +295,15 @@ mod tests {
             .collect();
         let selected = select(&tracks, &[], Recipe::Library, &HashSet::new()).unwrap();
         assert_eq!(selected.tracks.len(), 2);
-        assert!(select(
-            &tracks,
-            &[],
-            Recipe::Albums(AlbumFilter::Mood("Calm".into())),
-            &HashSet::new()
-        )
-        .is_err());
+        assert!(
+            select(
+                &tracks,
+                &[],
+                Recipe::Albums(AlbumFilter::Mood("Calm".into())),
+                &HashSet::new()
+            )
+            .is_err()
+        );
     }
     #[test]
     fn time_travel_skips_exhausted_decades_without_skipping_available_ones() {

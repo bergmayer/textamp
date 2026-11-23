@@ -2,12 +2,8 @@
 //!
 //! Handles input events, async task coordination, and state updates.
 
-use crate::app::event::*;
-use crate::app::handlers;
-use crate::app::state::PlayStatus;
-use crate::app::{Action, AppState, Event};
-use crate::audio::AudioPlayer;
-use crate::config::Config;
+use crate::app::{AppState, Event};
+use crate::app::{PlayStatus, View};
 
 use crate::ui;
 
@@ -16,8 +12,8 @@ use crossterm::event::{self, DisableMouseCapture, Event as CrosstermEvent, Mouse
 use crossterm::execute;
 use ratatui::prelude::*;
 use std::io::Stdout;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -45,6 +41,7 @@ impl InputReader {
                     };
                     let mapped = match raw_event {
                         Ok(CrosstermEvent::Key(key)) => Some(Event::Key(key)),
+                        Ok(CrosstermEvent::Paste(text)) => Some(Event::Paste(text)),
                         Ok(CrosstermEvent::Mouse(mouse)) => Some(Event::Mouse(mouse)),
                         Ok(CrosstermEvent::Resize(width, height)) => {
                             Some(Event::Resize(width, height))
@@ -92,10 +89,10 @@ impl InputReader {
 
     fn stop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
-        if let Some(handle) = self.handle.take() {
-            if handle.join().is_err() {
-                tracing::warn!("Terminal input thread panicked during shutdown");
-            }
+        if let Some(handle) = self.handle.take()
+            && handle.join().is_err()
+        {
+            tracing::warn!("Terminal input thread panicked during shutdown");
         }
     }
 }
@@ -135,11 +132,13 @@ fn tick_requires_render(state: &AppState) -> bool {
         library.studios_loading,
         library.right_panel_loading,
         state.station_nav.loading,
-        false,
     ]
     .contains(&true);
     let popup_loading = [
-        state.popups.artist_bio().is_some_and(|popup| popup.loading),
+        state
+            .popups
+            .artist_bio()
+            .is_some_and(|popup| popup.task.is_some()),
         state
             .popups
             .adventure_launcher()
@@ -152,15 +151,20 @@ fn tick_requires_render(state: &AppState) -> bool {
             state.playback.status,
             PlayStatus::Playing | PlayStatus::Buffering
         ),
-        marquee_active,
+        marquee_active
+            || state
+                .hit_regions
+                .header_clocks
+                .iter()
+                .any(|clock| clock.3.elapsed() >= crate::util::column_heading::DELAY),
         library_loading,
         popup_loading,
-        state.similar.loading,
+        state.similar.request.is_loading(),
         state.related.loading,
         state.artwork.fetch.is_loading(),
         !state.artwork.grid_pending.is_empty(),
-        state.waveform.generating,
-        state.spectrogram.generating,
+        state.waveform.generating(),
+        state.spectrogram.generating(),
         state.station_starting.is_some(),
         state.radio.refill != crate::app::state::RadioRefill::Idle,
         state.list_filter.loading,
@@ -171,159 +175,153 @@ fn tick_requires_render(state: &AppState) -> bool {
     .contains(&true)
 }
 
-async fn shutdown_signal() {
+/// Terminal signal streams registered before entering raw mode.
+pub struct ShutdownSignal {
     #[cfg(unix)]
-    {
-        use tokio::signal::unix::{signal, SignalKind};
-
-        let terminate = signal(SignalKind::terminate());
-        match terminate {
-            Ok(mut terminate) => {
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => {}
-                    _ = terminate.recv() => {}
-                }
-            }
-            Err(_) => {
-                let _ = tokio::signal::ctrl_c().await;
-            }
-        }
+    interrupt: tokio::signal::unix::Signal,
+    #[cfg(unix)]
+    terminate: tokio::signal::unix::Signal,
+    #[cfg(windows)]
+    interrupt: tokio::signal::windows::CtrlC,
+}
+impl ShutdownSignal {
+    /// Register process interruption handlers before terminal setup.
+    /// # Errors
+    /// Propagates operating-system signal registration failures.
+    pub fn new() -> std::io::Result<Self> {
+        Ok(Self {
+            #[cfg(unix)]
+            interrupt: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?,
+            #[cfg(unix)]
+            terminate: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?,
+            #[cfg(windows)]
+            interrupt: tokio::signal::windows::ctrl_c()?,
+        })
     }
-
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
+    async fn recv(&mut self) {
+        #[cfg(unix)]
+        tokio::select! {_ = self.interrupt.recv() => {}, _ = self.terminate.recv() => {}}
+        #[cfg(windows)]
+        {
+            self.interrupt.recv().await;
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+        }
     }
 }
 
 /// Main event loop.
 pub struct EventLoop {
-    event_tx: mpsc::Sender<Event>,
-    event_rx: mpsc::Receiver<Event>,
-    config: Config,
+    session: crate::app::runtime::Session,
+    signals: ShutdownSignal,
     shutdown: Arc<AtomicBool>,
 }
 
 impl EventLoop {
-    pub fn new(config: Config) -> Self {
-        let (event_tx, event_rx) = mpsc::channel(256);
+    /// Attach the external terminal adapter to an owned live session.
+    pub fn new(session: crate::app::runtime::Session, signals: ShutdownSignal) -> Self {
         Self {
-            event_tx,
-            event_rx,
-            config,
+            session,
+            signals,
             shutdown: Arc::new(AtomicBool::new(false)),
         }
     }
 
     /// Run the main event loop.
-    pub async fn run(
-        &mut self,
-        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-        state: &mut AppState,
-
-        audio: &mut AudioPlayer,
-    ) -> Result<()> {
-        let session = crate::app::tasks::TaskSession::new(self.event_tx.clone());
-        session.run(self.run_session(terminal, state, audio)).await
+    pub async fn run(&mut self, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+        let tasks = self.session.task_context();
+        let result = tasks.run(self.run_session(terminal)).await;
+        drop(tasks);
+        if !self.session.shutdown().await {
+            anyhow::bail!("Background work timed out at shutdown");
+        }
+        result
     }
 
     async fn run_session(
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-        state: &mut AppState,
-
-        audio: &mut AudioPlayer,
     ) -> Result<()> {
+        let size = terminal.size()?;
+        self.session.state.terminal_width = size.width;
+        self.session.state.terminal_height = size.height;
+        self.session.initialize().await?;
+        let crate::app::runtime::Session {
+            state,
+            audio,
+            config,
+            events: event_tx,
+            completions: event_rx,
+            clock: playback_clock,
+            ..
+        } = &mut self.session;
         let tick_rate = Duration::from_millis(100);
-        let render_rate = Duration::from_millis(33);
+        let idle_render_rate = Duration::from_millis(33);
         let mut last_tick = Instant::now();
         let mut last_render = Instant::now()
-            .checked_sub(render_rate)
+            .checked_sub(idle_render_rate)
             .unwrap_or_else(Instant::now);
         let mut dirty = true;
 
         self.shutdown.store(false, Ordering::Release);
-        let mut input_reader = InputReader::spawn(self.event_tx.clone(), self.shutdown.clone())?;
-        let shutdown_requested = shutdown_signal();
-        tokio::pin!(shutdown_requested);
+        let mut input_reader = InputReader::spawn(event_tx.clone(), self.shutdown.clone())?;
 
-        // Apply the configured theme before the first frame.
-        state.theme = crate::app::theme::ThemeName::from_config(&self.config.ui.theme);
         crate::ui::theme::set_theme(state.theme);
 
-        // Restore cover art view preference
-        state.artwork.default_visible = self.config.ui.cover_art_view;
+        let mut scene_motion =
+            ui::motion::SceneMotion::new(std::env::var("TERM").as_deref() != Ok("dumb"));
 
-        // Restore artwork mode preference
-        state.artwork.mode =
-            crate::app::state::ArtworkMode::from_config(&self.config.ui.artwork_mode);
-
-        // Restore Miller column layout preference. Default = Shrinking.
-        state.miller_layout = self.config.ui.miller_layout;
-
-        // Restore tall-mode preference.
-        state.tall_mode = self.config.ui.tall_mode;
-
-        // Mirror the per-service "external search enabled" toggles
-        // from config onto AppState so the palette / context menus /
-        // menu bar can gate their entries without threading Config
-        // through every render path. dispatch_settings updates these
-        // when the user flips a Settings toggle.
-        state.external_search.apple_music = self.config.ui.enable_apple_music_search;
-        state.external_search.spotify = self.config.ui.enable_spotify_search;
-        state.external_search.youtube = self.config.ui.enable_youtube_search;
-
-        state.hidden_sections = self.config.ui.hidden_sections.clone();
-        state.hidden_collections = self.config.ui.hidden_collections.clone();
-
-        // Mirror saved per-playlist view toggles (group-by-album,
-        // show-artwork) so the playlist-tracks-column event handlers
-        // can apply them without a config handle.
-        state.playlist_views.clear();
-        for (lib, settings) in &self.config.ui.library_view_settings {
-            state
-                .playlist_views
-                .insert(lib.clone(), settings.playlists.clone());
+        if std::env::var("TERM").as_deref() != Ok("dumb") {
+            let player = state.view == View::NowPlaying
+                || (state.view == View::Queue
+                    && state.tui_queue_workspace == crate::app::state::TuiWorkspace::NowPlaying);
+            state.tui_motion.initialize(
+                state.tui_sidebar_visible,
+                state.tui_queue_visible,
+                player,
+                Instant::now(),
+            );
         }
-
-        // Restore normal startup; directory discovery is independent of the
-        // active library and never opens an overlay or starts playback.
-        crate::app::sources::manager::initialize(state, &self.config);
-
-        if let Some(choice) = crate::app::sources::manager::startup_choice(&self.config) {
-            crate::app::dispatch::dispatch_action(
-                choice.action(),
-                state,
-                audio,
-                &mut self.config,
-                &self.event_tx,
-            )
-            .await?;
-        } else {
-            state.view = crate::app::state::View::Browse;
-            state.set_status("Add a library in Settings (F2)".into());
-        }
-
-        // Guard: only send one TrackEnded per track. Set when TrackEnded is sent,
-        // cleared when a new track starts (playback_started_at changes).
-        let mut track_ended_sent = false;
-        let mut last_playback_started: Option<Instant> = None;
-
         // Main loop
         loop {
+            let now = Instant::now();
+            let player = state.view == View::NowPlaying
+                || (state.view == View::Queue
+                    && state.tui_queue_workspace == crate::app::state::TuiWorkspace::NowPlaying);
+            state.tui_motion.sync(
+                state.tui_sidebar_visible,
+                state.tui_queue_visible,
+                player,
+                now,
+            );
+            dirty |= state.tui_motion.active(now) || scene_motion.active(now);
+            let render_rate = if state.tui_motion.active(now) || scene_motion.active(now) {
+                Duration::from_millis(16)
+            } else {
+                idle_render_rate
+            };
+
             // Coalesce bursts of input/network completions and cap terminal
             // writes at ~30 FPS. The app tick marks animated state dirty at
             // 10 FPS; idle screens perform no redraws at all.
             if dirty && last_render.elapsed() >= render_rate {
                 let mut feedback = None;
                 terminal.draw(|f| {
-                    feedback = Some(ui::render(f, state));
+                    feedback = Some(ui::render_with_motion(
+                        f,
+                        state,
+                        &mut scene_motion,
+                        ui::OutputHost::Terminal,
+                    ));
                 })?;
                 if let Some(feedback) = feedback {
                     state.apply_render_feedback(feedback);
                 }
-                dirty = false;
-                last_render = Instant::now();
+                dirty =
+                    state.tui_motion.active(Instant::now()) || scene_motion.active(Instant::now());
+                last_render = now;
             }
 
             // Wake for whichever is due first: app state maintenance or the
@@ -348,91 +346,30 @@ impl EventLoop {
             let mut signal_quit = false;
 
             tokio::select! {
-                Some(event) = self.event_rx.recv() => {
+                Some(event) = event_rx.recv() => {
                     direct_events.push(event);
                 }
                 _ = tokio::time::sleep(timeout) => {
                     if last_tick.elapsed() >= tick_rate {
-                        // Tick: update playback position
-                        if state.playback.status == PlayStatus::Playing {
-                            // Reset the one-shot end guard for a new playback attempt.
-                            if state.playback.playback_started_at != last_playback_started {
-                                track_ended_sent = false;
-                                last_playback_started = state.playback.playback_started_at;
-                            }
-
-                            {
-                                // Local mode: existing position tracking and end detection
-                                if let Some(position) = audio.position() {
-                                    state.playback.position_ms = position.as_millis() as u64;
-                                }
-
-                                // Deferred error counter reset: only clear after 5s of
-                                // sustained playback, confirming the track is truly playing
-                                if state.consecutive_playback_errors > 0 {
-                                    if let Some(started) = state.playback.playback_started_at {
-                                        if started.elapsed() >= Duration::from_secs(5) {
-                                            state.consecutive_playback_errors = 0;
-                                        }
-                                    }
-                                }
-
-                                // Detect track end: audio backend reports sink empty.
-                                // Grace period: ignore is_finished() for the first second after
-                                // playback starts to avoid spurious TrackEnded during cold-start
-                                // (sink initialization, network buffering, decoder warmup).
-                                // Only send once per track to prevent duplicate events.
-                                let playing_long_enough = state.playback.playback_started_at
-                                    .map(|t| t.elapsed() >= Duration::from_secs(1))
-                                    .unwrap_or(false);
-                                if playing_long_enough && audio.is_finished() && !track_ended_sent {
-                                    track_ended_sent = true;
-
-                                    // Duration-based guard: verify the track actually played
-                                    // its expected duration before treating as natural end
-                                    let actual_pos_ms = audio.position()
-                                        .map(|d| d.as_millis() as u64)
-                                        .unwrap_or(state.playback.position_ms);
-                                    let expected_ms = state.playback.duration_ms;
-
-                                    // Natural completion: no known duration, played >=90%,
-                                    // or within 5s of end
-                                    let completed_normally = expected_ms == 0
-                                        || actual_pos_ms >= expected_ms * 90 / 100
-                                        || (expected_ms > 5000 && actual_pos_ms >= expected_ms.saturating_sub(5000));
-
-                                    if completed_normally {
-                                        direct_events.push(PlaybackEvent::TrackEnded.into());
-                                    } else {
-                                        tracing::warn!(
-                                            "Premature track end detected: played {}ms of {}ms expected",
-                                            actual_pos_ms, expected_ms
-                                        );
-                                        direct_events.push(PlaybackEvent::PlaybackError {
-                                            playback_id: Some(state.playback.request_id),
-                                            message: "Track ended prematurely".to_string(),
-                                        }.into());
-                                    }
-                                }
-                            }
-                        }
-
-                        direct_events.extend(audio.take_failures().into_iter().map(Event::from));
-
-                        // Process status/toast expiry, cache saves, etc.
-                        direct_events.push(Event::Tick);
+                        direct_events.extend(playback_clock.poll(state, audio));
 
                         last_tick = Instant::now();
                     }
                 }
-                _ = &mut shutdown_requested => {
+                _ = self.signals.recv() => {
                     signal_quit = true;
                 }
             }
 
             if signal_quit {
-                self.dispatch(crate::app::action::SystemAction::Quit.into(), state, audio)
-                    .await?;
+                crate::app::dispatch::dispatch_action(
+                    crate::app::action::SystemAction::Quit.into(),
+                    state,
+                    audio,
+                    config,
+                    event_tx,
+                )
+                .await?;
                 dirty = true;
             }
 
@@ -442,9 +379,10 @@ impl EventLoop {
                 }
                 let event_needs_render =
                     !matches!(&event, Event::Tick) || tick_requires_render(state);
-                let actions = self.handle_event(event, state);
+                let actions = crate::app::runtime::reduce(event, state, config, event_tx);
                 for action in actions {
-                    self.dispatch(action, state, audio).await?;
+                    crate::app::dispatch::dispatch_action(action, state, audio, config, event_tx)
+                        .await?;
                 }
                 dirty |= event_needs_render;
             }
@@ -472,42 +410,5 @@ impl EventLoop {
         }
 
         Ok(())
-    }
-
-    /// Handle an incoming event and return actions to dispatch.
-    fn handle_event(&self, event: Event, state: &mut AppState) -> Vec<Action> {
-        match event {
-            Event::Key(key) => {
-                state.cache_mgmt.last_input_time = std::time::Instant::now();
-                // One shared router owns quit, popup capture and view shortcuts.
-                handlers::key_input::handle_key(key, state, &self.config)
-            }
-            Event::Resize(w, h) => {
-                state.terminal_width = w;
-                state.terminal_height = h;
-                state.seek_drag = None;
-                state.volume_drag = false;
-                vec![]
-            }
-            other => crate::app::dispatch::handle_core_event(other, state, &self.event_tx),
-        }
-    }
-
-    /// Dispatch an action to modify state or trigger side effects.
-    async fn dispatch(
-        &mut self,
-        action: Action,
-        state: &mut AppState,
-
-        audio: &mut AudioPlayer,
-    ) -> Result<()> {
-        crate::app::dispatch::dispatch_action(
-            action,
-            state,
-            audio,
-            &mut self.config,
-            &self.event_tx,
-        )
-        .await
     }
 }
